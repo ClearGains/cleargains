@@ -6,9 +6,9 @@ export async function GET(request: NextRequest) {
     (request.nextUrl.searchParams.get('accountType') as 'LIVE' | 'DEMO') ??
     'DEMO';
 
-  if (!process.env.T212_API_KEY) {
+  if (!process.env.T212_API_KEY || !process.env.T212_API_SECRET) {
     return NextResponse.json(
-      { error: 'T212_API_KEY not configured' },
+      { error: 'T212_API_KEY and T212_API_SECRET must both be configured.' },
       { status: 503 }
     );
   }

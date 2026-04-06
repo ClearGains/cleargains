@@ -8,9 +8,9 @@ export async function GET(request: NextRequest) {
     'DEMO';
   const limit = parseInt(request.nextUrl.searchParams.get('limit') ?? '50', 10);
 
-  if (!process.env.T212_API_KEY) {
+  if (!process.env.T212_API_KEY || !process.env.T212_API_SECRET) {
     return NextResponse.json(
-      { error: 'T212_API_KEY not configured' },
+      { error: 'T212_API_KEY and T212_API_SECRET must both be configured.' },
       { status: 503 }
     );
   }

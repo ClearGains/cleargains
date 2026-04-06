@@ -11,9 +11,18 @@ function getBase(accountType: 'LIVE' | 'DEMO'): string {
 
 function getHeaders(): HeadersInit {
   const apiKey = process.env.T212_API_KEY;
+  const apiSecret = process.env.T212_API_SECRET;
+
+  console.log('[T212] T212_API_KEY present:', !!apiKey);
+  console.log('[T212] T212_API_SECRET present:', !!apiSecret);
+
   if (!apiKey) throw new Error('T212_API_KEY not configured');
+  if (!apiSecret) throw new Error('T212_API_SECRET not configured');
+
+  const credentials = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
+
   return {
-    Authorization: apiKey,
+    Authorization: `Basic ${credentials}`,
     'Content-Type': 'application/json',
   };
 }

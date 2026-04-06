@@ -9,9 +9,9 @@ export async function POST(request: NextRequest) {
   const body = await request.json();
   const { accountType = 'DEMO' } = body as { accountType: 'LIVE' | 'DEMO' };
 
-  if (!process.env.T212_API_KEY) {
+  if (!process.env.T212_API_KEY || !process.env.T212_API_SECRET) {
     return NextResponse.json(
-      { error: 'T212_API_KEY not configured. Please add it to .env.local.' },
+      { error: 'T212_API_KEY and T212_API_SECRET must both be configured.' },
       { status: 503 }
     );
   }
