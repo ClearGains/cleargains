@@ -18,6 +18,7 @@ import {
 import { clsx } from 'clsx';
 import { useState } from 'react';
 import { useClearGainsStore } from '@/lib/store';
+import { T212NavButton } from '@/components/t212/T212NavButton';
 
 const navLinks = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -70,8 +71,10 @@ export function Navbar() {
           ))}
         </nav>
 
-        {/* Country indicator */}
-        <div className="flex items-center gap-3">
+        {/* Right-side actions */}
+        <div className="flex items-center gap-2">
+          <T212NavButton />
+
           <Link
             href="/onboarding"
             className="hidden sm:flex items-center gap-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg px-3 py-1.5 text-sm transition-colors"
