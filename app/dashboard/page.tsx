@@ -12,8 +12,13 @@ import {
   ArrowRight,
   Clock,
   Zap,
+  ShieldCheck,
+  AlertCircle,
+  FlaskConical,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
+import { buildSection104Pools } from '@/lib/cgt';
+import { Trade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -77,8 +82,13 @@ export default function DashboardPage() {
     selectedCountry,
   } = useClearGainsStore();
 
+  const { setTrades, updateSection104Pools } = useClearGainsStore();
+
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncDetail, setSyncDetail] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const portfolioValue = t212Positions.reduce(
     (sum, pos) => sum + pos.currentPrice * pos.quantity,
@@ -96,6 +106,8 @@ export default function DashboardPage() {
   async function handleSync() {
     setSyncing(true);
     setSyncError(null);
+    setSyncDetail(null);
+    setTestResult(null);
     try {
       const res = await fetch('/api/t212/sync', {
         method: 'POST',
@@ -105,15 +117,53 @@ export default function DashboardPage() {
       const data = await res.json();
       if (!res.ok) {
         setSyncError(data.error ?? 'Sync failed');
+        if (data.t212Message) setSyncDetail(data.t212Message);
       } else {
         setT212Positions(data.positions ?? []);
         setT212LastSync(new Date().toISOString());
         setT212Connected(true);
+        // Auto-import trades into CGT ledger (merge, skip duplicates)
+        if (Array.isArray(data.trades) && data.trades.length > 0) {
+          const { trades: existing } = useClearGainsStore.getState();
+          const existingIds = new Set(existing.map((t: Trade) => t.id));
+          const newTrades = (data.trades as Trade[]).filter((t) => !existingIds.has(t.id));
+          if (newTrades.length > 0) {
+            const merged = [...existing, ...newTrades];
+            setTrades(merged);
+            updateSection104Pools(buildSection104Pools(merged));
+          }
+        }
       }
-    } catch (err) {
-      setSyncError('Network error during sync');
+    } catch {
+      setSyncError('Network error — check your connection and try again');
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function handleTestConnection() {
+    setTesting(true);
+    setTestResult(null);
+    setSyncError(null);
+    try {
+      const res = await fetch('/api/t212/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountType: t212AccountType }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setTestResult({
+          ok: true,
+          message: `Credentials valid · Account ${data.accountId} · ${data.currency}`,
+        });
+      } else {
+        setTestResult({ ok: false, message: data.error ?? 'Connection test failed' });
+      }
+    } catch {
+      setTestResult({ ok: false, message: 'Network error during connection test' });
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -134,11 +184,12 @@ export default function DashboardPage() {
         </div>
         <div className="flex items-center gap-2">
           {t212Connected ? (
-            <Badge variant="live">
-              <Wifi className="h-3 w-3 mr-1" /> T212 Live
+            <Badge variant={t212AccountType === 'LIVE' ? 'live' : 'demo'}>
+              <Wifi className="h-3 w-3 mr-1" />
+              {t212AccountType === 'LIVE' ? 'Live Account' : 'Practice Account'}
             </Badge>
           ) : (
-            <Badge variant="demo">
+            <Badge variant="default">
               <WifiOff className="h-3 w-3 mr-1" /> Not Synced
             </Badge>
           )}
@@ -224,31 +275,75 @@ export default function DashboardPage() {
           />
 
           {/* Account type toggle */}
-          <div className="flex bg-gray-800 rounded-lg p-1 mb-4">
+          <div className="flex bg-gray-800 rounded-lg p-1 mb-3">
             {(['DEMO', 'LIVE'] as const).map((type) => (
               <button
                 key={type}
-                onClick={() => setT212AccountType(type)}
+                onClick={() => {
+                  setT212AccountType(type);
+                  setTestResult(null);
+                  setSyncError(null);
+                  setSyncDetail(null);
+                }}
                 className={clsx(
                   'flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors',
                   t212AccountType === type
                     ? type === 'LIVE'
                       ? 'bg-emerald-600 text-white'
-                      : 'bg-orange-600 text-white'
+                      : 'bg-amber-600 text-white'
                     : 'text-gray-500 hover:text-gray-300'
                 )}
               >
-                {type}
+                {type === 'LIVE' ? '🟢 LIVE' : '🟡 DEMO'}
               </button>
             ))}
           </div>
 
-          {syncError && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs text-red-400 mb-3">
-              {syncError}
+          {/* Mode description */}
+          <div className={clsx(
+            'flex items-start gap-2 px-3 py-2 rounded-lg text-xs mb-3',
+            t212AccountType === 'LIVE'
+              ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+              : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
+          )}>
+            {t212AccountType === 'LIVE'
+              ? <><ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /><span>Connected to live account — real Invest &amp; ISA positions</span></>
+              : <><FlaskConical className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /><span>Practice account — simulated data only, no real positions affected</span></>
+            }
+          </div>
+
+          {/* Test result */}
+          {testResult && (
+            <div className={clsx(
+              'flex items-start gap-2 px-3 py-2 rounded-lg text-xs mb-3',
+              testResult.ok
+                ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+                : 'bg-red-500/10 border border-red-500/30 text-red-400'
+            )}>
+              {testResult.ok
+                ? <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+              }
+              <span>{testResult.message}</span>
             </div>
           )}
 
+          {/* Sync error */}
+          {syncError && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs text-red-400 mb-3">
+              <div className="flex items-start gap-1.5">
+                <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                <span>{syncError}</span>
+              </div>
+              {syncDetail && (
+                <div className="mt-1.5 font-mono text-[10px] text-red-500/80 break-all">
+                  T212: {syncDetail}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Last synced */}
           {t212Connected && t212LastSync && (
             <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-3">
               <Clock className="h-3 w-3" />
@@ -256,19 +351,26 @@ export default function DashboardPage() {
             </div>
           )}
 
-          <Button
-            onClick={handleSync}
-            loading={syncing}
-            variant="secondary"
-            fullWidth
-            icon={<RefreshCw className="h-4 w-4" />}
-          >
-            {t212Connected ? 'Re-sync Account' : 'Sync with T212'}
-          </Button>
-
-          <p className="text-xs text-gray-600 mt-2 text-center">
-            Set T212_API_KEY and T212_API_SECRET in environment variables
-          </p>
+          <div className="flex gap-2">
+            <Button
+              onClick={handleTestConnection}
+              loading={testing}
+              variant="outline"
+              size="sm"
+              icon={<ShieldCheck className="h-3.5 w-3.5" />}
+            >
+              Test
+            </Button>
+            <Button
+              onClick={handleSync}
+              loading={syncing}
+              variant="secondary"
+              fullWidth
+              icon={<RefreshCw className="h-4 w-4" />}
+            >
+              {t212Connected ? 'Re-sync' : 'Sync Account'}
+            </Button>
+          </div>
         </Card>
 
         {/* Auto-reinvest toggle */}
