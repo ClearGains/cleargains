@@ -1,5 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+function getCredentials(accountType: 'LIVE' | 'DEMO'): { key: string; secret: string } | null {
+  if (accountType === 'LIVE') {
+    const key = process.env.T212_API_KEY;
+    const secret = process.env.T212_API_SECRET;
+    if (!key || !secret) return null;
+    return { key, secret };
+  }
+  const key = process.env.T212_DEMO_API_KEY;
+  const secret = process.env.T212_DEMO_SECRET;
+  if (!key || !secret) return null;
+  return { key, secret };
+}
+
 function getBaseUrl(accountType: 'LIVE' | 'DEMO'): string {
   if (accountType === 'LIVE') {
     return process.env.T212_BASE_URL ?? 'https://live.trading212.com/api/v0';
@@ -7,17 +20,15 @@ function getBaseUrl(accountType: 'LIVE' | 'DEMO'): string {
   return process.env.T212_DEMO_URL ?? 'https://demo.trading212.com/api/v0';
 }
 
-function buildAuthHeader(): string {
-  const apiKey = process.env.T212_API_KEY;
-  const apiSecret = process.env.T212_API_SECRET;
-  const credentials = Buffer.from(apiKey + ':' + apiSecret).toString('base64');
+function buildAuthHeader(key: string, secret: string): string {
+  const credentials = Buffer.from(key + ':' + secret).toString('base64');
   return 'Basic ' + credentials;
 }
 
-async function t212Fetch(url: string): Promise<Response> {
+async function t212Fetch(url: string, authHeader: string): Promise<Response> {
   return fetch(url, {
     headers: {
-      Authorization: buildAuthHeader(),
+      Authorization: authHeader,
       'Content-Type': 'application/json',
     },
     cache: 'no-store',
@@ -28,22 +39,26 @@ export async function POST(request: NextRequest) {
   const body = await request.json();
   const { accountType = 'DEMO' } = body as { accountType: 'LIVE' | 'DEMO' };
 
-  const apiKey = process.env.T212_API_KEY;
-  const apiSecret = process.env.T212_API_SECRET;
+  const creds = getCredentials(accountType);
 
   console.log('[T212 sync] accountType:', accountType);
-  console.log('[T212 sync] T212_API_KEY present:', !!apiKey);
-  console.log('[T212 sync] T212_API_SECRET present:', !!apiSecret);
+  console.log('[T212 sync] credentials present:', !!creds);
 
-  if (!apiKey || !apiSecret) {
+  if (!creds) {
+    const vars =
+      accountType === 'LIVE'
+        ? 'T212_API_KEY and T212_API_SECRET'
+        : 'T212_DEMO_API_KEY and T212_DEMO_SECRET';
     return NextResponse.json(
       {
-        error: 'T212_API_KEY and T212_API_SECRET must both be set as environment variables.',
+        error: `${vars} must both be set as environment variables.`,
         hint: 'Add both variables in Vercel → Project Settings → Environment Variables, then redeploy.',
       },
       { status: 503 }
     );
   }
+
+  const authHeader = buildAuthHeader(creds.key, creds.secret);
 
   const base = getBaseUrl(accountType);
   console.log('[T212 sync] base URL:', base);
@@ -51,9 +66,9 @@ export async function POST(request: NextRequest) {
   try {
     // Fetch account info, cash, and portfolio in parallel
     const [infoRes, cashRes, portfolioRes] = await Promise.all([
-      t212Fetch(`${base}/equity/account/info`),
-      t212Fetch(`${base}/equity/account/cash`),
-      t212Fetch(`${base}/equity/portfolio`),
+      t212Fetch(`${base}/equity/account/info`, authHeader),
+      t212Fetch(`${base}/equity/account/cash`, authHeader),
+      t212Fetch(`${base}/equity/portfolio`, authHeader),
     ]);
 
     // If any call failed, return T212's actual error body so we can debug
@@ -97,7 +112,7 @@ export async function POST(request: NextRequest) {
     );
 
     // Fetch recent order history (for CGT import)
-    const ordersRes = await t212Fetch(`${base}/equity/history/orders?limit=200`);
+    const ordersRes = await t212Fetch(`${base}/equity/history/orders?limit=200`, authHeader);
     let trades: unknown[] = [];
     if (ordersRes.ok) {
       const ordersData = await ordersRes.json();

@@ -4,24 +4,27 @@ export async function POST(request: NextRequest) {
   const body = await request.json();
   const { accountType = 'DEMO' } = body as { accountType: 'LIVE' | 'DEMO' };
 
-  const apiKey = process.env.T212_API_KEY;
-  const apiSecret = process.env.T212_API_SECRET;
+  const isLive = accountType === 'LIVE';
+  const apiKey = isLive ? process.env.T212_API_KEY : process.env.T212_DEMO_API_KEY;
+  const apiSecret = isLive ? process.env.T212_API_SECRET : process.env.T212_DEMO_SECRET;
 
   console.log('[T212 test] accountType:', accountType);
-  console.log('[T212 test] T212_API_KEY present:', !!apiKey);
-  console.log('[T212 test] T212_API_SECRET present:', !!apiSecret);
+  console.log('[T212 test] apiKey present:', !!apiKey);
+  console.log('[T212 test] apiSecret present:', !!apiSecret);
 
   if (!apiKey || !apiSecret) {
+    const vars = isLive
+      ? 'T212_API_KEY and T212_API_SECRET'
+      : 'T212_DEMO_API_KEY and T212_DEMO_SECRET';
     return NextResponse.json(
-      { ok: false, error: 'T212_API_KEY and T212_API_SECRET are not set in environment variables.' },
+      { ok: false, error: `${vars} are not set in environment variables.` },
       { status: 503 }
     );
   }
 
-  const base =
-    accountType === 'LIVE'
-      ? (process.env.T212_BASE_URL ?? 'https://live.trading212.com/api/v0')
-      : (process.env.T212_DEMO_URL ?? 'https://demo.trading212.com/api/v0');
+  const base = isLive
+    ? (process.env.T212_BASE_URL ?? 'https://live.trading212.com/api/v0')
+    : (process.env.T212_DEMO_URL ?? 'https://demo.trading212.com/api/v0');
 
   const credentials = Buffer.from(apiKey + ':' + apiSecret).toString('base64');
 
@@ -52,7 +55,7 @@ export async function POST(request: NextRequest) {
         status: res.status,
         error:
           res.status === 401
-            ? 'Invalid credentials — check T212_API_KEY and T212_API_SECRET are correct.'
+            ? `Invalid credentials — check ${isLive ? 'T212_API_KEY and T212_API_SECRET' : 'T212_DEMO_API_KEY and T212_DEMO_SECRET'} are correct.`
             : `Trading 212 returned ${res.status}`,
         t212Message: errorBody,
       },
