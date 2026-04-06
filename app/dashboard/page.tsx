@@ -25,6 +25,7 @@ import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { ConnectModal } from '@/components/t212/ConnectModal';
+import { TaxYearTracker } from '@/components/dashboard/TaxYearTracker';
 import { clsx } from 'clsx';
 import Link from 'next/link';
 
@@ -515,6 +516,11 @@ export default function DashboardPage() {
           </div>
         </Card>
       )}
+
+      {/* Tax Year Tracker */}
+      <div className="mt-4">
+        <TaxYearTracker />
+      </div>
 
       {/* Quick actions */}
       {!t212Connected && trades.length === 0 && (

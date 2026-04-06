@@ -9,6 +9,8 @@ import {
   Signal,
   ScanResult,
   T212Position,
+  DemoPosition,
+  DemoTrade,
 } from './types';
 import { DEFAULT_COUNTRY } from './countries';
 
@@ -49,6 +51,12 @@ interface ClearGainsState {
   // Deadlines reminders
   deadlineReminders: string[];
 
+  // Demo Auto-Trader
+  t212DemoApiKey: string;
+  t212DemoApiSecret: string;
+  demoPositions: DemoPosition[];
+  demoTrades: DemoTrade[];
+
   // Actions
   setCountry: (country: Country) => void;
   setHasOnboarded: (v: boolean) => void;
@@ -70,6 +78,12 @@ interface ClearGainsState {
   addScanResult: (result: ScanResult) => void;
   setFxRates: (rates: Record<string, number>) => void;
   toggleDeadlineReminder: (countryCode: string) => void;
+  setT212DemoCredentials: (key: string, secret: string) => void;
+  clearT212DemoCredentials: () => void;
+  addDemoPosition: (pos: DemoPosition) => void;
+  removeDemoPosition: (id: string) => void;
+  updateDemoPosition: (id: string, update: Partial<DemoPosition>) => void;
+  addDemoTrade: (trade: DemoTrade) => void;
   reset: () => void;
 }
 
@@ -94,6 +108,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
       fxRates: {},
       fxRatesLastFetched: null,
       deadlineReminders: [],
+      t212DemoApiKey: '',
+      t212DemoApiSecret: '',
+      demoPositions: [],
+      demoTrades: [],
 
       setCountry: (country) => set({ selectedCountry: country }),
       setHasOnboarded: (v) => set({ hasOnboarded: v }),
@@ -165,6 +183,26 @@ export const useClearGainsStore = create<ClearGainsState>()(
             : [...state.deadlineReminders, countryCode],
         })),
 
+      setT212DemoCredentials: (key, secret) =>
+        set({ t212DemoApiKey: key, t212DemoApiSecret: secret }),
+
+      clearT212DemoCredentials: () =>
+        set({ t212DemoApiKey: '', t212DemoApiSecret: '', demoPositions: [], demoTrades: [] }),
+
+      addDemoPosition: (pos) =>
+        set((state) => ({ demoPositions: [...state.demoPositions, pos] })),
+
+      removeDemoPosition: (id) =>
+        set((state) => ({ demoPositions: state.demoPositions.filter((p) => p.id !== id) })),
+
+      updateDemoPosition: (id, update) =>
+        set((state) => ({
+          demoPositions: state.demoPositions.map((p) => p.id === id ? { ...p, ...update } : p),
+        })),
+
+      addDemoTrade: (trade) =>
+        set((state) => ({ demoTrades: [trade, ...state.demoTrades].slice(0, 100) })),
+
       reset: () =>
         set({
           selectedCountry: DEFAULT_COUNTRY,
@@ -185,6 +223,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
           fxRates: {},
           fxRatesLastFetched: null,
           deadlineReminders: [],
+          t212DemoApiKey: '',
+          t212DemoApiSecret: '',
+          demoPositions: [],
+          demoTrades: [],
         }),
     }),
     {
@@ -206,6 +248,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
         watchlist: state.watchlist,
         scanHistory: state.scanHistory,
         deadlineReminders: state.deadlineReminders,
+        t212DemoApiKey: state.t212DemoApiKey,
+        t212DemoApiSecret: state.t212DemoApiSecret,
+        demoPositions: state.demoPositions,
+        demoTrades: state.demoTrades,
       }),
     }
   )

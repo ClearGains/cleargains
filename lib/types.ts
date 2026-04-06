@@ -126,6 +126,39 @@ export type T212Order = {
   currency: string;
 };
 
+export type DemoPosition = {
+  id: string;
+  ticker: string;       // Finnhub symbol e.g. "AAPL"
+  t212Ticker: string;   // T212 instrument e.g. "AAPL_US_EQ"
+  companyName: string;
+  sector: string;
+  quantity: number;
+  entryPrice: number;
+  currentPrice: number;
+  stopLoss: number;     // entryPrice * 0.98
+  takeProfit: number;   // entryPrice * 1.04
+  pnl: number;
+  pnlPct: number;
+  openedAt: string;
+  signal: string;
+};
+
+export type DemoTrade = {
+  id: string;
+  ticker: string;
+  t212Ticker: string;
+  companyName: string;
+  sector: string;
+  quantity: number;
+  entryPrice: number;
+  exitPrice: number;
+  pnl: number;
+  pnlPct: number;
+  openedAt: string;
+  closedAt: string;
+  closeReason: 'stop-loss' | 'take-profit' | 'manual';
+};
+
 export type RiskCheck = {
   id: string;
   label: string;

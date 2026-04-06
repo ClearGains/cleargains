@@ -8,23 +8,29 @@ import {
   Search,
   BookOpen,
   Calculator,
+  Receipt,
   ShieldCheck,
   Globe,
   Calendar,
   HelpCircle,
   Menu,
   X,
+  LogOut,
+  FlaskConical,
 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { useClearGainsStore } from '@/lib/store';
 import { T212NavButton } from '@/components/t212/T212NavButton';
 
 const navLinks = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/scanner', label: 'Scanner', icon: Search },
+  { href: '/demo-trader', label: 'Demo Trader', icon: FlaskConical },
   { href: '/ledger', label: 'Ledger', icon: BookOpen },
   { href: '/cgt', label: 'CGT', icon: Calculator },
+  { href: '/tax-calculator', label: 'Tax Calc', icon: Receipt },
   { href: '/risk', label: 'Risk', icon: ShieldCheck },
   { href: '/tax-guides', label: 'Tax Guides', icon: Globe },
   { href: '/deadlines', label: 'Deadlines', icon: Calendar },
@@ -33,8 +39,14 @@ const navLinks = [
 
 export function Navbar() {
   const pathname = usePathname();
+  const router = useRouter();
   const { selectedCountry } = useClearGainsStore();
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  const handleLogout = useCallback(async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    router.push('/login');
+  }, [router]);
 
   return (
     <header className="sticky top-0 z-50 bg-gray-950/95 backdrop-blur border-b border-gray-800">
@@ -83,6 +95,16 @@ export function Navbar() {
             <span className="text-gray-300">{selectedCountry.currencySymbol}</span>
             <span className="text-gray-500 text-xs">{selectedCountry.currency}</span>
           </Link>
+
+          {/* Logout */}
+          <button
+            onClick={handleLogout}
+            title="Sign out"
+            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            <span className="hidden lg:inline">Sign out</span>
+          </button>
 
           {/* Mobile menu button */}
           <button
