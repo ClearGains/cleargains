@@ -2,9 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  FlaskConical, Play, RefreshCw, AlertTriangle, X,
+  FlaskConical, Play, RefreshCw, X,
   CheckCircle2, AlertCircle, ArrowRight,
-  Target, BarChart3, Trophy, Copy, Info,
+  Target, BarChart3, Trophy, Copy, Info, RotateCcw, Wallet,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { DemoPosition, DemoTrade } from '@/lib/types';
@@ -15,9 +15,14 @@ import { sendPush } from '@/lib/pushNotifications';
 
 const SECTORS = ['All', 'Technology', 'Healthcare', 'Energy', 'Finance', 'Consumer'] as const;
 type Sector = typeof SECTORS[number];
+type RiskMode = 'fixed' | 'percent';
+type PositionPreset = 'small' | 'medium' | 'large' | 'custom';
 
-function fmt(n: number, currency = 'USD') {
-  return n.toLocaleString('en-GB', { style: 'currency', currency, maximumFractionDigits: 2 });
+function fmtGBP(n: number) {
+  return n.toLocaleString('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 2 });
+}
+function fmtUSD(n: number) {
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 function fmtPct(n: number) { return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`; }
 function uid() { return Math.random().toString(36).slice(2, 10); }
@@ -177,7 +182,7 @@ function CopyToLiveModal({
             </div>
             <div className="flex justify-between">
               <span className="text-gray-400">Live price</span>
-              <span className="text-gray-300 font-mono">${currentPrice.toFixed(2)}</span>
+              <span className="text-gray-300 font-mono">{fmtUSD(currentPrice)}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-gray-400">Quantity</span>
@@ -185,12 +190,12 @@ function CopyToLiveModal({
             </div>
             <div className="flex justify-between">
               <span className="text-gray-400">Estimated value</span>
-              <span className="text-white font-mono">${estimatedValue.toFixed(2)}</span>
+              <span className="text-white font-mono">{fmtUSD(estimatedValue)}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-gray-400">Paper P&L</span>
               <span className={clsx('font-semibold font-mono', trade.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                {fmt(trade.pnl)} ({fmtPct(trade.pnlPct)})
+                {trade.pnl >= 0 ? '+' : ''}{fmtGBP(trade.pnl)} ({fmtPct(trade.pnlPct)})
               </span>
             </div>
             <div className="flex justify-between">
@@ -226,10 +231,14 @@ export default function DemoTraderPage() {
   const {
     t212ApiKey, t212ApiSecret,
     demoPositions, demoTrades,
+    paperBudget, setPaperBudget, resetPaperAccount,
     addDemoPosition, removeDemoPosition, updateDemoPosition, addDemoTrade,
   } = useClearGainsStore();
 
-  const [maxRisk, setMaxRisk] = useState(500);
+  const [budgetInput, setBudgetInput] = useState(String(paperBudget));
+  const [riskMode, setRiskMode] = useState<RiskMode>('percent');
+  const [riskInput, setRiskInput] = useState('3');
+  const [positionPreset, setPositionPreset] = useState<PositionPreset>('medium');
   const [sectors, setSectors] = useState<Sector[]>(['Technology']);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [scanning, setScanning] = useState(false);
@@ -237,12 +246,37 @@ export default function DemoTraderPage() {
   const [runLog, setRunLog] = useState<string[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [copyTrade, setCopyTrade] = useState<DemoTrade | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const liveEncoded = t212ApiKey && t212ApiSecret
     ? btoa(t212ApiKey + ':' + t212ApiSecret)
     : '';
+
+  // ── Account calculations ───────────────────────────────────────────────────
+  const currentlyInvested = demoPositions.reduce((s, p) => s + p.entryPrice * p.quantity, 0);
+  const availableBalance = Math.max(0, paperBudget - currentlyInvested);
+  const totalOpenPnL = demoPositions.reduce((s, p) => s + p.pnl, 0);
+  const totalClosedPnL = demoTrades.reduce((s, t) => s + t.pnl, 0);
+  const totalPaperPnL = totalOpenPnL + totalClosedPnL;
+
+  const riskRaw = parseFloat(riskInput) || 0;
+  const tradeSize = riskMode === 'fixed' ? riskRaw : (riskRaw / 100) * availableBalance;
+
+  function applyPreset(preset: PositionPreset) {
+    setPositionPreset(preset);
+    setRiskMode('percent');
+    if (preset === 'small') setRiskInput('1');
+    else if (preset === 'medium') setRiskInput('3');
+    else if (preset === 'large') setRiskInput('5');
+  }
+
+  function commitBudget() {
+    const val = parseFloat(budgetInput);
+    if (!isNaN(val) && val > 0) setPaperBudget(val);
+    else setBudgetInput(String(paperBudget));
+  }
 
   // ── Refresh prices for open positions ──────────────────────────────────────
   const refreshPrices = useCallback(async (silent = false) => {
@@ -292,7 +326,7 @@ export default function DemoTraderPage() {
           const isTP = closeReason === 'take-profit';
           sendPush(
             isTP ? `Take-Profit Hit — ${pos.ticker}` : `Stop-Loss Hit — ${pos.ticker}`,
-            `${pos.companyName} · ${fmtPct(pnlPct)} · Entry $${pos.entryPrice.toFixed(2)} → Exit $${currentPrice.toFixed(2)}`,
+            `${pos.companyName} · ${fmtPct(pnlPct)} · Entry ${fmtUSD(pos.entryPrice)} → Exit ${fmtUSD(currentPrice)}`,
             '/demo-trader'
           );
         }
@@ -350,11 +384,16 @@ export default function DemoTraderPage() {
         return;
       }
 
-      setRunLog(l => [...l, `📋 Opening ${buys.length} paper position(s)…`]);
+      if (tradeSize <= 0) {
+        setRunLog(l => [...l, '⚠ Trade size is £0 — set a budget and risk amount first.']);
+        return;
+      }
+
+      setRunLog(l => [...l, `📋 Opening ${buys.length} paper position(s) at £${tradeSize.toFixed(2)} each…`]);
 
       for (const signal of buys) {
         const entryPrice = signal.currentPrice;
-        const quantity = Math.max(1, Math.floor(maxRisk / entryPrice));
+        const quantity = Math.max(1, Math.floor(tradeSize / entryPrice));
 
         const position: DemoPosition = {
           id: uid(),
@@ -376,7 +415,7 @@ export default function DemoTraderPage() {
         addDemoPosition(position);
         setRunLog(l => [
           ...l,
-          `  → PAPER BUY ${quantity}× ${signal.symbol} @ $${entryPrice.toFixed(2)} | SL $${(entryPrice * 0.98).toFixed(2)} TP $${(entryPrice * 1.04).toFixed(2)}`,
+          `  → PAPER BUY ${quantity}× ${signal.symbol} @ ${fmtUSD(entryPrice)} | SL ${fmtUSD(entryPrice * 0.98)} TP ${fmtUSD(entryPrice * 1.04)}`,
         ]);
       }
 
@@ -420,7 +459,6 @@ export default function DemoTraderPage() {
 
   // ── Performance stats ──────────────────────────────────────────────────────
   const wins = demoTrades.filter(t => t.pnl > 0);
-  const totalPnL = demoTrades.reduce((s, t) => s + t.pnl, 0);
   const winRate = demoTrades.length > 0 ? (wins.length / demoTrades.length) * 100 : 0;
   const bestTrade = demoTrades.reduce<DemoTrade | null>((b, t) => (!b || t.pnl > b.pnl ? t : b), null);
   const worstTrade = demoTrades.reduce<DemoTrade | null>((w, t) => (!w || t.pnl < w.pnl ? t : w), null);
@@ -436,10 +474,29 @@ export default function DemoTraderPage() {
         <CopyToLiveModal
           trade={copyTrade}
           liveEncoded={liveEncoded}
-          positionSize={maxRisk}
+          positionSize={tradeSize}
           onClose={() => setCopyTrade(null)}
           onDone={() => setCopyTrade(null)}
         />
+      )}
+
+      {/* Confirm reset dialog */}
+      {confirmReset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={() => setConfirmReset(false)} />
+          <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm shadow-2xl p-6">
+            <h2 className="text-base font-semibold text-white mb-2">Reset Paper Account?</h2>
+            <p className="text-sm text-gray-400 mb-5">
+              This will permanently clear all open positions and trade history. Your paper budget will remain at {fmtGBP(paperBudget)}.
+            </p>
+            <div className="flex gap-2">
+              <Button variant="outline" fullWidth onClick={() => setConfirmReset(false)}>Cancel</Button>
+              <Button fullWidth onClick={() => { resetPaperAccount(); setConfirmReset(false); }} icon={<RotateCcw className="h-4 w-4" />}>
+                Reset Account
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Header */}
@@ -465,24 +522,123 @@ export default function DemoTraderPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: controls */}
         <div className="space-y-4">
+
+          {/* Account summary */}
           <Card>
-            <CardHeader title="Strategy Settings" subtitle="Risk and sector focus" icon={<Target className="h-4 w-4" />} />
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs text-gray-400 mb-1 block">Max Risk Per Trade</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+            <CardHeader title="Paper Account" subtitle="Simulated trading balance" icon={<Wallet className="h-4 w-4" />} />
+            <div className="space-y-2 mb-3">
+              {[
+                { label: 'Paper Budget', value: fmtGBP(paperBudget), color: 'text-white' },
+                { label: 'Currently Invested', value: fmtGBP(currentlyInvested), color: 'text-amber-400' },
+                { label: 'Available to Trade', value: fmtGBP(availableBalance), color: availableBalance > 0 ? 'text-emerald-400' : 'text-gray-500' },
+                { label: 'Open Positions', value: String(demoPositions.length), color: demoPositions.length > 0 ? 'text-white' : 'text-gray-500' },
+                { label: 'Total Paper P&L', value: `${totalPaperPnL >= 0 ? '+' : ''}${fmtGBP(totalPaperPnL)}`, color: totalPaperPnL >= 0 ? 'text-emerald-400' : 'text-red-400' },
+              ].map(row => (
+                <div key={row.label} className="flex justify-between items-center text-xs">
+                  <span className="text-gray-500">{row.label}</span>
+                  <span className={clsx('font-semibold font-mono', row.color)}>{row.value}</span>
+                </div>
+              ))}
+            </div>
+            {/* Budget input */}
+            <div className="border-t border-gray-800 pt-3">
+              <label className="text-xs text-gray-400 mb-1.5 block">Set Paper Budget</label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
                   <input
-                    type="number" min={10} max={50000} value={maxRisk}
-                    onChange={e => setMaxRisk(Math.max(10, Number(e.target.value)))}
+                    type="number"
+                    value={budgetInput}
+                    onChange={e => setBudgetInput(e.target.value)}
+                    onBlur={commitBudget}
+                    onKeyDown={e => e.key === 'Enter' && commitBudget()}
                     className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                    placeholder="1000"
                   />
                 </div>
+                <Button size="sm" variant="outline" onClick={commitBudget}>Set</Button>
+              </div>
+            </div>
+            <button
+              onClick={() => setConfirmReset(true)}
+              className="mt-3 flex items-center gap-1.5 text-xs text-gray-600 hover:text-red-400 transition-colors"
+            >
+              <RotateCcw className="h-3 w-3" />
+              Reset paper account
+            </button>
+          </Card>
+
+          {/* Strategy settings */}
+          <Card>
+            <CardHeader title="Strategy Settings" subtitle="Position size and sectors" icon={<Target className="h-4 w-4" />} />
+            <div className="space-y-4">
+
+              {/* Position size presets */}
+              <div>
+                <label className="text-xs text-gray-400 mb-2 block">Position Size</label>
+                <div className="grid grid-cols-4 gap-1">
+                  {(['small', 'medium', 'large', 'custom'] as PositionPreset[]).map(p => (
+                    <button
+                      key={p}
+                      onClick={() => { setPositionPreset(p); if (p !== 'custom') applyPreset(p); }}
+                      className={clsx(
+                        'py-1.5 rounded-lg text-xs font-medium transition-colors capitalize',
+                        positionPreset === p
+                          ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                          : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-300'
+                      )}
+                    >
+                      {p === 'small' ? 'Small\n1%' : p === 'medium' ? 'Medium\n3%' : p === 'large' ? 'Large\n5%' : 'Custom'}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex gap-1.5 text-[10px] text-gray-600 mt-1 justify-between px-0.5">
+                  <span>1% budget</span><span>3% budget</span><span>5% budget</span><span>manual</span>
+                </div>
+              </div>
+
+              {/* Risk amount */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs text-gray-400">Risk Per Trade</label>
+                  <div className="flex rounded-lg overflow-hidden border border-gray-700 text-[11px]">
+                    {(['fixed', 'percent'] as RiskMode[]).map(m => (
+                      <button
+                        key={m}
+                        onClick={() => { setRiskMode(m); setPositionPreset('custom'); }}
+                        className={clsx(
+                          'px-2.5 py-1 transition-colors',
+                          riskMode === m ? 'bg-amber-500/20 text-amber-400' : 'bg-gray-800 text-gray-500 hover:text-gray-300'
+                        )}
+                      >
+                        {m === 'fixed' ? '£ Fixed' : '% of balance'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex gap-2 items-center">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">
+                      {riskMode === 'fixed' ? '£' : '%'}
+                    </span>
+                    <input
+                      type="number"
+                      value={riskInput}
+                      onChange={e => { setRiskInput(e.target.value); setPositionPreset('custom'); }}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                      placeholder={riskMode === 'fixed' ? '100' : '3'}
+                    />
+                  </div>
+                  {riskMode === 'percent' && tradeSize > 0 && (
+                    <span className="text-xs text-gray-500 whitespace-nowrap">= {fmtGBP(tradeSize)}</span>
+                  )}
+                </div>
                 <p className="text-[11px] text-gray-600 mt-1">
-                  Quantity = floor(${maxRisk} ÷ entry price)
+                  Qty = floor({fmtGBP(tradeSize > 0 ? tradeSize : 0)} ÷ entry price)
                 </p>
               </div>
 
+              {/* Sectors */}
               <div>
                 <label className="text-xs text-gray-400 mb-2 block">Sectors</label>
                 <div className="flex flex-wrap gap-1.5">
@@ -549,6 +705,7 @@ export default function DemoTraderPage() {
                       <th className="text-right py-2 pr-3">Price (USD)</th>
                       <th className="text-right py-2 pr-3">Change</th>
                       <th className="text-center py-2 pr-3">Signal</th>
+                      <th className="text-right py-2 pr-3">Strength</th>
                       <th className="text-left py-2">Reason</th>
                     </tr>
                   </thead>
@@ -560,7 +717,7 @@ export default function DemoTraderPage() {
                           <p className="text-gray-600">{s.sector}</p>
                         </td>
                         <td className="py-1.5 pr-3 text-right font-mono text-gray-300">
-                          ${s.currentPrice.toFixed(2)}
+                          {fmtUSD(s.currentPrice)}
                         </td>
                         <td className={clsx('py-1.5 pr-3 text-right font-mono', s.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                           {fmtPct(s.changePercent)}
@@ -569,6 +726,9 @@ export default function DemoTraderPage() {
                           <span className={clsx('px-1.5 py-0.5 rounded text-[10px] font-bold', s.signal === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : s.signal === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-gray-700 text-gray-400')}>
                             {s.signal}
                           </span>
+                        </td>
+                        <td className={clsx('py-1.5 pr-3 text-right font-mono', s.score > 70 ? 'text-amber-400' : 'text-gray-500')}>
+                          {s.score}%
                         </td>
                         <td className="py-1.5 text-gray-500 truncate max-w-[180px]">{s.reason}</td>
                       </tr>
@@ -609,11 +769,11 @@ export default function DemoTraderPage() {
                     <tr className="text-gray-500 border-b border-gray-800">
                       <th className="text-left py-2 pr-3">Stock</th>
                       <th className="text-right py-2 pr-3">Qty</th>
-                      <th className="text-right py-2 pr-3">Entry</th>
-                      <th className="text-right py-2 pr-3">Current</th>
-                      <th className="text-right py-2 pr-3">SL</th>
-                      <th className="text-right py-2 pr-3">TP</th>
-                      <th className="text-right py-2 pr-3">P&L</th>
+                      <th className="text-right py-2 pr-3">Entry $</th>
+                      <th className="text-right py-2 pr-3">Current $</th>
+                      <th className="text-right py-2 pr-3">SL $</th>
+                      <th className="text-right py-2 pr-3">TP $</th>
+                      <th className="text-right py-2 pr-3">P&L £</th>
                       <th className="text-right py-2">×</th>
                     </tr>
                   </thead>
@@ -625,12 +785,12 @@ export default function DemoTraderPage() {
                           <p className="text-gray-600">{hoursAgo(pos.openedAt)}</p>
                         </td>
                         <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{pos.quantity}</td>
-                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">${pos.entryPrice.toFixed(2)}</td>
-                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">${pos.currentPrice.toFixed(2)}</td>
-                        <td className="py-1.5 pr-3 text-right font-mono text-red-400">${pos.stopLoss.toFixed(2)}</td>
-                        <td className="py-1.5 pr-3 text-right font-mono text-emerald-400">${pos.takeProfit.toFixed(2)}</td>
+                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtUSD(pos.entryPrice)}</td>
+                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtUSD(pos.currentPrice)}</td>
+                        <td className="py-1.5 pr-3 text-right font-mono text-red-400">{fmtUSD(pos.stopLoss)}</td>
+                        <td className="py-1.5 pr-3 text-right font-mono text-emerald-400">{fmtUSD(pos.takeProfit)}</td>
                         <td className={clsx('py-1.5 pr-3 text-right font-mono font-semibold', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                          {pos.pnl >= 0 ? '+' : ''}${pos.pnl.toFixed(2)}
+                          {pos.pnl >= 0 ? '+' : ''}{fmtGBP(pos.pnl)}
                         </td>
                         <td className="py-1.5 text-right">
                           <button onClick={() => closePosition(pos)} className="text-gray-600 hover:text-red-400 transition-colors">
@@ -651,10 +811,10 @@ export default function DemoTraderPage() {
               <CardHeader title="Performance Summary" subtitle={`${demoTrades.length} closed trades`} icon={<Trophy className="h-4 w-4" />} />
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
                 {[
-                  { label: 'Total P&L', value: `${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}`, color: totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400' },
+                  { label: 'Closed P&L', value: `${totalClosedPnL >= 0 ? '+' : ''}${fmtGBP(totalClosedPnL)}`, color: totalClosedPnL >= 0 ? 'text-emerald-400' : 'text-red-400' },
                   { label: 'Win Rate', value: `${winRate.toFixed(0)}%`, color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
-                  { label: 'Best Trade', value: bestTrade ? `+$${bestTrade.pnl.toFixed(2)} (${bestTrade.ticker})` : '—', color: 'text-emerald-400' },
-                  { label: 'Worst Trade', value: worstTrade ? `$${worstTrade.pnl.toFixed(2)} (${worstTrade.ticker})` : '—', color: 'text-red-400' },
+                  { label: 'Best Trade', value: bestTrade ? `+${fmtGBP(bestTrade.pnl)} (${bestTrade.ticker})` : '—', color: 'text-emerald-400' },
+                  { label: 'Worst Trade', value: worstTrade ? `${fmtGBP(worstTrade.pnl)} (${worstTrade.ticker})` : '—', color: 'text-red-400' },
                 ].map(stat => (
                   <div key={stat.label} className="bg-gray-800/50 rounded-lg px-3 py-2.5">
                     <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">{stat.label}</p>
@@ -667,9 +827,9 @@ export default function DemoTraderPage() {
                   <thead>
                     <tr className="text-gray-500 border-b border-gray-800">
                       <th className="text-left py-2 pr-3">Stock</th>
-                      <th className="text-right py-2 pr-3">Entry</th>
-                      <th className="text-right py-2 pr-3">Exit</th>
-                      <th className="text-right py-2 pr-3">P&L</th>
+                      <th className="text-right py-2 pr-3">Entry $</th>
+                      <th className="text-right py-2 pr-3">Exit $</th>
+                      <th className="text-right py-2 pr-3">P&L £</th>
                       <th className="text-center py-2 pr-3">Close</th>
                       <th className="text-right py-2">When</th>
                     </tr>
@@ -678,10 +838,10 @@ export default function DemoTraderPage() {
                     {demoTrades.slice(0, 15).map(trade => (
                       <tr key={trade.id} className="border-b border-gray-800/50">
                         <td className="py-1.5 pr-3 font-semibold text-white">{trade.ticker}</td>
-                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">${trade.entryPrice.toFixed(2)}</td>
-                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">${trade.exitPrice.toFixed(2)}</td>
+                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtUSD(trade.entryPrice)}</td>
+                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtUSD(trade.exitPrice)}</td>
                         <td className={clsx('py-1.5 pr-3 text-right font-mono font-semibold', trade.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                          {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)} ({fmtPct(trade.pnlPct)})
+                          {trade.pnl >= 0 ? '+' : ''}{fmtGBP(trade.pnl)} ({fmtPct(trade.pnlPct)})
                         </td>
                         <td className="py-1.5 pr-3 text-center">
                           <span className={clsx('px-1.5 py-0.5 rounded text-[10px]',
@@ -723,12 +883,12 @@ export default function DemoTraderPage() {
                         {trade.ticker} <span className="text-xs text-gray-500 font-normal">{trade.companyName}</span>
                       </p>
                       <p className="text-xs text-gray-500">
-                        Entry ${trade.entryPrice.toFixed(2)} → Exit ${trade.exitPrice.toFixed(2)} · {hoursAgo(trade.closedAt)}
+                        Entry {fmtUSD(trade.entryPrice)} → Exit {fmtUSD(trade.exitPrice)} · {hoursAgo(trade.closedAt)}
                       </p>
                     </div>
                     <div className="flex items-center gap-3 flex-shrink-0">
                       <div className="text-right">
-                        <p className="text-sm font-semibold text-emerald-400 font-mono">+${trade.pnl.toFixed(2)}</p>
+                        <p className="text-sm font-semibold text-emerald-400 font-mono">+{fmtGBP(trade.pnl)}</p>
                         <p className="text-xs text-emerald-400/70">{fmtPct(trade.pnlPct)}</p>
                       </div>
                       <Button

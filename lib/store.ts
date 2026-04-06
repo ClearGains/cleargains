@@ -56,6 +56,7 @@ interface ClearGainsState {
   t212DemoApiSecret: string;
   demoPositions: DemoPosition[];
   demoTrades: DemoTrade[];
+  paperBudget: number;
 
   // Actions
   setCountry: (country: Country) => void;
@@ -84,6 +85,8 @@ interface ClearGainsState {
   removeDemoPosition: (id: string) => void;
   updateDemoPosition: (id: string, update: Partial<DemoPosition>) => void;
   addDemoTrade: (trade: DemoTrade) => void;
+  setPaperBudget: (n: number) => void;
+  resetPaperAccount: () => void;
   reset: () => void;
 }
 
@@ -112,6 +115,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
       t212DemoApiSecret: '',
       demoPositions: [],
       demoTrades: [],
+      paperBudget: 1000,
 
       setCountry: (country) => set({ selectedCountry: country }),
       setHasOnboarded: (v) => set({ hasOnboarded: v }),
@@ -203,6 +207,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
       addDemoTrade: (trade) =>
         set((state) => ({ demoTrades: [trade, ...state.demoTrades].slice(0, 100) })),
 
+      setPaperBudget: (n) => set({ paperBudget: n }),
+
+      resetPaperAccount: () => set({ demoPositions: [], demoTrades: [] }),
+
       reset: () =>
         set({
           selectedCountry: DEFAULT_COUNTRY,
@@ -227,6 +235,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
           t212DemoApiSecret: '',
           demoPositions: [],
           demoTrades: [],
+          paperBudget: 1000,
         }),
     }),
     {
@@ -252,6 +261,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
         t212DemoApiSecret: state.t212DemoApiSecret,
         demoPositions: state.demoPositions,
         demoTrades: state.demoTrades,
+        paperBudget: state.paperBudget,
       }),
     }
   )
