@@ -43,7 +43,9 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         setT212Connected(true);
         onConnected();
       } else {
-        setError(data.error ?? 'Connection failed. Check your credentials and try again.');
+        const msg = data.error ?? 'Connection failed. Check your credentials and try again.';
+        const raw = data.t212Raw ? ` (T212: ${data.t212Raw})` : '';
+        setError(msg + raw);
       }
     } catch {
       setError('Network error — check your connection and try again.');

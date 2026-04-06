@@ -8,6 +8,10 @@ export async function POST(request: NextRequest) {
     accountType: 'LIVE' | 'DEMO';
   };
 
+  console.log('[T212 test] accountType:', accountType);
+  console.log('[T212 test] apiKey received:', !!apiKey, '| first 4 chars:', apiKey ? apiKey.slice(0, 4) : 'none');
+  console.log('[T212 test] apiSecret received:', !!apiSecret);
+
   if (!apiKey || !apiSecret) {
     return NextResponse.json(
       { ok: false, error: 'API key and secret are required.' },
@@ -22,6 +26,8 @@ export async function POST(request: NextRequest) {
 
   const credentials = Buffer.from(apiKey + ':' + apiSecret).toString('base64');
 
+  console.log('[T212 test] fetching:', `${base}/equity/account/info`);
+
   try {
     const res = await fetch(`${base}/equity/account/info`, {
       headers: {
@@ -31,8 +37,12 @@ export async function POST(request: NextRequest) {
       cache: 'no-store',
     });
 
+    const errorBody = await res.text();
+    console.log('[T212 test] response status:', res.status);
+    console.log('[T212 test] response body:', errorBody);
+
     if (res.ok) {
-      const data = await res.json();
+      const data = JSON.parse(errorBody);
       return NextResponse.json({
         ok: true,
         accountType,
@@ -41,22 +51,26 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const errorBody = await res.text();
-    return NextResponse.json(
-      {
-        ok: false,
-        status: res.status,
-        error:
-          res.status === 401
-            ? 'Invalid credentials — check your API key and secret are correct.'
-            : `Trading 212 returned ${res.status}`,
-        t212Message: errorBody,
-      },
-      { status: 200 }
-    );
+    // Parse T212 error message if JSON, otherwise use raw text
+    let t212Error = errorBody;
+    try {
+      const parsed = JSON.parse(errorBody);
+      t212Error = parsed.message ?? parsed.error ?? parsed.code ?? errorBody;
+    } catch {
+      // errorBody is plain text — use as-is
+    }
+
+    return NextResponse.json({
+      ok: false,
+      status: res.status,
+      error: t212Error || `Trading 212 returned HTTP ${res.status}`,
+      t212Raw: errorBody,
+    });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log('[T212 test] fetch error:', msg);
     return NextResponse.json(
-      { ok: false, error: `Network error: ${err instanceof Error ? err.message : String(err)}` },
+      { ok: false, error: `Network error: ${msg}` },
       { status: 200 }
     );
   }
