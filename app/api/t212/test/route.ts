@@ -1,40 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
-import https from 'https';
 
-type ProbeResult = { label: string; status: number; rawBody: string };
-
-// Method A & B: fetch() with Authorization header
-async function probeFetch(label: string, url: string, authHeader: string): Promise<ProbeResult> {
+async function probe(
+  label: string,
+  url: string,
+  authHeader: string
+): Promise<{ label: string; url: string; status: number; rawBody: string }> {
   const res = await fetch(url, {
     method: 'GET',
     headers: {
       Authorization: authHeader,
+      'Content-Type': 'application/json',
       Accept: 'application/json',
     },
     cache: 'no-store',
   });
   const rawBody = await res.text();
-  return { label, status: res.status, rawBody };
-}
-
-// Method C: Node.js https.request with auth option — same as curl -u key:secret
-function probeNodeAuth(key: string, secret: string): Promise<ProbeResult> {
-  return new Promise((resolve) => {
-    const options: https.RequestOptions = {
-      hostname: 'live.trading212.com',
-      path: '/api/v0/equity/account/cash',
-      method: 'GET',
-      auth: key + ':' + secret,
-      headers: { Accept: 'application/json' },
-    };
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => resolve({ label: 'node-https-auth', status: res.statusCode ?? 0, rawBody: data }));
-    });
-    req.on('error', (err) => resolve({ label: 'node-https-auth', status: 0, rawBody: `error: ${err.message}` }));
-    req.end();
-  });
+  return { label, url, status: res.status, rawBody };
 }
 
 export async function POST(request: NextRequest) {
@@ -42,49 +23,56 @@ export async function POST(request: NextRequest) {
   const { apiKey, apiSecret, clientEncoded } = body as {
     apiKey: string;
     apiSecret: string;
-    clientEncoded?: string;
+    clientEncoded?: string; // pre-encoded by browser btoa()
   };
 
   // Strip ALL whitespace: spaces, newlines, carriage returns, tabs
   const key = (apiKey ?? '').replace(/[\s\n\r\t]/g, '');
   const secret = (apiSecret ?? '').replace(/[\s\n\r\t]/g, '');
 
-  console.log('[T212 test] key length:', key.length, '| key[0:4]:', key.slice(0, 4));
-  console.log('[T212 test] secret length:', secret.length);
+  console.log('[T212 test] key length after strip:', key.length, '| key[0:4]:', key.slice(0, 4));
+  console.log('[T212 test] secret length after strip:', secret.length);
 
   if (!key || !secret) {
-    return NextResponse.json({ ok: false, error: 'API key and secret must not be empty.' }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: 'API key and secret must not be empty.' },
+      { status: 400 }
+    );
   }
 
-  const url = 'https://live.trading212.com/api/v0/equity/account/cash';
+  // Approach A: server-side encoding with explicit utf8
+  const rawA = key + ':' + secret;
+  const encodedA = Buffer.from(rawA, 'utf8').toString('base64');
+  const headerA = 'Basic ' + encodedA;
+  console.log('[T212 test] server-encoded header[0:20]:', headerA.slice(0, 20));
+  console.log('[T212 test] server raw string length:', rawA.length);
 
-  // Method A: server-side Buffer.from().toString('base64')
-  const serverEncoded = Buffer.from(key + ':' + secret).toString('base64');
-  console.log('[T212 test] method-A header[0:20]:', ('Basic ' + serverEncoded).slice(0, 20));
+  // Approach B: client-side btoa() result forwarded as-is
+  const headerB = clientEncoded ? 'Basic ' + clientEncoded : null;
+  if (headerB) {
+    console.log('[T212 test] client-encoded header[0:20]:', headerB.slice(0, 20));
+  }
 
-  // Method B: client-side btoa() forwarded from browser
-  console.log('[T212 test] method-B clientEncoded present:', !!clientEncoded);
+  const url = 'https://live.trading212.com/api/v0/equity/account/summary';
 
-  const attempts: Promise<ProbeResult>[] = [
-    probeFetch('fetch-server-b64', url, 'Basic ' + serverEncoded),
-    probeNodeAuth(key, secret),
+  const attempts: Promise<{ label: string; url: string; status: number; rawBody: string }>[] = [
+    probe('server-encoded', url, headerA),
   ];
-  if (clientEncoded) {
-    console.log('[T212 test] method-B header[0:20]:', ('Basic ' + clientEncoded).slice(0, 20));
-    attempts.push(probeFetch('fetch-client-btoa', url, 'Basic ' + clientEncoded));
+  if (headerB) {
+    attempts.push(probe('client-encoded', url, headerB));
   }
 
-  let results: ProbeResult[];
+  let results: { label: string; url: string; status: number; rawBody: string }[];
   try {
     results = await Promise.all(attempts);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log('[T212 test] unexpected error:', msg);
-    return NextResponse.json({ ok: false, error: `Request failed: ${msg}` });
+    console.log('[T212 test] network error:', msg);
+    return NextResponse.json({ ok: false, error: `Request to Trading 212 failed: ${msg}` });
   }
 
   for (const r of results) {
-    console.log(`[T212 test] [${r.label}] HTTP ${r.status} | body: ${r.rawBody}`);
+    console.log(`[T212 test] [${r.label}] ${r.status} | body: ${r.rawBody}`);
   }
 
   const success = results.find((r) => r.status >= 200 && r.status < 300);
@@ -95,7 +83,7 @@ export async function POST(request: NextRequest) {
       ok: true,
       accountId: data.id ?? 'unknown',
       currency: data.currencyCode ?? 'GBP',
-      usedMethod: success.label,
+      usedEncoding: success.label,
       keyLength: key.length,
       secretLength: secret.length,
       results,
