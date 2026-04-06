@@ -2,11 +2,11 @@
 
 import { T212Position, T212Order } from './types';
 
-const T212_LIVE_BASE = 'https://live.trading212.com/api/v0';
-const T212_DEMO_BASE = 'https://demo.trading212.com/api/v0';
-
 function getBase(accountType: 'LIVE' | 'DEMO'): string {
-  return accountType === 'LIVE' ? T212_LIVE_BASE : T212_DEMO_BASE;
+  if (accountType === 'LIVE') {
+    return process.env.T212_BASE_URL ?? 'https://live.trading212.com/api/v0';
+  }
+  return process.env.T212_DEMO_URL ?? 'https://demo.trading212.com/api/v0';
 }
 
 function getHeaders(): HeadersInit {

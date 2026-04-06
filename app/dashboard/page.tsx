@@ -267,7 +267,7 @@ export default function DashboardPage() {
           </Button>
 
           <p className="text-xs text-gray-600 mt-2 text-center">
-            Requires T212_API_KEY in .env.local
+            Set T212_API_KEY and T212_API_SECRET in environment variables
           </p>
         </Card>
 
