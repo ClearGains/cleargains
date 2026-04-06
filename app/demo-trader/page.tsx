@@ -15,8 +15,6 @@ import { sendPush } from '@/lib/pushNotifications';
 
 const SECTORS = ['All', 'Technology', 'Healthcare', 'Energy', 'Finance', 'Consumer'] as const;
 type Sector = typeof SECTORS[number];
-type RiskMode = 'fixed' | 'percent';
-type PositionPreset = 'small' | 'medium' | 'large' | 'custom';
 
 function fmtGBP(n: number) {
   return n.toLocaleString('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 2 });
@@ -235,10 +233,13 @@ export default function DemoTraderPage() {
     addDemoPosition, removeDemoPosition, updateDemoPosition, addDemoTrade,
   } = useClearGainsStore();
 
-  const [budgetInput, setBudgetInput] = useState(String(paperBudget));
-  const [riskMode, setRiskMode] = useState<RiskMode>('percent');
-  const [riskInput, setRiskInput] = useState('3');
-  const [positionPreset, setPositionPreset] = useState<PositionPreset>('medium');
+  // Position size presets (£ fixed amounts)
+  const SIZE_PRESETS = [10, 50, 100, 250] as const;
+  type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
+
+  const [budgetStr, setBudgetStr] = useState(String(paperBudget));
+  const [sizePreset, setSizePreset] = useState<SizePreset>(100);
+  const [customSizeStr, setCustomSizeStr] = useState('');
   const [sectors, setSectors] = useState<Sector[]>(['Technology']);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [scanning, setScanning] = useState(false);
@@ -261,21 +262,22 @@ export default function DemoTraderPage() {
   const totalClosedPnL = demoTrades.reduce((s, t) => s + t.pnl, 0);
   const totalPaperPnL = totalOpenPnL + totalClosedPnL;
 
-  const riskRaw = parseFloat(riskInput) || 0;
-  const tradeSize = riskMode === 'fixed' ? riskRaw : (riskRaw / 100) * availableBalance;
-
-  function applyPreset(preset: PositionPreset) {
-    setPositionPreset(preset);
-    setRiskMode('percent');
-    if (preset === 'small') setRiskInput('1');
-    else if (preset === 'medium') setRiskInput('3');
-    else if (preset === 'large') setRiskInput('5');
-  }
+  const tradeSize = sizePreset === 'custom'
+    ? (parseInt(customSizeStr.replace(/[^0-9]/g, ''), 10) || 0)
+    : sizePreset;
 
   function commitBudget() {
-    const val = parseFloat(budgetInput);
-    if (!isNaN(val) && val > 0) setPaperBudget(val);
-    else setBudgetInput(String(paperBudget));
+    const raw = budgetStr.replace(/[^0-9]/g, '');
+    const val = raw === '' ? 0 : parseInt(raw, 10);
+    if (val > 0) setPaperBudget(val);
+    else setBudgetStr(String(paperBudget));
+  }
+
+  function handleReset() {
+    resetPaperAccount();
+    setPaperBudget(1000);
+    setBudgetStr('1000');
+    setConfirmReset(false);
   }
 
   // ── Refresh prices for open positions ──────────────────────────────────────
@@ -491,7 +493,7 @@ export default function DemoTraderPage() {
             </p>
             <div className="flex gap-2">
               <Button variant="outline" fullWidth onClick={() => setConfirmReset(false)}>Cancel</Button>
-              <Button fullWidth onClick={() => { resetPaperAccount(); setConfirmReset(false); }} icon={<RotateCcw className="h-4 w-4" />}>
+              <Button fullWidth onClick={handleReset} icon={<RotateCcw className="h-4 w-4" />}>
                 Reset Account
               </Button>
             </div>
@@ -523,118 +525,112 @@ export default function DemoTraderPage() {
         {/* Left: controls */}
         <div className="space-y-4">
 
-          {/* Account summary */}
+          {/* Paper Balance */}
           <Card>
-            <CardHeader title="Paper Account" subtitle="Simulated trading balance" icon={<Wallet className="h-4 w-4" />} />
-            <div className="space-y-2 mb-3">
+            <CardHeader title="Paper Balance" subtitle="Simulated account" icon={<Wallet className="h-4 w-4" />} />
+
+            <div className="space-y-2 mb-4">
               {[
-                { label: 'Paper Budget', value: fmtGBP(paperBudget), color: 'text-white' },
-                { label: 'Currently Invested', value: fmtGBP(currentlyInvested), color: 'text-amber-400' },
-                { label: 'Available to Trade', value: fmtGBP(availableBalance), color: availableBalance > 0 ? 'text-emerald-400' : 'text-gray-500' },
-                { label: 'Open Positions', value: String(demoPositions.length), color: demoPositions.length > 0 ? 'text-white' : 'text-gray-500' },
-                { label: 'Total Paper P&L', value: `${totalPaperPnL >= 0 ? '+' : ''}${fmtGBP(totalPaperPnL)}`, color: totalPaperPnL >= 0 ? 'text-emerald-400' : 'text-red-400' },
+                { label: 'Total Budget', value: fmtGBP(paperBudget), color: 'text-white' },
+                { label: 'Invested', value: fmtGBP(currentlyInvested), color: 'text-amber-400' },
+                { label: 'Available', value: fmtGBP(availableBalance), color: availableBalance > 0 ? 'text-emerald-400' : 'text-gray-500' },
+                { label: 'P&L', value: `${totalPaperPnL >= 0 ? '+' : ''}${fmtGBP(totalPaperPnL)}`, color: totalPaperPnL > 0 ? 'text-emerald-400' : totalPaperPnL < 0 ? 'text-red-400' : 'text-gray-500' },
               ].map(row => (
-                <div key={row.label} className="flex justify-between items-center text-xs">
-                  <span className="text-gray-500">{row.label}</span>
-                  <span className={clsx('font-semibold font-mono', row.color)}>{row.value}</span>
+                <div key={row.label} className="flex justify-between items-center">
+                  <span className="text-xs text-gray-500">{row.label}</span>
+                  <span className={clsx('text-sm font-semibold font-mono', row.color)}>{row.value}</span>
                 </div>
               ))}
             </div>
-            {/* Budget input */}
-            <div className="border-t border-gray-800 pt-3">
-              <label className="text-xs text-gray-400 mb-1.5 block">Set Paper Budget</label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
-                  <input
-                    type="number"
-                    value={budgetInput}
-                    onChange={e => setBudgetInput(e.target.value)}
-                    onBlur={commitBudget}
-                    onKeyDown={e => e.key === 'Enter' && commitBudget()}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
-                    placeholder="1000"
-                  />
+
+            <div className="border-t border-gray-800 pt-3 space-y-3">
+              <div>
+                <label className="text-xs text-gray-400 mb-1.5 block">Paper Budget</label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={budgetStr}
+                      onChange={e => setBudgetStr(e.target.value.replace(/[^0-9]/g, ''))}
+                      onBlur={commitBudget}
+                      onKeyDown={e => e.key === 'Enter' && commitBudget()}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                      placeholder="1000"
+                    />
+                  </div>
+                  <Button size="sm" variant="outline" onClick={commitBudget}>Set</Button>
                 </div>
-                <Button size="sm" variant="outline" onClick={commitBudget}>Set</Button>
               </div>
+
+              <button
+                onClick={() => setConfirmReset(true)}
+                className="flex items-center gap-1.5 text-xs text-gray-600 hover:text-red-400 transition-colors"
+              >
+                <RotateCcw className="h-3 w-3" />
+                Reset Paper Account
+              </button>
             </div>
-            <button
-              onClick={() => setConfirmReset(true)}
-              className="mt-3 flex items-center gap-1.5 text-xs text-gray-600 hover:text-red-400 transition-colors"
-            >
-              <RotateCcw className="h-3 w-3" />
-              Reset paper account
-            </button>
           </Card>
 
-          {/* Strategy settings */}
+          {/* Strategy Settings */}
           <Card>
             <CardHeader title="Strategy Settings" subtitle="Position size and sectors" icon={<Target className="h-4 w-4" />} />
             <div className="space-y-4">
 
-              {/* Position size presets */}
+              {/* Position size buttons */}
               <div>
-                <label className="text-xs text-gray-400 mb-2 block">Position Size</label>
-                <div className="grid grid-cols-4 gap-1">
-                  {(['small', 'medium', 'large', 'custom'] as PositionPreset[]).map(p => (
+                <label className="text-xs text-gray-400 mb-2 block">Position Size Per Trade</label>
+                <div className="grid grid-cols-5 gap-1.5 mb-2">
+                  {SIZE_PRESETS.map(amt => (
                     <button
-                      key={p}
-                      onClick={() => { setPositionPreset(p); if (p !== 'custom') applyPreset(p); }}
+                      key={amt}
+                      onClick={() => setSizePreset(amt)}
                       className={clsx(
-                        'py-1.5 rounded-lg text-xs font-medium transition-colors capitalize',
-                        positionPreset === p
-                          ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                          : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-300'
+                        'py-2.5 rounded-xl text-sm font-bold transition-all border',
+                        sizePreset === amt
+                          ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 shadow-sm'
+                          : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200 hover:border-gray-600'
                       )}
                     >
-                      {p === 'small' ? 'Small\n1%' : p === 'medium' ? 'Medium\n3%' : p === 'large' ? 'Large\n5%' : 'Custom'}
+                      £{amt}
                     </button>
                   ))}
+                  <button
+                    onClick={() => setSizePreset('custom')}
+                    className={clsx(
+                      'py-2.5 rounded-xl text-sm font-bold transition-all border',
+                      sizePreset === 'custom'
+                        ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 shadow-sm'
+                        : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200 hover:border-gray-600'
+                    )}
+                  >
+                    Custom
+                  </button>
                 </div>
-                <div className="flex gap-1.5 text-[10px] text-gray-600 mt-1 justify-between px-0.5">
-                  <span>1% budget</span><span>3% budget</span><span>5% budget</span><span>manual</span>
-                </div>
-              </div>
 
-              {/* Risk amount */}
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs text-gray-400">Risk Per Trade</label>
-                  <div className="flex rounded-lg overflow-hidden border border-gray-700 text-[11px]">
-                    {(['fixed', 'percent'] as RiskMode[]).map(m => (
-                      <button
-                        key={m}
-                        onClick={() => { setRiskMode(m); setPositionPreset('custom'); }}
-                        className={clsx(
-                          'px-2.5 py-1 transition-colors',
-                          riskMode === m ? 'bg-amber-500/20 text-amber-400' : 'bg-gray-800 text-gray-500 hover:text-gray-300'
-                        )}
-                      >
-                        {m === 'fixed' ? '£ Fixed' : '% of balance'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="flex gap-2 items-center">
-                  <div className="relative flex-1">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">
-                      {riskMode === 'fixed' ? '£' : '%'}
-                    </span>
+                {sizePreset === 'custom' && (
+                  <div className="relative mb-2">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
                     <input
-                      type="number"
-                      value={riskInput}
-                      onChange={e => { setRiskInput(e.target.value); setPositionPreset('custom'); }}
+                      type="text"
+                      inputMode="numeric"
+                      value={customSizeStr}
+                      onChange={e => setCustomSizeStr(e.target.value.replace(/[^0-9]/g, ''))}
                       className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
-                      placeholder={riskMode === 'fixed' ? '100' : '3'}
+                      placeholder="Enter amount"
+                      autoFocus
                     />
                   </div>
-                  {riskMode === 'percent' && tradeSize > 0 && (
-                    <span className="text-xs text-gray-500 whitespace-nowrap">= {fmtGBP(tradeSize)}</span>
-                  )}
-                </div>
-                <p className="text-[11px] text-gray-600 mt-1">
-                  Qty = floor({fmtGBP(tradeSize > 0 ? tradeSize : 0)} ÷ entry price)
+                )}
+
+                <p className="text-xs text-gray-500">
+                  Each trade will use{' '}
+                  <span className="text-amber-400 font-semibold">{fmtGBP(tradeSize)}</span>
+                  {' '}of your{' '}
+                  <span className="text-white font-semibold">{fmtGBP(paperBudget)}</span>
+                  {' '}paper budget
                 </p>
               </div>
 
@@ -661,7 +657,7 @@ export default function DemoTraderPage() {
               <div className="bg-gray-800/50 rounded-lg px-3 py-2 text-xs text-gray-500 space-y-0.5">
                 <div className="flex justify-between"><span>Stop-loss</span><span className="text-red-400">−2% from entry</span></div>
                 <div className="flex justify-between"><span>Take-profit</span><span className="text-emerald-400">+4% from entry</span></div>
-                <div className="flex justify-between"><span>Max new positions / run</span><span>3 (top BUY signals)</span></div>
+                <div className="flex justify-between"><span>Max positions / run</span><span>3 (top BUY signals)</span></div>
                 <div className="flex justify-between"><span>Price refresh</span><span>every 5 min</span></div>
               </div>
             </div>
