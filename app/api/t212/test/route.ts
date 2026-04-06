@@ -1,27 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-function describeT212Error(status: number, rawBody: string): string {
-  if (status === 401) {
-    if (!rawBody || rawBody.trim() === '') {
-      return 'Trading 212 returned 401 with empty response - this usually means the API key format is incorrect or the key was generated on the wrong account type';
-    }
-    return `Trading 212 returned 401 — ${rawBody}`;
-  }
-  if (status === 403) {
-    return `Trading 212 returned 403 Forbidden - your key may not have the required permissions${rawBody ? ` — ${rawBody}` : ''}`;
-  }
-  return `Trading 212 returned HTTP ${status} — ${rawBody || '(empty body)'}`;
+async function probe(url: string, authHeader: string): Promise<{ url: string; status: number; rawBody: string }> {
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: authHeader,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+  });
+  const rawBody = await res.text();
+  return { url, status: res.status, rawBody };
 }
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const { apiKey, apiSecret } = body as { apiKey: string; apiSecret: string };
 
+  // Trim to strip invisible whitespace from copy-paste
   const key = (apiKey ?? '').trim();
   const secret = (apiSecret ?? '').trim();
-
-  console.log('[T212 test] apiKey present:', !!key, '| first 4 chars:', key ? key.slice(0, 4) : 'none');
-  console.log('[T212 test] apiSecret present:', !!secret);
 
   if (!key || !secret) {
     return NextResponse.json(
@@ -30,46 +29,55 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const authHeader = 'Basic ' + Buffer.from(key + ':' + secret).toString('base64');
-  const url = 'https://live.trading212.com/api/v0/equity/account/info';
+  // Server-side base64 — identical output to btoa() for ASCII strings
+  const credentials = Buffer.from(key + ':' + secret).toString('base64');
+  const authHeader = 'Basic ' + credentials;
 
-  console.log('[T212 test] GET', url);
+  // Log first 20 chars to confirm encoding without exposing full value
+  console.log('[T212 test] key length:', key.length, '| key[0:4]:', key.slice(0, 4));
+  console.log('[T212 test] secret length:', secret.length);
+  console.log('[T212 test] Authorization header[0:20]:', authHeader.slice(0, 20));
+  console.log('[T212 test] base64 credentials[0:20]:', credentials.slice(0, 20));
 
-  let status: number;
-  let rawBody: string;
+  const urls = [
+    'https://live.trading212.com/api/v0/equity/account/info',
+    'https://live.trading212.com/api/v0/equity/account/cash',
+  ];
+
+  let results: { url: string; status: number; rawBody: string }[];
 
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { Authorization: authHeader },
-      cache: 'no-store',
-    });
-    status = res.status;
-    rawBody = await res.text();
+    results = await Promise.all(urls.map((url) => probe(url, authHeader)));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.log('[T212 test] network error:', msg);
     return NextResponse.json({ ok: false, error: `Request to Trading 212 failed: ${msg}` });
   }
 
-  console.log('[T212 test] status:', status, '| body:', rawBody);
+  for (const r of results) {
+    console.log(`[T212 test] ${r.url} → ${r.status} | body: ${r.rawBody}`);
+  }
 
-  if (status >= 200 && status < 300) {
+  const success = results.find((r) => r.status >= 200 && r.status < 300);
+  if (success) {
     let data: Record<string, unknown> = {};
-    try { data = JSON.parse(rawBody); } catch { /* leave empty */ }
+    try { data = JSON.parse(success.rawBody); } catch { /* leave empty */ }
     return NextResponse.json({
       ok: true,
       accountId: data.id ?? 'unknown',
-      currency: data.currencyCode ?? 'GBP',
-      status,
-      rawBody,
+      currency: data.currencyCode ?? data.free ?? 'GBP',
+      results,
     });
   }
 
+  // All failed — return full diagnostic info for every endpoint
+  const summary = results
+    .map((r) => `${r.url.split('/').pop()} → HTTP ${r.status}: ${r.rawBody || '(empty body)'}`)
+    .join(' | ');
+
   return NextResponse.json({
     ok: false,
-    status,
-    rawBody,
-    error: describeT212Error(status, rawBody),
+    error: summary,
+    results,
   });
 }

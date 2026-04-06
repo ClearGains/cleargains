@@ -21,6 +21,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
   const [showSecret, setShowSecret] = useState(false);
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [probeResults, setProbeResults] = useState<{ url: string; status: number; rawBody: string }[] | null>(null);
   const [step, setStep] = useState<'guide' | 'credentials'>('guide');
 
   async function handleConnect() {
@@ -30,11 +31,12 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
     }
     setTesting(true);
     setError(null);
+    setProbeResults(null);
     try {
       const res = await fetch('/api/t212/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: apiKey.trim(), apiSecret: apiSecret.trim(), accountType: t212AccountType }),
+        body: JSON.stringify({ apiKey: apiKey.trim(), apiSecret: apiSecret.trim() }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -43,11 +45,8 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         setT212Connected(true);
         onConnected();
       } else {
-        const parts: string[] = [];
-        if (data.status) parts.push(`HTTP ${data.status}`);
-        if (data.rawBody !== undefined) parts.push(`T212 response: "${data.rawBody || '(empty body)'}"` );
-        else if (data.error) parts.push(data.error);
-        setError(parts.join(' — ') || 'Connection failed.');
+        setError(data.error ?? 'Connection failed.');
+        if (Array.isArray(data.results)) setProbeResults(data.results);
       }
     } catch (err) {
       setError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -190,9 +189,26 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
             </div>
 
             {error && (
-              <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2.5 text-xs text-red-400 mb-4">
-                <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-                <span>{error}</span>
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2.5 text-xs text-red-400 mb-4 space-y-2">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+                {probeResults && (
+                  <div className="font-mono text-[10px] space-y-1 pt-1 border-t border-red-500/20">
+                    {probeResults.map((r) => (
+                      <div key={r.url} className="break-all">
+                        <span className="text-red-300">{r.url.split('/').slice(-3).join('/')}</span>
+                        {' → '}
+                        <span className={r.status >= 200 && r.status < 300 ? 'text-emerald-400' : 'text-red-400'}>
+                          HTTP {r.status}
+                        </span>
+                        {': '}
+                        <span className="text-red-500/80">{r.rawBody || '(empty body)'}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
