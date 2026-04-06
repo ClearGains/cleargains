@@ -1,14 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { apiKey, apiSecret } = body as { apiKey: string; apiSecret: string };
+  // Credentials are base64-encoded by the browser (btoa) and sent as a header.
+  // We pass the encoded value directly to Trading 212 — no server-side re-encoding.
+  const encoded = request.headers.get('x-t212-auth');
 
-  if (!apiKey || !apiSecret) {
-    return NextResponse.json({ ok: false, error: 'API key and secret are required.' }, { status: 400 });
+  if (!encoded) {
+    return NextResponse.json({ ok: false, error: 'Missing x-t212-auth header.' }, { status: 400 });
   }
-
-  const credentials = Buffer.from(apiKey + ':' + apiSecret).toString('base64');
 
   let status: number;
   let rawBody: string;
@@ -17,7 +16,7 @@ export async function POST(request: NextRequest) {
     const response = await fetch('https://live.trading212.com/api/v0/equity/account/cash', {
       method: 'GET',
       headers: {
-        Authorization: 'Basic ' + credentials,
+        Authorization: 'Basic ' + encoded,
         'Content-Type': 'application/json',
       },
     });
@@ -40,13 +39,13 @@ export async function POST(request: NextRequest) {
   }
 
   if (status === 401) {
-    const body = rawBody.trim();
+    const trimmed = rawBody.trim();
     return NextResponse.json({
       ok: false,
       status,
       rawBody,
-      error: body
-        ? `Trading 212 returned 401: ${body}`
+      error: trimmed
+        ? `Trading 212 returned 401: ${trimmed}`
         : 'Trading 212 returned 401 with empty response — check your API key and secret are correct',
     });
   }

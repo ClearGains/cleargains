@@ -36,10 +36,11 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
     setError(null);
 
     try {
+      // Encode in the browser — passed straight to Trading 212, no server re-encoding
+      const encoded = btoa(cleanKey + ':' + cleanSecret);
       const res = await fetch('/api/t212/connect', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: cleanKey, apiSecret: cleanSecret }),
+        headers: { 'x-t212-auth': encoded },
       });
       const data = await res.json();
 

@@ -1,18 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { apiKey, apiSecret, limit = 200 } = body as {
-    apiKey: string;
-    apiSecret: string;
-    limit?: number;
-  };
+  // Credentials are base64-encoded by the browser (btoa) and sent as a header.
+  const encoded = request.headers.get('x-t212-auth');
+  const body = await request.json().catch(() => ({}));
+  const limit = Number((body as Record<string, unknown>).limit ?? 200);
 
-  if (!apiKey || !apiSecret) {
-    return NextResponse.json({ error: 'API key and secret are required.' }, { status: 400 });
+  if (!encoded) {
+    return NextResponse.json({ error: 'Missing x-t212-auth header.' }, { status: 400 });
   }
-
-  const credentials = Buffer.from(apiKey + ':' + apiSecret).toString('base64');
 
   let status: number;
   let rawBody: string;
@@ -23,7 +19,7 @@ export async function POST(request: NextRequest) {
       {
         method: 'GET',
         headers: {
-          Authorization: 'Basic ' + credentials,
+          Authorization: 'Basic ' + encoded,
           'Content-Type': 'application/json',
         },
       }

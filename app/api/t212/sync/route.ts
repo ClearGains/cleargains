@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-async function t212Get(url: string, credentials: string): Promise<{ status: number; rawBody: string }> {
+async function t212Get(url: string, encoded: string): Promise<{ status: number; rawBody: string }> {
   const res = await fetch(url, {
     method: 'GET',
     headers: {
-      Authorization: 'Basic ' + credentials,
+      Authorization: 'Basic ' + encoded,
       'Content-Type': 'application/json',
     },
   });
@@ -13,20 +13,19 @@ async function t212Get(url: string, credentials: string): Promise<{ status: numb
 }
 
 export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { apiKey, apiSecret } = body as { apiKey: string; apiSecret: string };
+  // Credentials are base64-encoded by the browser (btoa) and sent as a header.
+  const encoded = request.headers.get('x-t212-auth');
 
-  if (!apiKey || !apiSecret) {
-    return NextResponse.json({ error: 'API key and secret are required.' }, { status: 400 });
+  if (!encoded) {
+    return NextResponse.json({ error: 'Missing x-t212-auth header.' }, { status: 400 });
   }
 
-  const credentials = Buffer.from(apiKey + ':' + apiSecret).toString('base64');
   const base = 'https://live.trading212.com/api/v0';
 
   try {
     const [cashResult, positionsResult] = await Promise.all([
-      t212Get(`${base}/equity/account/cash`, credentials),
-      t212Get(`${base}/equity/positions`, credentials),
+      t212Get(`${base}/equity/account/cash`, encoded),
+      t212Get(`${base}/equity/positions`, encoded),
     ]);
 
     if (cashResult.status < 200 || cashResult.status >= 300) {
@@ -59,7 +58,7 @@ export async function POST(request: NextRequest) {
       isISA: Boolean(pos.isISA ?? false),
     }));
 
-    const ordersResult = await t212Get(`${base}/equity/history/orders?limit=200`, credentials);
+    const ordersResult = await t212Get(`${base}/equity/history/orders?limit=200`, encoded);
     const trades: unknown[] = [];
     if (ordersResult.status >= 200 && ordersResult.status < 300) {
       try {

@@ -11,6 +11,7 @@ import {
   Globe,
   Calendar,
   HelpCircle,
+  Settings,
   Wifi,
   WifiOff,
 } from 'lucide-react';
@@ -26,6 +27,7 @@ const navLinks = [
   { href: '/tax-guides', label: 'Tax Guides', icon: Globe },
   { href: '/deadlines', label: 'Deadlines', icon: Calendar },
   { href: '/help', label: 'Help Centre', icon: HelpCircle },
+  { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
 export function Sidebar() {

@@ -87,10 +87,11 @@ export default function LedgerPage() {
     setImportCount(null);
 
     try {
+      const encoded = btoa(t212ApiKey + ':' + t212ApiSecret);
       const res = await fetch('/api/t212/orders', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: t212ApiKey, apiSecret: t212ApiSecret, limit: 200 }),
+        headers: { 'x-t212-auth': encoded, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: 200 }),
       });
       const data = await res.json();
       if (data.error) {
