@@ -293,8 +293,7 @@ export default function DemoTraderPage() {
           sendPush(
             isTP ? `Take-Profit Hit — ${pos.ticker}` : `Stop-Loss Hit — ${pos.ticker}`,
             `${pos.companyName} · ${fmtPct(pnlPct)} · Entry $${pos.entryPrice.toFixed(2)} → Exit $${currentPrice.toFixed(2)}`,
-            '/demo-trader',
-            `trade-closed-${pos.id}`
+            '/demo-trader'
           );
         }
       }
@@ -340,8 +339,7 @@ export default function DemoTraderPage() {
           sendPush(
             `${sig.signal} Signal — ${sig.symbol}`,
             `${sig.name} · Strength ${sig.score}% · $${sig.currentPrice.toFixed(2)} (${sig.changePercent >= 0 ? '+' : ''}${sig.changePercent.toFixed(2)}%)`,
-            '/demo-trader',
-            `signal-${sig.symbol}`
+            '/demo-trader'
           );
         }
       }

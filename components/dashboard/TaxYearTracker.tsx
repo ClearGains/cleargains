@@ -118,8 +118,7 @@ export function TaxYearTracker() {
       sendPush(
         'CGT Warning — Near Annual Limit',
         `Only £${aeaRemaining.toFixed(0)} remaining of your £3,000 CGT exemption for ${taxYear.label}. Consider deferring disposals.`,
-        '/cgt',
-        'cgt-aea-warning'
+        '/cgt'
       );
     }
     if (!nearLimit) notifiedRef.current = false;

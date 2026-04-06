@@ -5,7 +5,6 @@ import { Navbar } from '@/components/layout/Navbar';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Disclaimer } from '@/components/layout/Disclaimer';
 import { T212AutoConnect } from '@/components/t212/T212AutoConnect';
-import { ServiceWorkerRegistrar } from '@/components/ServiceWorkerRegistrar';
 
 const geist = Geist({
   variable: '--font-geist-sans',
@@ -26,8 +25,12 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${geist.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col bg-gray-950 text-gray-100">
+        <script dangerouslySetInnerHTML={{ __html: `
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js')
+          }
+        `}} />
         <T212AutoConnect />
-        <ServiceWorkerRegistrar />
         <Navbar />
         <div className="flex flex-1 min-h-0">
           <Sidebar />

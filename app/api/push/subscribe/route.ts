@@ -1,46 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile, writeFile } from 'fs/promises';
-import path from 'path';
+import { writeFile, readFile } from 'fs/promises';
 
-const SUBS_FILE = path.join(process.cwd(), 'data', 'push-subscriptions.json');
-
-async function readSubs(): Promise<object[]> {
-  try {
-    const raw = await readFile(SUBS_FILE, 'utf-8');
-    return JSON.parse(raw) as object[];
-  } catch {
-    return [];
-  }
-}
-
-async function writeSubs(subs: object[]) {
-  await writeFile(SUBS_FILE, JSON.stringify(subs, null, 2), 'utf-8');
-}
+const SUBS_FILE = '/tmp/push-subscription.json';
 
 export async function POST(request: NextRequest) {
-  const sub = await request.json() as { endpoint: string; keys: object };
+  const subscription = await request.json();
 
-  if (!sub?.endpoint) {
+  if (!subscription?.endpoint) {
     return NextResponse.json({ error: 'Invalid subscription.' }, { status: 400 });
   }
 
-  const subs = await readSubs();
-  // Replace existing subscription for same endpoint
-  const idx = subs.findIndex((s) => (s as { endpoint: string }).endpoint === sub.endpoint);
-  if (idx >= 0) {
-    subs[idx] = sub;
-  } else {
-    subs.push(sub);
+  // Read existing subscriptions (array), replace or append
+  let subs: object[] = [];
+  try {
+    const raw = await readFile(SUBS_FILE, 'utf-8');
+    subs = JSON.parse(raw);
+  } catch {
+    // File doesn't exist yet — start fresh
   }
 
-  await writeSubs(subs);
-  return NextResponse.json({ ok: true, count: subs.length });
-}
+  const idx = subs.findIndex(
+    (s) => (s as { endpoint: string }).endpoint === subscription.endpoint
+  );
+  if (idx >= 0) {
+    subs[idx] = subscription;
+  } else {
+    subs.push(subscription);
+  }
 
-export async function DELETE(request: NextRequest) {
-  const { endpoint } = await request.json() as { endpoint: string };
-  const subs = await readSubs();
-  const filtered = subs.filter((s) => (s as { endpoint: string }).endpoint !== endpoint);
-  await writeSubs(filtered);
+  await writeFile(SUBS_FILE, JSON.stringify(subs));
   return NextResponse.json({ ok: true });
 }

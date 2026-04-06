@@ -1,6 +1,6 @@
 'use client';
 
-const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_KEY ?? '';
+const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? '';
 
 function urlBase64ToUint8Array(base64String: string): ArrayBuffer {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -11,7 +11,7 @@ function urlBase64ToUint8Array(base64String: string): ArrayBuffer {
   return arr.buffer as ArrayBuffer;
 }
 
-/** Register the service worker. Call once on app mount. */
+/** Register the service worker. Safe to call multiple times. */
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return null;
   try {
@@ -21,25 +21,29 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
   }
 }
 
-/** Returns the current notification permission state. */
+/** Current notification permission, or 'unsupported'. */
 export function getPermission(): NotificationPermission | 'unsupported' {
   if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
   return Notification.permission;
 }
 
-/** Request permission + subscribe. Returns the subscription or null on failure. */
+/** Request permission, subscribe, and POST subscription to server. */
 export async function subscribeToPush(): Promise<PushSubscription | null> {
-  if (typeof window === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
-    return null;
-  }
+  if (
+    typeof window === 'undefined' ||
+    !('serviceWorker' in navigator) ||
+    !('PushManager' in window)
+  ) return null;
 
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') return null;
 
   const reg = await navigator.serviceWorker.ready;
+
+  // Re-use existing subscription if present
   const existing = await reg.pushManager.getSubscription();
   if (existing) {
-    await saveSubscription(existing);
+    await postSubscription(existing);
     return existing;
   }
 
@@ -48,27 +52,19 @@ export async function subscribeToPush(): Promise<PushSubscription | null> {
     applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
   });
 
-  await saveSubscription(sub);
+  await postSubscription(sub);
   return sub;
 }
 
-/** Unsubscribe and remove from server. */
+/** Unsubscribe from push. */
 export async function unsubscribeFromPush(): Promise<void> {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
   const reg = await navigator.serviceWorker.ready;
   const sub = await reg.pushManager.getSubscription();
-  if (!sub) return;
-
-  await fetch('/api/push/subscribe', {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ endpoint: sub.endpoint }),
-  });
-
-  await sub.unsubscribe();
+  if (sub) await sub.unsubscribe();
 }
 
-async function saveSubscription(sub: PushSubscription) {
+async function postSubscription(sub: PushSubscription) {
   await fetch('/api/push/subscribe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -76,15 +72,15 @@ async function saveSubscription(sub: PushSubscription) {
   });
 }
 
-/** Fire-and-forget: send a push notification via the server. */
-export async function sendPush(title: string, body: string, url?: string, tag?: string) {
+/** Fire-and-forget: trigger a push notification via the server route. */
+export async function sendPush(title: string, body: string, url?: string) {
   try {
     await fetch('/api/push/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, body, url, tag }),
+      body: JSON.stringify({ title, body, url: url ?? '/' }),
     });
   } catch {
-    // Non-critical — ignore errors
+    // Non-critical
   }
 }
