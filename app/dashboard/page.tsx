@@ -125,9 +125,9 @@ export default function DashboardPage() {
         body: JSON.stringify({ apiKey: t212ApiKey, apiSecret: t212ApiSecret, accountType: t212AccountType }),
       });
       const data = await res.json();
-      if (!res.ok) {
-        setSyncError(data.error ?? 'Sync failed');
-        if (data.t212Message) setSyncDetail(data.t212Message);
+      if (!res.ok || data.error) {
+        const detail = data.rawBody ? ` [raw: ${data.rawBody}]` : '';
+        setSyncError((data.error ?? 'Sync failed') + detail);
       } else {
         setT212Positions(data.positions ?? []);
         setT212LastSync(new Date().toISOString());
@@ -143,8 +143,8 @@ export default function DashboardPage() {
           }
         }
       }
-    } catch {
-      setSyncError('Network error — check your connection and try again');
+    } catch (err) {
+      setSyncError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSyncing(false);
     }

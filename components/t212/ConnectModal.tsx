@@ -49,8 +49,8 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         else if (data.error) parts.push(data.error);
         setError(parts.join(' — ') || 'Connection failed.');
       }
-    } catch {
-      setError('Network error — check your connection and try again.');
+    } catch (err) {
+      setError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setTesting(false);
     }

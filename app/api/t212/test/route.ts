@@ -1,21 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+function describeT212Error(status: number, rawBody: string): string {
+  if (status === 401) {
+    if (!rawBody || rawBody.trim() === '') {
+      return 'Trading 212 returned 401 with empty response - this usually means the API key format is incorrect or the key was generated on the wrong account type';
+    }
+    return `Trading 212 returned 401 — ${rawBody}`;
+  }
+  if (status === 403) {
+    return `Trading 212 returned 403 Forbidden - your key may not have the required permissions${rawBody ? ` — ${rawBody}` : ''}`;
+  }
+  return `Trading 212 returned HTTP ${status} — ${rawBody || '(empty body)'}`;
+}
+
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const { apiKey, apiSecret } = body as { apiKey: string; apiSecret: string };
 
-  console.log('[T212 test] apiKey received:', !!apiKey, '| first 4 chars:', apiKey ? apiKey.slice(0, 4) : 'none');
-  console.log('[T212 test] apiSecret received:', !!apiSecret);
+  const key = (apiKey ?? '').trim();
+  const secret = (apiSecret ?? '').trim();
 
-  if (!apiKey || !apiSecret) {
-    return NextResponse.json({ ok: false, error: 'API key and secret are required.' }, { status: 400 });
+  console.log('[T212 test] apiKey present:', !!key, '| first 4 chars:', key ? key.slice(0, 4) : 'none');
+  console.log('[T212 test] apiSecret present:', !!secret);
+
+  if (!key || !secret) {
+    return NextResponse.json(
+      { ok: false, error: 'API key and secret must not be empty.' },
+      { status: 400 }
+    );
   }
 
-  const authHeader = 'Basic ' + Buffer.from(apiKey + ':' + apiSecret).toString('base64');
+  const authHeader = 'Basic ' + Buffer.from(key + ':' + secret).toString('base64');
   const url = 'https://live.trading212.com/api/v0/equity/account/info';
 
-  console.log('[T212 test] fetching:', url);
-  console.log('[T212 test] Authorization header prefix:', authHeader.slice(0, 12));
+  console.log('[T212 test] GET', url);
 
   let status: number;
   let rawBody: string;
@@ -30,12 +48,11 @@ export async function POST(request: NextRequest) {
     rawBody = await res.text();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log('[T212 test] fetch threw:', msg);
-    return NextResponse.json({ ok: false, error: `Network error: ${msg}` });
+    console.log('[T212 test] network error:', msg);
+    return NextResponse.json({ ok: false, error: `Request to Trading 212 failed: ${msg}` });
   }
 
-  console.log('[T212 test] status:', status);
-  console.log('[T212 test] body:', rawBody);
+  console.log('[T212 test] status:', status, '| body:', rawBody);
 
   if (status >= 200 && status < 300) {
     let data: Record<string, unknown> = {};
@@ -53,6 +70,6 @@ export async function POST(request: NextRequest) {
     ok: false,
     status,
     rawBody,
-    error: `Trading 212 returned HTTP ${status} — ${rawBody || '(empty body)'}`,
+    error: describeT212Error(status, rawBody),
   });
 }
