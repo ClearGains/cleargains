@@ -33,19 +33,34 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
     setError(null);
     setProbeResults(null);
     try {
+      // Strip all whitespace before encoding — mirrors server-side stripping
+      const cleanKey = apiKey.replace(/[\s\n\r\t]/g, '');
+      const cleanSecret = apiSecret.replace(/[\s\n\r\t]/g, '');
+
+      // Client-side encode using btoa — handles non-ASCII via encodeURIComponent
+      let clientEncoded: string | undefined;
+      try {
+        clientEncoded = btoa(unescape(encodeURIComponent(cleanKey + ':' + cleanSecret)));
+      } catch {
+        // btoa failed (non-latin chars) — server will fall back to server-only encoding
+      }
+
       const res = await fetch('/api/t212/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: apiKey.trim(), apiSecret: apiSecret.trim() }),
+        body: JSON.stringify({ apiKey: cleanKey, apiSecret: cleanSecret, clientEncoded }),
       });
       const data = await res.json();
       if (data.ok) {
-        setT212Credentials(apiKey.trim(), apiSecret.trim());
+        setT212Credentials(cleanKey, cleanSecret);
         setT212AccountInfo({ id: data.accountId, currency: data.currency });
         setT212Connected(true);
         onConnected();
       } else {
-        setError(data.error ?? 'Connection failed.');
+        const lengths = (data.keyLength != null && data.secretLength != null)
+          ? ` (key: ${data.keyLength} chars, secret: ${data.secretLength} chars)`
+          : '';
+        setError((data.error ?? 'Connection failed.') + lengths);
         if (Array.isArray(data.results)) setProbeResults(data.results);
       }
     } catch (err) {

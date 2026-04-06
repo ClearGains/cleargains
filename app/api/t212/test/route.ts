@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-async function probe(url: string, authHeader: string): Promise<{ url: string; status: number; rawBody: string }> {
+async function probe(
+  label: string,
+  url: string,
+  authHeader: string
+): Promise<{ label: string; url: string; status: number; rawBody: string }> {
   const res = await fetch(url, {
     method: 'GET',
     headers: {
@@ -11,16 +15,23 @@ async function probe(url: string, authHeader: string): Promise<{ url: string; st
     cache: 'no-store',
   });
   const rawBody = await res.text();
-  return { url, status: res.status, rawBody };
+  return { label, url, status: res.status, rawBody };
 }
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { apiKey, apiSecret } = body as { apiKey: string; apiSecret: string };
+  const { apiKey, apiSecret, clientEncoded } = body as {
+    apiKey: string;
+    apiSecret: string;
+    clientEncoded?: string; // pre-encoded by browser btoa()
+  };
 
-  // Trim to strip invisible whitespace from copy-paste
-  const key = (apiKey ?? '').trim();
-  const secret = (apiSecret ?? '').trim();
+  // Strip ALL whitespace: spaces, newlines, carriage returns, tabs
+  const key = (apiKey ?? '').replace(/[\s\n\r\t]/g, '');
+  const secret = (apiSecret ?? '').replace(/[\s\n\r\t]/g, '');
+
+  console.log('[T212 test] key length after strip:', key.length, '| key[0:4]:', key.slice(0, 4));
+  console.log('[T212 test] secret length after strip:', secret.length);
 
   if (!key || !secret) {
     return NextResponse.json(
@@ -29,25 +40,31 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Server-side base64 — identical output to btoa() for ASCII strings
-  const credentials = Buffer.from(key + ':' + secret).toString('base64');
-  const authHeader = 'Basic ' + credentials;
+  // Approach A: server-side encoding with explicit utf8
+  const rawA = key + ':' + secret;
+  const encodedA = Buffer.from(rawA, 'utf8').toString('base64');
+  const headerA = 'Basic ' + encodedA;
+  console.log('[T212 test] server-encoded header[0:20]:', headerA.slice(0, 20));
+  console.log('[T212 test] server raw string length:', rawA.length);
 
-  // Log first 20 chars to confirm encoding without exposing full value
-  console.log('[T212 test] key length:', key.length, '| key[0:4]:', key.slice(0, 4));
-  console.log('[T212 test] secret length:', secret.length);
-  console.log('[T212 test] Authorization header[0:20]:', authHeader.slice(0, 20));
-  console.log('[T212 test] base64 credentials[0:20]:', credentials.slice(0, 20));
+  // Approach B: client-side btoa() result forwarded as-is
+  const headerB = clientEncoded ? 'Basic ' + clientEncoded : null;
+  if (headerB) {
+    console.log('[T212 test] client-encoded header[0:20]:', headerB.slice(0, 20));
+  }
 
-  const urls = [
-    'https://live.trading212.com/api/v0/equity/account/summary',
-    'https://live.trading212.com/api/v0/equity/account/cash',
+  const url = 'https://live.trading212.com/api/v0/equity/account/summary';
+
+  const attempts: Promise<{ label: string; url: string; status: number; rawBody: string }>[] = [
+    probe('server-encoded', url, headerA),
   ];
+  if (headerB) {
+    attempts.push(probe('client-encoded', url, headerB));
+  }
 
-  let results: { url: string; status: number; rawBody: string }[];
-
+  let results: { label: string; url: string; status: number; rawBody: string }[];
   try {
-    results = await Promise.all(urls.map((url) => probe(url, authHeader)));
+    results = await Promise.all(attempts);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.log('[T212 test] network error:', msg);
@@ -55,7 +72,7 @@ export async function POST(request: NextRequest) {
   }
 
   for (const r of results) {
-    console.log(`[T212 test] ${r.url} → ${r.status} | body: ${r.rawBody}`);
+    console.log(`[T212 test] [${r.label}] ${r.status} | body: ${r.rawBody}`);
   }
 
   const success = results.find((r) => r.status >= 200 && r.status < 300);
@@ -65,19 +82,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       ok: true,
       accountId: data.id ?? 'unknown',
-      currency: data.currencyCode ?? data.free ?? 'GBP',
+      currency: data.currencyCode ?? 'GBP',
+      usedEncoding: success.label,
+      keyLength: key.length,
+      secretLength: secret.length,
       results,
     });
   }
 
-  // All failed — return full diagnostic info for every endpoint
   const summary = results
-    .map((r) => `${r.url.split('/').pop()} → HTTP ${r.status}: ${r.rawBody || '(empty body)'}`)
+    .map((r) => `[${r.label}] HTTP ${r.status}: ${r.rawBody || '(empty body)'}`)
     .join(' | ');
 
   return NextResponse.json({
     ok: false,
     error: summary,
+    keyLength: key.length,
+    secretLength: secret.length,
     results,
   });
 }
