@@ -2,76 +2,57 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { apiKey, apiSecret, accountType = 'DEMO' } = body as {
-    apiKey: string;
-    apiSecret: string;
-    accountType: 'LIVE' | 'DEMO';
-  };
+  const { apiKey, apiSecret } = body as { apiKey: string; apiSecret: string };
 
-  console.log('[T212 test] accountType:', accountType);
   console.log('[T212 test] apiKey received:', !!apiKey, '| first 4 chars:', apiKey ? apiKey.slice(0, 4) : 'none');
   console.log('[T212 test] apiSecret received:', !!apiSecret);
 
   if (!apiKey || !apiSecret) {
-    return NextResponse.json(
-      { ok: false, error: 'API key and secret are required.' },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: 'API key and secret are required.' }, { status: 400 });
   }
 
-  const base =
-    accountType === 'LIVE'
-      ? 'https://live.trading212.com/api/v0'
-      : 'https://demo.trading212.com/api/v0';
+  const authHeader = 'Basic ' + Buffer.from(apiKey + ':' + apiSecret).toString('base64');
+  const url = 'https://live.trading212.com/api/v0/equity/account/info';
 
-  const credentials = Buffer.from(apiKey + ':' + apiSecret).toString('base64');
+  console.log('[T212 test] fetching:', url);
+  console.log('[T212 test] Authorization header prefix:', authHeader.slice(0, 12));
 
-  console.log('[T212 test] fetching:', `${base}/equity/account/info`);
+  let status: number;
+  let rawBody: string;
 
   try {
-    const res = await fetch(`${base}/equity/account/info`, {
-      headers: {
-        Authorization: 'Basic ' + credentials,
-        'Content-Type': 'application/json',
-      },
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Authorization: authHeader },
       cache: 'no-store',
     });
-
-    const errorBody = await res.text();
-    console.log('[T212 test] response status:', res.status);
-    console.log('[T212 test] response body:', errorBody);
-
-    if (res.ok) {
-      const data = JSON.parse(errorBody);
-      return NextResponse.json({
-        ok: true,
-        accountType,
-        accountId: data.id ?? 'unknown',
-        currency: data.currencyCode ?? 'GBP',
-      });
-    }
-
-    // Parse T212 error message if JSON, otherwise use raw text
-    let t212Error = errorBody;
-    try {
-      const parsed = JSON.parse(errorBody);
-      t212Error = parsed.message ?? parsed.error ?? parsed.code ?? errorBody;
-    } catch {
-      // errorBody is plain text — use as-is
-    }
-
-    return NextResponse.json({
-      ok: false,
-      status: res.status,
-      error: t212Error || `Trading 212 returned HTTP ${res.status}`,
-      t212Raw: errorBody,
-    });
+    status = res.status;
+    rawBody = await res.text();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log('[T212 test] fetch error:', msg);
-    return NextResponse.json(
-      { ok: false, error: `Network error: ${msg}` },
-      { status: 200 }
-    );
+    console.log('[T212 test] fetch threw:', msg);
+    return NextResponse.json({ ok: false, error: `Network error: ${msg}` });
   }
+
+  console.log('[T212 test] status:', status);
+  console.log('[T212 test] body:', rawBody);
+
+  if (status >= 200 && status < 300) {
+    let data: Record<string, unknown> = {};
+    try { data = JSON.parse(rawBody); } catch { /* leave empty */ }
+    return NextResponse.json({
+      ok: true,
+      accountId: data.id ?? 'unknown',
+      currency: data.currencyCode ?? 'GBP',
+      status,
+      rawBody,
+    });
+  }
+
+  return NextResponse.json({
+    ok: false,
+    status,
+    rawBody,
+    error: `Trading 212 returned HTTP ${status} — ${rawBody || '(empty body)'}`,
+  });
 }
