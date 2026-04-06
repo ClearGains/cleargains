@@ -21,6 +21,7 @@ import {
 import { useClearGainsStore } from '@/lib/store';
 import { buildSection104Pools } from '@/lib/cgt';
 import { Trade } from '@/lib/types';
+import { t212Sync } from '@/lib/t212-browser';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -119,15 +120,9 @@ export default function DashboardPage() {
     setSyncError(null);
     setSyncDetail(null);
     try {
-      const res = await fetch('/api/t212/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: t212ApiKey, apiSecret: t212ApiSecret, accountType: t212AccountType }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        const detail = data.rawBody ? ` [raw: ${data.rawBody}]` : '';
-        setSyncError((data.error ?? 'Sync failed') + detail);
+      const data = await t212Sync(t212ApiKey, t212ApiSecret);
+      if (!data.ok) {
+        setSyncError(data.error ?? 'Sync failed');
       } else {
         setT212Positions(data.positions ?? []);
         setT212LastSync(new Date().toISOString());

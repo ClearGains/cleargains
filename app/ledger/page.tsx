@@ -12,6 +12,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
+import { t212FetchOrders } from '@/lib/t212-browser';
 import { buildSection104Pools } from '@/lib/cgt';
 import { Trade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
@@ -39,7 +40,7 @@ const EMPTY_FORM = {
 };
 
 export default function LedgerPage() {
-  const { trades, addTrade, removeTrade, setTrades, updateSection104Pools, t212AccountType } =
+  const { trades, addTrade, removeTrade, setTrades, updateSection104Pools, t212ApiKey, t212ApiSecret } =
     useClearGainsStore();
 
   const [form, setForm] = useState(EMPTY_FORM);
@@ -87,17 +88,8 @@ export default function LedgerPage() {
     setImportCount(null);
 
     try {
-      const res = await fetch(
-        `/api/t212/orders?accountType=${t212AccountType}&limit=200`
-      );
-      const data = await res.json();
-
-      if (!res.ok) {
-        setImportError(data.error ?? 'Import failed');
-        return;
-      }
-
-      const imported: Trade[] = data.trades ?? [];
+      const orders = await t212FetchOrders(t212ApiKey, t212ApiSecret, 200);
+      const imported: Trade[] = orders as Trade[];
       // Merge — skip duplicates by id
       const existingIds = new Set(trades.map((t) => t.id));
       const newTrades = imported.filter((t) => !existingIds.has(t.id));
@@ -105,8 +97,8 @@ export default function LedgerPage() {
       setTrades(merged);
       updateSection104Pools(buildSection104Pools(merged));
       setImportCount(newTrades.length);
-    } catch {
-      setImportError('Network error during import');
+    } catch (err) {
+      setImportError(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setImporting(false);
     }
