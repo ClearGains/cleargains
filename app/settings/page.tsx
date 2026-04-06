@@ -1,11 +1,12 @@
 'use client';
 
-import { useState } from 'react';
-import { Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck, Bell, BellOff } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
+import { getPermission, subscribeToPush, unsubscribeFromPush, registerServiceWorker } from '@/lib/pushNotifications';
 
 export default function SettingsPage() {
   const {
@@ -27,6 +28,30 @@ export default function SettingsPage() {
   const [showSecret, setShowSecret] = useState(false);
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  // Push notifications
+  const [notifPermission, setNotifPermission] = useState<string>('default');
+  const [notifLoading, setNotifLoading] = useState(false);
+
+  useEffect(() => {
+    registerServiceWorker();
+    setNotifPermission(getPermission());
+  }, []);
+
+  async function handleEnableNotifications() {
+    setNotifLoading(true);
+    const sub = await subscribeToPush();
+    setNotifPermission(getPermission());
+    setNotifLoading(false);
+    if (!sub) setNotifPermission(Notification.permission);
+  }
+
+  async function handleDisableNotifications() {
+    setNotifLoading(true);
+    await unsubscribeFromPush();
+    setNotifPermission(getPermission());
+    setNotifLoading(false);
+  }
 
   async function handleSave() {
     const cleanKey = apiKey.replace(/[\s\n\r\t]/g, '');
@@ -172,6 +197,62 @@ export default function SettingsPage() {
             sent directly to Trading 212 via our API route. They are never logged or stored server-side.
           </p>
         </div>
+      </Card>
+
+      <Card className="mb-4">
+        <CardHeader
+          title="Browser Notifications"
+          subtitle="Get alerted for signals, paper trades, and CGT warnings"
+          icon={<Bell className="h-4 w-4" />}
+        />
+
+        {notifPermission === 'unsupported' ? (
+          <p className="text-xs text-gray-500">Push notifications are not supported in this browser.</p>
+        ) : notifPermission === 'denied' ? (
+          <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5 text-xs text-red-400">
+            <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+            Notifications are blocked. Please allow them in your browser&apos;s site settings, then reload.
+          </div>
+        ) : notifPermission === 'granted' ? (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-xs text-emerald-400">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Notifications enabled — you&apos;ll be alerted for:
+            </div>
+            <ul className="text-xs text-gray-400 space-y-1 list-disc list-inside ml-1">
+              <li>BUY/SELL signals with strength &gt; 70%</li>
+              <li>Paper trade take-profit or stop-loss hit</li>
+              <li>CGT exempt amount within £500 of the £3,000 limit</li>
+            </ul>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDisableNotifications}
+              loading={notifLoading}
+              icon={<BellOff className="h-3.5 w-3.5" />}
+            >
+              Disable Notifications
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-xs text-gray-400">
+              Enable browser push notifications to get real-time alerts:
+            </p>
+            <ul className="text-xs text-gray-500 space-y-1 list-disc list-inside ml-1">
+              <li>BUY/SELL signals with strength &gt; 70%</li>
+              <li>Paper trade take-profit or stop-loss hit</li>
+              <li>CGT exempt amount within £500 of the £3,000 limit</li>
+            </ul>
+            <Button
+              onClick={handleEnableNotifications}
+              loading={notifLoading}
+              icon={<Bell className="h-4 w-4" />}
+            >
+              Enable Notifications
+            </Button>
+          </div>
+        )}
       </Card>
 
       <Card>

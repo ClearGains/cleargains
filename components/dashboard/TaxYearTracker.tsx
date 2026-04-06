@@ -1,11 +1,12 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useEffect, useRef } from 'react';
 import { AlertTriangle, AlertCircle, CheckCircle2, Calendar, RefreshCw } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { calculateSection104 } from '@/lib/cgt';
 import { Trade } from '@/lib/types';
 import { clsx } from 'clsx';
+import { sendPush } from '@/lib/pushNotifications';
 
 const CGT_AEA = 3_000;
 const WARN_THRESHOLD = 500; // amber when < £500 remaining
@@ -108,6 +109,21 @@ export function TaxYearTracker() {
   const exceeded = netGain > CGT_AEA;
   const nearLimit = !exceeded && aeaRemaining < WARN_THRESHOLD;
   const status = exceeded ? 'red' : nearLimit ? 'amber' : 'green';
+
+  // Fire push notification once when CGT AEA drops within £500
+  const notifiedRef = useRef(false);
+  useEffect(() => {
+    if (nearLimit && !notifiedRef.current && analysis.disposalCount > 0) {
+      notifiedRef.current = true;
+      sendPush(
+        'CGT Warning — Near Annual Limit',
+        `Only £${aeaRemaining.toFixed(0)} remaining of your £3,000 CGT exemption for ${taxYear.label}. Consider deferring disposals.`,
+        '/cgt',
+        'cgt-aea-warning'
+      );
+    }
+    if (!nearLimit) notifiedRef.current = false;
+  }, [nearLimit, aeaRemaining, taxYear.label, analysis.disposalCount]);
 
   const aeaPct = Math.min(100, (aeaUsed / CGT_AEA) * 100);
 

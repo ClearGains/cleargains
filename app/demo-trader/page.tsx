@@ -11,6 +11,7 @@ import { DemoPosition, DemoTrade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { clsx } from 'clsx';
+import { sendPush } from '@/lib/pushNotifications';
 
 const SECTORS = ['All', 'Technology', 'Healthcare', 'Energy', 'Finance', 'Consumer'] as const;
 type Sector = typeof SECTORS[number];
@@ -286,6 +287,15 @@ export default function DemoTraderPage() {
             closeReason,
           });
           removeDemoPosition(pos.id);
+
+          // Push notification for SL/TP hit
+          const isTP = closeReason === 'take-profit';
+          sendPush(
+            isTP ? `Take-Profit Hit — ${pos.ticker}` : `Stop-Loss Hit — ${pos.ticker}`,
+            `${pos.companyName} · ${fmtPct(pnlPct)} · Entry $${pos.entryPrice.toFixed(2)} → Exit $${currentPrice.toFixed(2)}`,
+            '/demo-trader',
+            `trade-closed-${pos.id}`
+          );
         }
       }
     } catch {
@@ -323,6 +333,18 @@ export default function DemoTraderPage() {
       const allSignals = sigData.signals ?? [];
       setSignals(allSignals);
       setRunLog(l => [...l, `✓ Scanned ${sigData.scannedCount ?? 0} stocks — ${allSignals.filter(s => s.signal === 'BUY').length} BUY signals found.`]);
+
+      // Push notifications for strong signals (score > 70)
+      for (const sig of allSignals) {
+        if (sig.score > 70) {
+          sendPush(
+            `${sig.signal} Signal — ${sig.symbol}`,
+            `${sig.name} · Strength ${sig.score}% · $${sig.currentPrice.toFixed(2)} (${sig.changePercent >= 0 ? '+' : ''}${sig.changePercent.toFixed(2)}%)`,
+            '/demo-trader',
+            `signal-${sig.symbol}`
+          );
+        }
+      }
 
       const buys = allSignals.filter(s => s.signal === 'BUY').slice(0, 3);
       if (buys.length === 0) {
