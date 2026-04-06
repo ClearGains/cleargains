@@ -130,17 +130,21 @@ export async function POST(request: NextRequest) {
   // Sort by score descending and return top signals
   results.sort((a, b) => b.score - a.score);
 
-  const signals = results.slice(0, 10).map(r => ({
-    symbol: r.symbol,
-    name: r.name,
-    t212Ticker: r.t212,
-    sector: r.sector,
-    score: Math.round(r.score * 100) / 100,
-    currentPrice: r.price,
-    changePercent: r.changePercent,
-    signal: r.score >= 0.15 ? 'BUY' : r.score <= -0.15 ? 'SELL' : 'NEUTRAL',
-    reason: r.reason,
-  }));
+  const signals = results.slice(0, 10).map(r => {
+    // Map raw score (-1..1) to confidence (0..100): -1→0, 0→50, 1→100
+    const confidence = Math.round(Math.max(0, Math.min(100, (r.score + 1) / 2 * 100)));
+    return {
+      symbol: r.symbol,
+      name: r.name,
+      t212Ticker: r.t212,
+      sector: r.sector,
+      score: confidence,
+      currentPrice: r.price,
+      changePercent: r.changePercent,
+      signal: r.score >= 0.15 ? 'BUY' : r.score <= -0.15 ? 'SELL' : 'NEUTRAL',
+      reason: r.reason,
+    };
+  });
 
   return NextResponse.json({ signals, scannedCount: results.length, timestamp: new Date().toISOString() });
 }

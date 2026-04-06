@@ -233,13 +233,15 @@ export default function DemoTraderPage() {
     addDemoPosition, removeDemoPosition, updateDemoPosition, addDemoTrade,
   } = useClearGainsStore();
 
-  // Position size presets (£ fixed amounts)
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
+  const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
   const [sizePreset, setSizePreset] = useState<SizePreset>(100);
   const [customSizeStr, setCustomSizeStr] = useState('');
+  const [slPctStr, setSlPctStr] = useState('2');
+  const [tpPctStr, setTpPctStr] = useState('4');
   const [sectors, setSectors] = useState<Sector[]>(['Technology']);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [scanning, setScanning] = useState(false);
@@ -262,9 +264,20 @@ export default function DemoTraderPage() {
   const totalClosedPnL = demoTrades.reduce((s, t) => s + t.pnl, 0);
   const totalPaperPnL = totalOpenPnL + totalClosedPnL;
 
-  const tradeSize = sizePreset === 'custom'
+  // Manual mode: fixed trade size from preset buttons
+  const manualTradeSize = sizePreset === 'custom'
     ? (parseInt(customSizeStr.replace(/[^0-9]/g, ''), 10) || 0)
     : sizePreset;
+
+  // Auto mode: size based on signal confidence (score is 0–100)
+  function autoTradeSize(score: number): number {
+    if (score > 80) return availableBalance * 0.05;   // High: 5%
+    if (score > 70) return availableBalance * 0.03;   // Medium: 3%
+    return availableBalance * 0.01;                   // Lower: 1%
+  }
+
+  const slPct = parseFloat(slPctStr) || 2;
+  const tpPct = parseFloat(tpPctStr) || 4;
 
   function commitBudget() {
     const raw = budgetStr.replace(/[^0-9]/g, '');
@@ -386,16 +399,19 @@ export default function DemoTraderPage() {
         return;
       }
 
-      if (tradeSize <= 0) {
-        setRunLog(l => [...l, '⚠ Trade size is £0 — set a budget and risk amount first.']);
+      if (mode === 'manual' && manualTradeSize <= 0) {
+        setRunLog(l => [...l, '⚠ Trade size is £0 — set a position size first.']);
         return;
       }
 
-      setRunLog(l => [...l, `📋 Opening ${buys.length} paper position(s) at £${tradeSize.toFixed(2)} each…`]);
+      setRunLog(l => [...l, `📋 Opening ${buys.length} paper position(s) in ${mode} mode…`]);
 
       for (const signal of buys) {
         const entryPrice = signal.currentPrice;
-        const quantity = Math.max(1, Math.floor(tradeSize / entryPrice));
+        const size = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
+        const quantity = Math.max(1, Math.floor(size / entryPrice));
+        const sl = entryPrice * (1 - slPct / 100);
+        const tp = entryPrice * (1 + tpPct / 100);
 
         const position: DemoPosition = {
           id: uid(),
@@ -406,8 +422,8 @@ export default function DemoTraderPage() {
           quantity,
           entryPrice,
           currentPrice: entryPrice,
-          stopLoss: entryPrice * 0.98,
-          takeProfit: entryPrice * 1.04,
+          stopLoss: sl,
+          takeProfit: tp,
           pnl: 0,
           pnlPct: 0,
           openedAt: new Date().toISOString(),
@@ -415,9 +431,10 @@ export default function DemoTraderPage() {
         };
 
         addDemoPosition(position);
+        const sizeLabel = mode === 'auto' ? `auto ${fmtGBP(size)} (${signal.score}% conf)` : fmtGBP(size);
         setRunLog(l => [
           ...l,
-          `  → PAPER BUY ${quantity}× ${signal.symbol} @ ${fmtUSD(entryPrice)} | SL ${fmtUSD(entryPrice * 0.98)} TP ${fmtUSD(entryPrice * 1.04)}`,
+          `  → PAPER BUY ${quantity}× ${signal.symbol} @ ${fmtUSD(entryPrice)} [${sizeLabel}] SL ${fmtUSD(sl)} TP ${fmtUSD(tp)}`,
         ]);
       }
 
@@ -476,7 +493,7 @@ export default function DemoTraderPage() {
         <CopyToLiveModal
           trade={copyTrade}
           liveEncoded={liveEncoded}
-          positionSize={tradeSize}
+          positionSize={manualTradeSize}
           onClose={() => setCopyTrade(null)}
           onDone={() => setCopyTrade(null)}
         />
@@ -528,13 +545,13 @@ export default function DemoTraderPage() {
           {/* Paper Balance */}
           <Card>
             <CardHeader title="Paper Balance" subtitle="Simulated account" icon={<Wallet className="h-4 w-4" />} />
-
             <div className="space-y-2 mb-4">
               {[
                 { label: 'Total Budget', value: fmtGBP(paperBudget), color: 'text-white' },
-                { label: 'Invested', value: fmtGBP(currentlyInvested), color: 'text-amber-400' },
                 { label: 'Available', value: fmtGBP(availableBalance), color: availableBalance > 0 ? 'text-emerald-400' : 'text-gray-500' },
-                { label: 'P&L', value: `${totalPaperPnL >= 0 ? '+' : ''}${fmtGBP(totalPaperPnL)}`, color: totalPaperPnL > 0 ? 'text-emerald-400' : totalPaperPnL < 0 ? 'text-red-400' : 'text-gray-500' },
+                { label: 'Invested', value: fmtGBP(currentlyInvested), color: 'text-amber-400' },
+                { label: 'Open Positions', value: String(demoPositions.length), color: demoPositions.length > 0 ? 'text-white' : 'text-gray-500' },
+                { label: 'Total P&L', value: `${totalPaperPnL >= 0 ? '+' : ''}${fmtGBP(totalPaperPnL)}`, color: totalPaperPnL > 0 ? 'text-emerald-400' : totalPaperPnL < 0 ? 'text-red-400' : 'text-gray-500' },
               ].map(row => (
                 <div key={row.label} className="flex justify-between items-center">
                   <span className="text-xs text-gray-500">{row.label}</span>
@@ -542,7 +559,6 @@ export default function DemoTraderPage() {
                 </div>
               ))}
             </div>
-
             <div className="border-t border-gray-800 pt-3 space-y-3">
               <div>
                 <label className="text-xs text-gray-400 mb-1.5 block">Paper Budget</label>
@@ -550,8 +566,7 @@ export default function DemoTraderPage() {
                   <div className="relative flex-1">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
                     <input
-                      type="text"
-                      inputMode="numeric"
+                      type="text" inputMode="numeric"
                       value={budgetStr}
                       onChange={e => setBudgetStr(e.target.value.replace(/[^0-9]/g, ''))}
                       onBlur={commitBudget}
@@ -563,7 +578,6 @@ export default function DemoTraderPage() {
                   <Button size="sm" variant="outline" onClick={commitBudget}>Set</Button>
                 </div>
               </div>
-
               <button
                 onClick={() => setConfirmReset(true)}
                 className="flex items-center gap-1.5 text-xs text-gray-600 hover:text-red-400 transition-colors"
@@ -576,63 +590,124 @@ export default function DemoTraderPage() {
 
           {/* Strategy Settings */}
           <Card>
-            <CardHeader title="Strategy Settings" subtitle="Position size and sectors" icon={<Target className="h-4 w-4" />} />
+            <CardHeader title="Strategy Settings" subtitle="Mode, position size and sectors" icon={<Target className="h-4 w-4" />} />
             <div className="space-y-4">
 
-              {/* Position size buttons */}
+              {/* Mode toggle */}
               <div>
-                <label className="text-xs text-gray-400 mb-2 block">Position Size Per Trade</label>
-                <div className="grid grid-cols-5 gap-1.5 mb-2">
-                  {SIZE_PRESETS.map(amt => (
+                <label className="text-xs text-gray-400 mb-2 block">Trading Mode</label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {(['auto', 'manual'] as const).map(m => (
                     <button
-                      key={amt}
-                      onClick={() => setSizePreset(amt)}
+                      key={m}
+                      onClick={() => setMode(m)}
                       className={clsx(
-                        'py-2.5 rounded-xl text-sm font-bold transition-all border',
-                        sizePreset === amt
-                          ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 shadow-sm'
+                        'py-2.5 rounded-xl text-sm font-semibold transition-all border',
+                        mode === m
+                          ? 'bg-amber-500/25 text-amber-300 border-amber-500/50'
                           : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200 hover:border-gray-600'
                       )}
                     >
-                      £{amt}
+                      {m === 'auto' ? '⚡ Automatic' : '🎛 Manual'}
                     </button>
                   ))}
-                  <button
-                    onClick={() => setSizePreset('custom')}
-                    className={clsx(
-                      'py-2.5 rounded-xl text-sm font-bold transition-all border',
-                      sizePreset === 'custom'
-                        ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 shadow-sm'
-                        : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200 hover:border-gray-600'
-                    )}
-                  >
-                    Custom
-                  </button>
                 </div>
-
-                {sizePreset === 'custom' && (
-                  <div className="relative mb-2">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={customSizeStr}
-                      onChange={e => setCustomSizeStr(e.target.value.replace(/[^0-9]/g, ''))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
-                      placeholder="Enter amount"
-                      autoFocus
-                    />
-                  </div>
-                )}
-
-                <p className="text-xs text-gray-500">
-                  Each trade will use{' '}
-                  <span className="text-amber-400 font-semibold">{fmtGBP(tradeSize)}</span>
-                  {' '}of your{' '}
-                  <span className="text-white font-semibold">{fmtGBP(paperBudget)}</span>
-                  {' '}paper budget
-                </p>
               </div>
+
+              {/* Auto mode explanation */}
+              {mode === 'auto' && (
+                <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-200/80 space-y-1.5">
+                  <p className="font-semibold text-amber-300">System auto-sizes positions by confidence:</p>
+                  <div className="space-y-1 text-amber-200/70">
+                    <div className="flex justify-between"><span>High confidence (&gt;80%)</span><span className="font-mono">5% of available</span></div>
+                    <div className="flex justify-between"><span>Medium confidence (70–80%)</span><span className="font-mono">3% of available</span></div>
+                    <div className="flex justify-between"><span>Lower confidence (60–70%)</span><span className="font-mono">1% of available</span></div>
+                  </div>
+                  <p className="text-amber-200/50 text-[11px]">Stop-loss −2% · Take-profit +4% (fixed)</p>
+                </div>
+              )}
+
+              {/* Manual mode controls */}
+              {mode === 'manual' && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-xs text-gray-400 mb-2 block">Position Size Per Trade</label>
+                    <div className="grid grid-cols-5 gap-1.5 mb-2">
+                      {SIZE_PRESETS.map(amt => (
+                        <button
+                          key={amt}
+                          onClick={() => setSizePreset(amt)}
+                          className={clsx(
+                            'py-2.5 rounded-xl text-sm font-bold transition-all border',
+                            sizePreset === amt
+                              ? 'bg-amber-500/25 text-amber-300 border-amber-500/50'
+                              : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200 hover:border-gray-600'
+                          )}
+                        >
+                          £{amt}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setSizePreset('custom')}
+                        className={clsx(
+                          'py-2.5 rounded-xl text-sm font-bold transition-all border',
+                          sizePreset === 'custom'
+                            ? 'bg-amber-500/25 text-amber-300 border-amber-500/50'
+                            : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200 hover:border-gray-600'
+                        )}
+                      >
+                        Custom
+                      </button>
+                    </div>
+                    {sizePreset === 'custom' && (
+                      <div className="relative mb-2">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
+                        <input
+                          type="text" inputMode="numeric" autoFocus
+                          value={customSizeStr}
+                          onChange={e => setCustomSizeStr(e.target.value.replace(/[^0-9]/g, ''))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                          placeholder="Enter amount"
+                        />
+                      </div>
+                    )}
+                    <p className="text-xs text-gray-500">
+                      Each trade will use <span className="text-amber-400 font-semibold">{fmtGBP(manualTradeSize)}</span> of your <span className="text-white font-semibold">{fmtGBP(paperBudget)}</span> budget
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-gray-400 mb-1.5 block">Stop-loss %</label>
+                      <div className="relative">
+                        <input
+                          type="text" inputMode="decimal"
+                          value={slPctStr}
+                          onChange={e => setSlPctStr(e.target.value.replace(/[^0-9.]/g, ''))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-3 pr-7 py-2 text-sm text-white focus:outline-none focus:border-red-500"
+                          placeholder="2"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">%</span>
+                      </div>
+                      <p className="text-[11px] text-gray-600 mt-1">−{slPct}% from entry</p>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 mb-1.5 block">Take-profit %</label>
+                      <div className="relative">
+                        <input
+                          type="text" inputMode="decimal"
+                          value={tpPctStr}
+                          onChange={e => setTpPctStr(e.target.value.replace(/[^0-9.]/g, ''))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-3 pr-7 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                          placeholder="4"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">%</span>
+                      </div>
+                      <p className="text-[11px] text-gray-600 mt-1">+{tpPct}% from entry</p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Sectors */}
               <div>
@@ -655,8 +730,17 @@ export default function DemoTraderPage() {
               </div>
 
               <div className="bg-gray-800/50 rounded-lg px-3 py-2 text-xs text-gray-500 space-y-0.5">
-                <div className="flex justify-between"><span>Stop-loss</span><span className="text-red-400">−2% from entry</span></div>
-                <div className="flex justify-between"><span>Take-profit</span><span className="text-emerald-400">+4% from entry</span></div>
+                {mode === 'auto' ? (
+                  <>
+                    <div className="flex justify-between"><span>Stop-loss</span><span className="text-red-400">−2% (auto)</span></div>
+                    <div className="flex justify-between"><span>Take-profit</span><span className="text-emerald-400">+4% (auto)</span></div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between"><span>Stop-loss</span><span className="text-red-400">−{slPct}%</span></div>
+                    <div className="flex justify-between"><span>Take-profit</span><span className="text-emerald-400">+{tpPct}%</span></div>
+                  </>
+                )}
                 <div className="flex justify-between"><span>Max positions / run</span><span>3 (top BUY signals)</span></div>
                 <div className="flex justify-between"><span>Price refresh</span><span>every 5 min</span></div>
               </div>
