@@ -15,6 +15,8 @@ import {
   ShieldCheck,
   AlertCircle,
   FlaskConical,
+  Key,
+  LogOut,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { buildSection104Pools } from '@/lib/cgt';
@@ -22,6 +24,7 @@ import { Trade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
+import { ConnectModal } from '@/components/t212/ConnectModal';
 import { clsx } from 'clsx';
 import Link from 'next/link';
 
@@ -70,25 +73,28 @@ export default function DashboardPage() {
     t212Positions,
     t212Connected,
     t212AccountType,
+    t212AccountInfo,
     t212LastSync,
+    t212ApiKey,
+    t212ApiSecret,
     autoReinvest,
     setAutoReinvest,
     setT212AccountType,
     setT212Connected,
     setT212LastSync,
     setT212Positions,
+    clearT212Credentials,
     signals,
     trades,
     selectedCountry,
+    setTrades,
+    updateSection104Pools,
   } = useClearGainsStore();
 
-  const { setTrades, updateSection104Pools } = useClearGainsStore();
-
+  const [showConnectModal, setShowConnectModal] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncDetail, setSyncDetail] = useState<string | null>(null);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const portfolioValue = t212Positions.reduce(
     (sum, pos) => sum + pos.currentPrice * pos.quantity,
@@ -97,22 +103,26 @@ export default function DashboardPage() {
   const totalPnL = t212Positions.reduce((sum, pos) => sum + pos.ppl, 0);
   const unrealisedGain = totalPnL;
 
-  // Rough CGT estimate (20% of positive unrealised gains outside ISA)
   const nonIsaGain = t212Positions
     .filter((p) => !p.isISA && p.ppl > 0)
     .reduce((sum, p) => sum + p.ppl, 0);
   const cgtEstimate = Math.max(0, nonIsaGain - selectedCountry.aea) * (selectedCountry.cgRates.higher / 100);
 
+  const hasCredentials = !!t212ApiKey && !!t212ApiSecret;
+
   async function handleSync() {
+    if (!hasCredentials) {
+      setShowConnectModal(true);
+      return;
+    }
     setSyncing(true);
     setSyncError(null);
     setSyncDetail(null);
-    setTestResult(null);
     try {
       const res = await fetch('/api/t212/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountType: t212AccountType }),
+        body: JSON.stringify({ apiKey: t212ApiKey, apiSecret: t212ApiSecret, accountType: t212AccountType }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -122,7 +132,6 @@ export default function DashboardPage() {
         setT212Positions(data.positions ?? []);
         setT212LastSync(new Date().toISOString());
         setT212Connected(true);
-        // Auto-import trades into CGT ledger (merge, skip duplicates)
         if (Array.isArray(data.trades) && data.trades.length > 0) {
           const { trades: existing } = useClearGainsStore.getState();
           const existingIds = new Set(existing.map((t: Trade) => t.id));
@@ -141,30 +150,10 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleTestConnection() {
-    setTesting(true);
-    setTestResult(null);
+  function handleDisconnect() {
+    clearT212Credentials();
     setSyncError(null);
-    try {
-      const res = await fetch('/api/t212/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountType: t212AccountType }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setTestResult({
-          ok: true,
-          message: `Credentials valid · Account ${data.accountId} · ${data.currency}`,
-        });
-      } else {
-        setTestResult({ ok: false, message: data.error ?? 'Connection test failed' });
-      }
-    } catch {
-      setTestResult({ ok: false, message: 'Network error during connection test' });
-    } finally {
-      setTesting(false);
-    }
+    setSyncDetail(null);
   }
 
   const recentSignals = signals.slice(0, 3);
@@ -174,6 +163,16 @@ export default function DashboardPage() {
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto">
+      {showConnectModal && (
+        <ConnectModal
+          onClose={() => setShowConnectModal(false)}
+          onConnected={() => {
+            setShowConnectModal(false);
+            handleSync();
+          }}
+        />
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -274,103 +273,118 @@ export default function DashboardPage() {
             icon={<Wifi className="h-4 w-4" />}
           />
 
-          {/* Account type toggle */}
-          <div className="flex bg-gray-800 rounded-lg p-1 mb-3">
-            {(['DEMO', 'LIVE'] as const).map((type) => (
-              <button
-                key={type}
-                onClick={() => {
-                  setT212AccountType(type);
-                  setTestResult(null);
-                  setSyncError(null);
-                  setSyncDetail(null);
-                }}
-                className={clsx(
-                  'flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors',
-                  t212AccountType === type
-                    ? type === 'LIVE'
-                      ? 'bg-emerald-600 text-white'
-                      : 'bg-amber-600 text-white'
-                    : 'text-gray-500 hover:text-gray-300'
-                )}
+          {/* Not connected state */}
+          {!hasCredentials ? (
+            <div className="py-4">
+              <p className="text-xs text-gray-500 mb-3">
+                Enter your T212 API key and secret to sync your portfolio. Your credentials are stored locally and never sent to our servers.
+              </p>
+              <Button
+                onClick={() => setShowConnectModal(true)}
+                fullWidth
+                icon={<Key className="h-4 w-4" />}
               >
-                {type === 'LIVE' ? '🟢 LIVE' : '🟡 DEMO'}
-              </button>
-            ))}
-          </div>
-
-          {/* Mode description */}
-          <div className={clsx(
-            'flex items-start gap-2 px-3 py-2 rounded-lg text-xs mb-3',
-            t212AccountType === 'LIVE'
-              ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-              : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
-          )}>
-            {t212AccountType === 'LIVE'
-              ? <><ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /><span>Connected to live account — real Invest &amp; ISA positions</span></>
-              : <><FlaskConical className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /><span>Practice account — simulated data only, no real positions affected</span></>
-            }
-          </div>
-
-          {/* Test result */}
-          {testResult && (
-            <div className={clsx(
-              'flex items-start gap-2 px-3 py-2 rounded-lg text-xs mb-3',
-              testResult.ok
-                ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                : 'bg-red-500/10 border border-red-500/30 text-red-400'
-            )}>
-              {testResult.ok
-                ? <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-                : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-              }
-              <span>{testResult.message}</span>
+                Connect Trading 212
+              </Button>
             </div>
-          )}
-
-          {/* Sync error */}
-          {syncError && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs text-red-400 mb-3">
-              <div className="flex items-start gap-1.5">
-                <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-                <span>{syncError}</span>
+          ) : (
+            <>
+              {/* Connected account info */}
+              <div className="flex items-center justify-between mb-3 px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                <div>
+                  <p className="text-xs font-semibold text-emerald-400">
+                    {t212AccountType} account connected
+                  </p>
+                  {t212AccountInfo && (
+                    <p className="text-xs text-emerald-400/70 mt-0.5">
+                      ID: {t212AccountInfo.id} · {t212AccountInfo.currency}
+                    </p>
+                  )}
+                </div>
+                <ShieldCheck className="h-4 w-4 text-emerald-400 flex-shrink-0" />
               </div>
-              {syncDetail && (
-                <div className="mt-1.5 font-mono text-[10px] text-red-500/80 break-all">
-                  T212: {syncDetail}
+
+              {/* Account type toggle */}
+              <div className="flex bg-gray-800 rounded-lg p-1 mb-3">
+                {(['DEMO', 'LIVE'] as const).map((type) => (
+                  <button
+                    key={type}
+                    onClick={() => {
+                      setT212AccountType(type);
+                      setSyncError(null);
+                      setSyncDetail(null);
+                    }}
+                    className={clsx(
+                      'flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors',
+                      t212AccountType === type
+                        ? type === 'LIVE'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-amber-600 text-white'
+                        : 'text-gray-500 hover:text-gray-300'
+                    )}
+                  >
+                    {type === 'LIVE' ? '🟢 LIVE' : '🟡 DEMO'}
+                  </button>
+                ))}
+              </div>
+
+              {/* Mode description */}
+              <div className={clsx(
+                'flex items-start gap-2 px-3 py-2 rounded-lg text-xs mb-3',
+                t212AccountType === 'LIVE'
+                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+                  : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
+              )}>
+                {t212AccountType === 'LIVE'
+                  ? <><ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /><span>Connected to live account — real Invest &amp; ISA positions</span></>
+                  : <><FlaskConical className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /><span>Practice account — simulated data only</span></>
+                }
+              </div>
+
+              {/* Sync error */}
+              {syncError && (
+                <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs text-red-400 mb-3">
+                  <div className="flex items-start gap-1.5">
+                    <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                    <span>{syncError}</span>
+                  </div>
+                  {syncDetail && (
+                    <div className="mt-1.5 font-mono text-[10px] text-red-500/80 break-all">
+                      T212: {syncDetail}
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
 
-          {/* Last synced */}
-          {t212Connected && t212LastSync && (
-            <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-3">
-              <Clock className="h-3 w-3" />
-              Last synced: {new Date(t212LastSync).toLocaleString('en-GB')}
-            </div>
-          )}
+              {/* Last synced */}
+              {t212Connected && t212LastSync && (
+                <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-3">
+                  <Clock className="h-3 w-3" />
+                  Last synced: {new Date(t212LastSync).toLocaleString('en-GB')}
+                </div>
+              )}
 
-          <div className="flex gap-2">
-            <Button
-              onClick={handleTestConnection}
-              loading={testing}
-              variant="outline"
-              size="sm"
-              icon={<ShieldCheck className="h-3.5 w-3.5" />}
-            >
-              Test
-            </Button>
-            <Button
-              onClick={handleSync}
-              loading={syncing}
-              variant="secondary"
-              fullWidth
-              icon={<RefreshCw className="h-4 w-4" />}
-            >
-              {t212Connected ? 'Re-sync' : 'Sync Account'}
-            </Button>
-          </div>
+              <div className="flex gap-2">
+                <Button
+                  onClick={handleDisconnect}
+                  variant="outline"
+                  size="sm"
+                  icon={<LogOut className="h-3.5 w-3.5" />}
+                >
+                  Disconnect
+                </Button>
+                <Button
+                  onClick={handleSync}
+                  loading={syncing}
+                  variant="secondary"
+                  fullWidth
+                  icon={<RefreshCw className="h-4 w-4" />}
+                >
+                  {t212Connected ? 'Re-sync' : 'Sync Account'}
+                </Button>
+              </div>
+            </>
+          )}
         </Card>
 
         {/* Auto-reinvest toggle */}
@@ -514,7 +528,7 @@ export default function DashboardPage() {
               calculate CGT, and get AI-powered signals.
             </p>
             <div className="flex flex-wrap gap-3 justify-center">
-              <Button onClick={handleSync} loading={syncing} icon={<Wifi className="h-4 w-4" />}>
+              <Button onClick={() => setShowConnectModal(true)} icon={<Key className="h-4 w-4" />}>
                 Connect T212
               </Button>
               <Link href="/ledger">

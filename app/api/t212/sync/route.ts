@@ -1,23 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-function getCredentials(accountType: 'LIVE' | 'DEMO'): { key: string; secret: string } | null {
-  if (accountType === 'LIVE') {
-    const key = process.env.T212_API_KEY;
-    const secret = process.env.T212_API_SECRET;
-    if (!key || !secret) return null;
-    return { key, secret };
-  }
-  const key = process.env.T212_DEMO_API_KEY;
-  const secret = process.env.T212_DEMO_SECRET;
-  if (!key || !secret) return null;
-  return { key, secret };
-}
-
 function getBaseUrl(accountType: 'LIVE' | 'DEMO'): string {
-  if (accountType === 'LIVE') {
-    return process.env.T212_BASE_URL ?? 'https://live.trading212.com/api/v0';
-  }
-  return process.env.T212_DEMO_URL ?? 'https://demo.trading212.com/api/v0';
+  return accountType === 'LIVE'
+    ? 'https://live.trading212.com/api/v0'
+    : 'https://demo.trading212.com/api/v0';
 }
 
 function buildAuthHeader(key: string, secret: string): string {
@@ -37,41 +23,29 @@ async function t212Fetch(url: string, authHeader: string): Promise<Response> {
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { accountType = 'DEMO' } = body as { accountType: 'LIVE' | 'DEMO' };
+  const { apiKey, apiSecret, accountType = 'DEMO' } = body as {
+    apiKey: string;
+    apiSecret: string;
+    accountType: 'LIVE' | 'DEMO';
+  };
 
-  const creds = getCredentials(accountType);
-
-  console.log('[T212 sync] accountType:', accountType);
-  console.log('[T212 sync] credentials present:', !!creds);
-
-  if (!creds) {
-    const vars =
-      accountType === 'LIVE'
-        ? 'T212_API_KEY and T212_API_SECRET'
-        : 'T212_DEMO_API_KEY and T212_DEMO_SECRET';
+  if (!apiKey || !apiSecret) {
     return NextResponse.json(
-      {
-        error: `${vars} must both be set as environment variables.`,
-        hint: 'Add both variables in Vercel → Project Settings → Environment Variables, then redeploy.',
-      },
-      { status: 503 }
+      { error: 'API key and secret are required.' },
+      { status: 400 }
     );
   }
 
-  const authHeader = buildAuthHeader(creds.key, creds.secret);
-
+  const authHeader = buildAuthHeader(apiKey, apiSecret);
   const base = getBaseUrl(accountType);
-  console.log('[T212 sync] base URL:', base);
 
   try {
-    // Fetch account info, cash, and portfolio in parallel
     const [infoRes, cashRes, portfolioRes] = await Promise.all([
       t212Fetch(`${base}/equity/account/info`, authHeader),
       t212Fetch(`${base}/equity/account/cash`, authHeader),
       t212Fetch(`${base}/equity/portfolio`, authHeader),
     ]);
 
-    // If any call failed, return T212's actual error body so we can debug
     for (const [label, res] of [
       ['account/info', infoRes],
       ['account/cash', cashRes],
@@ -79,7 +53,6 @@ export async function POST(request: NextRequest) {
     ] as [string, Response][]) {
       if (!res.ok) {
         const errorBody = await res.text();
-        console.error(`[T212 sync] ${label} failed ${res.status}:`, errorBody);
         return NextResponse.json(
           {
             error: `Trading 212 returned ${res.status} for ${label}`,
@@ -97,7 +70,6 @@ export async function POST(request: NextRequest) {
       portfolioRes.json(),
     ]);
 
-    // Normalise positions
     const positions = (Array.isArray(rawPositions) ? rawPositions : []).map(
       (pos: Record<string, unknown>) => ({
         ticker: String(pos.ticker ?? ''),
@@ -111,7 +83,6 @@ export async function POST(request: NextRequest) {
       })
     );
 
-    // Fetch recent order history (for CGT import)
     const ordersRes = await t212Fetch(`${base}/equity/history/orders?limit=200`, authHeader);
     let trades: unknown[] = [];
     if (ordersRes.ok) {
@@ -160,7 +131,6 @@ export async function POST(request: NextRequest) {
       syncedAt: new Date().toISOString(),
     });
   } catch (err) {
-    console.error('[T212 sync] unexpected error:', err);
     return NextResponse.json(
       {
         error: `Sync failed: ${err instanceof Error ? err.message : String(err)}`,

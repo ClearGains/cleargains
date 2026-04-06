@@ -22,8 +22,11 @@ interface ClearGainsState {
   // Section 104 pools (derived, but cached)
   section104Pools: Record<string, Section104Pool>;
 
-  // T212 integration
+  // T212 user-provided credentials (stored in localStorage, never sent to any server except T212)
+  t212ApiKey: string;
+  t212ApiSecret: string;
   t212AccountType: 'LIVE' | 'DEMO';
+  t212AccountInfo: { id: string; currency: string } | null;
   t212LastSync: string | null;
   t212Positions: T212Position[];
   t212Connected: boolean;
@@ -39,7 +42,7 @@ interface ClearGainsState {
   fxRatesLastFetched: string | null;
 
   // Deadlines reminders
-  deadlineReminders: string[]; // country codes with reminders set
+  deadlineReminders: string[];
 
   // Actions
   setCountry: (country: Country) => void;
@@ -48,7 +51,10 @@ interface ClearGainsState {
   removeTrade: (id: string) => void;
   setTrades: (trades: Trade[]) => void;
   updateSection104Pools: (pools: Record<string, Section104Pool>) => void;
+  setT212Credentials: (key: string, secret: string) => void;
+  clearT212Credentials: () => void;
   setT212AccountType: (type: 'LIVE' | 'DEMO') => void;
+  setT212AccountInfo: (info: { id: string; currency: string } | null) => void;
   setT212LastSync: (date: string) => void;
   setT212Positions: (positions: T212Position[]) => void;
   setT212Connected: (v: boolean) => void;
@@ -66,7 +72,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
       hasOnboarded: false,
       trades: [],
       section104Pools: {},
+      t212ApiKey: '',
+      t212ApiSecret: '',
       t212AccountType: 'DEMO',
+      t212AccountInfo: null,
       t212LastSync: null,
       t212Positions: [],
       t212Connected: false,
@@ -89,7 +98,22 @@ export const useClearGainsStore = create<ClearGainsState>()(
 
       updateSection104Pools: (pools) => set({ section104Pools: pools }),
 
+      setT212Credentials: (key, secret) =>
+        set({ t212ApiKey: key, t212ApiSecret: secret }),
+
+      clearT212Credentials: () =>
+        set({
+          t212ApiKey: '',
+          t212ApiSecret: '',
+          t212Connected: false,
+          t212AccountInfo: null,
+          t212Positions: [],
+          t212LastSync: null,
+        }),
+
       setT212AccountType: (type) => set({ t212AccountType: type }),
+
+      setT212AccountInfo: (info) => set({ t212AccountInfo: info }),
 
       setT212LastSync: (date) => set({ t212LastSync: date }),
 
@@ -120,7 +144,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
           hasOnboarded: false,
           trades: [],
           section104Pools: {},
+          t212ApiKey: '',
+          t212ApiSecret: '',
           t212AccountType: 'DEMO',
+          t212AccountInfo: null,
           t212LastSync: null,
           t212Positions: [],
           t212Connected: false,
@@ -138,7 +165,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
         hasOnboarded: state.hasOnboarded,
         trades: state.trades,
         section104Pools: state.section104Pools,
+        t212ApiKey: state.t212ApiKey,
+        t212ApiSecret: state.t212ApiSecret,
         t212AccountType: state.t212AccountType,
+        t212AccountInfo: state.t212AccountInfo,
         t212LastSync: state.t212LastSync,
         t212Positions: state.t212Positions,
         t212Connected: state.t212Connected,
