@@ -12,7 +12,6 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
-import { t212FetchOrders } from '@/lib/t212-browser';
 import { buildSection104Pools } from '@/lib/cgt';
 import { Trade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
@@ -88,8 +87,17 @@ export default function LedgerPage() {
     setImportCount(null);
 
     try {
-      const orders = await t212FetchOrders(t212ApiKey, t212ApiSecret, 200);
-      const imported: Trade[] = orders as Trade[];
+      const res = await fetch('/api/t212/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: t212ApiKey, apiSecret: t212ApiSecret, limit: 200 }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setImportError(data.error);
+        return;
+      }
+      const imported: Trade[] = data.trades ?? [];
       // Merge — skip duplicates by id
       const existingIds = new Set(trades.map((t) => t.id));
       const newTrades = imported.filter((t) => !existingIds.has(t.id));

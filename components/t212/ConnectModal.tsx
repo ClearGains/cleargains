@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import { X, Key, ShieldCheck, AlertCircle, ExternalLink, Eye, EyeOff, CheckCircle2 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
-import { t212TestConnection } from '@/lib/t212-browser';
 import { Button } from '@/components/ui/Button';
 import { clsx } from 'clsx';
 
@@ -37,14 +36,20 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
     setError(null);
 
     try {
-      const result = await t212TestConnection(cleanKey, cleanSecret);
-      if (result.ok) {
+      const res = await fetch('/api/t212/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: cleanKey, apiSecret: cleanSecret }),
+      });
+      const data = await res.json();
+
+      if (data.ok) {
         setT212Credentials(cleanKey, cleanSecret);
-        setT212AccountInfo({ id: result.accountId ?? 'unknown', currency: result.currency ?? 'GBP' });
+        setT212AccountInfo({ id: data.accountId, currency: data.currency });
         setT212Connected(true);
         onConnected();
       } else {
-        setError(result.error ?? 'Connection failed.');
+        setError(data.error ?? 'Connection failed.');
       }
     } catch (err) {
       setError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -96,8 +101,8 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
                 <div>
                   <p className="text-xs font-semibold text-blue-400 mb-1">Your credentials are private</p>
                   <p className="text-xs text-blue-400/80">
-                    Your API key and secret are stored only in your browser (localStorage) and sent
-                    directly to Trading 212. They never pass through ClearGains servers.
+                    Your API key and secret are stored only in your browser (localStorage). They are sent
+                    directly to Trading 212 via our API route and never logged or stored on our servers.
                   </p>
                 </div>
               </div>
@@ -119,7 +124,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
           </div>
         ) : (
           <div className="px-6 py-5">
-            {/* Account type */}
+            {/* Account type toggle */}
             <div className="flex bg-gray-800 rounded-lg p-1 mb-4">
               {(['DEMO', 'LIVE'] as const).map((type) => (
                 <button
