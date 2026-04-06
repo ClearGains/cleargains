@@ -59,3 +59,4 @@ FX_API_KEY=your_exchangerate_api_key
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new)
 
 Set the three environment variables above in your Vercel project settings before deploying.
+# build fix
