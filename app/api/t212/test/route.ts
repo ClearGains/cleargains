@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
   console.log('[T212 test] base64 credentials[0:20]:', credentials.slice(0, 20));
 
   const urls = [
-    'https://live.trading212.com/api/v0/equity/account/info',
+    'https://live.trading212.com/api/v0/equity/account/summary',
     'https://live.trading212.com/api/v0/equity/account/cash',
   ];
 

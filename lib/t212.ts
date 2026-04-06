@@ -29,7 +29,7 @@ function getHeaders(): HeadersInit {
 
 export async function fetchT212AccountInfo(accountType: 'LIVE' | 'DEMO') {
   const base = getBase(accountType);
-  const res = await fetch(`${base}/equity/account/info`, {
+  const res = await fetch(`${base}/equity/account/summary`, {
     headers: getHeaders(),
     next: { revalidate: 0 },
   });
@@ -51,7 +51,7 @@ export async function fetchT212Portfolio(
   accountType: 'LIVE' | 'DEMO'
 ): Promise<T212Position[]> {
   const base = getBase(accountType);
-  const res = await fetch(`${base}/equity/portfolio`, {
+  const res = await fetch(`${base}/equity/positions`, {
     headers: getHeaders(),
     next: { revalidate: 0 },
   });

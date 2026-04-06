@@ -58,9 +58,9 @@ export async function POST(request: NextRequest) {
 
   try {
     const endpoints = {
-      info: `${base}/equity/account/info`,
+      info: `${base}/equity/account/summary`,
       cash: `${base}/equity/account/cash`,
-      portfolio: `${base}/equity/portfolio`,
+      portfolio: `${base}/equity/positions`,
     };
 
     console.log('[T212 sync] fetching info, cash, portfolio in parallel');
@@ -76,9 +76,9 @@ export async function POST(request: NextRequest) {
     console.log('[T212 sync] portfolio:', portfolioResult.status, portfolioResult.rawBody);
 
     for (const [label, result] of [
-      ['equity/account/info', infoResult],
+      ['equity/account/summary', infoResult],
       ['equity/account/cash', cashResult],
-      ['equity/portfolio', portfolioResult],
+      ['equity/positions', portfolioResult],
     ] as [string, { status: number; rawBody: string }][]) {
       if (result.status < 200 || result.status >= 300) {
         const error = describeT212Error(label, result.status, result.rawBody);
