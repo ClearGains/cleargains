@@ -1,131 +1,97 @@
 import { NextRequest, NextResponse } from 'next/server';
+import Anthropic from '@anthropic-ai/sdk';
+import { ScanResult } from '@/lib/types';
 
-type NewsItem = {
-  title: string;
-  source: string;
-  pubDate: string;
-  link: string;
-};
-
-function parseRSS(xml: string): NewsItem[] {
-  const items: NewsItem[] = [];
-  const itemMatches = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)];
-  for (const match of itemMatches) {
-    const block = match[1];
-    const title = (
-      block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/)?.[1] ??
-      block.match(/<title>([^<]*)<\/title>/)?.[1] ??
-      ''
-    ).trim();
-    const source = (
-      block.match(/<source[^>]*>([^<]*)<\/source>/)?.[1] ?? ''
-    ).trim();
-    const pubDate = (block.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] ?? '').trim();
-    const link = (block.match(/<link>([^<]*)<\/link>/)?.[1] ?? '').trim();
-    if (title) items.push({ title, source, pubDate, link });
-  }
-  return items.slice(0, 12);
-}
-
-const BULLISH = [
-  'beat', 'beats', 'surge', 'soar', 'gain', 'rises', 'rally', 'record',
-  'upgrade', 'upgraded', 'outperform', 'growth', 'profit', 'boost',
-  'strong', 'positive', 'raises', 'raised', 'exceed', 'exceeded', 'jumps',
-];
-const BEARISH = [
-  'miss', 'misses', 'fall', 'falls', 'drop', 'drops', 'decline', 'plunge',
-  'downgrade', 'downgraded', 'underperform', 'loss', 'losses', 'cut', 'cuts',
-  'weak', 'concern', 'risk', 'negative', 'slump', 'warns', 'warning',
-];
-
-function deriveOutlook(items: NewsItem[]): {
-  signal: 'BUY' | 'SELL' | 'HOLD';
-  label: string;
-  bullishCount: number;
-  bearishCount: number;
-  summary: string;
-} {
-  let bullishCount = 0;
-  let bearishCount = 0;
-
-  for (const item of items) {
-    const lower = item.title.toLowerCase();
-    bullishCount += BULLISH.filter((w) => lower.includes(w)).length;
-    bearishCount += BEARISH.filter((w) => lower.includes(w)).length;
-  }
-
-  const total = bullishCount + bearishCount;
-  let signal: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-  let label = 'Neutral';
-
-  if (total > 0) {
-    const bullishRatio = bullishCount / total;
-    if (bullishRatio >= 0.6) { signal = 'BUY'; label = 'Bullish'; }
-    else if (bullishRatio <= 0.4) { signal = 'SELL'; label = 'Bearish'; }
-  }
-
-  const sourceList = [...new Set(items.map((i) => i.source).filter(Boolean))].slice(0, 4);
-  const summary =
-    items.length === 0
-      ? 'No recent news found for this ticker.'
-      : `Based on ${items.length} recent news item${items.length !== 1 ? 's' : ''} from ${
-          sourceList.length > 0 ? sourceList.join(', ') : 'various sources'
-        }. Sentiment signals: ${bullishCount} bullish, ${bearishCount} bearish indicator${bearishCount !== 1 ? 's' : ''} in headlines.`;
-
-  return { signal, label, bullishCount, bearishCount, summary };
-}
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { ticker } = body as { ticker: string };
+  const { query } = body as { query: string };
 
-  if (!ticker) {
-    return NextResponse.json({ error: 'ticker is required' }, { status: 400 });
+  if (!query) {
+    return NextResponse.json({ error: 'query is required' }, { status: 400 });
   }
 
-  const symbol = ticker.trim().toUpperCase();
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 503 });
+  }
 
-  // Try Yahoo Finance RSS first, fall back to Google News RSS
-  const feeds = [
-    `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(symbol)}&region=US&lang=en-US`,
-    `https://news.google.com/rss/search?q=${encodeURIComponent(symbol + ' stock')}&hl=en-US&gl=US&ceid=US:en`,
-  ];
+  const prompt = `Search for the very latest news about this stock or company: "${query}"
 
-  let items: NewsItem[] = [];
-  let fetchError: string | null = null;
+If given a company name (e.g. "Tesla", "Vodafone"), resolve it to the correct ticker symbol first.
+For UK-listed stocks, use the .L suffix format (e.g. VOD.L, LLOY.L, BARC.L).
 
-  for (const url of feeds) {
-    try {
-      const res = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClearGains/1.0)' },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (res.ok) {
-        const xml = await res.text();
-        items = parseRSS(xml);
-        if (items.length > 0) break;
-      }
-    } catch (err) {
-      fetchError = err instanceof Error ? err.message : String(err);
+Search for recent news, earnings, analyst ratings, and market sentiment about this stock.
+
+Then respond with ONLY a valid JSON object — no markdown, no explanation outside the JSON:
+
+{
+  "ticker": "exact ticker symbol (e.g. AAPL, VOD.L)",
+  "companyName": "Full official company name",
+  "signal": "BUY" or "SELL" or "HOLD",
+  "confidence": <integer 0-100>,
+  "riskScore": <integer 0-100, where 100 = highest risk>,
+  "verdict": "PROCEED" or "CAUTION" or "REJECT",
+  "reasoning": "2-3 sentence plain English explanation of why this signal was generated, referencing specific news",
+  "market": "US" or "UK" or "OTHER",
+  "articles": [
+    {
+      "headline": "Exact article headline",
+      "source": "Publication name",
+      "date": "YYYY-MM-DD or approximate date",
+      "summary": "One sentence explaining why this article is relevant to the signal"
     }
+  ],
+  "timestamp": "${new Date().toISOString()}"
+}
+
+Rules:
+- verdict must be PROCEED when signal=BUY and confidence>=60
+- verdict must be REJECT when signal=SELL and confidence>=60
+- verdict must be CAUTION in all other cases
+- Include 3-5 of the most recent and relevant articles in the articles array
+- For UK stocks and companies, use UK market context (LSE, FTSE, GBP)
+- riskScore should reflect: market volatility + news sentiment negativity + company-specific risks`;
+
+  try {
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      tools: [
+        {
+          type: 'web_search_20250305' as const,
+          name: 'web_search',
+          max_uses: 5,
+        },
+      ],
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    // Extract the final text block
+    let jsonText = '';
+    for (const block of response.content) {
+      if (block.type === 'text') {
+        jsonText = block.text;
+      }
+    }
+
+    // Parse JSON — strip any markdown fences if present
+    const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON in response');
+
+    const result: ScanResult = JSON.parse(jsonMatch[0]);
+
+    // Enforce verdict logic in case model got it wrong
+    if (result.signal === 'BUY' && result.confidence >= 60) result.verdict = 'PROCEED';
+    else if (result.signal === 'SELL' && result.confidence >= 60) result.verdict = 'REJECT';
+    else result.verdict = 'CAUTION';
+
+    return NextResponse.json(result);
+  } catch (err) {
+    console.error('[scanner] error:', err);
+    return NextResponse.json(
+      { error: `Scan failed: ${err instanceof Error ? err.message : String(err)}` },
+      { status: 500 }
+    );
   }
-
-  const outlook = deriveOutlook(items);
-
-  return NextResponse.json({
-    ticker: symbol,
-    signal: outlook.signal,
-    label: outlook.label,
-    bullishCount: outlook.bullishCount,
-    bearishCount: outlook.bearishCount,
-    summary: outlook.summary,
-    articles: items,
-    fetchError: items.length === 0 ? fetchError : null,
-    timestamp: new Date().toISOString(),
-    // Legacy Signal fields for store compatibility
-    riskScore: Math.round((outlook.bearishCount / Math.max(outlook.bullishCount + outlook.bearishCount, 1)) * 100),
-    confidence: Math.min(items.length * 8, 90),
-    reasoning: outlook.summary,
-    sources: [...new Set(items.map((i) => i.source).filter(Boolean))],
-  });
 }

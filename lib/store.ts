@@ -7,6 +7,7 @@ import {
   Trade,
   Section104Pool,
   Signal,
+  ScanResult,
   T212Position,
 } from './types';
 import { DEFAULT_COUNTRY } from './countries';
@@ -37,6 +38,10 @@ interface ClearGainsState {
   // AI signals
   signals: Signal[];
 
+  // Scanner watchlist & history
+  watchlist: string[];
+  scanHistory: ScanResult[];
+
   // FX rates (base GBP)
   fxRates: Record<string, number>;
   fxRatesLastFetched: string | null;
@@ -60,6 +65,9 @@ interface ClearGainsState {
   setT212Connected: (v: boolean) => void;
   setAutoReinvest: (v: boolean) => void;
   addSignal: (signal: Signal) => void;
+  addToWatchlist: (ticker: string) => void;
+  removeFromWatchlist: (ticker: string) => void;
+  addScanResult: (result: ScanResult) => void;
   setFxRates: (rates: Record<string, number>) => void;
   toggleDeadlineReminder: (countryCode: string) => void;
   reset: () => void;
@@ -81,6 +89,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
       t212Connected: false,
       autoReinvest: false,
       signals: [],
+      watchlist: [],
+      scanHistory: [],
       fxRates: {},
       fxRatesLastFetched: null,
       deadlineReminders: [],
@@ -128,6 +138,23 @@ export const useClearGainsStore = create<ClearGainsState>()(
           signals: [signal, ...state.signals].slice(0, 20),
         })),
 
+      addToWatchlist: (ticker) =>
+        set((state) => ({
+          watchlist: state.watchlist.includes(ticker)
+            ? state.watchlist
+            : [...state.watchlist, ticker],
+        })),
+
+      removeFromWatchlist: (ticker) =>
+        set((state) => ({
+          watchlist: state.watchlist.filter((t) => t !== ticker),
+        })),
+
+      addScanResult: (result) =>
+        set((state) => ({
+          scanHistory: [result, ...state.scanHistory].slice(0, 30),
+        })),
+
       setFxRates: (rates) =>
         set({ fxRates: rates, fxRatesLastFetched: new Date().toISOString() }),
 
@@ -153,6 +180,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
           t212Connected: false,
           autoReinvest: false,
           signals: [],
+          watchlist: [],
+          scanHistory: [],
           fxRates: {},
           fxRatesLastFetched: null,
           deadlineReminders: [],
@@ -174,6 +203,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
         t212Connected: state.t212Connected,
         autoReinvest: state.autoReinvest,
         signals: state.signals,
+        watchlist: state.watchlist,
+        scanHistory: state.scanHistory,
         deadlineReminders: state.deadlineReminders,
       }),
     }

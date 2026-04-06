@@ -73,6 +73,26 @@ export type Signal = {
   timestamp: string;
 };
 
+export type NewsArticle = {
+  headline: string;
+  source: string;
+  date: string;
+  summary: string;
+};
+
+export type ScanResult = {
+  ticker: string;
+  companyName: string;
+  signal: 'BUY' | 'SELL' | 'HOLD';
+  confidence: number;
+  riskScore: number;
+  verdict: 'PROCEED' | 'CAUTION' | 'REJECT';
+  reasoning: string;
+  market: 'US' | 'UK' | 'OTHER';
+  articles: NewsArticle[];
+  timestamp: string;
+};
+
 export type T212Account = {
   id: string;
   type: 'LIVE' | 'DEMO';

@@ -2,85 +2,94 @@
 
 import { useState } from 'react';
 import {
-  Search,
-  Newspaper,
-  AlertTriangle,
-  TrendingUp,
-  TrendingDown,
-  Minus,
-  Clock,
-  RefreshCw,
-  ExternalLink,
+  Search, Newspaper, AlertTriangle, TrendingUp, TrendingDown, Minus,
+  Clock, RefreshCw, BookmarkPlus, BookmarkCheck, Trash2, ChevronRight,
+  ShieldCheck, ShieldAlert, ShieldX, Zap,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
-import { Signal } from '@/lib/types';
+import { ScanResult } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { clsx } from 'clsx';
 
-type NewsArticle = {
-  title: string;
-  source: string;
-  pubDate: string;
-  link: string;
-};
-
-type ScanResult = {
-  ticker: string;
-  signal: 'BUY' | 'SELL' | 'HOLD';
-  label: string;
-  bullishCount: number;
-  bearishCount: number;
-  summary: string;
-  articles: NewsArticle[];
-  fetchError: string | null;
-  timestamp: string;
-  riskScore: number;
-  confidence: number;
-  reasoning: string;
-  sources: string[];
-};
-
-const POPULAR_TICKERS = [
-  'AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN',
-  'GOOGL', 'META', 'AVGO', 'TSM', 'ASML',
-  'BP', 'LLOY', 'VOD', 'GSK', 'RIO',
+const QUICK_TICKERS = [
+  { symbol: 'AAPL', label: 'Apple' },
+  { symbol: 'NVDA', label: 'Nvidia' },
+  { symbol: 'TSLA', label: 'Tesla' },
+  { symbol: 'MSFT', label: 'Microsoft' },
+  { symbol: 'AMZN', label: 'Amazon' },
+  { symbol: 'GOOGL', label: 'Alphabet' },
+  { symbol: 'VOD.L', label: 'Vodafone' },
+  { symbol: 'LLOY.L', label: 'Lloyds' },
+  { symbol: 'BARC.L', label: 'Barclays' },
+  { symbol: 'BP.L', label: 'BP' },
 ];
 
-function OutlookBadge({ signal, label }: { signal: string; label: string }) {
+function SignalBadge({ signal }: { signal: 'BUY' | 'SELL' | 'HOLD' }) {
   const icon =
     signal === 'BUY' ? <TrendingUp className="h-3.5 w-3.5" /> :
     signal === 'SELL' ? <TrendingDown className="h-3.5 w-3.5" /> :
     <Minus className="h-3.5 w-3.5" />;
-
   return (
     <Badge variant={signal.toLowerCase() as 'buy' | 'sell' | 'hold'}>
-      {icon}
-      <span className="ml-1">{label}</span>
+      {icon}<span className="ml-1">{signal}</span>
     </Badge>
   );
 }
 
-function formatDate(dateStr: string) {
-  try {
-    return new Date(dateStr).toLocaleDateString('en-GB', {
-      day: 'numeric', month: 'short', year: 'numeric',
-    });
-  } catch {
-    return dateStr;
-  }
+function VerdictBadge({ verdict }: { verdict: 'PROCEED' | 'CAUTION' | 'REJECT' }) {
+  if (verdict === 'PROCEED') return (
+    <div className="flex items-center gap-1.5 text-emerald-400 text-sm font-semibold">
+      <ShieldCheck className="h-4 w-4" /> Proceed
+    </div>
+  );
+  if (verdict === 'REJECT') return (
+    <div className="flex items-center gap-1.5 text-red-400 text-sm font-semibold">
+      <ShieldX className="h-4 w-4" /> Reject
+    </div>
+  );
+  return (
+    <div className="flex items-center gap-1.5 text-yellow-400 text-sm font-semibold">
+      <ShieldAlert className="h-4 w-4" /> Caution
+    </div>
+  );
+}
+
+function RiskBar({ score }: { score: number }) {
+  const color = score >= 70 ? 'bg-red-500' : score >= 45 ? 'bg-yellow-500' : 'bg-emerald-500';
+  return (
+    <div className="w-full bg-gray-800 rounded-full h-1.5 mt-1">
+      <div className={clsx('h-1.5 rounded-full transition-all', color)} style={{ width: `${score}%` }} />
+    </div>
+  );
+}
+
+function ConfidenceRing({ score }: { score: number }) {
+  const color = score >= 70 ? 'text-emerald-400' : score >= 45 ? 'text-yellow-400' : 'text-red-400';
+  return (
+    <div className="flex flex-col items-center">
+      <div className={clsx('text-3xl font-bold tabular-nums', color)}>{score}</div>
+      <div className="text-xs text-gray-500">confidence</div>
+    </div>
+  );
 }
 
 export default function ScannerPage() {
-  const { signals, addSignal, t212Positions } = useClearGainsStore();
-  const [ticker, setTicker] = useState('');
+  const {
+    signals, addSignal,
+    watchlist, addToWatchlist, removeFromWatchlist,
+    scanHistory, addScanResult,
+    t212Positions,
+  } = useClearGainsStore();
+
+  const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ScanResult | null>(null);
 
-  async function runScan(symbol?: string) {
-    const target = (symbol ?? ticker).trim().toUpperCase();
+  async function runScan(q?: string) {
+    const target = (q ?? query).trim();
     if (!target) return;
 
     setLoading(true);
@@ -91,27 +100,26 @@ export default function ScannerPage() {
       const res = await fetch('/api/ai-scanner', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticker: target }),
+        body: JSON.stringify({ query: target }),
       });
-
       const data = await res.json();
 
       if (!res.ok) {
         setError(data.error ?? 'Scan failed');
       } else {
         setResult(data);
-        // Save to signal history (uses legacy Signal fields)
-        const signal: Signal = {
+        addScanResult(data);
+        // Also push to legacy signals for dashboard widget
+        addSignal({
           ticker: data.ticker,
           signal: data.signal,
           riskScore: data.riskScore,
           confidence: data.confidence,
           reasoning: data.reasoning,
-          sources: data.sources,
+          sources: data.articles?.map((a: { source: string }) => a.source) ?? [],
           timestamp: data.timestamp,
-        };
-        addSignal(signal);
-        setTicker('');
+        });
+        setQuery('');
       }
     } catch {
       setError('Network error — please try again');
@@ -120,260 +128,313 @@ export default function ScannerPage() {
     }
   }
 
-  const portfolioTickers = t212Positions.map((p) => p.ticker).slice(0, 8);
+  const portfolioTickers = t212Positions.map((p) => p.ticker).slice(0, 6);
+  const isWatched = result ? watchlist.includes(result.ticker) : false;
 
   return (
-    <div className="p-4 sm:p-6 max-w-6xl mx-auto">
+    <div className="p-4 sm:p-6 max-w-7xl mx-auto">
       {/* Header */}
-      <div className="mb-6">
+      <div className="mb-5">
         <h1 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Newspaper className="h-6 w-6 text-emerald-400" />
+          <Zap className="h-6 w-6 text-emerald-400" />
           News Scanner
         </h1>
         <p className="text-sm text-gray-500 mt-1">
-          Fetches the latest news for a stock and derives a market outlook from headline sentiment
+          Search any stock or company — live news fetched and analysed in real time
         </p>
       </div>
 
       {/* Disclaimer */}
-      <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 mb-6 flex items-start gap-3">
+      <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 mb-5 flex items-start gap-3">
         <AlertTriangle className="h-4 w-4 text-yellow-500 flex-shrink-0 mt-0.5" />
         <p className="text-xs text-yellow-400">
-          <span className="font-semibold">Educational purposes only.</span> Outlook is derived from
-          keyword sentiment in news headlines — not financial advice. Always do your own research
-          before making any investment decisions.
+          <span className="font-semibold">Educational only.</span> Signals are based on news
+          sentiment and are not financial advice. Always do your own research.
         </p>
       </div>
 
-      {/* Search */}
-      <Card className="mb-6">
-        <CardHeader
-          title="Scan a Stock"
-          subtitle="Enter a ticker to fetch latest news and sentiment"
-          icon={<Search className="h-4 w-4" />}
-        />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        {/* Left col — search + results */}
+        <div className="lg:col-span-2 space-y-4">
 
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={ticker}
-            onChange={(e) => setTicker(e.target.value.toUpperCase())}
-            onKeyDown={(e) => e.key === 'Enter' && runScan()}
-            placeholder="e.g. AAPL, TSLA, LLOY..."
-            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500 font-mono"
-          />
-          <Button onClick={() => runScan()} loading={loading} icon={<Search className="h-4 w-4" />}>
-            Scan News
-          </Button>
-        </div>
-
-        <div className="mt-4">
-          <p className="text-xs text-gray-600 mb-2">Popular tickers:</p>
-          <div className="flex flex-wrap gap-1.5">
-            {POPULAR_TICKERS.map((t) => (
-              <button
-                key={t}
-                onClick={() => runScan(t)}
-                disabled={loading}
-                className="px-2.5 py-1 text-xs font-mono bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-emerald-500 text-gray-400 hover:text-emerald-400 rounded-md transition-colors disabled:opacity-50"
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {portfolioTickers.length > 0 && (
-          <div className="mt-3">
-            <p className="text-xs text-gray-600 mb-2">From your portfolio:</p>
-            <div className="flex flex-wrap gap-1.5">
-              {portfolioTickers.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => runScan(t)}
-                  disabled={loading}
-                  className="px-2.5 py-1 text-xs font-mono bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-600/20 hover:border-emerald-500/40 text-emerald-400 rounded-md transition-colors disabled:opacity-50"
-                >
-                  {t}
-                </button>
-              ))}
+          {/* Search */}
+          <Card>
+            <div className="flex gap-2 mb-4">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && runScan()}
+                placeholder="Search ticker or company — e.g. AAPL, Tesla, VOD.L, Barclays…"
+                className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500"
+              />
+              <Button onClick={() => runScan()} loading={loading} icon={<Search className="h-4 w-4" />}>
+                Scan
+              </Button>
             </div>
-          </div>
-        )}
-      </Card>
 
-      {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 mb-4 text-sm text-red-400">
-          {error}
-        </div>
-      )}
-
-      {loading && (
-        <Card className="mb-6">
-          <div className="flex items-center gap-3 py-4 justify-center">
-            <RefreshCw className="h-5 w-5 text-emerald-400 animate-spin" />
-            <span className="text-gray-400 text-sm">Fetching latest news…</span>
-          </div>
-        </Card>
-      )}
-
-      {result && !loading && (
-        <div className="mb-6 space-y-4">
-          {/* Outlook summary */}
-          <Card className="border-emerald-500/20">
-            <div className="flex items-start justify-between mb-3">
-              <div className="flex items-center gap-3">
-                <span className="text-2xl font-bold text-white font-mono">{result.ticker}</span>
-                <OutlookBadge signal={result.signal} label={result.label} />
+            {/* Quick tickers */}
+            <div className="mb-3">
+              <p className="text-xs text-gray-600 mb-2">Quick scan:</p>
+              <div className="flex flex-wrap gap-1.5">
+                {QUICK_TICKERS.map(({ symbol, label }) => (
+                  <button
+                    key={symbol}
+                    onClick={() => runScan(symbol)}
+                    disabled={loading}
+                    className="px-2.5 py-1 text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-emerald-500 text-gray-400 hover:text-emerald-400 rounded-md transition-colors disabled:opacity-50"
+                  >
+                    <span className="font-mono">{symbol}</span>
+                    <span className="text-gray-600 ml-1 hidden sm:inline">{label}</span>
+                  </button>
+                ))}
               </div>
-              <p className="text-xs text-gray-600 flex items-center gap-1">
-                <Clock className="h-3 w-3" />
-                {new Date(result.timestamp).toLocaleString('en-GB')}
-              </p>
             </div>
 
-            {/* Sentiment bar */}
-            <div className="flex items-center gap-3 mb-3">
-              <span className="text-xs text-emerald-400 w-20 flex-shrink-0">
-                {result.bullishCount} bullish
-              </span>
-              <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden flex">
-                {(result.bullishCount + result.bearishCount) > 0 && (
-                  <>
-                    <div
-                      className="h-full bg-emerald-500 transition-all"
-                      style={{ width: `${(result.bullishCount / (result.bullishCount + result.bearishCount)) * 100}%` }}
-                    />
-                    <div className="h-full bg-red-500 flex-1" />
-                  </>
-                )}
+            {portfolioTickers.length > 0 && (
+              <div>
+                <p className="text-xs text-gray-600 mb-2">Your portfolio:</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {portfolioTickers.map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => runScan(t)}
+                      disabled={loading}
+                      className="px-2.5 py-1 text-xs font-mono bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-600/20 text-emerald-400 rounded-md transition-colors disabled:opacity-50"
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <span className="text-xs text-red-400 w-20 flex-shrink-0 text-right">
-                {result.bearishCount} bearish
-              </span>
-            </div>
-
-            <p className="text-xs text-gray-400 leading-relaxed">{result.summary}</p>
-
-            {result.fetchError && (
-              <p className="text-xs text-yellow-500/80 mt-2">
-                Note: news fetch issue — {result.fetchError}
-              </p>
             )}
           </Card>
 
-          {/* News articles */}
-          {result.articles.length > 0 && (
+          {error && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
+              {error}
+            </div>
+          )}
+
+          {loading && (
+            <Card>
+              <div className="flex items-center gap-3 py-6 justify-center">
+                <RefreshCw className="h-5 w-5 text-emerald-400 animate-spin" />
+                <span className="text-gray-400 text-sm">Searching live news and generating signal…</span>
+              </div>
+            </Card>
+          )}
+
+          {/* Signal card */}
+          {result && !loading && (
+            <>
+              <Card className="border-emerald-500/20">
+                {/* Header row */}
+                <div className="flex items-start justify-between mb-4">
+                  <div>
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <span className="text-2xl font-bold text-white font-mono">{result.ticker}</span>
+                      <SignalBadge signal={result.signal} />
+                      <span className={clsx(
+                        'text-xs px-2 py-0.5 rounded border font-medium',
+                        result.market === 'UK'
+                          ? 'text-blue-400 border-blue-500/30 bg-blue-500/10'
+                          : result.market === 'US'
+                          ? 'text-purple-400 border-purple-500/30 bg-purple-500/10'
+                          : 'text-gray-400 border-gray-600 bg-gray-800'
+                      )}>
+                        {result.market}
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-400 mt-0.5">{result.companyName}</p>
+                    <p className="text-xs text-gray-600 mt-1 flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      {new Date(result.timestamp).toLocaleString('en-GB')}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => isWatched ? removeFromWatchlist(result.ticker) : addToWatchlist(result.ticker)}
+                    className={clsx(
+                      'flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors',
+                      isWatched
+                        ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
+                        : 'text-gray-500 border-gray-700 hover:text-emerald-400 hover:border-emerald-500/30'
+                    )}
+                  >
+                    {isWatched ? <BookmarkCheck className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
+                    {isWatched ? 'Watching' : 'Watchlist'}
+                  </button>
+                </div>
+
+                {/* Metrics row */}
+                <div className="grid grid-cols-3 gap-3 mb-4">
+                  <div className="bg-gray-800/60 rounded-xl p-3 text-center">
+                    <ConfidenceRing score={result.confidence} />
+                  </div>
+                  <div className="bg-gray-800/60 rounded-xl p-3">
+                    <div className="text-xs text-gray-500 mb-1">Risk Score</div>
+                    <div className="text-2xl font-bold text-white tabular-nums">{result.riskScore}</div>
+                    <RiskBar score={result.riskScore} />
+                  </div>
+                  <div className="bg-gray-800/60 rounded-xl p-3 flex items-center justify-center">
+                    <VerdictBadge verdict={result.verdict} />
+                  </div>
+                </div>
+
+                {/* Reasoning */}
+                <div className="bg-gray-800/40 border border-gray-700/50 rounded-xl p-3">
+                  <div className="text-xs text-gray-500 mb-1.5 font-medium uppercase tracking-wide">Signal Reasoning</div>
+                  <p className="text-sm text-gray-300 leading-relaxed">{result.reasoning}</p>
+                </div>
+              </Card>
+
+              {/* News feed */}
+              {result.articles?.length > 0 && (
+                <Card>
+                  <CardHeader
+                    title="Latest News"
+                    subtitle={`${result.articles.length} articles informing this signal`}
+                    icon={<Newspaper className="h-4 w-4" />}
+                  />
+                  <div className="divide-y divide-gray-800">
+                    {result.articles.map((article, i) => (
+                      <div key={i} className="py-3 first:pt-0">
+                        <p className="text-sm text-gray-200 font-medium leading-snug mb-1">
+                          {article.headline}
+                        </p>
+                        <p className="text-xs text-gray-500 mb-1.5">{article.summary}</p>
+                        <div className="flex items-center gap-2 text-xs text-gray-600">
+                          {article.source && <span className="text-gray-500 font-medium">{article.source}</span>}
+                          {article.source && article.date && <span>·</span>}
+                          {article.date && <span>{article.date}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              )}
+            </>
+          )}
+
+          {/* Scan history */}
+          {scanHistory.length > 0 && !loading && (
             <Card>
               <CardHeader
-                title="Recent News"
-                subtitle={`${result.articles.length} articles`}
-                icon={<Newspaper className="h-4 w-4" />}
+                title="Scan History"
+                subtitle={`${scanHistory.length} previous scans`}
+                icon={<Clock className="h-4 w-4" />}
               />
-              <div className="space-y-0 divide-y divide-gray-800">
-                {result.articles.map((article, i) => {
-                  const lower = article.title.toLowerCase();
-                  const isBullish = BULLISH_WORDS.some((w) => lower.includes(w));
-                  const isBearish = BEARISH_WORDS.some((w) => lower.includes(w));
+              <div className="space-y-1.5">
+                {scanHistory.map((scan, i) => (
+                  <button
+                    key={i}
+                    onClick={() => runScan(scan.ticker)}
+                    disabled={loading}
+                    className="w-full flex items-center justify-between py-2 px-3 bg-gray-800/50 hover:bg-gray-800 rounded-lg border border-gray-700/50 transition-colors disabled:opacity-50"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono font-semibold text-white text-sm w-20 text-left">{scan.ticker}</span>
+                      <span className="text-xs text-gray-500 hidden sm:block">{scan.companyName}</span>
+                      <SignalBadge signal={scan.signal} />
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-gray-600">
+                      <span className="hidden sm:block">{new Date(scan.timestamp).toLocaleDateString('en-GB')}</span>
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {!result && !loading && scanHistory.length === 0 && (
+            <div className="text-center py-16">
+              <Zap className="h-12 w-12 text-gray-700 mx-auto mb-4" />
+              <p className="text-gray-500 text-sm">Search a stock above to get a live news signal</p>
+              <p className="text-gray-600 text-xs mt-1">Works for US stocks (AAPL) and UK stocks (VOD.L, Barclays)</p>
+            </div>
+          )}
+        </div>
+
+        {/* Right col — watchlist */}
+        <div className="space-y-4">
+          <Card>
+            <CardHeader
+              title="Watchlist"
+              subtitle={watchlist.length > 0 ? `${watchlist.length} stocks` : 'No stocks added yet'}
+              icon={<BookmarkCheck className="h-4 w-4" />}
+            />
+
+            {watchlist.length === 0 ? (
+              <div className="py-4 text-center">
+                <p className="text-xs text-gray-600">
+                  Scan a stock and click <span className="text-emerald-400">+ Watchlist</span> to save it here
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {watchlist.map((ticker) => {
+                  const lastScan = scanHistory.find((s) => s.ticker === ticker);
                   return (
-                    <div key={i} className="py-3 flex items-start gap-3">
-                      <div
-                        className={clsx(
-                          'w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1.5',
-                          isBullish && !isBearish ? 'bg-emerald-400' :
-                          isBearish && !isBullish ? 'bg-red-400' : 'bg-gray-600'
-                        )}
-                      />
-                      <div className="flex-1 min-w-0">
-                        {article.link ? (
-                          <a
-                            href={article.link}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-sm text-gray-200 hover:text-white leading-snug flex items-start gap-1 group"
-                          >
-                            <span>{article.title}</span>
-                            <ExternalLink className="h-3 w-3 flex-shrink-0 mt-0.5 opacity-0 group-hover:opacity-60 transition-opacity" />
-                          </a>
-                        ) : (
-                          <p className="text-sm text-gray-200 leading-snug">{article.title}</p>
-                        )}
-                        <div className="flex items-center gap-2 mt-1">
-                          {article.source && (
-                            <span className="text-xs text-gray-500">{article.source}</span>
-                          )}
-                          {article.pubDate && (
-                            <span className="text-xs text-gray-600">{formatDate(article.pubDate)}</span>
-                          )}
+                    <div key={ticker} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-gray-800/50 group">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-sm font-semibold text-white">{ticker}</span>
+                          {lastScan && <SignalBadge signal={lastScan.signal} />}
                         </div>
+                        {lastScan && (
+                          <p className="text-xs text-gray-600 mt-0.5">
+                            {new Date(lastScan.timestamp).toLocaleDateString('en-GB')}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => runScan(ticker)}
+                          disabled={loading}
+                          className="p-1.5 text-gray-500 hover:text-emerald-400 transition-colors"
+                          title="Re-scan"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={() => removeFromWatchlist(ticker)}
+                          className="p-1.5 text-gray-500 hover:text-red-400 transition-colors"
+                          title="Remove"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     </div>
                   );
                 })}
               </div>
-            </Card>
-          )}
+            )}
+          </Card>
 
-          {result.articles.length === 0 && (
+          {/* Signals from dashboard (legacy) */}
+          {signals.length > 0 && (
             <Card>
-              <div className="text-center py-6">
-                <Newspaper className="h-8 w-8 text-gray-700 mx-auto mb-2" />
-                <p className="text-sm text-gray-500">No news articles found for {result.ticker}</p>
-                <p className="text-xs text-gray-600 mt-1">Try a different ticker or check back later</p>
+              <CardHeader
+                title="Recent Signals"
+                subtitle="From this session"
+                icon={<Zap className="h-4 w-4" />}
+              />
+              <div className="space-y-1.5">
+                {signals.slice(0, 5).map((signal, i) => (
+                  <div key={i} className="flex items-center justify-between py-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-sm font-semibold text-white w-16">{signal.ticker}</span>
+                      <SignalBadge signal={signal.signal} />
+                    </div>
+                    <span className="text-xs text-gray-600 tabular-nums">{signal.confidence}%</span>
+                  </div>
+                ))}
               </div>
             </Card>
           )}
         </div>
-      )}
-
-      {/* Scan history */}
-      {signals.length > 0 && !loading && (
-        <Card>
-          <CardHeader
-            title="Scan History"
-            subtitle={`${signals.length} tickers scanned`}
-            icon={<Clock className="h-4 w-4" />}
-          />
-          <div className="space-y-2">
-            {signals.map((signal, i) => (
-              <div
-                key={i}
-                className="flex items-center justify-between py-2.5 px-3 bg-gray-800/50 rounded-lg border border-gray-700/50 cursor-pointer hover:bg-gray-800"
-                onClick={() => runScan(signal.ticker)}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="font-mono font-semibold text-white text-sm w-16">{signal.ticker}</span>
-                  <Badge variant={signal.signal.toLowerCase() as 'buy' | 'sell' | 'hold'}>
-                    {signal.signal === 'BUY' ? 'Bullish' : signal.signal === 'SELL' ? 'Bearish' : 'Neutral'}
-                  </Badge>
-                </div>
-                <div className="text-xs text-gray-600 hidden sm:block">
-                  {new Date(signal.timestamp).toLocaleDateString('en-GB')}
-                </div>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {signals.length === 0 && !result && !loading && (
-        <div className="text-center py-12">
-          <Newspaper className="h-12 w-12 text-gray-700 mx-auto mb-4" />
-          <p className="text-gray-500 text-sm">Enter a ticker above to fetch the latest news</p>
-        </div>
-      )}
+      </div>
     </div>
   );
 }
-
-// Keyword lists referenced in JSX for dot colour logic
-const BULLISH_WORDS = [
-  'beat', 'beats', 'surge', 'soar', 'gain', 'rises', 'rally', 'record',
-  'upgrade', 'upgraded', 'outperform', 'growth', 'profit', 'boost',
-  'strong', 'positive', 'raises', 'raised', 'exceed', 'exceeded', 'jumps',
-];
-const BEARISH_WORDS = [
-  'miss', 'misses', 'fall', 'falls', 'drop', 'drops', 'decline', 'plunge',
-  'downgrade', 'downgraded', 'underperform', 'loss', 'losses', 'cut', 'cuts',
-  'weak', 'concern', 'risk', 'negative', 'slump', 'warns', 'warning',
-];
