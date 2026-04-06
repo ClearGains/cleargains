@@ -16,6 +16,7 @@ import {
   generateSA108Preview,
   buildSection104Pools,
 } from '@/lib/cgt';
+import { Trade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { clsx } from 'clsx';
@@ -35,7 +36,7 @@ function getTaxYears() {
   return years;
 }
 
-function filterTradesByTaxYear(trades: ReturnType<typeof useClearGainsStore>['trades'], taxYear: string) {
+function filterTradesByTaxYear(trades: Trade[], taxYear: string) {
   const [startY, endY] = taxYear.split('/').map(Number);
   const start = new Date(`${startY}-04-06`);
   const end = new Date(`${endY}-04-05T23:59:59`);
