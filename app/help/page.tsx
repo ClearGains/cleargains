@@ -23,7 +23,7 @@ const FAQ = [
   },
   {
     q: 'How does the Trading 212 integration work?',
-    a: 'You provide your Trading 212 API key in a .env.local file (T212_API_KEY=your_key). ClearGains calls the Trading 212 REST API server-side to fetch your portfolio positions and order history. Your API key is never exposed to the browser. You can generate a read-only API key in Trading 212: go to Settings → API (demo or live account).',
+    a: 'Enter your Trading 212 API key in the Settings page. ClearGains calls the Trading 212 REST API server-side to fetch your portfolio positions and order history. Your credentials are stored only in your browser (localStorage) and are sent with each request — never stored on any server. Generate an API key in Trading 212 under Settings → API (demo or live account).',
   },
   {
     q: 'How accurate is the CGT calculator?',
@@ -42,8 +42,8 @@ const FAQ = [
     a: 'Stocks held within a Stocks & Shares ISA are completely sheltered from Capital Gains Tax and Income Tax on dividends. Any gains made inside an ISA do not need to be reported on your Self Assessment. Always mark ISA trades correctly in the Trade Ledger.',
   },
   {
-    q: 'How do I get an Anthropic API key for the AI scanner?',
-    a: 'Sign up at console.anthropic.com to get an API key. Add it as ANTHROPIC_API_KEY in your .env.local file. Without it, the scanner returns simulated signals for demonstration. The AI uses Claude with web search to find recent news about your ticker.',
+    q: 'How does the Stock Scanner work?',
+    a: 'The scanner fetches recent headlines from Yahoo Finance RSS feeds for the ticker you search. It analyses the headlines using keyword sentiment analysis — counting bullish words (beats, surges, upgrade, etc.) and bearish words (misses, drops, downgrade, etc.) — to derive a BUY/SELL/HOLD signal with a confidence score. No API key is required.',
   },
   {
     q: 'What does the Risk Engine measure?',
@@ -55,7 +55,7 @@ const FAQ = [
   },
   {
     q: 'Is my data stored on your servers?',
-    a: 'No. ClearGains stores all data locally in your browser using localStorage (via Zustand persist). Your API keys are stored only in .env.local on your machine. No data is sent to any ClearGains servers — API calls go directly from your browser/server to Trading 212 and Anthropic.',
+    a: 'No. ClearGains stores all data locally in your browser using localStorage (via Zustand persist). Your Trading 212 API key is stored only in your browser. No data is sent to any ClearGains servers — API calls go directly from your browser/server to Trading 212 and Yahoo Finance.',
   },
 ];
 
@@ -65,7 +65,7 @@ const GUIDES = [
     title: 'Getting Started',
     steps: [
       'Select your country on the Onboarding screen',
-      'Optionally add your Trading 212 API key to .env.local',
+      'Go to Settings to connect your Trading 212 account with your API key',
       'Click "Sync with T212" on the Dashboard to import your portfolio',
       'Add or import trades in the Trade Ledger',
       'Use the CGT Calculator to estimate your tax liability',
@@ -96,11 +96,11 @@ const GUIDES = [
     icon: <Zap className="h-5 w-5 text-purple-400" />,
     title: 'AI Scanner',
     steps: [
-      'Enter a ticker symbol and click "Analyse"',
-      'Claude AI searches the web for recent news about the stock',
-      'A BUY/SELL/HOLD signal is generated with risk score and reasoning',
+      'Enter a ticker symbol or company name and click "Scan"',
+      'Recent headlines are fetched from Yahoo Finance RSS (no API key needed)',
+      'Keyword sentiment analysis derives a BUY/SELL/HOLD signal with confidence score',
       'Signals are for educational purposes only — not trading recommendations',
-      'All signals are saved in your session history',
+      'Add tickers to your watchlist for quick re-scanning',
     ],
   },
   {
@@ -171,35 +171,14 @@ export default function HelpPage() {
         <div className="bg-gray-800 rounded-lg px-4 py-3 font-mono text-xs text-gray-300 mb-4 overflow-x-auto">
           <div className="text-gray-500"># cleargains/.env.local</div>
           <div className="mt-2">
-            <span className="text-emerald-400">T212_API_KEY</span>=your_trading212_api_key<br />
-            <span className="text-emerald-400">ANTHROPIC_API_KEY</span>=your_anthropic_api_key<br />
             <span className="text-gray-500"># Optional: for live FX rates</span><br />
             <span className="text-emerald-400">FX_API_KEY</span>=your_exchangerate_api_key
           </div>
         </div>
+        <p className="text-xs text-gray-500 mb-3">
+          No API keys are required for core features. Trading 212 credentials are entered directly in the Settings page and stored in your browser only.
+        </p>
         <div className="space-y-2 text-xs text-gray-500">
-          <div className="flex items-center justify-between">
-            <span>T212_API_KEY</span>
-            <a
-              href="https://www.trading212.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-400 hover:text-blue-300 flex items-center gap-1"
-            >
-              trading212.com → Settings → API <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
-          <div className="flex items-center justify-between">
-            <span>ANTHROPIC_API_KEY</span>
-            <a
-              href="https://console.anthropic.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-400 hover:text-blue-300 flex items-center gap-1"
-            >
-              console.anthropic.com <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
           <div className="flex items-center justify-between">
             <span>FX_API_KEY (optional)</span>
             <a
