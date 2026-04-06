@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck, Bell, BellOff } from 'lucide-react';
+import { Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck, Bell } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
-import { getPermission, subscribeToPush, unsubscribeFromPush, registerServiceWorker } from '@/lib/pushNotifications';
+import { getPermission, requestPermission } from '@/lib/pushNotifications';
 
 export default function SettingsPage() {
   const {
@@ -34,23 +34,19 @@ export default function SettingsPage() {
   const [notifLoading, setNotifLoading] = useState(false);
 
   useEffect(() => {
-    registerServiceWorker();
     setNotifPermission(getPermission());
   }, []);
 
   async function handleEnableNotifications() {
     setNotifLoading(true);
-    const sub = await subscribeToPush();
-    setNotifPermission(getPermission());
+    const result = await requestPermission();
+    setNotifPermission(result);
     setNotifLoading(false);
-    if (!sub) setNotifPermission(Notification.permission);
   }
 
-  async function handleDisableNotifications() {
-    setNotifLoading(true);
-    await unsubscribeFromPush();
-    setNotifPermission(getPermission());
-    setNotifLoading(false);
+  function handleDisableNotifications() {
+    // Browser doesn't allow programmatic revocation — instruct the user
+    setNotifPermission('denied-info');
   }
 
   async function handleSave() {
@@ -207,11 +203,11 @@ export default function SettingsPage() {
         />
 
         {notifPermission === 'unsupported' ? (
-          <p className="text-xs text-gray-500">Push notifications are not supported in this browser.</p>
+          <p className="text-xs text-gray-500">Browser notifications are not supported in this browser.</p>
         ) : notifPermission === 'denied' ? (
           <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5 text-xs text-red-400">
             <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-            Notifications are blocked. Please allow them in your browser&apos;s site settings, then reload.
+            Notifications are blocked. To re-enable, click the lock icon in your browser address bar and allow notifications, then reload the page.
           </div>
         ) : notifPermission === 'granted' ? (
           <div className="space-y-3">
@@ -224,20 +220,14 @@ export default function SettingsPage() {
               <li>Paper trade take-profit or stop-loss hit</li>
               <li>CGT exempt amount within £500 of the £3,000 limit</li>
             </ul>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleDisableNotifications}
-              loading={notifLoading}
-              icon={<BellOff className="h-3.5 w-3.5" />}
-            >
-              Disable Notifications
-            </Button>
+            <p className="text-xs text-gray-600">
+              To disable, click the lock icon in your browser address bar and block notifications.
+            </p>
           </div>
         ) : (
           <div className="space-y-3">
             <p className="text-xs text-gray-400">
-              Enable browser push notifications to get real-time alerts:
+              Enable browser notifications to get real-time alerts:
             </p>
             <ul className="text-xs text-gray-500 space-y-1 list-disc list-inside ml-1">
               <li>BUY/SELL signals with strength &gt; 70%</li>
