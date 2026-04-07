@@ -16,6 +16,7 @@ import {
   Wifi,
   WifiOff,
   FlaskConical,
+  Bookmark,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -23,6 +24,7 @@ import { useClearGainsStore } from '@/lib/store';
 const navLinks = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/scanner', label: 'AI Scanner', icon: Search },
+  { href: '/watchlist', label: 'Watchlist', icon: Bookmark },
   { href: '/demo-trader', label: 'Demo Trader', icon: FlaskConical },
   { href: '/ledger', label: 'Trade Ledger', icon: BookOpen },
   { href: '/cgt', label: 'CGT Calculator', icon: Calculator },

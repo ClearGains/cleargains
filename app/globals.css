@@ -24,3 +24,14 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@keyframes price-flash-up {
+  0%   { background-color: rgba(52, 211, 153, 0.25); }
+  100% { background-color: transparent; }
+}
+@keyframes price-flash-down {
+  0%   { background-color: rgba(248, 113, 113, 0.25); }
+  100% { background-color: transparent; }
+}
+.price-flash-up   { animation: price-flash-up   0.9s ease-out forwards; }
+.price-flash-down { animation: price-flash-down 0.9s ease-out forwards; }

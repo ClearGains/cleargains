@@ -4,13 +4,15 @@ import { useState } from 'react';
 import {
   Search, Newspaper, AlertTriangle, TrendingUp, TrendingDown, Minus,
   Clock, RefreshCw, BookmarkPlus, BookmarkCheck, Trash2, ChevronRight,
-  ShieldCheck, ShieldAlert, ShieldX, Zap,
+  ShieldCheck, ShieldAlert, ShieldX, Zap, ExternalLink, FlaskConical,
+  CheckCircle2, AlertCircle, X,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { ScanResult } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
+import { TickerTooltip } from '@/components/ui/TickerTooltip';
 import { clsx } from 'clsx';
 
 const QUICK_TICKERS = [
@@ -75,6 +77,167 @@ function ConfidenceRing({ score }: { score: number }) {
   );
 }
 
+type PaperBuyState = {
+  ticker: string;
+  companyName: string;
+  t212Ticker: string;
+  sector: string;
+} | null;
+
+function uid() { return Math.random().toString(36).slice(2, 10); }
+
+function PaperBuyModal({
+  stock,
+  onClose,
+}: {
+  stock: NonNullable<PaperBuyState>;
+  onClose: () => void;
+}) {
+  const { paperBudget, demoPositions, addDemoPosition } = useClearGainsStore();
+  const [loading, setLoading] = useState(true);
+  const [price, setPrice] = useState<number | null>(null);
+  const [sizeStr, setSizeStr] = useState('100');
+  const [done, setDone] = useState<{ ok: boolean; message: string } | null>(null);
+
+  // Fetch price on mount
+  useState(() => {
+    fetch('/api/demo-trader/prices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbols: [stock.ticker] }),
+    })
+      .then(r => r.json())
+      .then((d: { prices: Record<string, number> }) => {
+        setPrice(d.prices[stock.ticker] ?? null);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  });
+
+  const size = parseInt(sizeStr.replace(/[^0-9]/g, ''), 10) || 100;
+  const invested = demoPositions.reduce((s, p) => s + p.entryPrice * p.quantity, 0);
+  const available = Math.max(0, paperBudget - invested);
+  const quantity = price && price > 0 ? Math.max(1, Math.floor(size / price)) : 0;
+  const estimatedCost = quantity * (price ?? 0);
+  const sl = price ? price * 0.98 : 0;
+  const tp = price ? price * 1.04 : 0;
+
+  function handleBuy() {
+    if (!price || quantity < 1) return;
+    addDemoPosition({
+      id: uid(),
+      ticker: stock.ticker,
+      t212Ticker: stock.t212Ticker,
+      companyName: stock.companyName,
+      sector: stock.sector,
+      quantity,
+      entryPrice: price,
+      currentPrice: price,
+      stopLoss: sl,
+      takeProfit: tp,
+      pnl: 0,
+      pnlPct: 0,
+      openedAt: new Date().toISOString(),
+      signal: 'Manual buy from scanner',
+    });
+    setDone({ ok: true, message: `Opened paper position: ${quantity}× ${stock.ticker} @ $${price.toFixed(2)}` });
+    setTimeout(onClose, 2000);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm shadow-2xl p-6">
+        <button onClick={onClose} className="absolute right-4 top-4 text-gray-500 hover:text-gray-300">
+          <X className="h-5 w-5" />
+        </button>
+        <div className="flex items-center gap-2 mb-4">
+          <FlaskConical className="h-5 w-5 text-amber-400" />
+          <h2 className="text-base font-semibold text-white">Paper Trade</h2>
+        </div>
+
+        {loading ? (
+          <div className="flex items-center gap-2 text-sm text-gray-400 py-4">
+            <RefreshCw className="h-4 w-4 animate-spin" />
+            Fetching live price…
+          </div>
+        ) : price == null ? (
+          <div className="text-sm text-red-400 py-4">Could not fetch price for {stock.ticker}. Market may be closed.</div>
+        ) : (
+          <>
+            <div className="bg-gray-800/50 rounded-lg p-4 mb-4 space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-gray-400">Stock</span>
+                <span className="text-white font-semibold">{stock.ticker} · {stock.companyName}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Live price</span>
+                <span className="text-white font-mono">${price.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Available budget</span>
+                <span className={clsx('font-mono', available > 0 ? 'text-emerald-400' : 'text-red-400')}>
+                  £{available.toFixed(0)}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Position size</span>
+                <div className="relative">
+                  <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500 text-xs">£</span>
+                  <input
+                    type="text" inputMode="numeric"
+                    value={sizeStr}
+                    onChange={e => setSizeStr(e.target.value.replace(/[^0-9]/g, ''))}
+                    className="w-20 pl-5 pr-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white text-right focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Quantity</span>
+                <span className="text-white font-mono">{quantity} shares</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Est. cost</span>
+                <span className="text-white font-mono">${estimatedCost.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-500">Stop-loss −2%</span>
+                <span className="text-red-400 font-mono">${sl.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-500">Take-profit +4%</span>
+                <span className="text-emerald-400 font-mono">${tp.toFixed(2)}</span>
+              </div>
+            </div>
+
+            {estimatedCost > available && (
+              <div className="text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2 mb-3">
+                Position size exceeds available budget. Reduce size.
+              </div>
+            )}
+
+            {done ? (
+              <div className={clsx('flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs', done.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400')}>
+                {done.ok ? <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
+                {done.message}
+              </div>
+            ) : (
+              <Button
+                onClick={handleBuy}
+                fullWidth
+                disabled={quantity < 1 || estimatedCost > available}
+                icon={<FlaskConical className="h-4 w-4" />}
+              >
+                Open Paper Position
+              </Button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ScannerPage() {
   const {
     signals, addSignal,
@@ -87,6 +250,7 @@ export default function ScannerPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ScanResult | null>(null);
+  const [paperBuyStock, setPaperBuyStock] = useState<PaperBuyState>(null);
 
   async function runScan(q?: string) {
     const target = (q ?? query).trim();
@@ -133,6 +297,10 @@ export default function ScannerPage() {
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto">
+      {paperBuyStock && (
+        <PaperBuyModal stock={paperBuyStock} onClose={() => setPaperBuyStock(null)} />
+      )}
+
       {/* Header */}
       <div className="mb-5">
         <h1 className="text-2xl font-bold text-white flex items-center gap-2">
@@ -233,7 +401,9 @@ export default function ScannerPage() {
                 <div className="flex items-start justify-between mb-4">
                   <div>
                     <div className="flex items-center gap-3 flex-wrap">
-                      <span className="text-2xl font-bold text-white font-mono">{result.ticker}</span>
+                      <TickerTooltip symbol={result.ticker}>
+                        <span className="text-2xl font-bold text-white font-mono">{result.ticker}</span>
+                      </TickerTooltip>
                       <SignalBadge signal={result.signal} />
                       <span className={clsx(
                         'text-xs px-2 py-0.5 rounded border font-medium',
@@ -252,18 +422,34 @@ export default function ScannerPage() {
                       {new Date(result.timestamp).toLocaleString('en-GB')}
                     </p>
                   </div>
-                  <button
-                    onClick={() => isWatched ? removeFromWatchlist(result.ticker) : addToWatchlist(result.ticker)}
-                    className={clsx(
-                      'flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors',
-                      isWatched
-                        ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
-                        : 'text-gray-500 border-gray-700 hover:text-emerald-400 hover:border-emerald-500/30'
+                  <div className="flex items-center gap-2">
+                    {result.signal === 'BUY' && (
+                      <button
+                        onClick={() => setPaperBuyStock({
+                          ticker: result.ticker,
+                          companyName: result.companyName,
+                          t212Ticker: result.ticker + '_US_EQ',
+                          sector: result.market === 'UK' ? 'UK' : 'US',
+                        })}
+                        className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors text-amber-300 border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20"
+                      >
+                        <FlaskConical className="h-3.5 w-3.5" />
+                        Paper BUY
+                      </button>
                     )}
-                  >
-                    {isWatched ? <BookmarkCheck className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
-                    {isWatched ? 'Watching' : 'Watchlist'}
-                  </button>
+                    <button
+                      onClick={() => isWatched ? removeFromWatchlist(result.ticker) : addToWatchlist(result.ticker)}
+                      className={clsx(
+                        'flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors',
+                        isWatched
+                          ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
+                          : 'text-gray-500 border-gray-700 hover:text-emerald-400 hover:border-emerald-500/30'
+                      )}
+                    >
+                      {isWatched ? <BookmarkCheck className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
+                      {isWatched ? 'Watching' : 'Watchlist'}
+                    </button>
+                  </div>
                 </div>
 
                 {/* Metrics row */}
@@ -299,10 +485,23 @@ export default function ScannerPage() {
                   <div className="divide-y divide-gray-800">
                     {result.articles.map((article, i) => (
                       <div key={i} className="py-3 first:pt-0">
-                        <p className="text-sm text-gray-200 font-medium leading-snug mb-1">
-                          {article.headline}
-                        </p>
-                        <p className="text-xs text-gray-500 mb-1.5">{article.summary}</p>
+                        {article.link ? (
+                          <a
+                            href={article.link}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="group"
+                          >
+                            <p className="text-sm text-gray-200 font-medium leading-snug mb-1 group-hover:text-emerald-300 transition-colors flex items-start gap-1.5">
+                              <span className="flex-1">{article.headline}</span>
+                              <ExternalLink className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity text-emerald-400" />
+                            </p>
+                          </a>
+                        ) : (
+                          <p className="text-sm text-gray-200 font-medium leading-snug mb-1">
+                            {article.headline}
+                          </p>
+                        )}
                         <div className="flex items-center gap-2 text-xs text-gray-600">
                           {article.source && <span className="text-gray-500 font-medium">{article.source}</span>}
                           {article.source && article.date && <span>·</span>}

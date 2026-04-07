@@ -78,6 +78,7 @@ export type NewsArticle = {
   source: string;
   date: string;
   summary: string;
+  link?: string;
 };
 
 export type ScanResult = {

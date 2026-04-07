@@ -4,12 +4,13 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FlaskConical, Play, RefreshCw, X,
   CheckCircle2, AlertCircle, ArrowRight,
-  Target, BarChart3, Trophy, Copy, Info, RotateCcw, Wallet,
+  Target, BarChart3, Trophy, Copy, Info, RotateCcw, Wallet, Clock,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { DemoPosition, DemoTrade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { TickerTooltip } from '@/components/ui/TickerTooltip';
 import { clsx } from 'clsx';
 import { sendPush } from '@/lib/pushNotifications';
 
@@ -250,8 +251,12 @@ export default function DemoTraderPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [copyTrade, setCopyTrade] = useState<DemoTrade | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [priceFlash, setPriceFlash] = useState<Record<string, 'up' | 'down' | null>>({});
+  const [lastRefreshed, setLastRefreshed] = useState<number>(0);
+  const [tick, setTick] = useState(0);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const prevPricesRef = useRef<Record<string, number>>({});
 
   const liveEncoded = t212ApiKey && t212ApiSecret
     ? btoa(t212ApiKey + ':' + t212ApiSecret)
@@ -308,9 +313,18 @@ export default function DemoTraderPage() {
       if (!res.ok) return;
       const data = await res.json() as { prices: Record<string, number> };
 
+      // Compute flash states before updating
+      const newFlash: Record<string, 'up' | 'down' | null> = {};
+
       for (const pos of demoPositions) {
         const currentPrice = data.prices[pos.ticker];
         if (!currentPrice || currentPrice <= 0) continue;
+
+        const prevPrice = prevPricesRef.current[pos.ticker];
+        if (prevPrice && prevPrice > 0) {
+          newFlash[pos.ticker] = currentPrice > prevPrice ? 'up' : currentPrice < prevPrice ? 'down' : null;
+        }
+        prevPricesRef.current[pos.ticker] = currentPrice;
 
         const pnl = (currentPrice - pos.entryPrice) * pos.quantity;
         const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
@@ -346,6 +360,13 @@ export default function DemoTraderPage() {
           );
         }
       }
+
+      // Apply flashes, then clear after 900ms
+      if (Object.keys(newFlash).length > 0) {
+        setPriceFlash(newFlash);
+        setTimeout(() => setPriceFlash({}), 900);
+      }
+      setLastRefreshed(Date.now());
     } catch {
       // Ignore refresh errors silently
     } finally {
@@ -353,11 +374,20 @@ export default function DemoTraderPage() {
     }
   }, [demoPositions, updateDemoPosition, addDemoTrade, removeDemoPosition]);
 
-  // 5-minute background price check
+  // 60-second background price refresh
   useEffect(() => {
-    intervalRef.current = setInterval(() => refreshPrices(true), 5 * 60 * 1000);
+    intervalRef.current = setInterval(() => refreshPrices(true), 60_000);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [refreshPrices]);
+
+  // 1-second tick for countdown display
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const secondsAgo = lastRefreshed > 0 ? Math.floor((Date.now() - lastRefreshed) / 1000) : null;
+  void tick; // used only to trigger re-render for countdown
 
   // ── Run strategy ───────────────────────────────────────────────────────────
   async function runStrategy() {
@@ -742,7 +772,7 @@ export default function DemoTraderPage() {
                   </>
                 )}
                 <div className="flex justify-between"><span>Max positions / run</span><span>3 (top BUY signals)</span></div>
-                <div className="flex justify-between"><span>Price refresh</span><span>every 5 min</span></div>
+                <div className="flex justify-between"><span>Price refresh</span><span>every 60s</span></div>
               </div>
             </div>
           </Card>
@@ -827,14 +857,22 @@ export default function DemoTraderPage() {
               icon={<FlaskConical className="h-4 w-4" />}
               action={
                 demoPositions.length > 0 ? (
-                  <button
-                    onClick={() => refreshPrices(false)}
-                    disabled={refreshing}
-                    className="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1"
-                  >
-                    <RefreshCw className={clsx('h-3 w-3', refreshing && 'animate-spin')} />
-                    Refresh
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {secondsAgo !== null && (
+                      <span className="text-[10px] text-gray-600 flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {secondsAgo < 5 ? 'Just updated' : `${secondsAgo}s ago`}
+                      </span>
+                    )}
+                    <button
+                      onClick={() => refreshPrices(false)}
+                      disabled={refreshing}
+                      className="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1"
+                    >
+                      <RefreshCw className={clsx('h-3 w-3', refreshing && 'animate-spin')} />
+                      Refresh
+                    </button>
+                  </div>
                 ) : undefined
               }
             />
@@ -861,12 +899,17 @@ export default function DemoTraderPage() {
                     {demoPositions.map(pos => (
                       <tr key={pos.id} className="border-b border-gray-800/50">
                         <td className="py-1.5 pr-3">
-                          <p className="font-semibold text-white">{pos.ticker}</p>
+                          <TickerTooltip symbol={pos.ticker}>
+                            <p className="font-semibold text-white">{pos.ticker}</p>
+                          </TickerTooltip>
                           <p className="text-gray-600">{hoursAgo(pos.openedAt)}</p>
                         </td>
                         <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{pos.quantity}</td>
                         <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtUSD(pos.entryPrice)}</td>
-                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtUSD(pos.currentPrice)}</td>
+                        <td className={clsx('py-1.5 pr-3 text-right font-mono text-gray-300 rounded',
+                          priceFlash[pos.ticker] === 'up' ? 'price-flash-up' :
+                          priceFlash[pos.ticker] === 'down' ? 'price-flash-down' : ''
+                        )}>{fmtUSD(pos.currentPrice)}</td>
                         <td className="py-1.5 pr-3 text-right font-mono text-red-400">{fmtUSD(pos.stopLoss)}</td>
                         <td className="py-1.5 pr-3 text-right font-mono text-emerald-400">{fmtUSD(pos.takeProfit)}</td>
                         <td className={clsx('py-1.5 pr-3 text-right font-mono font-semibold', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>

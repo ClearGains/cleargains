@@ -188,6 +188,7 @@ export async function POST(request: NextRequest) {
     source: item.source || 'Yahoo Finance',
     date: formatDate(item.pubDate),
     summary: buildSummary(item.title),
+    link: item.link || undefined,
   }));
 
   const result: ScanResult = {
