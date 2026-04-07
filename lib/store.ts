@@ -14,6 +14,20 @@ import {
 } from './types';
 import { DEFAULT_COUNTRY } from './countries';
 
+// ── Dedicated localStorage keys for paper trading (belt-and-suspenders) ──────
+const LS_POSITIONS = 'paper_positions';
+const LS_TRADES    = 'paper_trades';
+const LS_BUDGET    = 'paper_budget';
+
+function lsWrite(key: string, value: unknown) {
+  if (typeof localStorage === 'undefined') return;
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+function lsRemove(...keys: string[]) {
+  if (typeof localStorage === 'undefined') return;
+  keys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+}
+
 interface ClearGainsState {
   // Onboarding
   selectedCountry: Country;
@@ -87,6 +101,9 @@ interface ClearGainsState {
   addDemoTrade: (trade: DemoTrade) => void;
   setPaperBudget: (n: number) => void;
   resetPaperAccount: () => void;
+  // Restore actions — called on page mount to rehydrate from dedicated LS keys
+  setPaperPositions: (positions: DemoPosition[]) => void;
+  setPaperTrades: (trades: DemoTrade[]) => void;
   reset: () => void;
 }
 
@@ -190,28 +207,61 @@ export const useClearGainsStore = create<ClearGainsState>()(
       setT212DemoCredentials: (key, secret) =>
         set({ t212DemoApiKey: key, t212DemoApiSecret: secret }),
 
-      clearT212DemoCredentials: () =>
-        set({ t212DemoApiKey: '', t212DemoApiSecret: '', demoPositions: [], demoTrades: [] }),
+      clearT212DemoCredentials: () => {
+        lsRemove(LS_POSITIONS, LS_TRADES);
+        set({ t212DemoApiKey: '', t212DemoApiSecret: '', demoPositions: [], demoTrades: [] });
+      },
 
       addDemoPosition: (pos) =>
-        set((state) => ({ demoPositions: [...state.demoPositions, pos] })),
+        set((state) => {
+          const positions = [...state.demoPositions, pos];
+          lsWrite(LS_POSITIONS, positions);
+          return { demoPositions: positions };
+        }),
 
       removeDemoPosition: (id) =>
-        set((state) => ({ demoPositions: state.demoPositions.filter((p) => p.id !== id) })),
+        set((state) => {
+          const positions = state.demoPositions.filter((p) => p.id !== id);
+          lsWrite(LS_POSITIONS, positions);
+          return { demoPositions: positions };
+        }),
 
       updateDemoPosition: (id, update) =>
-        set((state) => ({
-          demoPositions: state.demoPositions.map((p) => p.id === id ? { ...p, ...update } : p),
-        })),
+        set((state) => {
+          const positions = state.demoPositions.map((p) => p.id === id ? { ...p, ...update } : p);
+          lsWrite(LS_POSITIONS, positions);
+          return { demoPositions: positions };
+        }),
 
       addDemoTrade: (trade) =>
-        set((state) => ({ demoTrades: [trade, ...state.demoTrades].slice(0, 100) })),
+        set((state) => {
+          const trades = [trade, ...state.demoTrades].slice(0, 100);
+          lsWrite(LS_TRADES, trades);
+          return { demoTrades: trades };
+        }),
 
-      setPaperBudget: (n) => set({ paperBudget: n }),
+      setPaperBudget: (n) => {
+        lsWrite(LS_BUDGET, n);
+        set({ paperBudget: n });
+      },
 
-      resetPaperAccount: () => set({ demoPositions: [], demoTrades: [] }),
+      resetPaperAccount: () => {
+        lsRemove(LS_POSITIONS, LS_TRADES);
+        set({ demoPositions: [], demoTrades: [] });
+      },
 
-      reset: () =>
+      setPaperPositions: (positions) => {
+        lsWrite(LS_POSITIONS, positions);
+        set({ demoPositions: positions });
+      },
+
+      setPaperTrades: (trades) => {
+        lsWrite(LS_TRADES, trades);
+        set({ demoTrades: trades });
+      },
+
+      reset: () => {
+        lsRemove(LS_POSITIONS, LS_TRADES, LS_BUDGET);
         set({
           selectedCountry: DEFAULT_COUNTRY,
           hasOnboarded: false,
@@ -236,7 +286,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
           demoPositions: [],
           demoTrades: [],
           paperBudget: 1000,
-        }),
+        });
+      },
     }),
     {
       name: 'cleargains-storage',

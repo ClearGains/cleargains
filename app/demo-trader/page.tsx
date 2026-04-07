@@ -232,6 +232,7 @@ export default function DemoTraderPage() {
     demoPositions, demoTrades,
     paperBudget, setPaperBudget, resetPaperAccount,
     addDemoPosition, removeDemoPosition, updateDemoPosition, addDemoTrade,
+    setPaperPositions, setPaperTrades,
   } = useClearGainsStore();
 
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
@@ -257,6 +258,28 @@ export default function DemoTraderPage() {
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevPricesRef = useRef<Record<string, number>>({});
+
+  // ── Restore paper state from dedicated localStorage keys on mount ──────────
+  useEffect(() => {
+    try {
+      const rawPos = localStorage.getItem('paper_positions');
+      const rawTrades = localStorage.getItem('paper_trades');
+      const rawBudget = localStorage.getItem('paper_budget');
+      if (rawPos) {
+        const positions = JSON.parse(rawPos) as DemoPosition[];
+        if (Array.isArray(positions) && positions.length > 0) setPaperPositions(positions);
+      }
+      if (rawTrades) {
+        const trades = JSON.parse(rawTrades) as DemoTrade[];
+        if (Array.isArray(trades) && trades.length > 0) setPaperTrades(trades);
+      }
+      if (rawBudget) {
+        const budget = Number(JSON.parse(rawBudget));
+        if (budget > 0) { setPaperBudget(budget); setBudgetStr(String(budget)); }
+      }
+    } catch { /* ignore parse errors */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const liveEncoded = t212ApiKey && t212ApiSecret
     ? btoa(t212ApiKey + ':' + t212ApiSecret)
