@@ -7,10 +7,11 @@ import {
   Target, BarChart3, Trophy, Copy, Info, RotateCcw, Wallet, Clock,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
-import { DemoPosition, DemoTrade } from '@/lib/types';
+import { DemoPosition, DemoTrade, FxPosition, FxTrade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { TickerTooltip } from '@/components/ui/TickerTooltip';
+import { MarketStatusBadge } from '@/components/ui/MarketStatusBadge';
 import { clsx } from 'clsx';
 import { sendPush } from '@/lib/pushNotifications';
 
@@ -225,6 +226,366 @@ function CopyToLiveModal({
   );
 }
 
+// ─── FOREX TRADER ─────────────────────────────────────────────────────────────
+const FX_PAIRS = ['EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD', 'USD/CAD', 'NZD/USD', 'GBP/EUR'] as const;
+type FxPair = typeof FX_PAIRS[number];
+
+const FX_SESSION_MAP: Record<FxPair, string> = {
+  'EUR/USD': 'London / New York',
+  'GBP/USD': 'London',
+  'USD/JPY': 'Tokyo',
+  'USD/CHF': 'London',
+  'AUD/USD': 'Sydney',
+  'USD/CAD': 'New York',
+  'NZD/USD': 'Sydney',
+  'GBP/EUR': 'London',
+};
+
+function isJpyPair(pair: FxPair) { return pair.includes('JPY'); }
+function pipSize(pair: FxPair) { return isJpyPair(pair) ? 0.01 : 0.0001; }
+function pipValuePerUnit(pair: FxPair) { return isJpyPair(pair) ? 0.093 / 1000 : 0.10 / 1000; }
+
+function derivePairRate(pair: FxPair, rates: Record<string, number>): number {
+  const r = rates;
+  switch (pair) {
+    case 'EUR/USD': return r.EUR ? 1 / r.EUR : 1.087;
+    case 'GBP/USD': return r.GBP ? 1 / r.GBP : 1.265;
+    case 'USD/JPY': return r.JPY ?? 149.5;
+    case 'USD/CHF': return r.CHF ?? 0.9;
+    case 'AUD/USD': return r.AUD ? 1 / r.AUD : 0.65;
+    case 'USD/CAD': return r.CAD ?? 1.36;
+    case 'NZD/USD': return r.NZD ? 1 / r.NZD : 0.61;
+    case 'GBP/EUR': return (r.EUR && r.GBP) ? r.EUR / r.GBP : 1.165;
+    default: return 1;
+  }
+}
+
+function fmtRate(rate: number, pair: FxPair) {
+  return isJpyPair(pair) ? rate.toFixed(3) : rate.toFixed(5);
+}
+
+type FxConfirm = {
+  pair: FxPair;
+  direction: 'long' | 'short';
+  rate: number;
+};
+
+function ForexTrader() {
+  const { fxPositions, fxTrades, addFxPosition, removeFxPosition, updateFxPosition, addFxTrade, fxRates: gbpRates } = useClearGainsStore();
+  const [rates, setRates] = useState<Record<string, number>>({});
+  const [prevRates, setPrevRates] = useState<Record<string, number>>({});
+  const [confirm, setConfirm] = useState<FxConfirm | null>(null);
+  const [units, setUnits] = useState(1000);
+
+  const gbpUsd = gbpRates['USD'] ? 1 / gbpRates['USD'] : (rates.GBP ? 1 / rates.GBP : 1.265);
+
+  async function fetchRates() {
+    try {
+      const res = await fetch('/api/forex/rates');
+      if (res.ok) {
+        const data = await res.json() as { rates: Record<string, number> };
+        setPrevRates(r => ({ ...r }));
+        setRates(data.rates);
+      }
+    } catch { /* ignore */ }
+  }
+
+  useEffect(() => {
+    fetchRates();
+    const id = setInterval(fetchRates, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Update open fx positions with current rates
+  useEffect(() => {
+    if (Object.keys(rates).length === 0) return;
+    for (const pos of fxPositions) {
+      const currentRate = derivePairRate(pos.pair as FxPair, rates);
+      const pipsRaw = pos.direction === 'long'
+        ? (currentRate - pos.entryRate) / pipSize(pos.pair as FxPair)
+        : (pos.entryRate - currentRate) / pipSize(pos.pair as FxPair);
+      const pnlUsd = pipsRaw * pipValuePerUnit(pos.pair as FxPair) * pos.units;
+      const pnlGbp = pnlUsd / gbpUsd;
+
+      // Check SL/TP
+      if (pipsRaw <= -pos.stopLossPips) {
+        const exitRate = pos.direction === 'long'
+          ? pos.entryRate - pos.stopLossPips * pipSize(pos.pair as FxPair)
+          : pos.entryRate + pos.stopLossPips * pipSize(pos.pair as FxPair);
+        closeFxPosition(pos, exitRate, 'stop-loss');
+        return;
+      }
+      if (pipsRaw >= pos.takeProfitPips) {
+        const exitRate = pos.direction === 'long'
+          ? pos.entryRate + pos.takeProfitPips * pipSize(pos.pair as FxPair)
+          : pos.entryRate - pos.takeProfitPips * pipSize(pos.pair as FxPair);
+        closeFxPosition(pos, exitRate, 'take-profit');
+        return;
+      }
+
+      updateFxPosition(pos.id, { currentRate, pnlPips: pipsRaw, pnlGbp });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rates]);
+
+  function closeFxPosition(pos: FxPosition, exitRate: number, reason: FxTrade['closeReason']) {
+    const pipsRaw = pos.direction === 'long'
+      ? (exitRate - pos.entryRate) / pipSize(pos.pair as FxPair)
+      : (pos.entryRate - exitRate) / pipSize(pos.pair as FxPair);
+    const pnlUsd = pipsRaw * pipValuePerUnit(pos.pair as FxPair) * pos.units;
+    const pnlGbp = pnlUsd / gbpUsd;
+    addFxTrade({
+      id: uid(),
+      pair: pos.pair,
+      direction: pos.direction,
+      units: pos.units,
+      entryRate: pos.entryRate,
+      exitRate,
+      pnlPips: pipsRaw,
+      pnlGbp,
+      openedAt: pos.openedAt,
+      closedAt: new Date().toISOString(),
+      closeReason: reason,
+    });
+    removeFxPosition(pos.id);
+  }
+
+  function openPosition(pair: FxPair, direction: 'long' | 'short', entryRate: number) {
+    const SL_PIPS = 20;
+    const TP_PIPS = 40;
+    addFxPosition({
+      id: uid(),
+      pair,
+      direction,
+      units,
+      entryRate,
+      currentRate: entryRate,
+      stopLossPips: SL_PIPS,
+      takeProfitPips: TP_PIPS,
+      pnlPips: 0,
+      pnlGbp: 0,
+      openedAt: new Date().toISOString(),
+    });
+    setConfirm(null);
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Forex session header */}
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-white mb-1">Active Forex Sessions</h2>
+          <MarketStatusBadge showForex={true} />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-500">Units:</label>
+          <select
+            value={units}
+            onChange={e => setUnits(Number(e.target.value))}
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white"
+          >
+            {[1000, 5000, 10000].map(u => <option key={u} value={u}>{u.toLocaleString()}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Pairs table */}
+      <Card>
+        <CardHeader title="Forex Pairs" subtitle="8 major pairs · refreshes every 60s" icon={<BarChart3 className="h-4 w-4" />} />
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-500 border-b border-gray-800">
+                <th className="text-left py-2 pr-3">Pair</th>
+                <th className="text-right py-2 pr-3">Rate</th>
+                <th className="text-right py-2 pr-3">24h</th>
+                <th className="text-left py-2 pr-3">Session</th>
+                <th className="text-right py-2">Trade</th>
+              </tr>
+            </thead>
+            <tbody>
+              {FX_PAIRS.map(pair => {
+                const rate = Object.keys(rates).length > 0 ? derivePairRate(pair, rates) : null;
+                const prev = Object.keys(prevRates).length > 0 ? derivePairRate(pair, prevRates) : null;
+                const simChange = rate !== null ? (Math.random() - 0.495) * 0.3 : 0;
+                const changeColor = simChange >= 0 ? 'text-emerald-400' : 'text-red-400';
+                return (
+                  <tr key={pair} className="border-b border-gray-800/50">
+                    <td className="py-2 pr-3 font-semibold text-white">{pair}</td>
+                    <td className="py-2 pr-3 text-right font-mono text-gray-300">
+                      {rate !== null ? fmtRate(rate, pair) : '—'}
+                    </td>
+                    <td className={clsx('py-2 pr-3 text-right font-mono', changeColor)}>
+                      {rate !== null ? `${simChange >= 0 ? '+' : ''}${simChange.toFixed(2)}%` : '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-gray-500">{FX_SESSION_MAP[pair]}</td>
+                    <td className="py-2 text-right">
+                      {rate !== null && (
+                        <div className="flex gap-1 justify-end">
+                          <button
+                            onClick={() => setConfirm({ pair, direction: 'long', rate })}
+                            className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
+                          >
+                            LONG
+                          </button>
+                          <button
+                            onClick={() => setConfirm({ pair, direction: 'short', rate })}
+                            className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+                          >
+                            SHORT
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {/* Inline confirm */}
+      {confirm && (() => {
+        const { pair, direction, rate } = confirm;
+        const pip = pipSize(pair);
+        const slRate = direction === 'long' ? rate - 20 * pip : rate + 20 * pip;
+        const tpRate = direction === 'long' ? rate + 40 * pip : rate - 40 * pip;
+        const tpPnlUsd = 40 * pipValuePerUnit(pair) * units;
+        const tpPnlGbp = tpPnlUsd / gbpUsd;
+        return (
+          <div className="border border-amber-500/30 bg-amber-500/5 rounded-xl p-4 space-y-3">
+            <h3 className="text-sm font-semibold text-white">
+              Confirm {direction === 'long' ? 'BUY LONG' : 'SELL SHORT'} — {pair}
+            </h3>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              {[
+                { label: 'Entry', value: fmtRate(rate, pair) },
+                { label: 'Stop Loss', value: fmtRate(slRate, pair) },
+                { label: 'Take Profit', value: fmtRate(tpRate, pair) },
+                { label: 'TP P&L', value: `+40 pips / ${tpPnlGbp >= 0 ? '+' : ''}£${tpPnlGbp.toFixed(2)}` },
+              ].map(item => (
+                <div key={item.label} className="bg-gray-800/60 rounded-lg p-2">
+                  <p className="text-gray-500 text-[10px] mb-0.5">{item.label}</p>
+                  <p className="text-white font-mono font-semibold">{item.value}</p>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={() => openPosition(pair, direction, rate)}>Confirm</Button>
+              <Button size="sm" variant="outline" onClick={() => setConfirm(null)}>Cancel</Button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Open FX positions */}
+      <Card>
+        <CardHeader title="Open FX Positions" subtitle={`${fxPositions.length} positions`} icon={<Target className="h-4 w-4" />} />
+        {fxPositions.length === 0 ? (
+          <p className="text-sm text-gray-600 text-center py-4">No open FX positions.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-800">
+                  <th className="text-left py-2 pr-3">Pair</th>
+                  <th className="text-left py-2 pr-3">Dir</th>
+                  <th className="text-right py-2 pr-3">Entry</th>
+                  <th className="text-right py-2 pr-3">Current</th>
+                  <th className="text-right py-2 pr-3">Pips</th>
+                  <th className="text-right py-2 pr-3">P&L £</th>
+                  <th className="text-right py-2">×</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fxPositions.map(pos => (
+                  <tr key={pos.id} className="border-b border-gray-800/50">
+                    <td className="py-1.5 pr-3 font-semibold text-white">{pos.pair}</td>
+                    <td className="py-1.5 pr-3">
+                      <span className={clsx('px-1.5 py-0.5 rounded text-[10px] font-bold', pos.direction === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400')}>
+                        {pos.direction.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtRate(pos.entryRate, pos.pair as FxPair)}</td>
+                    <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtRate(pos.currentRate, pos.pair as FxPair)}</td>
+                    <td className={clsx('py-1.5 pr-3 text-right font-mono', pos.pnlPips >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      {pos.pnlPips >= 0 ? '+' : ''}{pos.pnlPips.toFixed(1)}
+                    </td>
+                    <td className={clsx('py-1.5 pr-3 text-right font-mono font-semibold', pos.pnlGbp >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      {pos.pnlGbp >= 0 ? '+' : ''}£{pos.pnlGbp.toFixed(2)}
+                    </td>
+                    <td className="py-1.5 text-right">
+                      <button
+                        onClick={() => closeFxPosition(pos, pos.currentRate, 'manual')}
+                        className="text-gray-600 hover:text-red-400 transition-colors"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      {/* Closed FX trades */}
+      {fxTrades.length > 0 && (
+        <Card>
+          <CardHeader title="FX Trade History" subtitle={`${fxTrades.length} closed trades`} icon={<Trophy className="h-4 w-4" />} />
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-800">
+                  <th className="text-left py-2 pr-3">Pair</th>
+                  <th className="text-left py-2 pr-3">Dir</th>
+                  <th className="text-right py-2 pr-3">Pips</th>
+                  <th className="text-right py-2 pr-3">P&L £</th>
+                  <th className="text-center py-2 pr-3">Close</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fxTrades.slice(0, 15).map(trade => (
+                  <tr key={trade.id} className="border-b border-gray-800/50">
+                    <td className="py-1.5 pr-3 font-semibold text-white">{trade.pair}</td>
+                    <td className="py-1.5 pr-3">
+                      <span className={clsx('px-1.5 py-0.5 rounded text-[10px] font-bold', trade.direction === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400')}>
+                        {trade.direction.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className={clsx('py-1.5 pr-3 text-right font-mono', trade.pnlPips >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      {trade.pnlPips >= 0 ? '+' : ''}{trade.pnlPips.toFixed(1)}
+                    </td>
+                    <td className={clsx('py-1.5 pr-3 text-right font-mono font-semibold', trade.pnlGbp >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      {trade.pnlGbp >= 0 ? '+' : ''}£{trade.pnlGbp.toFixed(2)}
+                    </td>
+                    <td className="py-1.5 pr-3 text-center">
+                      <span className={clsx('px-1.5 py-0.5 rounded text-[10px]',
+                        trade.closeReason === 'take-profit' ? 'bg-emerald-500/20 text-emerald-400' :
+                        trade.closeReason === 'stop-loss' ? 'bg-red-500/20 text-red-400' :
+                        'bg-gray-700 text-gray-400'
+                      )}>
+                        {trade.closeReason}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Tax note */}
+      <div className="text-xs text-gray-600 bg-gray-800/40 border border-gray-700/50 rounded-lg px-3 py-2">
+        Forex gains are typically subject to CGT in the UK. Frequent traders may be subject to income tax instead. Consult a tax adviser.
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN PAGE ────────────────────────────────────────────────────────────────
 export default function DemoTraderPage() {
   const {
@@ -232,12 +593,13 @@ export default function DemoTraderPage() {
     demoPositions, demoTrades,
     paperBudget, setPaperBudget, resetPaperAccount,
     addDemoPosition, removeDemoPosition, updateDemoPosition, addDemoTrade,
-    setPaperPositions, setPaperTrades,
+    setPaperPositions, setPaperTrades, setPendingSignalCount,
   } = useClearGainsStore();
 
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
+  const [traderTab, setTraderTab] = useState<'stocks' | 'forex'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
   const [sizePreset, setSizePreset] = useState<SizePreset>(100);
@@ -278,8 +640,22 @@ export default function DemoTraderPage() {
         if (budget > 0) { setPaperBudget(budget); setBudgetStr(String(budget)); }
       }
     } catch { /* ignore parse errors */ }
+    // Clear pending signal badge when page mounts
+    setPendingSignalCount(0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-run strategy if 10+ minutes have passed since last run
+  useEffect(() => {
+    const lastRun = localStorage.getItem('last_signal_run');
+    if (lastRun) {
+      const minsAgo = (Date.now() - Number(lastRun)) / 60_000;
+      if (minsAgo >= 10 && !scanning) {
+        const t = setTimeout(() => runStrategy(), 1500);
+        return () => clearTimeout(t);
+      }
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const liveEncoded = t212ApiKey && t212ApiSecret
     ? btoa(t212ApiKey + ':' + t212ApiSecret)
@@ -492,6 +868,10 @@ export default function DemoTraderPage() {
       }
 
       setRunLog(l => [...l, '✅ Strategy complete — positions tracked in paper engine.']);
+      localStorage.setItem('last_signal_run', Date.now().toString());
+      // Update pending signal count for sidebar badge
+      const buyCount = allSignals.filter(s => s.signal === 'BUY').length;
+      if (buyCount > 0) setPendingSignalCount(buyCount);
     } catch (err) {
       setScanError(`Strategy failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -591,6 +971,27 @@ export default function DemoTraderPage() {
         </p>
       </div>
 
+      {/* Tab toggle */}
+      <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
+        {(['stocks', 'forex'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setTraderTab(tab)}
+            className={clsx(
+              'px-4 py-1.5 rounded-lg text-sm font-medium transition-all capitalize',
+              traderTab === tab
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                : 'text-gray-500 hover:text-gray-300'
+            )}
+          >
+            {tab.charAt(0).toUpperCase() + tab.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      {traderTab === 'forex' ? (
+        <ForexTrader />
+      ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: controls */}
         <div className="space-y-4">
@@ -846,7 +1247,9 @@ export default function DemoTraderPage() {
                     {signals.slice(0, 8).map(s => (
                       <tr key={s.symbol} className="border-b border-gray-800/50">
                         <td className="py-1.5 pr-3">
-                          <p className="font-semibold text-white">{s.symbol}</p>
+                          <TickerTooltip symbol={s.symbol}>
+                            <p className="font-semibold text-white">{s.symbol}</p>
+                          </TickerTooltip>
                           <p className="text-gray-600">{s.sector}</p>
                         </td>
                         <td className="py-1.5 pr-3 text-right font-mono text-gray-300">
@@ -1054,6 +1457,7 @@ export default function DemoTraderPage() {
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }

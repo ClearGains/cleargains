@@ -80,10 +80,22 @@ const BEARISH = [
   'underweight', 'bearish', 'negative', 'lower', 'down', 'below',
 ];
 
-function formatDate(dateStr: string): string {
+function formatRelativeDate(dateStr: string): string {
   if (!dateStr) return '';
   try {
-    return new Date(dateStr).toISOString().slice(0, 10);
+    const date = new Date(dateStr);
+    const diffMs = Date.now() - date.getTime();
+    const diffDays = diffMs / 86_400_000;
+    if (diffDays < 7) {
+      const diffMins = Math.floor(diffMs / 60_000);
+      if (diffMins < 60) return `${diffMins}m ago`;
+      const diffHrs = Math.floor(diffMs / 3_600_000);
+      if (diffHrs < 24) return `${diffHrs}h ago`;
+      return `${Math.floor(diffDays)}d ago`;
+    }
+    const diffWeeks = Math.floor(diffDays / 7);
+    if (diffWeeks < 5) return `${diffWeeks} week${diffWeeks !== 1 ? 's' : ''} ago`;
+    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   } catch {
     return dateStr.slice(0, 10);
   }
@@ -113,6 +125,7 @@ export async function POST(request: NextRequest) {
 
   let rawItems: RawItem[] = [];
   let fetchError: string | null = null;
+  let isFallback = false;
 
   try {
     const res = await fetch(rssUrl, {
@@ -126,6 +139,39 @@ export async function POST(request: NextRequest) {
     }
   } catch (err) {
     fetchError = err instanceof Error ? err.message : String(err);
+  }
+
+  // Fallback to Finnhub company news if Yahoo returned nothing
+  const finnhubKey = process.env.FINNHUB_API_KEY;
+  if (rawItems.length === 0 && finnhubKey) {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const threeMonthsAgo = new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10);
+      const fRes = await fetch(
+        `https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(ticker)}&from=${threeMonthsAgo}&to=${today}&token=${finnhubKey}`,
+        { signal: AbortSignal.timeout(8000) }
+      );
+      if (fRes.ok) {
+        const fData = await fRes.json() as Array<{ headline: string; source: string; datetime: number; url: string }>;
+        if (Array.isArray(fData) && fData.length > 0) {
+          rawItems = fData.slice(0, 12).map(item => ({
+            title: item.headline,
+            source: item.source,
+            pubDate: new Date(item.datetime * 1000).toISOString(),
+            link: item.url,
+          }));
+          isFallback = true;
+        } else {
+          isFallback = true;
+        }
+      } else {
+        isFallback = true;
+      }
+    } catch {
+      isFallback = true;
+    }
+  } else if (rawItems.length === 0) {
+    isFallback = true;
   }
 
   // Sentiment analysis
@@ -180,13 +226,14 @@ export async function POST(request: NextRequest) {
       signal === 'BUY' ? `predominantly bullish (${bullishCount} positive vs ${bearishCount} negative indicators)`
       : signal === 'SELL' ? `predominantly bearish (${bearishCount} negative vs ${bullishCount} positive indicators)`
       : `mixed (${bullishCount} positive, ${bearishCount} negative indicators)`;
-    reasoning = `Based on ${rawItems.length} recent news article${rawItems.length !== 1 ? 's' : ''} from ${sourceList.join(', ') || 'various sources'}, headline sentiment is ${sentimentDesc}. Confidence is ${confidence}% — ${confidence >= 70 ? 'headlines show clear directional agreement' : confidence >= 50 ? 'some directional agreement in headlines' : 'limited signal — few headlines found'}.`;
+    const fallbackNote = isFallback ? ' No recent news found — showing most recent available articles.' : '';
+    reasoning = `Based on ${rawItems.length} recent news article${rawItems.length !== 1 ? 's' : ''} from ${sourceList.join(', ') || 'various sources'}, headline sentiment is ${sentimentDesc}. Confidence is ${confidence}% — ${confidence >= 70 ? 'headlines show clear directional agreement' : confidence >= 50 ? 'some directional agreement in headlines' : 'limited signal — few headlines found'}.${fallbackNote}`;
   }
 
   const articles: NewsArticle[] = rawItems.slice(0, 5).map((item) => ({
     headline: item.title,
     source: item.source || 'Yahoo Finance',
-    date: formatDate(item.pubDate),
+    date: formatRelativeDate(item.pubDate),
     summary: buildSummary(item.title),
     link: item.link || undefined,
   }));
@@ -202,6 +249,7 @@ export async function POST(request: NextRequest) {
     market,
     articles,
     timestamp: new Date().toISOString(),
+    noRecentNews: isFallback,
   };
 
   return NextResponse.json(result);

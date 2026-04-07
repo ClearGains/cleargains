@@ -92,6 +92,35 @@ export type ScanResult = {
   market: 'US' | 'UK' | 'OTHER';
   articles: NewsArticle[];
   timestamp: string;
+  noRecentNews?: boolean;
+};
+
+export type FxPosition = {
+  id: string;
+  pair: string;
+  direction: 'long' | 'short';
+  units: number;
+  entryRate: number;
+  currentRate: number;
+  stopLossPips: number;
+  takeProfitPips: number;
+  pnlPips: number;
+  pnlGbp: number;
+  openedAt: string;
+};
+
+export type FxTrade = {
+  id: string;
+  pair: string;
+  direction: 'long' | 'short';
+  units: number;
+  entryRate: number;
+  exitRate: number;
+  pnlPips: number;
+  pnlGbp: number;
+  openedAt: string;
+  closedAt: string;
+  closeReason: 'stop-loss' | 'take-profit' | 'manual';
 };
 
 export type T212Account = {

@@ -482,6 +482,12 @@ export default function ScannerPage() {
                     subtitle={`${result.articles.length} articles informing this signal`}
                     icon={<Newspaper className="h-4 w-4" />}
                   />
+                  {result.noRecentNews && (
+                    <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400">
+                      <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+                      No recent news found — showing most relevant available articles
+                    </div>
+                  )}
                   <div className="divide-y divide-gray-800">
                     {result.articles.map((article, i) => (
                       <div key={i} className="py-3 first:pt-0">

@@ -38,13 +38,15 @@ const navLinks = [
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { t212Connected, t212AccountType, t212LastSync } = useClearGainsStore();
+  const { t212Connected, t212AccountType, t212LastSync, pendingSignalCount } = useClearGainsStore();
 
   return (
     <aside className="hidden xl:flex flex-col w-56 flex-shrink-0 bg-gray-950 border-r border-gray-800 min-h-screen sticky top-14 h-[calc(100vh-3.5rem)]">
       <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
         {navLinks.map(({ href, label, icon: Icon }) => {
           const isActive = pathname === href || pathname.startsWith(href + '/');
+          const isDemoTrader = href === '/demo-trader';
+          const showBadge = isDemoTrader && pendingSignalCount > 0;
           return (
             <Link
               key={href}
@@ -62,7 +64,12 @@ export function Sidebar() {
                   isActive ? 'text-emerald-400' : 'text-gray-600'
                 )}
               />
-              {label}
+              <span className="flex-1">{label}</span>
+              {showBadge && (
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">
+                  {pendingSignalCount}
+                </span>
+              )}
             </Link>
           );
         })}

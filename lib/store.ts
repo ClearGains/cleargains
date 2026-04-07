@@ -11,6 +11,8 @@ import {
   T212Position,
   DemoPosition,
   DemoTrade,
+  FxPosition,
+  FxTrade,
 } from './types';
 import { DEFAULT_COUNTRY } from './countries';
 
@@ -72,6 +74,13 @@ interface ClearGainsState {
   demoTrades: DemoTrade[];
   paperBudget: number;
 
+  // FX Trading
+  fxPositions: FxPosition[];
+  fxTrades: FxTrade[];
+
+  // In-memory only (not persisted)
+  pendingSignalCount: number;
+
   // Actions
   setCountry: (country: Country) => void;
   setHasOnboarded: (v: boolean) => void;
@@ -104,6 +113,12 @@ interface ClearGainsState {
   // Restore actions — called on page mount to rehydrate from dedicated LS keys
   setPaperPositions: (positions: DemoPosition[]) => void;
   setPaperTrades: (trades: DemoTrade[]) => void;
+  // FX actions
+  addFxPosition: (pos: FxPosition) => void;
+  removeFxPosition: (id: string) => void;
+  updateFxPosition: (id: string, update: Partial<FxPosition>) => void;
+  addFxTrade: (trade: FxTrade) => void;
+  setPendingSignalCount: (n: number) => void;
   reset: () => void;
 }
 
@@ -133,6 +148,9 @@ export const useClearGainsStore = create<ClearGainsState>()(
       demoPositions: [],
       demoTrades: [],
       paperBudget: 1000,
+      fxPositions: [],
+      fxTrades: [],
+      pendingSignalCount: 0,
 
       setCountry: (country) => set({ selectedCountry: country }),
       setHasOnboarded: (v) => set({ hasOnboarded: v }),
@@ -247,7 +265,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
 
       resetPaperAccount: () => {
         lsRemove(LS_POSITIONS, LS_TRADES);
-        set({ demoPositions: [], demoTrades: [] });
+        set({ demoPositions: [], demoTrades: [], fxPositions: [] });
       },
 
       setPaperPositions: (positions) => {
@@ -259,6 +277,22 @@ export const useClearGainsStore = create<ClearGainsState>()(
         lsWrite(LS_TRADES, trades);
         set({ demoTrades: trades });
       },
+
+      addFxPosition: (pos) =>
+        set((state) => ({ fxPositions: [...state.fxPositions, pos] })),
+
+      removeFxPosition: (id) =>
+        set((state) => ({ fxPositions: state.fxPositions.filter(p => p.id !== id) })),
+
+      updateFxPosition: (id, update) =>
+        set((state) => ({
+          fxPositions: state.fxPositions.map(p => p.id === id ? { ...p, ...update } : p),
+        })),
+
+      addFxTrade: (trade) =>
+        set((state) => ({ fxTrades: [trade, ...state.fxTrades].slice(0, 100) })),
+
+      setPendingSignalCount: (n) => set({ pendingSignalCount: n }),
 
       reset: () => {
         lsRemove(LS_POSITIONS, LS_TRADES, LS_BUDGET);
@@ -286,6 +320,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
           demoPositions: [],
           demoTrades: [],
           paperBudget: 1000,
+          fxPositions: [],
+          fxTrades: [],
         });
       },
     }),
@@ -313,6 +349,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
         demoPositions: state.demoPositions,
         demoTrades: state.demoTrades,
         paperBudget: state.paperBudget,
+        fxPositions: state.fxPositions,
+        fxTrades: state.fxTrades,
       }),
     }
   )

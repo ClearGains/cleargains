@@ -200,11 +200,34 @@ const defaultForm: FormState = {
 // ─── TOOLTIP ──────────────────────────────────────────────────────────────
 function Tooltip({ text }: { text: string }) {
   const [show, setShow] = useState(false);
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+
+  function handleEnter(e: React.MouseEvent | React.TouchEvent) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    let x = rect.left + rect.width / 2 - 112;
+    let y = rect.top - 8;
+    if (typeof window !== 'undefined') {
+      x = Math.max(8, Math.min(x, window.innerWidth - 232));
+      y = Math.max(8, y);
+    }
+    setPos({ x, y });
+    setShow(true);
+  }
+
   return (
-    <span className="relative inline-flex ml-1" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
-      <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-xs text-gray-500 cursor-help">?</span>
-      {show && (
-        <span className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-56 bg-gray-900 text-gray-100 text-xs rounded-md px-2.5 py-2 leading-relaxed shadow-lg pointer-events-none">
+    <span
+      className="relative inline-flex ml-1"
+      onMouseEnter={handleEnter}
+      onMouseLeave={() => setShow(false)}
+      onClick={(e) => { e.stopPropagation(); if (show) setShow(false); else handleEnter(e); }}
+      onTouchStart={(e) => { e.stopPropagation(); if (show) setShow(false); else handleEnter(e); }}
+    >
+      <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-xs text-gray-500 cursor-help select-none">?</span>
+      {show && pos && (
+        <span
+          className="w-56 bg-gray-900 text-gray-100 text-xs rounded-md px-2.5 py-2 leading-relaxed shadow-xl pointer-events-none"
+          style={{ position: 'fixed', left: pos.x, top: pos.y, transform: 'translateY(-100%)', zIndex: 9999 }}
+        >
           {text}
           <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900" />
         </span>
