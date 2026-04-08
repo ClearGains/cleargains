@@ -107,6 +107,8 @@ export type FxPosition = {
   pnlPips: number;
   pnlGbp: number;
   openedAt: string;
+  trailingActive?: boolean;
+  autoManaged?: boolean;
 };
 
 export type FxTrade = {
@@ -120,7 +122,7 @@ export type FxTrade = {
   pnlGbp: number;
   openedAt: string;
   closedAt: string;
-  closeReason: 'stop-loss' | 'take-profit' | 'manual';
+  closeReason: 'stop-loss' | 'take-profit' | 'manual' | 'trailing-stop';
 };
 
 export type T212Account = {

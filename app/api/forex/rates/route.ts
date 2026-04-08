@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 
+const NEEDED = ['EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'CAD', 'NZD'];
+
 const FALLBACK_RATES: Record<string, number> = {
   EUR: 0.92,
   GBP: 0.79,
@@ -10,9 +12,36 @@ const FALLBACK_RATES: Record<string, number> = {
   NZD: 1.63,
 };
 
-export async function GET() {
-  const key = process.env.FINNHUB_API_KEY;
+function pickRates(raw: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const code of NEEDED) {
+    out[code] = raw[code] ?? FALLBACK_RATES[code];
+  }
+  return out;
+}
 
+export async function GET() {
+  // Primary: exchangerate-api.com (free, no key required)
+  try {
+    const res = await fetch('https://api.exchangerate-api.com/v4/latest/USD', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClearGains/1.0)' },
+      signal: AbortSignal.timeout(6000),
+      next: { revalidate: 60 },
+    });
+    if (res.ok) {
+      const data = await res.json() as { rates?: Record<string, number> };
+      if (data.rates && typeof data.rates === 'object') {
+        return NextResponse.json({
+          rates: pickRates(data.rates),
+          source: 'exchangerate-api',
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Secondary: Finnhub (requires API key)
+  const key = process.env.FINNHUB_API_KEY;
   if (key) {
     try {
       const res = await fetch(`https://finnhub.io/api/v1/forex/rates?base=USD&token=${key}`, {
@@ -20,18 +49,21 @@ export async function GET() {
       });
       if (res.ok) {
         const data = await res.json() as { quote?: Record<string, number> };
-        const quote = data.quote ?? {};
-        const rates: Record<string, number> = {};
-        for (const code of Object.keys(FALLBACK_RATES)) {
-          if (quote[code] !== undefined) rates[code] = quote[code];
-          else rates[code] = FALLBACK_RATES[code];
+        if (data.quote) {
+          return NextResponse.json({
+            rates: pickRates(data.quote),
+            source: 'finnhub',
+            timestamp: new Date().toISOString(),
+          });
         }
-        return NextResponse.json({ rates, timestamp: new Date().toISOString() });
       }
-    } catch {
-      // fall through to fallback
-    }
+    } catch { /* fall through */ }
   }
 
-  return NextResponse.json({ rates: FALLBACK_RATES, timestamp: new Date().toISOString() });
+  // Fallback: hardcoded rates
+  return NextResponse.json({
+    rates: FALLBACK_RATES,
+    source: 'fallback',
+    timestamp: new Date().toISOString(),
+  });
 }
