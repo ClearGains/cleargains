@@ -27,6 +27,7 @@ const navLinks = [
   { href: '/scanner', label: 'AI Scanner', icon: Search },
   { href: '/watchlist', label: 'Watchlist', icon: Bookmark },
   { href: '/world-affairs', label: 'World Affairs', icon: Newspaper },
+  { href: '/trading-guide', label: 'Trading Guide', icon: BookOpen },
   { href: '/demo-trader', label: 'Demo Trader', icon: FlaskConical },
   { href: '/ledger', label: 'Trade Ledger', icon: BookOpen },
   { href: '/cgt', label: 'CGT Calculator', icon: Calculator },

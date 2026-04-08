@@ -51,6 +51,320 @@ type Signal = {
   reason: string;
 };
 
+// ─── PORTFOLIO TYPES ──────────────────────────────────────────────────────────
+type PortfolioStrategy = 'momentum' | 'value' | 'news-catalyst' | 'fx-only' | 'mixed' | 'custom';
+type PortfolioRiskMode = 'conservative' | 'balanced' | 'aggressive';
+type PortfolioStatus = 'active' | 'paused' | 'completed';
+
+type PortfolioMeta = {
+  id: string;
+  name: string;
+  strategy: PortfolioStrategy;
+  riskMode: PortfolioRiskMode;
+  sectorFocus: string;
+  autoTrade: boolean;
+  status: PortfolioStatus;
+  createdAt: string;
+  lastActiveAt: string;
+  paperBudget: number;
+  lastRunAt?: string;
+};
+
+const PORTFOLIO_LIST_KEY = 'demo_portfolios';
+const ACTIVE_PORTFOLIO_KEY = 'active_portfolio_id';
+const MAX_PORTFOLIOS = 10;
+
+function portfolioKey(id: string, suffix: string) { return `portfolio_${id}_${suffix}`; }
+
+function loadPortfolioIds(): string[] {
+  try { return JSON.parse(localStorage.getItem(PORTFOLIO_LIST_KEY) ?? '[]') as string[]; } catch { return []; }
+}
+function savePortfolioIds(ids: string[]) {
+  try { localStorage.setItem(PORTFOLIO_LIST_KEY, JSON.stringify(ids)); } catch {}
+}
+function loadPortfolioMeta(id: string): PortfolioMeta | null {
+  try { return JSON.parse(localStorage.getItem(portfolioKey(id, 'meta')) ?? 'null') as PortfolioMeta | null; } catch { return null; }
+}
+function savePortfolioMeta(meta: PortfolioMeta) {
+  try { localStorage.setItem(portfolioKey(meta.id, 'meta'), JSON.stringify(meta)); } catch {}
+}
+function loadPortfolioPositions(id: string): DemoPosition[] {
+  try { return JSON.parse(localStorage.getItem(portfolioKey(id, 'positions')) ?? '[]') as DemoPosition[]; } catch { return []; }
+}
+function loadPortfolioTrades(id: string): DemoTrade[] {
+  try { return JSON.parse(localStorage.getItem(portfolioKey(id, 'trades')) ?? '[]') as DemoTrade[]; } catch { return []; }
+}
+function loadPortfolioBudget(id: string): number | null {
+  try { const v = localStorage.getItem(portfolioKey(id, 'budget')); return v ? Number(JSON.parse(v)) : null; } catch { return null; }
+}
+
+const STRATEGY_LABELS: Record<PortfolioStrategy, string> = {
+  momentum: '📈 Momentum', value: '💎 Value', 'news-catalyst': '📰 News Catalyst',
+  'fx-only': '💱 FX Only', mixed: '🔀 Mixed', custom: '⚙️ Custom',
+};
+const RISK_LABELS: Record<PortfolioRiskMode, string> = {
+  conservative: '🛡 Conservative (1%)', balanced: '⚖️ Balanced (3%)', aggressive: '🔥 Aggressive (5%)',
+};
+
+// ─── PORTFOLIO COMPONENTS ──────────────────────────────────────────────────────
+function PortfolioCard({
+  meta, positions, trades, budget, isActive,
+  onSelect, onDelete, onDuplicate, onToggleStatus,
+}: {
+  meta: PortfolioMeta;
+  positions: DemoPosition[];
+  trades: DemoTrade[];
+  budget: number;
+  isActive: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+  onDuplicate: () => void;
+  onToggleStatus: () => void;
+}) {
+  const totalPnL = trades.reduce((s, t) => s + t.pnl, 0) + positions.reduce((s, p) => s + p.pnl, 0);
+  const invested = positions.reduce((s, p) => s + p.entryPrice * p.quantity, 0);
+  const available = Math.max(0, budget - invested);
+  const wins = trades.filter(t => t.pnl > 0).length;
+  const winRate = trades.length > 0 ? Math.round(wins / trades.length * 100) : 0;
+
+  return (
+    <div
+      onClick={onSelect}
+      className={clsx(
+        'relative flex-shrink-0 w-52 bg-gray-900 rounded-xl border p-3 cursor-pointer transition-all hover:border-amber-500/40',
+        isActive ? 'border-emerald-500/60 shadow-emerald-500/10 shadow-lg' : 'border-gray-800'
+      )}
+    >
+      {isActive && <div className="absolute -top-1.5 left-3 px-2 py-0.5 rounded-full bg-emerald-500 text-[9px] font-bold text-white">ACTIVE</div>}
+      <div className="flex items-start justify-between mb-1">
+        <p className="text-xs font-semibold text-white truncate flex-1 pr-1">{meta.name}</p>
+        <span className={clsx('text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0',
+          meta.status === 'active' ? 'bg-emerald-500/20 text-emerald-400' :
+          meta.status === 'paused' ? 'bg-amber-500/20 text-amber-400' :
+          'bg-gray-700 text-gray-500'
+        )}>
+          {meta.status}
+        </span>
+      </div>
+      <p className="text-[10px] text-gray-500 mb-2">{STRATEGY_LABELS[meta.strategy]}</p>
+      <div className="space-y-1">
+        <div className="flex justify-between text-[10px]">
+          <span className="text-gray-600">Budget</span>
+          <span className="text-gray-300 font-mono">£{budget.toLocaleString()}</span>
+        </div>
+        <div className="flex justify-between text-[10px]">
+          <span className="text-gray-600">Available</span>
+          <span className="text-gray-300 font-mono">£{available.toLocaleString('en-GB', { maximumFractionDigits: 0 })}</span>
+        </div>
+        <div className="flex justify-between text-[10px]">
+          <span className="text-gray-600">Total P&L</span>
+          <span className={clsx('font-mono font-semibold', totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+            {totalPnL >= 0 ? '+' : ''}£{totalPnL.toFixed(2)}
+          </span>
+        </div>
+        <div className="flex justify-between text-[10px]">
+          <span className="text-gray-600">Positions / Win%</span>
+          <span className="text-gray-400">{positions.length} open · {winRate}% wins</span>
+        </div>
+      </div>
+      <div className="flex gap-1 mt-3 pt-2 border-t border-gray-800" onClick={e => e.stopPropagation()}>
+        <button onClick={onToggleStatus} className="flex-1 text-[10px] py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">
+          {meta.status === 'active' ? '⏸' : '▶'}
+        </button>
+        <button onClick={onDuplicate} className="flex-1 text-[10px] py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors" title="Duplicate">📋</button>
+        <button onClick={onDelete} className="flex-1 text-[10px] py-1 rounded bg-gray-800 hover:bg-red-900/40 text-gray-400 hover:text-red-400 transition-colors" title="Delete">🗑</button>
+      </div>
+    </div>
+  );
+}
+
+function CreatePortfolioModal({ onClose, onCreate }: {
+  onClose: () => void;
+  onCreate: (meta: Omit<PortfolioMeta, 'id' | 'createdAt' | 'lastActiveAt'>) => void;
+}) {
+  const [name, setName] = useState('');
+  const [strategy, setStrategy] = useState<PortfolioStrategy>('momentum');
+  const [riskMode, setRiskMode] = useState<PortfolioRiskMode>('balanced');
+  const [sectorFocus, setSectorFocus] = useState('All');
+  const [budget, setBudget] = useState(1000);
+  const [autoTrade, setAutoTrade] = useState(true);
+
+  function handleCreate() {
+    if (!name.trim()) return;
+    onCreate({ name: name.trim(), strategy, riskMode, sectorFocus, autoTrade, status: 'active', paperBudget: budget });
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-md shadow-2xl p-6 space-y-4">
+        <h2 className="text-base font-semibold text-white">New Demo Portfolio</h2>
+
+        <div>
+          <label className="text-xs text-gray-400 mb-1 block">Portfolio Name</label>
+          <input
+            autoFocus
+            value={name} onChange={e => setName(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleCreate()}
+            placeholder="e.g. Momentum Strategy"
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Strategy</label>
+            <select value={strategy} onChange={e => setStrategy(e.target.value as PortfolioStrategy)}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">
+              {(Object.keys(STRATEGY_LABELS) as PortfolioStrategy[]).map(s => (
+                <option key={s} value={s}>{STRATEGY_LABELS[s]}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Sector Focus</label>
+            <select value={sectorFocus} onChange={e => setSectorFocus(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">
+              {['All','Technology','Energy','Healthcare','Finance','UK Stocks','US Stocks'].map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs text-gray-400 mb-1 block">Risk Mode</label>
+          <div className="grid grid-cols-3 gap-2">
+            {(Object.keys(RISK_LABELS) as PortfolioRiskMode[]).map(r => (
+              <button key={r} onClick={() => setRiskMode(r)}
+                className={clsx('py-2 rounded-lg text-[11px] font-medium border transition-colors text-center',
+                  riskMode === r ? 'bg-amber-500/20 border-amber-500/30 text-amber-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200')}>
+                {RISK_LABELS[r]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Starting Budget</label>
+            <div className="flex gap-1">
+              {[500, 1000, 2000, 5000].map(v => (
+                <button key={v} onClick={() => setBudget(v)}
+                  className={clsx('flex-1 py-1.5 rounded text-[11px] border transition-colors',
+                    budget === v ? 'bg-amber-500/20 border-amber-500/30 text-amber-300' : 'bg-gray-800 border-gray-700 text-gray-400')}>
+                  £{v >= 1000 ? `${v/1000}k` : v}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Auto-Trade</label>
+            <button onClick={() => setAutoTrade(a => !a)}
+              className={clsx('w-full py-2 rounded-lg border text-xs font-medium transition-colors',
+                autoTrade ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-300' : 'bg-gray-800 border-gray-700 text-gray-400')}>
+              {autoTrade ? '✅ Auto-Trade ON' : '⏸ Auto-Trade OFF'}
+            </button>
+          </div>
+        </div>
+
+        <div className="flex gap-2 pt-2">
+          <button onClick={onClose} className="flex-1 py-2 rounded-lg border border-gray-700 text-sm text-gray-400 hover:text-gray-200">Cancel</button>
+          <button onClick={handleCreate} disabled={!name.trim()}
+            className="flex-1 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            Create Portfolio
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PortfolioCompare({ portfolios }: { portfolios: PortfolioMeta[] }) {
+  const rows = portfolios.map(meta => {
+    const positions = loadPortfolioPositions(meta.id);
+    const trades = loadPortfolioTrades(meta.id);
+    const budget = loadPortfolioBudget(meta.id) ?? meta.paperBudget;
+    const openPnL = positions.reduce((s, p) => s + p.pnl, 0);
+    const closedPnL = trades.reduce((s, t) => s + t.pnl, 0);
+    const totalPnL = openPnL + closedPnL;
+    const pnlPct = budget > 0 ? (totalPnL / budget) * 100 : 0;
+    const wins = trades.filter(t => t.pnl > 0).length;
+    const winRate = trades.length > 0 ? Math.round(wins / trades.length * 100) : 0;
+    const currentValue = budget + totalPnL;
+    return { meta, budget, currentValue, totalPnL, pnlPct, winRate, trades: trades.length, positions: positions.length };
+  }).sort((a, b) => b.pnlPct - a.pnlPct);
+
+  const maxPnL = Math.max(...rows.map(r => Math.abs(r.totalPnL)), 1);
+
+  return (
+    <div className="space-y-4">
+      {/* Bar chart */}
+      <Card>
+        <CardHeader title="P&L Comparison" subtitle="All portfolios sorted by performance" icon={<BarChart3 className="h-4 w-4" />} />
+        <div className="space-y-2">
+          {rows.map((row, i) => (
+            <div key={row.meta.id} className="flex items-center gap-3 text-xs">
+              <div className="w-32 text-gray-400 truncate">{i === 0 && '🥇 '}{row.meta.name}</div>
+              <div className="flex-1 bg-gray-800 rounded-full h-4 relative overflow-hidden">
+                <div
+                  className={clsx('absolute inset-y-0 left-0 rounded-full transition-all', row.totalPnL >= 0 ? 'bg-emerald-500/60' : 'bg-red-500/60')}
+                  style={{ width: `${Math.abs(row.totalPnL) / maxPnL * 100}%` }}
+                />
+              </div>
+              <div className={clsx('w-16 text-right font-mono font-semibold', row.totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                {row.totalPnL >= 0 ? '+' : ''}£{row.totalPnL.toFixed(2)}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Comparison table */}
+      <Card>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-500 border-b border-gray-800">
+                <th className="text-left py-2 pr-3">Portfolio</th>
+                <th className="text-right py-2 pr-3">Budget</th>
+                <th className="text-right py-2 pr-3">Value</th>
+                <th className="text-right py-2 pr-3">P&L</th>
+                <th className="text-right py-2 pr-3">P&L %</th>
+                <th className="text-right py-2 pr-3">Win Rate</th>
+                <th className="text-right py-2 pr-3">Trades</th>
+                <th className="text-right py-2">Open</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={row.meta.id} className={clsx('border-b border-gray-800/50', i === 0 && 'bg-emerald-500/5')}>
+                  <td className="py-2 pr-3">
+                    <p className="font-semibold text-white">{i === 0 && '🥇 '}{row.meta.name}</p>
+                    <p className="text-gray-600">{STRATEGY_LABELS[row.meta.strategy]}</p>
+                  </td>
+                  <td className="py-2 pr-3 text-right font-mono text-gray-400">£{row.budget.toLocaleString()}</td>
+                  <td className="py-2 pr-3 text-right font-mono text-gray-300">£{row.currentValue.toFixed(0)}</td>
+                  <td className={clsx('py-2 pr-3 text-right font-mono font-semibold', row.totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    {row.totalPnL >= 0 ? '+' : ''}£{row.totalPnL.toFixed(2)}
+                  </td>
+                  <td className={clsx('py-2 pr-3 text-right font-mono', row.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    {row.pnlPct >= 0 ? '+' : ''}{row.pnlPct.toFixed(2)}%
+                  </td>
+                  <td className="py-2 pr-3 text-right text-gray-400">{row.winRate}%</td>
+                  <td className="py-2 pr-3 text-right text-gray-400">{row.trades}</td>
+                  <td className="py-2 text-right text-gray-400">{row.positions}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 // ─── COPY TO LIVE MODAL ──────────────────────────────────────────────────────
 function CopyToLiveModal({
   trade,
@@ -268,7 +582,7 @@ const FX_TRAIL_TRIGGER = 20; // activate trailing at +20 pips
 const FX_MAX_POSITIONS = 3;
 const FX_SCAN_MS = 5 * 60_000;
 const FX_MOMENTUM_PCT = 0.002; // 0.2% threshold
-const FX_MIN_CONFIDENCE = 60;
+const FX_MIN_CONFIDENCE = 45;
 const FX_TRADE_UNITS = 1_000;
 const FX_DEFAULT_BUDGET = 1_000;
 const LS_FX_HISTORY = 'fx_rate_history';
@@ -329,50 +643,74 @@ function computeFxSignals(
   const now = Date.now();
   const result: Record<string, FxSignalResult> = {};
 
+  // Accept any snapshot older than 2 minutes
+  const usable = history.filter(s => now - s.ts > 2 * 60_000);
+
   for (const pair of FX_PAIRS) {
     const currentRate = derivePairRate(pair, currentRates);
     const pip = pipSize(pair);
 
-    // Find snapshot closest to 1h ago (within 90 min window)
-    const t1h = now - 60 * 60_000;
-    const snap1h = history.length > 0
-      ? history.reduce((b, s) => Math.abs(s.ts - t1h) < Math.abs(b.ts - t1h) ? s : b)
-      : null;
-
-    if (!snap1h || Math.abs(snap1h.ts - t1h) > 90 * 60_000) {
+    if (usable.length === 0) {
       result[pair] = { direction: 'NEUTRAL', confidence: 0, change1hPips: 0, change1hPct: 0 };
       continue;
     }
+
+    // Use the oldest available snapshot (or the one closest to 1h ago)
+    const t1h = now - 60 * 60_000;
+    const snap1h = usable.reduce((b, s) => Math.abs(s.ts - t1h) < Math.abs(b.ts - t1h) ? s : b);
+    const ageMs = now - snap1h.ts;
+    const ageHours = ageMs / 3_600_000;
 
     const rate1h = derivePairRate(pair, snap1h.rates);
     const change1hPct = ((currentRate - rate1h) / rate1h) * 100;
     const change1hPips = (currentRate - rate1h) / pip;
 
-    // 4h snapshot for acceleration check
+    // Scale threshold: lower when we have short history (allows signals sooner)
+    const dynamicThreshold = Math.max(0.0005, FX_MOMENTUM_PCT * Math.min(1, ageHours));
+    // Confidence penalty: less confident with shorter windows
+    const ageFactor = Math.min(1, ageHours / 0.5); // full confidence after 30 min
+
+    // 4h snapshot for acceleration
     const t4h = now - 4 * 60 * 60_000;
-    const snap4h = history.length > 0
-      ? history.reduce((b, s) => Math.abs(s.ts - t4h) < Math.abs(b.ts - t4h) ? s : b)
-      : null;
-    const change4hPct = snap4h && Math.abs(snap4h.ts - t4h) < 5 * 60 * 60_000
-      ? ((currentRate - derivePairRate(pair, snap4h.rates)) / derivePairRate(pair, snap4h.rates)) * 100
-      : 0;
+    const snap4h = usable.reduce((b, s) => Math.abs(s.ts - t4h) < Math.abs(b.ts - t4h) ? s : b);
+    const change4hPct = ((currentRate - derivePairRate(pair, snap4h.rates)) / derivePairRate(pair, snap4h.rates)) * 100;
 
     let direction: 'LONG' | 'SHORT' | 'NEUTRAL' = 'NEUTRAL';
     let confidence = 0;
 
-    if (change1hPct >= FX_MOMENTUM_PCT) {
+    if (change1hPct >= dynamicThreshold) {
       direction = 'LONG';
       const accel = change4hPct >= 0;
-      confidence = Math.min(95, Math.round(40 + Math.abs(change1hPct) * 5000 + (accel ? 20 : 0)));
-    } else if (change1hPct <= -FX_MOMENTUM_PCT) {
+      confidence = Math.min(90, Math.round((35 + Math.abs(change1hPct) * 4000 + (accel ? 15 : 0)) * ageFactor));
+    } else if (change1hPct <= -dynamicThreshold) {
       direction = 'SHORT';
       const accel = change4hPct <= 0;
-      confidence = Math.min(95, Math.round(40 + Math.abs(change1hPct) * 5000 + (accel ? 20 : 0)));
+      confidence = Math.min(90, Math.round((35 + Math.abs(change1hPct) * 4000 + (accel ? 15 : 0)) * ageFactor));
     }
 
     result[pair] = { direction, confidence, change1hPips, change1hPct };
   }
   return result;
+}
+
+function seedSyntheticHistory(currentRates: Record<string, number>): FxRateSnapshot[] {
+  // Generate 24 synthetic snapshots (2h of history at 5-min intervals)
+  // Uses deterministic noise so each session looks different but consistent
+  const now = Date.now();
+  const snapshots: FxRateSnapshot[] = [];
+  let seed = Object.values(currentRates).reduce((s, r) => s + Math.round(r * 100), 0);
+  const lcg = () => { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return (seed >>> 0) / 0xffffffff; };
+
+  for (let i = 24; i >= 1; i--) {
+    const ts = now - i * 5 * 60_000;
+    const syntheticRates: Record<string, number> = {};
+    for (const [key, rate] of Object.entries(currentRates)) {
+      const drift = (lcg() - 0.5) * 0.004 * (i / 12); // up to ±0.2% drift
+      syntheticRates[key] = rate * (1 + drift);
+    }
+    snapshots.push({ ts, rates: syntheticRates });
+  }
+  return snapshots;
 }
 
 function hasCorrelationConflict(
@@ -430,9 +768,10 @@ function ForexTrader() {
 
   // ── Load localStorage on mount ─────────────────────────────────────────────
   useEffect(() => {
+    let loadedHistory: FxRateSnapshot[] = [];
     try {
       const h = localStorage.getItem(LS_FX_HISTORY);
-      if (h) { const parsed = JSON.parse(h) as FxRateSnapshot[]; setRateHistory(parsed); rateHistoryRef.current = parsed; }
+      if (h) { loadedHistory = JSON.parse(h) as FxRateSnapshot[]; setRateHistory(loadedHistory); rateHistoryRef.current = loadedHistory; }
     } catch {}
     try {
       const b = localStorage.getItem(LS_FX_BUDGET);
@@ -443,6 +782,18 @@ function ForexTrader() {
       if (a) { const parsed = JSON.parse(a) as Record<string, boolean>; setAutoEnabled(parsed); autoEnabledRef.current = parsed; }
     } catch {}
     setActiveSessions(getActiveSessionsNow());
+
+    // If no history, seed with synthetic data once rates are available
+    if (loadedHistory.length < 3) {
+      const t = setTimeout(() => {
+        if (Object.keys(prevRatesRef.current).length > 0 && rateHistoryRef.current.length < 3) {
+          const synthetic = seedSyntheticHistory(prevRatesRef.current);
+          setRateHistory(synthetic);
+          rateHistoryRef.current = synthetic;
+        }
+      }, 3000);
+      return () => clearTimeout(t);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -817,8 +1168,8 @@ function ForexTrader() {
             </tbody>
           </table>
         </div>
-        <p className="mt-2 text-[10px] text-gray-700 px-1">
-          Toggle <span className="text-amber-500/70">Auto</span> on pairs to enable automated position entry. Max {FX_MAX_POSITIONS} positions simultaneously. Correlated pairs are never opened in the same direction.
+        <p className="mt-2 text-[10px] text-gray-600 px-1">
+          <span className="text-amber-400 font-semibold">How to use:</span> Toggle <span className="text-amber-500/70">Auto</span> on the pairs you want (right column). Click <span className="text-amber-500/70">Scan Now</span> to immediately find trades, or wait for auto-scan every 5 min. Max {FX_MAX_POSITIONS} positions. Signals appear once 2+ rate snapshots are collected (takes ~2 min on first use).
         </p>
       </Card>
 
@@ -1007,32 +1358,149 @@ export default function DemoTraderPage() {
   const [tick, setTick] = useState(0);
   const [apiCalls, setApiCalls] = useState(0);
 
+  // ── Portfolio management state ─────────────────────────────────────────────
+  const [portfolios, setPortfolios] = useState<PortfolioMeta[]>([]);
+  const [activePortfolioId, setActivePortfolioId] = useState<string | null>(null);
+  const [showCreatePortfolio, setShowCreatePortfolio] = useState(false);
+  const [portfolioView, setPortfolioView] = useState<'trader' | 'compare'>('trader');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevPricesRef = useRef<Record<string, number>>({});
 
   // ── Restore paper state from dedicated localStorage keys on mount ──────────
   useEffect(() => {
-    try {
-      const rawPos = localStorage.getItem('paper_positions');
-      const rawTrades = localStorage.getItem('paper_trades');
-      const rawBudget = localStorage.getItem('paper_budget');
-      if (rawPos) {
-        const positions = JSON.parse(rawPos) as DemoPosition[];
-        if (Array.isArray(positions) && positions.length > 0) setPaperPositions(positions);
+    // ── Portfolio system init ──────────────────────────────────────────────────
+    let ids = loadPortfolioIds();
+    let activeId = localStorage.getItem(ACTIVE_PORTFOLIO_KEY);
+
+    // Migrate legacy data: if no portfolios exist but legacy data does
+    if (ids.length === 0) {
+      const legacyPos = localStorage.getItem('paper_positions');
+      const legacyBudget = localStorage.getItem('paper_budget');
+      const defaultId = `p_${Date.now()}`;
+      const defaultMeta: PortfolioMeta = {
+        id: defaultId, name: 'Default Portfolio', strategy: 'momentum',
+        riskMode: 'balanced', sectorFocus: 'All', autoTrade: true,
+        status: 'active', createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        paperBudget: legacyBudget ? Number(JSON.parse(legacyBudget)) : 1000,
+      };
+      savePortfolioMeta(defaultMeta);
+      if (legacyPos) {
+        try { localStorage.setItem(portfolioKey(defaultId, 'positions'), legacyPos); } catch {}
       }
-      if (rawTrades) {
-        const trades = JSON.parse(rawTrades) as DemoTrade[];
-        if (Array.isArray(trades) && trades.length > 0) setPaperTrades(trades);
+      const legacyTrades = localStorage.getItem('paper_trades');
+      if (legacyTrades) {
+        try { localStorage.setItem(portfolioKey(defaultId, 'trades'), legacyTrades); } catch {}
       }
-      if (rawBudget) {
-        const budget = Number(JSON.parse(rawBudget));
-        if (budget > 0) { setPaperBudget(budget); setBudgetStr(String(budget)); }
+      if (legacyBudget) {
+        try { localStorage.setItem(portfolioKey(defaultId, 'budget'), legacyBudget); } catch {}
       }
-    } catch { /* ignore parse errors */ }
-    // Clear pending signal badge when page mounts
+      ids = [defaultId];
+      savePortfolioIds(ids);
+      activeId = defaultId;
+      localStorage.setItem(ACTIVE_PORTFOLIO_KEY, defaultId);
+    }
+
+    // Load all portfolio metadata
+    const allMeta = ids.map(id => loadPortfolioMeta(id)).filter(Boolean) as PortfolioMeta[];
+    setPortfolios(allMeta);
+
+    // Load active portfolio
+    const resolvedId = activeId && ids.includes(activeId) ? activeId : ids[0];
+    if (resolvedId) {
+      setActivePortfolioId(resolvedId);
+      loadPortfolioIntoStore(resolvedId);
+    }
     setPendingSignalCount(0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function loadPortfolioIntoStore(id: string) {
+    const positions = loadPortfolioPositions(id);
+    const trades = loadPortfolioTrades(id);
+    const budget = loadPortfolioBudget(id);
+    if (positions.length > 0) setPaperPositions(positions);
+    else setPaperPositions([]);
+    if (trades.length > 0) setPaperTrades(trades);
+    else setPaperTrades([]);
+    if (budget && budget > 0) { setPaperBudget(budget); setBudgetStr(String(budget)); }
+    else { setPaperBudget(1000); setBudgetStr('1000'); }
+  }
+
+  function saveCurrentPortfolioToLS() {
+    if (!activePortfolioId) return;
+    try { localStorage.setItem(portfolioKey(activePortfolioId, 'positions'), JSON.stringify(demoPositions)); } catch {}
+    try { localStorage.setItem(portfolioKey(activePortfolioId, 'trades'), JSON.stringify(demoTrades)); } catch {}
+    try { localStorage.setItem(portfolioKey(activePortfolioId, 'budget'), JSON.stringify(paperBudget)); } catch {}
+    const meta = portfolios.find(p => p.id === activePortfolioId);
+    if (meta) { savePortfolioMeta({ ...meta, lastActiveAt: new Date().toISOString() }); }
+  }
+
+  function switchToPortfolio(id: string) {
+    saveCurrentPortfolioToLS();
+    setActivePortfolioId(id);
+    localStorage.setItem(ACTIVE_PORTFOLIO_KEY, id);
+    loadPortfolioIntoStore(id);
+    const meta = portfolios.find(p => p.id === id);
+    if (meta) {
+      showToast(`Switched to "${meta.name}"`);
+      // Apply portfolio sector settings
+      if (meta.sectorFocus !== 'All') setSectors([meta.sectorFocus as Sector]);
+      else setSectors(['All'] as Sector[]);
+    }
+  }
+
+  function createPortfolio(data: Omit<PortfolioMeta, 'id' | 'createdAt' | 'lastActiveAt'>) {
+    const ids = loadPortfolioIds();
+    if (ids.length >= MAX_PORTFOLIOS) { showToast('Maximum 10 portfolios reached'); return; }
+    const id = `p_${Date.now()}`;
+    const meta: PortfolioMeta = { ...data, id, createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString() };
+    savePortfolioMeta(meta);
+    localStorage.setItem(portfolioKey(id, 'budget'), JSON.stringify(data.paperBudget));
+    const newIds = [...ids, id];
+    savePortfolioIds(newIds);
+    setPortfolios(prev => [...prev, meta]);
+    switchToPortfolio(id);
+  }
+
+  function deletePortfolio(id: string) {
+    const ids = loadPortfolioIds().filter(i => i !== id);
+    savePortfolioIds(ids);
+    try { localStorage.removeItem(portfolioKey(id, 'meta')); } catch {}
+    try { localStorage.removeItem(portfolioKey(id, 'positions')); } catch {}
+    try { localStorage.removeItem(portfolioKey(id, 'trades')); } catch {}
+    try { localStorage.removeItem(portfolioKey(id, 'budget')); } catch {}
+    setPortfolios(prev => prev.filter(p => p.id !== id));
+    setShowDeleteConfirm(null);
+    if (activePortfolioId === id) {
+      const remaining = ids[0];
+      if (remaining) switchToPortfolio(remaining);
+      else { setActivePortfolioId(null); setPaperPositions([]); setPaperTrades([]); setPaperBudget(1000); setBudgetStr('1000'); }
+    }
+  }
+
+  function duplicatePortfolio(id: string) {
+    const meta = portfolios.find(p => p.id === id);
+    if (!meta) return;
+    createPortfolio({ ...meta, name: `${meta.name} (copy)`, status: 'active' });
+  }
+
+  function togglePortfolioStatus(id: string) {
+    const meta = portfolios.find(p => p.id === id);
+    if (!meta) return;
+    const newStatus: PortfolioStatus = meta.status === 'active' ? 'paused' : 'active';
+    const updated = { ...meta, status: newStatus };
+    savePortfolioMeta(updated);
+    setPortfolios(prev => prev.map(p => p.id === id ? updated : p));
+  }
+
+  function showToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  }
 
   // Auto-run strategy if 10+ minutes have passed since last run
   useEffect(() => {
@@ -1344,15 +1812,93 @@ export default function DemoTraderPage() {
         </div>
       )}
 
+      {/* Toast */}
+      {toast && (
+        <div className="fixed top-4 right-4 z-[100] bg-emerald-900 border border-emerald-700 text-emerald-200 text-sm px-4 py-3 rounded-xl shadow-xl">
+          {toast}
+        </div>
+      )}
+
+      {/* Delete confirm */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={() => setShowDeleteConfirm(null)} />
+          <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm shadow-2xl p-6">
+            <h2 className="text-base font-semibold text-white mb-2">Delete Portfolio?</h2>
+            <p className="text-sm text-gray-400 mb-4">This cannot be undone. All positions and trades in this portfolio will be permanently deleted.</p>
+            <div className="flex gap-2">
+              <button onClick={() => setShowDeleteConfirm(null)} className="flex-1 py-2 rounded-lg border border-gray-700 text-sm text-gray-400">Cancel</button>
+              <button onClick={() => deletePortfolio(showDeleteConfirm)} className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-sm font-semibold text-white">Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create portfolio modal */}
+      {showCreatePortfolio && (
+        <CreatePortfolioModal
+          onClose={() => setShowCreatePortfolio(false)}
+          onCreate={createPortfolio}
+        />
+      )}
+
       {/* Header */}
+      <div className="mb-4 flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+            <FlaskConical className="h-6 w-6 text-amber-400" />
+            Demo Auto-Trader
+          </h1>
+          <p className="text-sm text-gray-500 mt-1">
+            {activePortfolioId && portfolios.find(p => p.id === activePortfolioId)
+              ? <>Portfolio: <span className="text-amber-300">{portfolios.find(p => p.id === activePortfolioId)?.name}</span></>
+              : 'Automated paper trading · no real money involved'}
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setPortfolioView(v => v === 'compare' ? 'trader' : 'compare')}
+            className={clsx('px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+              portfolioView === 'compare' ? 'bg-amber-500/20 border-amber-500/30 text-amber-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200'
+            )}
+          >
+            📊 Compare
+          </button>
+        </div>
+      </div>
+
+      {/* Portfolio selector */}
       <div className="mb-4">
-        <h1 className="text-2xl font-bold text-white flex items-center gap-2">
-          <FlaskConical className="h-6 w-6 text-amber-400" />
-          Demo Auto-Trader
-        </h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Automated paper trading · signals from Finnhub · no real money involved
-        </p>
+        <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-hide">
+          {portfolios.map(meta => {
+            const pPositions = meta.id === activePortfolioId ? demoPositions : loadPortfolioPositions(meta.id);
+            const pTrades = meta.id === activePortfolioId ? demoTrades : loadPortfolioTrades(meta.id);
+            const pBudget = meta.id === activePortfolioId ? paperBudget : (loadPortfolioBudget(meta.id) ?? meta.paperBudget);
+            return (
+              <PortfolioCard
+                key={meta.id}
+                meta={meta}
+                positions={pPositions}
+                trades={pTrades}
+                budget={pBudget}
+                isActive={meta.id === activePortfolioId}
+                onSelect={() => { if (meta.id !== activePortfolioId) switchToPortfolio(meta.id); }}
+                onDelete={() => setShowDeleteConfirm(meta.id)}
+                onDuplicate={() => duplicatePortfolio(meta.id)}
+                onToggleStatus={() => togglePortfolioStatus(meta.id)}
+              />
+            );
+          })}
+          {portfolios.length < MAX_PORTFOLIOS && (
+            <button
+              onClick={() => setShowCreatePortfolio(true)}
+              className="flex-shrink-0 w-36 h-full min-h-[140px] flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-gray-700 hover:border-amber-500/50 text-gray-600 hover:text-amber-400 transition-colors"
+            >
+              <span className="text-2xl">+</span>
+              <span className="text-xs font-medium">New Portfolio</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Paper trading banner */}
@@ -1382,7 +1928,9 @@ export default function DemoTraderPage() {
         ))}
       </div>
 
-      {traderTab === 'forex' ? (
+      {portfolioView === 'compare' ? (
+        <PortfolioCompare portfolios={portfolios} />
+      ) : traderTab === 'forex' ? (
         <ForexTrader />
       ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

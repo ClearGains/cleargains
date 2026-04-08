@@ -60,6 +60,15 @@ export async function GET() {
     } catch { /* fall through */ }
   }
 
+  // Tertiary: open.er-api.com (completely free)
+  try {
+    const res = await fetch('https://open.er-api.com/v6/latest/USD', { signal: AbortSignal.timeout(6000) });
+    if (res.ok) {
+      const data = await res.json() as { rates?: Record<string, number> };
+      if (data.rates) return NextResponse.json({ rates: pickRates(data.rates), source: 'open-er-api', timestamp: new Date().toISOString() });
+    }
+  } catch { /* fall through */ }
+
   // Fallback: hardcoded rates
   return NextResponse.json({
     rates: FALLBACK_RATES,
