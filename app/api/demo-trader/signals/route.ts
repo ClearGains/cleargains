@@ -110,8 +110,52 @@ function sentimentScore(headlines: string[]): number {
   return (bull - bear) / total;
 }
 
+// ── Smart-Money Swing strategy rationale builder ─────────────────────────────
+function buildSmartMoneyRationale(
+  symbol: string,
+  changePercent: number,
+  volRatio: number,
+  newsCount: number,
+  recentNewsCount: number,
+  sentimentRaw: number,
+  profitScore: number,
+): string {
+  const parts: string[] = [];
+
+  // Momentum leg
+  const momTag = changePercent >= 2
+    ? `Strong +${changePercent.toFixed(1)}% momentum`
+    : changePercent >= 0.5
+    ? `Positive +${changePercent.toFixed(1)}% trend`
+    : `Consolidation near flat (${changePercent.toFixed(1)}%)`;
+  parts.push(momTag);
+
+  // Volume leg
+  if (volRatio >= 3)
+    parts.push(`Heavy vol surge ${volRatio.toFixed(1)}× avg — institutional accumulation`);
+  else if (volRatio >= 1.5)
+    parts.push(`Elevated vol ${volRatio.toFixed(1)}× avg — smart money interest`);
+  else
+    parts.push('Normal volume');
+
+  // Catalyst leg
+  if (recentNewsCount >= 2)
+    parts.push(`${recentNewsCount} catalysts in last 6 h — ${sentimentRaw >= 0.1 ? 'bullish' : 'mixed'} sentiment`);
+  else if (newsCount > 0)
+    parts.push(`${newsCount} news article${newsCount > 1 ? 's' : ''} — ${sentimentRaw >= 0.1 ? 'positive' : sentimentRaw <= -0.1 ? 'cautious' : 'neutral'} tone`);
+  else
+    parts.push('Technicals-only signal — no news catalyst');
+
+  // Risk leg
+  parts.push('R:R 2:1 — SL −1.5 % · TP +3.0 %');
+
+  return parts.join(' · ');
+}
+
 export async function POST(request: NextRequest) {
-  const { sectors } = await request.json() as { sectors: string[] };
+  const body = await request.json() as { sectors: string[]; strategy?: string };
+  const { sectors, strategy } = body;
+  const isSmartMoney = strategy === 'smart-money';
   const apiKey = process.env.FINNHUB_API_KEY;
   const debugLog: string[] = [];
 
@@ -243,40 +287,65 @@ export async function POST(request: NextRequest) {
       const sentimentRaw = sentimentScore(headlines);
 
       // ── Scoring ─────────────────────────────────────────────────────────
-      // Momentum (0-35): bigger % move = better. Cap at 5%.
-      const momentumScore = Math.min(35, Math.abs(stock.changePercent) * 7);
-
-      // Volume surge (0-25): relative to universe median
       const volRatio = stock.volume > 0 && medianVolume > 0 ? stock.volume / medianVolume : 1;
-      const volumeScore = Math.min(25, (volRatio - 1) * 12.5); // 3x median = 25pts
 
-      // News catalyst (0-30): recent news weighted more
-      const newsScore = Math.min(30, recentNewsCount * 12 + Math.min(newsCount, 5) * 2);
+      // Smart-Money weights: volume matters more (40 pts), news critical (35 pts)
+      // Standard weights: momentum (35), volume (25), news (30), volatility (10)
+      let momentumScore: number, volumeScore: number, newsScore: number, volatilityScore: number;
 
-      // Intraday volatility (0-10): (high-low) / price
       const intradayRange = stock.high > 0 && stock.low > 0
         ? ((stock.high - stock.low) / stock.price) * 100
         : 0;
-      const volatilityScore = Math.min(10, intradayRange * 2);
+
+      if (isSmartMoney) {
+        // Momentum (0-25): sweet spot 0.5-5% — parabolic moves lose points
+        const absMov = Math.abs(stock.changePercent);
+        momentumScore = absMov < 0.5 ? 0
+          : absMov > 5 ? Math.max(0, 25 - (absMov - 5) * 4)   // penalise parabolic
+          : Math.min(25, absMov * 5);
+        // Volume (0-40): key filter — 3× median = full marks
+        volumeScore = Math.min(40, (volRatio - 1) * 16);
+        // Catalyst (0-35): recent news heavily rewarded
+        newsScore = Math.min(35, recentNewsCount * 15 + Math.min(newsCount, 3) * 2);
+        // Volatility (0-0): ignored for smart-money (we want controlled moves)
+        volatilityScore = 0;
+      } else {
+        momentumScore  = Math.min(35, Math.abs(stock.changePercent) * 7);
+        volumeScore    = Math.min(25, (volRatio - 1) * 12.5);
+        newsScore      = Math.min(30, recentNewsCount * 12 + Math.min(newsCount, 5) * 2);
+        volatilityScore = Math.min(10, intradayRange * 2);
+      }
 
       const rawTotal = momentumScore + Math.max(0, volumeScore) + newsScore + volatilityScore;
       const profitScore = Math.round(Math.min(100, rawTotal));
 
-      // ── Signal logic (lowered thresholds) ────────────────────────────────
-      // Primary: any move ≥ 0.5% generates a directional signal
-      // Bearish news overrides bullish momentum only if sentiment is very negative
+      // ── Signal logic ──────────────────────────────────────────────────────
       let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
 
-      if (stock.changePercent >= 0.5) {
-        // Bullish momentum — only suppress if very strong bearish sentiment
-        signal = sentimentRaw <= -0.5 ? 'NEUTRAL' : 'BUY';
-      } else if (stock.changePercent <= -0.5) {
-        // Bearish momentum — only suppress if very strong bullish sentiment
-        signal = sentimentRaw >= 0.5 ? 'NEUTRAL' : 'SELL';
+      if (isSmartMoney) {
+        // Smart-Money: require vol surge + catalyst + positive/flat move
+        const volOk     = volRatio >= 1.3;
+        const hasNews   = newsCount > 0;
+        const movOk     = stock.changePercent >= 0.3 && stock.changePercent <= 6;
+        const sentOk    = sentimentRaw > -0.4;
+        const rangeOk   = intradayRange < 5; // not already a volatile blow-off
+
+        if (volOk && hasNews && movOk && sentOk && rangeOk) {
+          signal = 'BUY';
+        } else if (stock.changePercent <= -1 && sentimentRaw <= -0.3 && volRatio >= 1.3) {
+          signal = 'SELL';
+        }
+      } else {
+        if (stock.changePercent >= 0.5) {
+          signal = sentimentRaw <= -0.5 ? 'NEUTRAL' : 'BUY';
+        } else if (stock.changePercent <= -0.5) {
+          signal = sentimentRaw >= 0.5 ? 'NEUTRAL' : 'SELL';
+        }
       }
 
       // ── Badges ───────────────────────────────────────────────────────────
       const badges: string[] = [];
+      if (isSmartMoney) badges.push('🧠 Smart Money');
       if (Math.abs(stock.changePercent) >= 0.5) {
         badges.push(`📈 ${stock.changePercent >= 0 ? '+' : ''}${stock.changePercent.toFixed(1)}%`);
       }
@@ -288,7 +357,7 @@ export async function POST(request: NextRequest) {
       if (volRatio >= 1.5) {
         badges.push(`🔊 ${volRatio.toFixed(1)}× vol`);
       }
-      if (intradayRange >= 2.5) {
+      if (!isSmartMoney && intradayRange >= 2.5) {
         badges.push('⚡ Volatile');
       }
       if (Math.abs(stock.changePercent) > 5) {
@@ -296,11 +365,13 @@ export async function POST(request: NextRequest) {
       }
 
       const sentimentLabel = sentimentRaw >= 0.1 ? 'positive' : sentimentRaw <= -0.1 ? 'negative' : 'neutral';
-      const reason = [
-        `${stock.changePercent >= 0 ? '+' : ''}${stock.changePercent.toFixed(2)}% today`,
-        newsCount > 0 ? `${newsCount} headlines (${sentimentLabel} sentiment)` : 'no news found',
-        volRatio >= 1.5 ? `${volRatio.toFixed(1)}× volume surge` : 'normal volume',
-      ].join(' · ');
+      const reason = isSmartMoney
+        ? buildSmartMoneyRationale(stock.symbol, stock.changePercent, volRatio, newsCount, recentNewsCount, sentimentRaw, profitScore)
+        : [
+            `${stock.changePercent >= 0 ? '+' : ''}${stock.changePercent.toFixed(2)}% today`,
+            newsCount > 0 ? `${newsCount} headlines (${sentimentLabel} sentiment)` : 'no news found',
+            volRatio >= 1.5 ? `${volRatio.toFixed(1)}× volume surge` : 'normal volume',
+          ].join(' · ');
 
       results.push({
         ...stock,
@@ -417,7 +488,9 @@ export async function POST(request: NextRequest) {
     candidateCount: phase2Stocks.length,
     apiCallsUsed: apiCalls,
     timestamp: new Date().toISOString(),
-    note: 'Selected based on momentum, volume surge, and news catalysts — not company size',
+    note: isSmartMoney
+      ? 'Smart Money Swing: vol ≥1.3× + news catalyst + 0.3–6% move. R:R 2:1 (SL −1.5%, TP +3%). Risk 1% portfolio per trade.'
+      : 'Selected based on momentum, volume surge, and news catalysts — not company size',
     debugLog,
   });
 }

@@ -52,7 +52,7 @@ type Signal = {
 };
 
 // ─── PORTFOLIO TYPES ──────────────────────────────────────────────────────────
-type PortfolioStrategy = 'momentum' | 'value' | 'news-catalyst' | 'fx-only' | 'mixed' | 'custom';
+type PortfolioStrategy = 'momentum' | 'value' | 'news-catalyst' | 'fx-only' | 'mixed' | 'custom' | 'smart-money';
 type PortfolioRiskMode = 'conservative' | 'balanced' | 'aggressive';
 type PortfolioStatus = 'active' | 'paused' | 'completed';
 
@@ -109,9 +109,16 @@ function loadPortfolioBudget(id: string): number | null {
 }
 
 const STRATEGY_LABELS: Record<PortfolioStrategy, string> = {
+  'smart-money': '🧠 Smart Money Swing',
   momentum: '📈 Momentum', value: '💎 Value', 'news-catalyst': '📰 News Catalyst',
   'fx-only': '💱 FX Only', mixed: '🔀 Mixed', custom: '⚙️ Custom',
 };
+
+// Smart-Money strategy parameters (2:1 R:R, 1% portfolio risk per trade)
+const SMART_MONEY_SL_PCT  = 1.5;
+const SMART_MONEY_TP_PCT  = 3.0;
+const SMART_MONEY_RISK_PCT = 1.0;  // risk this % of portfolio per position
+const SMART_MONEY_MAX_POS  = 4;
 const RISK_LABELS: Record<PortfolioRiskMode, string> = {
   conservative: '🛡 Conservative (1%)', balanced: '⚖️ Balanced (3%)', aggressive: '🔥 Aggressive (5%)',
 };
@@ -1889,12 +1896,15 @@ export default function DemoTraderPage() {
 
     try {
       const selectedSectors = sectors.includes('All') ? ['All'] : sectors;
-      setRunLog(l => [...l, `📡 Scanning ${selectedSectors.join(', ')} via Finnhub…`]);
+      const activeMeta = portfolios.find(p => p.id === activePortfolioId);
+      const activeStrategy = activeMeta?.strategy ?? 'momentum';
+      const isSmartMoney   = activeStrategy === 'smart-money';
+      setRunLog(l => [...l, `📡 Scanning ${selectedSectors.join(', ')} via Finnhub${isSmartMoney ? ' [Smart Money Swing]' : ''}…`]);
 
       const sigRes = await fetch('/api/demo-trader/signals', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sectors: selectedSectors }),
+        body: JSON.stringify({ sectors: selectedSectors, strategy: activeStrategy }),
       });
       const sigData = await sigRes.json() as {
         signals?: Signal[]; error?: string;
@@ -1929,10 +1939,16 @@ export default function DemoTraderPage() {
         }
       }
 
-      const buys = allSignals.filter(s => s.signal === 'BUY').slice(0, 3);
+      const maxPositions = isSmartMoney ? SMART_MONEY_MAX_POS : 10;
+      const openSlots = maxPositions - demoPositions.length;
+      const buys = allSignals.filter(s => s.signal === 'BUY').slice(0, Math.max(1, Math.min(3, openSlots)));
       if (buys.length === 0) {
         setRunLog(l => [...l, 'ℹ No BUY signals returned — check debug panel for details.']);
         setDebugOpen(true);
+        return;
+      }
+      if (isSmartMoney && openSlots <= 0) {
+        setRunLog(l => [...l, `⚠ Smart Money max ${SMART_MONEY_MAX_POS} positions reached — close existing trades first.`]);
         return;
       }
 
@@ -1941,14 +1957,27 @@ export default function DemoTraderPage() {
         return;
       }
 
-      setRunLog(l => [...l, `📋 Opening ${buys.length} paper position(s) in ${mode} mode…`]);
+      setRunLog(l => [...l, `📋 Opening ${buys.length} position(s) in ${mode} mode${isSmartMoney ? ' [2:1 R:R · 1% risk]' : ''}…`]);
 
       for (const signal of buys) {
         const entryPrice = signal.currentPrice;
-        const size = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
+
+        // Smart-Money: size so that SL loss = 1% of portfolio; others use existing logic
+        let size: number;
+        if (isSmartMoney) {
+          const riskAmount = paperBudget * (SMART_MONEY_RISK_PCT / 100);
+          const slDistance = entryPrice * (SMART_MONEY_SL_PCT / 100);
+          const sharesForRisk = riskAmount / slDistance;
+          size = sharesForRisk * entryPrice;
+        } else {
+          size = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
+        }
+
         const quantity = Math.max(1, Math.floor(size / entryPrice));
-        const sl = entryPrice * (1 - slPct / 100);
-        const tp = entryPrice * (1 + tpPct / 100);
+        const useSl = isSmartMoney ? SMART_MONEY_SL_PCT : slPct;
+        const useTp = isSmartMoney ? SMART_MONEY_TP_PCT : tpPct;
+        const sl = entryPrice * (1 - useSl / 100);
+        const tp = entryPrice * (1 + useTp / 100);
 
         const position: DemoPosition = {
           id: uid(),
@@ -1968,10 +1997,12 @@ export default function DemoTraderPage() {
         };
 
         addDemoPosition(position);
-        const sizeLabel = mode === 'auto' ? `auto ${fmtGBP(size)} (${signal.score}% conf)` : fmtGBP(size);
+        const sizeLabel = isSmartMoney
+          ? `1% risk ${fmtGBP(size)}`
+          : mode === 'auto' ? `auto ${fmtGBP(size)} (${signal.score}% conf)` : fmtGBP(size);
         setRunLog(l => [
           ...l,
-          `  → PAPER BUY ${quantity}× ${signal.symbol} @ ${fmtUSD(entryPrice)} [${sizeLabel}] SL ${fmtUSD(sl)} TP ${fmtUSD(tp)}`,
+          `  → BUY ${quantity}× ${signal.symbol} @ ${fmtUSD(entryPrice)} [${sizeLabel}] SL ${fmtUSD(sl)} (−${useSl}%) TP ${fmtUSD(tp)} (+${useTp}%)`,
         ]);
       }
 
@@ -1979,7 +2010,6 @@ export default function DemoTraderPage() {
       localStorage.setItem('last_signal_run', Date.now().toString());
 
       // ── Route orders to the correct T212 account ──────────────────────────
-      const activeMeta = portfolios.find(p => p.id === activePortfolioId);
       const execAccount: ExecutionAccount = activeMeta?.executionAccount ?? 'paper';
 
       // Determine credentials and env based on executionAccount
@@ -2269,13 +2299,45 @@ export default function DemoTraderPage() {
       </div>
 
       {/* Paper trading banner */}
-      <div className="mb-6 flex items-start gap-2 bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3">
+      <div className="mb-4 flex items-start gap-2 bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3">
         <Info className="h-4 w-4 text-blue-400 flex-shrink-0 mt-0.5" />
         <p className="text-xs text-blue-200/80">
           <strong className="text-blue-300">Paper trading — simulated positions using real live prices. No real money involved.</strong>{' '}
           Positions are tracked internally using live Finnhub prices. T212 DEMO API does not support order placement, so all trades are simulated here. Use <em>Copy to Live</em> to place real orders on your live T212 account.
         </p>
       </div>
+
+      {/* Smart Money strategy info card */}
+      {portfolios.find(p => p.id === activePortfolioId)?.strategy === 'smart-money' && (
+        <div className="mb-4 bg-amber-500/8 border border-amber-500/25 rounded-xl px-4 py-3.5 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-base">🧠</span>
+            <p className="text-sm font-semibold text-amber-300">Smart Money Swing Strategy</p>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 ml-1">Active</span>
+          </div>
+          <p className="text-xs text-amber-200/70 leading-relaxed">
+            Mimics institutional order flow by targeting stocks with <strong className="text-amber-300">unusual volume surges</strong> (≥1.3× average)
+            backed by a <strong className="text-amber-300">news catalyst</strong> and confirmed <strong className="text-amber-300">price momentum</strong>.
+            When smart money accumulates a position it shows up as volume before price fully reacts — we try to piggyback that.
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+            {[
+              { label: 'Entry criteria', value: 'Vol ≥1.3× + news + 0.3–6% move', icon: '📋' },
+              { label: 'Stop loss',      value: '−1.5% (capital preservation)', icon: '🛡' },
+              { label: 'Take profit',    value: '+3.0% (2:1 risk/reward)',       icon: '🎯' },
+              { label: 'Position size',  value: '1% portfolio risk per trade',   icon: '⚖️' },
+            ].map(r => (
+              <div key={r.label} className="bg-gray-900/60 rounded-lg px-2.5 py-2">
+                <p className="text-[10px] text-gray-500 mb-0.5">{r.icon} {r.label}</p>
+                <p className="text-[11px] text-amber-300/90 font-medium leading-tight">{r.value}</p>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-gray-600 pt-0.5">
+            ⚠ Past performance does not guarantee future results. This is a simulated strategy for educational purposes only.
+          </p>
+        </div>
+      )}
 
       {/* Tab toggle */}
       <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
@@ -2745,6 +2807,12 @@ export default function DemoTraderPage() {
                             <p className="font-semibold text-white">{pos.ticker}</p>
                           </TickerTooltip>
                           <p className="text-gray-600">{hoursAgo(pos.openedAt)}</p>
+                          {/* Show trade rationale for smart-money positions */}
+                          {pos.signal && pos.signal.includes('R:R') && (
+                            <p className="text-[10px] text-amber-400/70 mt-0.5 max-w-[180px] leading-tight">
+                              🧠 {pos.signal}
+                            </p>
+                          )}
                           {(() => {
                             const r = t212OrderResults.find(x => x.symbol === pos.ticker);
                             if (!r) return null;
