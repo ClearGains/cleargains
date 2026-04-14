@@ -56,6 +56,8 @@ type PortfolioStrategy = 'momentum' | 'value' | 'news-catalyst' | 'fx-only' | 'm
 type PortfolioRiskMode = 'conservative' | 'balanced' | 'aggressive';
 type PortfolioStatus = 'active' | 'paused' | 'completed';
 
+type ExecutionAccount = 'paper' | 'practice' | 'invest' | 'isa';
+
 type PortfolioMeta = {
   id: string;
   name: string;
@@ -67,7 +69,15 @@ type PortfolioMeta = {
   createdAt: string;
   lastActiveAt: string;
   paperBudget: number;
+  executionAccount: ExecutionAccount;
   lastRunAt?: string;
+};
+
+const EXECUTION_ACCOUNT_LABELS: Record<ExecutionAccount, string> = {
+  paper: '📝 Paper Only',
+  practice: '🎮 Practice (T212 Demo)',
+  invest: '📊 Invest (Live)',
+  isa: '📈 Stocks ISA (Live)',
 };
 
 const PORTFOLIO_LIST_KEY = 'demo_portfolios';
@@ -146,7 +156,8 @@ function PortfolioCard({
           {meta.status}
         </span>
       </div>
-      <p className="text-[10px] text-gray-500 mb-2">{STRATEGY_LABELS[meta.strategy]}</p>
+      <p className="text-[10px] text-gray-500">{STRATEGY_LABELS[meta.strategy]}</p>
+      <p className="text-[10px] text-gray-600 mb-2">{EXECUTION_ACCOUNT_LABELS[meta.executionAccount ?? 'paper']}</p>
       <div className="space-y-1">
         <div className="flex justify-between text-[10px]">
           <span className="text-gray-600">Budget</span>
@@ -182,16 +193,32 @@ function CreatePortfolioModal({ onClose, onCreate }: {
   onClose: () => void;
   onCreate: (meta: Omit<PortfolioMeta, 'id' | 'createdAt' | 'lastActiveAt'>) => void;
 }) {
+  const {
+    t212Connected, t212IsaConnected, t212DemoConnected,
+  } = useClearGainsStore();
+
   const [name, setName] = useState('');
   const [strategy, setStrategy] = useState<PortfolioStrategy>('momentum');
   const [riskMode, setRiskMode] = useState<PortfolioRiskMode>('balanced');
   const [sectorFocus, setSectorFocus] = useState('All');
   const [budget, setBudget] = useState(1000);
   const [autoTrade, setAutoTrade] = useState(true);
+  const [executionAccount, setExecutionAccount] = useState<ExecutionAccount>('paper');
+  const [understood, setUnderstood] = useState(false);
+
+  const isRealMoney = executionAccount === 'invest' || executionAccount === 'isa';
+  const accountAvailable = (acc: ExecutionAccount) => {
+    if (acc === 'paper') return true;
+    if (acc === 'practice') return t212DemoConnected;
+    if (acc === 'invest') return t212Connected;
+    if (acc === 'isa') return t212IsaConnected;
+    return false;
+  };
 
   function handleCreate() {
     if (!name.trim()) return;
-    onCreate({ name: name.trim(), strategy, riskMode, sectorFocus, autoTrade, status: 'active', paperBudget: budget });
+    if (isRealMoney && !understood) return;
+    onCreate({ name: name.trim(), strategy, riskMode, sectorFocus, autoTrade, status: 'active', paperBudget: budget, executionAccount });
     onClose();
   }
 
@@ -269,10 +296,58 @@ function CreatePortfolioModal({ onClose, onCreate }: {
           </div>
         </div>
 
+        <div>
+          <label className="text-xs text-gray-400 mb-1.5 block">Execution Account</label>
+          <div className="grid grid-cols-2 gap-2">
+            {(['paper', 'practice', 'invest', 'isa'] as ExecutionAccount[]).map(acc => {
+              const available = accountAvailable(acc);
+              const isSelected = executionAccount === acc;
+              const isLive = acc === 'invest' || acc === 'isa';
+              return (
+                <button
+                  key={acc}
+                  onClick={() => { if (available) { setExecutionAccount(acc); setUnderstood(false); } }}
+                  disabled={!available}
+                  className={clsx('py-2 px-3 rounded-lg border text-[11px] font-medium transition-colors text-left',
+                    !available ? 'opacity-40 cursor-not-allowed bg-gray-800 border-gray-800 text-gray-600' :
+                    isSelected && isLive ? 'bg-amber-500/20 border-amber-500/30 text-amber-300' :
+                    isSelected ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-300' :
+                    'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200'
+                  )}
+                >
+                  <div>{EXECUTION_ACCOUNT_LABELS[acc]}</div>
+                  {!available && <div className="text-[10px] text-gray-600 mt-0.5">Not connected</div>}
+                </button>
+              );
+            })}
+          </div>
+          {isRealMoney && (
+            <div className="mt-2 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5">
+              <p className="text-xs text-amber-400 font-semibold mb-1">⚠ Real money account selected</p>
+              <p className="text-xs text-amber-300/80">
+                This strategy will place real orders on your {executionAccount === 'isa' ? 'Stocks ISA' : 'Invest'} account.
+                ClearGains will confirm each order before placing.
+              </p>
+              <label className="flex items-start gap-2 mt-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={understood}
+                  onChange={e => setUnderstood(e.target.checked)}
+                  className="mt-0.5 accent-amber-500"
+                />
+                <span className="text-xs text-amber-300">I understand this uses real money and I am responsible for all trading decisions</span>
+              </label>
+            </div>
+          )}
+        </div>
+
         <div className="flex gap-2 pt-2">
           <button onClick={onClose} className="flex-1 py-2 rounded-lg border border-gray-700 text-sm text-gray-400 hover:text-gray-200">Cancel</button>
-          <button onClick={handleCreate} disabled={!name.trim()}
-            className="flex-1 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+          <button
+            onClick={handleCreate}
+            disabled={!name.trim() || (isRealMoney && !understood)}
+            className="flex-1 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
             Create Portfolio
           </button>
         </div>
@@ -1422,6 +1497,7 @@ export default function DemoTraderPage() {
   const {
     t212ApiKey, t212ApiSecret,
     t212DemoConnected, t212DemoApiKey, t212DemoApiSecret,
+    t212IsaConnected, t212IsaApiKey, t212IsaApiSecret,
     demoPositions, demoTrades,
     paperBudget, setPaperBudget, resetPaperAccount,
     addDemoPosition, removeDemoPosition, updateDemoPosition, addDemoTrade,
@@ -1486,6 +1562,7 @@ export default function DemoTraderPage() {
         status: 'active', createdAt: new Date().toISOString(),
         lastActiveAt: new Date().toISOString(),
         paperBudget: legacyBudget ? Number(JSON.parse(legacyBudget)) : 1000,
+        executionAccount: 'paper',
       };
       savePortfolioMeta(defaultMeta);
       if (legacyPos) {
@@ -1690,6 +1767,7 @@ export default function DemoTraderPage() {
         if (currentPrice <= pos.stopLoss || currentPrice >= pos.takeProfit) {
           const closeReason: DemoTrade['closeReason'] =
             currentPrice <= pos.stopLoss ? 'stop-loss' : 'take-profit';
+          const activeMeta = portfolios.find(p => p.id === activePortfolioId);
           addDemoTrade({
             id: uid(),
             ticker: pos.ticker,
@@ -1704,6 +1782,7 @@ export default function DemoTraderPage() {
             openedAt: pos.openedAt,
             closedAt: new Date().toISOString(),
             closeReason,
+            accountType: activeMeta?.executionAccount ?? 'paper',
           });
           removeDemoPosition(pos.id);
 
@@ -1842,14 +1921,37 @@ export default function DemoTraderPage() {
       setRunLog(l => [...l, '✅ Strategy complete — positions tracked in paper engine.']);
       localStorage.setItem('last_signal_run', Date.now().toString());
 
-      // ── Place orders on T212 Demo account if connected ────────────────────
-      if (t212DemoConnected && t212DemoApiKey && t212DemoApiSecret) {
-        const demoEncoded = btoa(t212DemoApiKey + ':' + t212DemoApiSecret);
-        // Pass live credentials too so the route can fall back to live instruments if needed
-        const liveEncoded = t212ApiKey && t212ApiSecret
-          ? btoa(t212ApiKey + ':' + t212ApiSecret)
-          : demoEncoded;
-        setRunLog(l => [...l, `📲 Placing ${buys.length} order(s) on T212 Demo account…`]);
+      // ── Route orders to the correct T212 account ──────────────────────────
+      const activeMeta = portfolios.find(p => p.id === activePortfolioId);
+      const execAccount: ExecutionAccount = activeMeta?.executionAccount ?? 'paper';
+
+      // Determine credentials and env based on executionAccount
+      const investEncoded = t212ApiKey && t212ApiSecret ? btoa(t212ApiKey + ':' + t212ApiSecret) : '';
+      const isaEncoded = t212IsaApiKey && t212IsaApiSecret ? btoa(t212IsaApiKey + ':' + t212IsaApiSecret) : '';
+      const demoEncoded = t212DemoApiKey && t212DemoApiSecret ? btoa(t212DemoApiKey + ':' + t212DemoApiSecret) : '';
+
+      let orderAuth = '';
+      let orderEnv: 'live' | 'demo' = 'live';
+      let accountLabel = '';
+
+      if (execAccount === 'practice' && t212DemoConnected && demoEncoded) {
+        orderAuth = demoEncoded;
+        orderEnv = 'demo';
+        accountLabel = 'T212 Practice';
+      } else if (execAccount === 'invest' && investEncoded) {
+        orderAuth = investEncoded;
+        orderEnv = 'live';
+        accountLabel = 'T212 Invest';
+      } else if (execAccount === 'isa' && t212IsaConnected && isaEncoded) {
+        orderAuth = isaEncoded;
+        orderEnv = 'live';
+        accountLabel = 'T212 ISA';
+      }
+
+      if (orderAuth) {
+        // Pass invest creds as fallback for instrument resolution (demo instruments endpoint returns 403)
+        const liveAuthFallback = investEncoded || orderAuth;
+        setRunLog(l => [...l, `📲 Placing ${buys.length} order(s) on ${accountLabel}…`]);
 
         type OrderResp = { ok: boolean; orderId?: unknown; error?: string; ticker?: string; note?: string };
         const orderResults = await Promise.allSettled(
@@ -1861,13 +1963,13 @@ export default function DemoTraderPage() {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'x-t212-auth': demoEncoded,
-                'x-t212-live-auth': liveEncoded,
+                'x-t212-auth': orderAuth,
+                'x-t212-live-auth': liveAuthFallback,
               },
               body: JSON.stringify({
                 ticker: signal.t212Ticker,
                 quantity: qty,
-                env: 'demo',
+                env: orderEnv,
               }),
             }).then(r => r.json() as Promise<OrderResp>);
           })
@@ -1878,23 +1980,26 @@ export default function DemoTraderPage() {
           const sym = buys[i].symbol;
           if (result.status === 'fulfilled' && result.value.ok) {
             const note = result.value.note ? ` (${result.value.note})` : '';
-            setRunLog(l => [...l, `  ✅ T212 Demo order placed: ${sym} → ${result.value.ticker ?? ''} (id: ${result.value.orderId ?? '?'})${note}`]);
-            newStatuses.push({ symbol: sym, status: 'placed', message: `Placed on T212 Demo ✓ (id: ${result.value.orderId ?? '?'})` });
+            setRunLog(l => [...l, `  ✅ ${accountLabel} order placed: ${sym} → ${result.value.ticker ?? ''} (id: ${result.value.orderId ?? '?'})${note}`]);
+            newStatuses.push({ symbol: sym, status: 'placed', message: `Placed on ${accountLabel} ✓ (id: ${result.value.orderId ?? '?'})` });
           } else {
             const err = result.status === 'fulfilled'
               ? (result.value.error ?? 'Unknown error')
               : String(result.reason);
-            setRunLog(l => [...l, `  ⚠ T212 Demo: ${sym}: ${err}`]);
-            newStatuses.push({ symbol: sym, status: 'failed', message: `T212 Demo: ${err}` });
+            setRunLog(l => [...l, `  ⚠ ${accountLabel}: ${sym}: ${err}`]);
+            newStatuses.push({ symbol: sym, status: 'failed', message: `${accountLabel}: ${err}` });
           }
         });
         setT212OrderResults(newStatuses);
       } else {
-        setRunLog(l => [...l, `  ℹ Paper only — connect T212 Demo to place real demo orders`]);
+        const reason = execAccount === 'paper'
+          ? 'Paper only — set execution account to place real orders'
+          : `${EXECUTION_ACCOUNT_LABELS[execAccount]} not connected — go to Settings → Accounts`;
+        setRunLog(l => [...l, `  ℹ ${reason}`]);
         setT212OrderResults(buys.map(s => ({
           symbol: s.symbol,
           status: 'paper' as const,
-          message: 'Paper only — T212 demo not connected',
+          message: execAccount === 'paper' ? 'Paper only' : `${execAccount} not connected`,
         })));
       }
 
@@ -1910,6 +2015,7 @@ export default function DemoTraderPage() {
 
   // ── Manual close ───────────────────────────────────────────────────────────
   function closePosition(pos: DemoPosition) {
+    const activeMeta = portfolios.find(p => p.id === activePortfolioId);
     addDemoTrade({
       id: uid(),
       ticker: pos.ticker,
@@ -1924,6 +2030,7 @@ export default function DemoTraderPage() {
       openedAt: pos.openedAt,
       closedAt: new Date().toISOString(),
       closeReason: 'manual',
+      accountType: activeMeta?.executionAccount ?? 'paper',
     });
     removeDemoPosition(pos.id);
   }
@@ -2606,6 +2713,7 @@ export default function DemoTraderPage() {
                       <th className="text-right py-2 pr-3">Exit $</th>
                       <th className="text-right py-2 pr-3">P&L £</th>
                       <th className="text-center py-2 pr-3">Close</th>
+                      <th className="text-left py-2 pr-3">Account</th>
                       <th className="text-right py-2">When</th>
                     </tr>
                   </thead>
@@ -2626,6 +2734,12 @@ export default function DemoTraderPage() {
                           )}>
                             {trade.closeReason}
                           </span>
+                        </td>
+                        <td className="py-1.5 pr-3 text-[10px]">
+                          {trade.accountType === 'practice' && <span className="text-blue-400">🎮 Practice</span>}
+                          {trade.accountType === 'invest' && <span className="text-emerald-400">📊 Invest</span>}
+                          {trade.accountType === 'isa' && <span className="text-indigo-400">📈 ISA</span>}
+                          {(!trade.accountType || trade.accountType === 'paper') && <span className="text-gray-600">📝 Paper</span>}
                         </td>
                         <td className="py-1.5 text-right text-gray-500">{hoursAgo(trade.closedAt)}</td>
                       </tr>

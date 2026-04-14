@@ -189,6 +189,7 @@ export type DemoTrade = {
   openedAt: string;
   closedAt: string;
   closeReason: 'stop-loss' | 'take-profit' | 'manual';
+  accountType?: 'paper' | 'practice' | 'invest' | 'isa';
 };
 
 export type RiskCheck = {

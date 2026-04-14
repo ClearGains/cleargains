@@ -82,6 +82,12 @@ interface ClearGainsState {
   t212DemoConnected: boolean;
   t212DemoAccountInfo: { id: string; currency: string } | null;
 
+  // T212 ISA (Stocks ISA — same live.trading212.com but different API key)
+  t212IsaApiKey: string;
+  t212IsaApiSecret: string;
+  t212IsaConnected: boolean;
+  t212IsaAccountInfo: { id: string; currency: string } | null;
+
   // In-memory only (not persisted)
   pendingSignalCount: number;
 
@@ -110,6 +116,10 @@ interface ClearGainsState {
   clearT212DemoCredentials: () => void;
   setT212DemoConnected: (v: boolean) => void;
   setT212DemoAccountInfo: (info: { id: string; currency: string } | null) => void;
+  setT212IsaCredentials: (key: string, secret: string) => void;
+  clearT212IsaCredentials: () => void;
+  setT212IsaConnected: (v: boolean) => void;
+  setT212IsaAccountInfo: (info: { id: string; currency: string } | null) => void;
   addDemoPosition: (pos: DemoPosition) => void;
   removeDemoPosition: (id: string) => void;
   updateDemoPosition: (id: string, update: Partial<DemoPosition>) => void;
@@ -153,6 +163,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
       t212DemoApiSecret: '',
       t212DemoConnected: false,
       t212DemoAccountInfo: null,
+      t212IsaApiKey: '',
+      t212IsaApiSecret: '',
+      t212IsaConnected: false,
+      t212IsaAccountInfo: null,
       demoPositions: [],
       demoTrades: [],
       paperBudget: 1000,
@@ -240,6 +254,16 @@ export const useClearGainsStore = create<ClearGainsState>()(
       setT212DemoConnected: (v) => set({ t212DemoConnected: v }),
 
       setT212DemoAccountInfo: (info) => set({ t212DemoAccountInfo: info }),
+
+      setT212IsaCredentials: (key, secret) =>
+        set({ t212IsaApiKey: key, t212IsaApiSecret: secret }),
+
+      clearT212IsaCredentials: () =>
+        set({ t212IsaApiKey: '', t212IsaApiSecret: '', t212IsaConnected: false, t212IsaAccountInfo: null }),
+
+      setT212IsaConnected: (v) => set({ t212IsaConnected: v }),
+
+      setT212IsaAccountInfo: (info) => set({ t212IsaAccountInfo: info }),
 
       addDemoPosition: (pos) =>
         set((state) => {
@@ -330,6 +354,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
           t212DemoApiSecret: '',
           t212DemoConnected: false,
           t212DemoAccountInfo: null,
+          t212IsaApiKey: '',
+          t212IsaApiSecret: '',
+          t212IsaConnected: false,
+          t212IsaAccountInfo: null,
           demoPositions: [],
           demoTrades: [],
           paperBudget: 1000,
@@ -359,6 +387,12 @@ export const useClearGainsStore = create<ClearGainsState>()(
         deadlineReminders: state.deadlineReminders,
         t212DemoApiKey: state.t212DemoApiKey,
         t212DemoApiSecret: state.t212DemoApiSecret,
+        t212DemoConnected: state.t212DemoConnected,
+        t212DemoAccountInfo: state.t212DemoAccountInfo,
+        t212IsaApiKey: state.t212IsaApiKey,
+        t212IsaApiSecret: state.t212IsaApiSecret,
+        t212IsaConnected: state.t212IsaConnected,
+        t212IsaAccountInfo: state.t212IsaAccountInfo,
         demoPositions: state.demoPositions,
         demoTrades: state.demoTrades,
         paperBudget: state.paperBudget,

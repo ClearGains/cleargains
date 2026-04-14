@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck, Bell } from 'lucide-react';
+import { Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck, Bell, ChevronRight } from 'lucide-react';
+import Link from 'next/link';
 import { useClearGainsStore } from '@/lib/store';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -97,6 +98,21 @@ export default function SettingsPage() {
         <h1 className="text-2xl font-bold text-white">Settings</h1>
         <p className="text-sm text-gray-500 mt-1">Configure your Trading 212 connection and account preferences.</p>
       </div>
+
+      {/* Quick link to multi-account manager */}
+      <Link
+        href="/settings/accounts"
+        className="mb-4 flex items-center justify-between px-4 py-3 bg-gray-900 border border-gray-800 rounded-xl hover:border-emerald-500/30 transition-colors group"
+      >
+        <div className="flex items-center gap-3">
+          <span className="text-xl">🏦</span>
+          <div>
+            <p className="text-sm font-semibold text-white">Trading 212 Account Manager</p>
+            <p className="text-xs text-gray-500">Connect Invest, ISA, and Practice accounts separately</p>
+          </div>
+        </div>
+        <ChevronRight className="h-4 w-4 text-gray-600 group-hover:text-emerald-400 transition-colors" />
+      </Link>
 
       <Card className="mb-4">
         <CardHeader

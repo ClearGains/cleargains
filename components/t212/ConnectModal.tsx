@@ -11,26 +11,36 @@ interface ConnectModalProps {
   onConnected: () => void;
 }
 
-type Tab = 'live' | 'demo';
+type Tab = 'live' | 'isa' | 'demo';
 
 export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
   const {
     t212Connected, t212AccountInfo,
     t212DemoConnected, t212DemoAccountInfo,
+    t212IsaConnected, t212IsaAccountInfo,
     setT212Credentials, setT212Connected, setT212AccountInfo,
     setT212DemoCredentials, setT212DemoConnected, setT212DemoAccountInfo,
-    clearT212Credentials, clearT212DemoCredentials,
+    setT212IsaCredentials, setT212IsaConnected, setT212IsaAccountInfo,
+    clearT212Credentials, clearT212DemoCredentials, clearT212IsaCredentials,
   } = useClearGainsStore();
 
   const [tab, setTab] = useState<Tab>('live');
 
-  // LIVE form state
+  // LIVE (Invest) form state
   const [liveKey, setLiveKey] = useState('');
   const [liveSecret, setLiveSecret] = useState('');
   const [showLiveKey, setShowLiveKey] = useState(false);
   const [showLiveSecret, setShowLiveSecret] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [liveTesting, setLiveTesting] = useState(false);
+
+  // ISA form state
+  const [isaKey, setIsaKey] = useState('');
+  const [isaSecret, setIsaSecret] = useState('');
+  const [showIsaKey, setShowIsaKey] = useState(false);
+  const [showIsaSecret, setShowIsaSecret] = useState(false);
+  const [isaError, setIsaError] = useState<string | null>(null);
+  const [isaTesting, setIsaTesting] = useState(false);
 
   // DEMO form state
   const [demoKey, setDemoKey] = useState('');
@@ -66,6 +76,35 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
       setLiveError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setLiveTesting(false);
+    }
+  }
+
+  async function handleConnectIsa() {
+    const cleanKey = isaKey.replace(/[\s\n\r\t]/g, '');
+    const cleanSecret = isaSecret.replace(/[\s\n\r\t]/g, '');
+    if (!cleanKey || !cleanSecret) { setIsaError('Both API key and secret are required.'); return; }
+
+    setIsaTesting(true);
+    setIsaError(null);
+    try {
+      const encoded = btoa(cleanKey + ':' + cleanSecret);
+      const res = await fetch('/api/t212/connect', {
+        method: 'POST',
+        headers: { 'x-t212-auth': encoded, 'x-t212-account-type': 'LIVE' },
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setT212IsaCredentials(cleanKey, cleanSecret);
+        setT212IsaAccountInfo({ id: data.accountId, currency: data.currency });
+        setT212IsaConnected(true);
+        onConnected();
+      } else {
+        setIsaError(data.error ?? 'Connection failed.');
+      }
+    } catch (err) {
+      setIsaError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsaTesting(false);
     }
   }
 
@@ -115,26 +154,36 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         </div>
 
         {/* Tab switcher */}
-        <div className="flex bg-gray-800 mx-6 mt-5 rounded-lg p-1">
+        <div className="flex bg-gray-800 mx-6 mt-5 rounded-lg p-1 gap-0.5">
           <button
             onClick={() => setTab('live')}
-            className={clsx('flex-1 py-2 rounded-md text-sm font-semibold transition-colors flex items-center justify-center gap-1.5',
+            className={clsx('flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors flex items-center justify-center gap-1',
               tab === 'live' ? 'bg-emerald-600 text-white' : 'text-gray-500 hover:text-gray-300'
             )}
           >
-            <span className={clsx('w-2 h-2 rounded-full', t212Connected ? 'bg-emerald-300' : 'bg-gray-500')} />
-            Live Account
-            {t212Connected && <CheckCircle2 className="h-3.5 w-3.5" />}
+            <span className={clsx('w-1.5 h-1.5 rounded-full', t212Connected ? 'bg-emerald-300' : 'bg-gray-500')} />
+            📊 Invest
+            {t212Connected && <CheckCircle2 className="h-3 w-3" />}
+          </button>
+          <button
+            onClick={() => setTab('isa')}
+            className={clsx('flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors flex items-center justify-center gap-1',
+              tab === 'isa' ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:text-gray-300'
+            )}
+          >
+            <span className={clsx('w-1.5 h-1.5 rounded-full', t212IsaConnected ? 'bg-indigo-300' : 'bg-gray-500')} />
+            📈 ISA
+            {t212IsaConnected && <CheckCircle2 className="h-3 w-3" />}
           </button>
           <button
             onClick={() => setTab('demo')}
-            className={clsx('flex-1 py-2 rounded-md text-sm font-semibold transition-colors flex items-center justify-center gap-1.5',
+            className={clsx('flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors flex items-center justify-center gap-1',
               tab === 'demo' ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-300'
             )}
           >
-            <span className={clsx('w-2 h-2 rounded-full', t212DemoConnected ? 'bg-blue-300' : 'bg-gray-500')} />
-            Demo / Practice
-            {t212DemoConnected && <CheckCircle2 className="h-3.5 w-3.5" />}
+            <span className={clsx('w-1.5 h-1.5 rounded-full', t212DemoConnected ? 'bg-blue-300' : 'bg-gray-500')} />
+            🎮 Practice
+            {t212DemoConnected && <CheckCircle2 className="h-3 w-3" />}
           </button>
         </div>
 
@@ -145,7 +194,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
               <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 flex items-start gap-3">
                 <Wifi className="h-5 w-5 text-emerald-400 flex-shrink-0 mt-0.5" />
                 <div className="flex-1">
-                  <p className="text-sm font-semibold text-emerald-400">✓ Live Account Connected</p>
+                  <p className="text-sm font-semibold text-emerald-400">✓ Invest Account Connected</p>
                   {t212AccountInfo && (
                     <p className="text-xs text-emerald-400/70 mt-0.5">
                       Account ID: {t212AccountInfo.id} · {t212AccountInfo.currency}
@@ -163,8 +212,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
               <>
                 <div>
                   <p className="text-sm text-gray-400 mb-3">
-                    Connect your <span className="text-white font-medium">live Trading 212 account</span> to
-                    copy paper trades as real orders. Uses{' '}
+                    Connect your <span className="text-white font-medium">Invest account</span> (standard taxable account) to copy paper trades as real orders. Uses{' '}
                     <code className="text-xs bg-gray-800 px-1 rounded">live.trading212.com</code>
                   </p>
                   <div className="space-y-3 mb-3">
@@ -203,7 +251,85 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
                 </div>
 
                 <Button onClick={handleConnectLive} loading={liveTesting} fullWidth icon={<CheckCircle2 className="h-4 w-4" />}>
-                  {liveTesting ? 'Verifying...' : 'Connect Live Account'}
+                  {liveTesting ? 'Verifying...' : 'Connect Invest Account'}
+                </Button>
+              </>
+            )}
+
+            <SecurityNote />
+          </div>
+        )}
+
+        {/* ── ISA TAB ──────────────────────────────────────────────── */}
+        {tab === 'isa' && (
+          <div className="px-6 py-5 space-y-4">
+            {t212IsaConnected ? (
+              <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-xl p-4 flex items-start gap-3">
+                <Wifi className="h-5 w-5 text-indigo-400 flex-shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-sm font-semibold text-indigo-400">✓ Stocks ISA Account Connected</p>
+                  {t212IsaAccountInfo && (
+                    <p className="text-xs text-indigo-400/70 mt-0.5">
+                      Account ID: {t212IsaAccountInfo.id} · {t212IsaAccountInfo.currency}
+                    </p>
+                  )}
+                  <p className="text-xs text-indigo-400/60 mt-1">
+                    Strategies set to ISA will route orders through this account. Gains inside an ISA are free of CGT and income tax.
+                  </p>
+                </div>
+                <button
+                  onClick={clearT212IsaCredentials}
+                  className="text-xs text-red-400 hover:text-red-300 transition-colors"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <>
+                <div>
+                  <p className="text-sm text-gray-400 mb-3">
+                    Connect your <span className="text-white font-medium">Stocks ISA account</span> — a separate T212 API key generated while in the ISA view. Strategies routed here trade tax-free within your{' '}
+                    <span className="text-indigo-400 font-medium">£20,000 annual allowance</span>. Uses{' '}
+                    <code className="text-xs bg-gray-800 px-1 rounded">live.trading212.com</code>
+                  </p>
+                  <p className="text-xs font-medium text-indigo-400 mb-2">How to get your ISA API key:</p>
+                  <div className="space-y-2 mb-4">
+                    {[
+                      'Open Trading 212 → tap your account name at the top',
+                      'Switch to "Stocks ISA" account',
+                      'Go to Settings → API (Beta)',
+                      'Generate a new key with read + order permissions',
+                      'Copy both key and secret — this is your ISA key',
+                    ].map((text, i) => (
+                      <div key={i} className="flex items-start gap-3">
+                        <span className="flex-shrink-0 w-5 h-5 rounded-full bg-indigo-600/20 text-indigo-400 text-xs font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
+                        <p className="text-sm text-gray-300">{text}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <PasswordField label="ISA API Key" value={isaKey} onChange={setIsaKey} show={showIsaKey} onToggleShow={() => setShowIsaKey(v => !v)} placeholder="Paste your Stocks ISA API key" />
+                  <PasswordField label="ISA API Secret" value={isaSecret} onChange={setIsaSecret} show={showIsaSecret} onToggleShow={() => setShowIsaSecret(v => !v)} placeholder="Paste your Stocks ISA API secret" />
+                </div>
+
+                {isaError && <ErrorBox message={isaError} />}
+
+                <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-lg px-4 py-3">
+                  <p className="text-xs text-indigo-400">
+                    💡 ISA trades are exempt from CGT and income tax. ClearGains will tag ISA trades separately and track your £20,000 annual allowance.
+                  </p>
+                </div>
+
+                <Button
+                  onClick={handleConnectIsa}
+                  loading={isaTesting}
+                  fullWidth
+                  className="bg-indigo-600 hover:bg-indigo-500"
+                  icon={<CheckCircle2 className="h-4 w-4" />}
+                >
+                  {isaTesting ? 'Verifying...' : 'Connect ISA Account'}
                 </Button>
               </>
             )}
