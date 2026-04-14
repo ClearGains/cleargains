@@ -145,9 +145,8 @@ function PaperBuyModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm shadow-2xl p-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm max-h-[calc(100vh-80px)] overflow-y-auto shadow-2xl p-6" onClick={e => e.stopPropagation()}>
         <button onClick={onClose} className="absolute right-4 top-4 text-gray-500 hover:text-gray-300">
           <X className="h-5 w-5" />
         </button>
