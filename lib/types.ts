@@ -207,3 +207,39 @@ export type Deadline = {
   description: string;
   reminderSet: boolean;
 };
+
+export type TaxTrade = {
+  id: string;
+  ticker: string;
+  isISA: boolean;
+  accountType: 'invest' | 'isa' | 'demo';
+  disposalDate: string;        // ISO string
+  quantity: number;
+  proceedsGBP: number;         // Total disposal proceeds in GBP
+  allowableCostGBP: number;    // Matching-rule cost basis in GBP
+  gainGBP: number;             // Positive = gain
+  lossGBP: number;             // Positive = loss amount
+  rule: 'same-day' | 'bed-and-breakfast' | 'section104';
+  taxDueGBP: number;           // 0 for ISA/losses
+  taxRate: number;             // 0.18 or 0.24
+  cumulativeAEAUsed: number;   // AEA used up to and including this disposal
+  bbWarning: boolean;          // true if B&B rule applies or may apply
+  source: 't212-live' | 't212-isa' | 'manual';
+  notes?: string;
+};
+
+export type CGTAlert = {
+  id: string;
+  type: 'gain' | 'loss' | 'isa' | 'aea-warning' | 'aea-exceeded' | 'bb-rule' | 'year-end';
+  ticker?: string;
+  message: string;
+  detail?: string;
+  ts: string;                  // ISO
+};
+
+export type S104PoolEnriched = Section104Pool & {
+  currentPrice?: number;       // live market price
+  currentValueGBP?: number;    // quantity × currentPrice
+  unrealisedGainGBP?: number;  // currentValue - totalCost
+  estimatedCGT?: number;       // unrealisedGain × 0.24 (worst-case, before AEA)
+};

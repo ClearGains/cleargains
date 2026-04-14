@@ -13,6 +13,8 @@ import {
   DemoTrade,
   FxPosition,
   FxTrade,
+  TaxTrade,
+  CGTAlert,
 } from './types';
 import { DEFAULT_COUNTRY } from './countries';
 
@@ -92,6 +94,13 @@ interface ClearGainsState {
   // Full keyHash is stored server-side in the cg-account-links HTTP-only cookie
   linkedAccountIds: Record<string, string>; // accountType → keyHashPrefix (8 hex chars)
 
+  // CGT real-time monitoring
+  taxTrades: TaxTrade[];                          // all disposed trades with CGT calcs
+  cgtAlerts: CGTAlert[];                          // toast queue (max 20)
+  carriedForwardLosses: number;                   // losses from prior tax years
+  taxMonitorLastPoll: string | null;              // ISO of last T212 poll
+  taxMonitorLivePositions: T212Position[];        // snapshot of last polled positions
+
   // In-memory only (not persisted)
   pendingSignalCount: number;
 
@@ -141,6 +150,16 @@ interface ClearGainsState {
   setPendingSignalCount: (n: number) => void;
   setLinkedAccountId: (accountType: string, keyHashPrefix: string) => void;
   clearLinkedAccountId: (accountType: string) => void;
+
+  // Tax monitor actions
+  addTaxTrade: (trade: TaxTrade) => void;
+  clearTaxTrades: () => void;
+  addCGTAlert: (alert: CGTAlert) => void;
+  dismissCGTAlert: (id: string) => void;
+  setCarriedForwardLosses: (n: number) => void;
+  setTaxMonitorLastPoll: (ts: string) => void;
+  setTaxMonitorLivePositions: (positions: T212Position[]) => void;
+
   reset: () => void;
 }
 
@@ -180,6 +199,11 @@ export const useClearGainsStore = create<ClearGainsState>()(
       fxTrades: [],
       linkedAccountIds: {},
       pendingSignalCount: 0,
+      taxTrades: [],
+      cgtAlerts: [],
+      carriedForwardLosses: 0,
+      taxMonitorLastPoll: null,
+      taxMonitorLivePositions: [],
 
       setCountry: (country) => set({ selectedCountry: country }),
       setHasOnboarded: (v) => set({ hasOnboarded: v }),
@@ -336,6 +360,17 @@ export const useClearGainsStore = create<ClearGainsState>()(
 
       setPendingSignalCount: (n) => set({ pendingSignalCount: n }),
 
+      addTaxTrade: (trade) =>
+        set((state) => ({ taxTrades: [trade, ...state.taxTrades].slice(0, 500) })),
+      clearTaxTrades: () => set({ taxTrades: [] }),
+      addCGTAlert: (alert) =>
+        set((state) => ({ cgtAlerts: [alert, ...state.cgtAlerts].slice(0, 20) })),
+      dismissCGTAlert: (id) =>
+        set((state) => ({ cgtAlerts: state.cgtAlerts.filter(a => a.id !== id) })),
+      setCarriedForwardLosses: (n) => set({ carriedForwardLosses: n }),
+      setTaxMonitorLastPoll: (ts) => set({ taxMonitorLastPoll: ts }),
+      setTaxMonitorLivePositions: (positions) => set({ taxMonitorLivePositions: positions }),
+
       setLinkedAccountId: (accountType, keyHashPrefix) =>
         set((state) => ({
           linkedAccountIds: { ...state.linkedAccountIds, [accountType]: keyHashPrefix },
@@ -383,6 +418,11 @@ export const useClearGainsStore = create<ClearGainsState>()(
           fxPositions: [],
           fxTrades: [],
           linkedAccountIds: {},
+          taxTrades: [],
+          cgtAlerts: [],
+          carriedForwardLosses: 0,
+          taxMonitorLastPoll: null,
+          taxMonitorLivePositions: [],
         });
       },
     }),
@@ -419,6 +459,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
         fxPositions: state.fxPositions,
         fxTrades: state.fxTrades,
         linkedAccountIds: state.linkedAccountIds,
+        taxTrades: state.taxTrades,
+        cgtAlerts: state.cgtAlerts,
+        carriedForwardLosses: state.carriedForwardLosses,
+        taxMonitorLivePositions: state.taxMonitorLivePositions,
       }),
     }
   )

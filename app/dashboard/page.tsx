@@ -26,6 +26,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { ConnectModal } from '@/components/t212/ConnectModal';
 import { TaxYearTracker } from '@/components/dashboard/TaxYearTracker';
+import { CGTMonitorWidget } from '@/components/tax/CGTMonitorWidget';
 import { clsx } from 'clsx';
 import Link from 'next/link';
 
@@ -520,6 +521,11 @@ export default function DashboardPage() {
       {/* Tax Year Tracker */}
       <div className="mt-4">
         <TaxYearTracker />
+      </div>
+
+      {/* CGT Monitor Widget */}
+      <div className="mt-4">
+        <CGTMonitorWidget />
       </div>
 
       {/* Quick actions */}

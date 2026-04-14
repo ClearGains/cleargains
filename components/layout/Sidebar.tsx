@@ -30,6 +30,7 @@ const navLinks = [
   { href: '/trading-guide', label: 'Trading Guide', icon: BookOpen },
   { href: '/demo-trader', label: 'Demo Trader', icon: FlaskConical },
   { href: '/ledger', label: 'Trade Ledger', icon: BookOpen },
+  { href: '/tax-monitor', label: 'Tax Monitor', icon: ShieldCheck },
   { href: '/cgt', label: 'CGT Calculator', icon: Calculator },
   { href: '/tax-calculator', label: 'Tax Calculator', icon: Receipt },
   { href: '/risk', label: 'Risk Engine', icon: ShieldCheck },

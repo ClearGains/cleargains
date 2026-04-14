@@ -5,6 +5,8 @@ import { Navbar } from '@/components/layout/Navbar';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Disclaimer } from '@/components/layout/Disclaimer';
 import { T212AutoConnect } from '@/components/t212/T212AutoConnect';
+import { ToastProvider } from '@/components/ui/Toast';
+import { TaxMonitorService } from '@/components/tax/TaxMonitorService';
 
 const geist = Geist({
   variable: '--font-geist-sans',
@@ -25,15 +27,18 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${geist.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col bg-gray-950 text-gray-100">
-        <T212AutoConnect />
-        <Navbar />
-        <div className="flex flex-1 min-h-0">
-          <Sidebar />
-          <main className="flex-1 min-w-0 flex flex-col">
-            <div className="flex-1">{children}</div>
-            <Disclaimer />
-          </main>
-        </div>
+        <ToastProvider>
+          <T212AutoConnect />
+          <TaxMonitorService />
+          <Navbar />
+          <div className="flex flex-1 min-h-0">
+            <Sidebar />
+            <main className="flex-1 min-w-0 flex flex-col">
+              <div className="flex-1">{children}</div>
+              <Disclaimer />
+            </main>
+          </div>
+        </ToastProvider>
       </body>
     </html>
   );
