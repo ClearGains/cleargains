@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { hashFromEncoded, verifyLinks, isAuthorised, ACCOUNT_COOKIE, AccountType } from '@/lib/accountAuth';
 
 // ── Hardcoded T212 ticker mapping ─────────────────────────────────────────────
 // Used when the instruments endpoint is unavailable (403 on demo) or for speed.
@@ -156,6 +157,27 @@ export async function POST(request: NextRequest) {
   type Body = { ticker: string; quantity: number; env?: 'demo' | 'live' };
   const body = await request.json() as Body;
   const { ticker, quantity, env = 'live' } = body;
+
+  // ── Account-link permission check ─────────────────────────────────────────
+  // If the session has a cg-account-links cookie, verify the credentials match
+  // the registered account for this env. This prevents one session from trading
+  // on another user's account even if they somehow obtain that account's key.
+  const accountCookie = request.cookies.get(ACCOUNT_COOKIE)?.value;
+  if (accountCookie) {
+    const links = verifyLinks(accountCookie);
+    if (links) {
+      const accountType: AccountType = env === 'demo' ? 'demo' : env === 'live' ? 'live' : 'isa';
+      const keyHash = hashFromEncoded(encoded);
+      const claim = links.claims.find(c => c.accountType === accountType);
+      if (claim && claim.keyHash !== keyHash) {
+        return NextResponse.json({
+          ok: false,
+          error: `Permission denied: the credentials you provided do not match the ${accountType} account linked to this session. ` +
+                 `Reconnect in Settings → Accounts to update the link.`,
+        }, { status: 403 });
+      }
+    }
+  }
 
   if (!ticker || !quantity || quantity <= 0) {
     return NextResponse.json({ ok: false, error: 'ticker and positive quantity are required.' }, { status: 400 });

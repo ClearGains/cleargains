@@ -5,7 +5,17 @@ export async function GET(request: NextRequest) {
   if (!symbol) return NextResponse.json({ error: 'symbol required' }, { status: 400 });
 
   const apiKey = process.env.FINNHUB_API_KEY;
-  if (!apiKey) return NextResponse.json({ error: 'FINNHUB_API_KEY not configured' }, { status: 503 });
+  if (!apiKey) {
+    console.error(
+      '[stock/profile] FINNHUB_API_KEY is not set. ' +
+      'Add it in Vercel Dashboard → Settings → Environment Variables. ' +
+      'Visit /api/health to check all required env vars.'
+    );
+    return NextResponse.json(
+      { error: 'FINNHUB_API_KEY is not configured on this server. See /api/health for diagnostics.' },
+      { status: 503 }
+    );
+  }
 
   try {
     const [profileRes, quoteRes] = await Promise.all([
@@ -32,6 +42,7 @@ export async function GET(request: NextRequest) {
       changePercent: quote?.dp ?? null,
     });
   } catch (err) {
+    console.error('[stock/profile] Finnhub fetch error:', err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

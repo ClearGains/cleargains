@@ -88,6 +88,10 @@ interface ClearGainsState {
   t212IsaConnected: boolean;
   t212IsaAccountInfo: { id: string; currency: string } | null;
 
+  // Account-link tokens — keyHash (first 8 chars) per account type, for display only
+  // Full keyHash is stored server-side in the cg-account-links HTTP-only cookie
+  linkedAccountIds: Record<string, string>; // accountType → keyHashPrefix (8 hex chars)
+
   // In-memory only (not persisted)
   pendingSignalCount: number;
 
@@ -135,6 +139,8 @@ interface ClearGainsState {
   updateFxPosition: (id: string, update: Partial<FxPosition>) => void;
   addFxTrade: (trade: FxTrade) => void;
   setPendingSignalCount: (n: number) => void;
+  setLinkedAccountId: (accountType: string, keyHashPrefix: string) => void;
+  clearLinkedAccountId: (accountType: string) => void;
   reset: () => void;
 }
 
@@ -172,6 +178,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
       paperBudget: 1000,
       fxPositions: [],
       fxTrades: [],
+      linkedAccountIds: {},
       pendingSignalCount: 0,
 
       setCountry: (country) => set({ selectedCountry: country }),
@@ -329,6 +336,18 @@ export const useClearGainsStore = create<ClearGainsState>()(
 
       setPendingSignalCount: (n) => set({ pendingSignalCount: n }),
 
+      setLinkedAccountId: (accountType, keyHashPrefix) =>
+        set((state) => ({
+          linkedAccountIds: { ...state.linkedAccountIds, [accountType]: keyHashPrefix },
+        })),
+
+      clearLinkedAccountId: (accountType) =>
+        set((state) => {
+          const next = { ...state.linkedAccountIds };
+          delete next[accountType];
+          return { linkedAccountIds: next };
+        }),
+
       reset: () => {
         lsRemove(LS_POSITIONS, LS_TRADES, LS_BUDGET);
         set({
@@ -363,6 +382,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
           paperBudget: 1000,
           fxPositions: [],
           fxTrades: [],
+          linkedAccountIds: {},
         });
       },
     }),
@@ -398,6 +418,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
         paperBudget: state.paperBudget,
         fxPositions: state.fxPositions,
         fxTrades: state.fxTrades,
+        linkedAccountIds: state.linkedAccountIds,
       }),
     }
   )

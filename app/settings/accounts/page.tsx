@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Eye, EyeOff, CheckCircle2, AlertCircle, Wifi, WifiOff, LogOut, ExternalLink, ChevronDown, ChevronRight } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
+import { Key } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { clsx } from 'clsx';
@@ -62,6 +63,7 @@ function InvestAccountCard() {
   const {
     t212Connected, t212AccountInfo,
     setT212Credentials, setT212Connected, setT212AccountInfo, clearT212Credentials,
+    linkedAccountIds, setLinkedAccountId, clearLinkedAccountId,
   } = useClearGainsStore();
 
   const [key, setKey] = useState('');
@@ -88,6 +90,14 @@ function InvestAccountCard() {
         setT212AccountInfo({ id: data.accountId, currency: data.currency });
         setT212Connected(true);
         setKey(''); setSecret('');
+        // Register account-link server-side (sets signed HTTP-only cookie)
+        const linkRes = await fetch('/api/auth/account-link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: cleanKey, apiSecret: cleanSecret, accountType: 'live' }),
+        });
+        const linkData = await linkRes.json();
+        if (linkData.ok) setLinkedAccountId('live', linkData.keyHashPrefix);
       } else {
         setError(data.error ?? 'Connection failed.');
       }
@@ -96,6 +106,16 @@ function InvestAccountCard() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function handleDisconnect() {
+    clearT212Credentials();
+    clearLinkedAccountId('live');
+    await fetch('/api/auth/account-link', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountType: 'live' }),
+    }).catch(() => {});
   }
 
   return (
@@ -120,10 +140,16 @@ function InvestAccountCard() {
         <div className="space-y-3">
           <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5 text-xs text-emerald-400">
             <div className="flex items-center gap-1.5 mb-0.5"><CheckCircle2 className="h-3.5 w-3.5" /> Account verified</div>
-            {t212AccountInfo && <p className="text-emerald-400/70">ID: {t212AccountInfo.id} · {t212AccountInfo.currency}</p>}
+            {t212AccountInfo && <p className="text-emerald-400/70">T212 ID: {t212AccountInfo.id} · {t212AccountInfo.currency}</p>}
+            {linkedAccountIds['live'] && (
+              <div className="flex items-center gap-1.5 mt-1 text-emerald-400/70">
+                <Key className="h-3 w-3" />
+                <span>Account key: <span className="font-mono">{linkedAccountIds['live']}…</span> (strategies saved to this key)</span>
+              </div>
+            )}
           </div>
           <p className="text-xs text-gray-500">Strategies set to <span className="text-emerald-400">Invest</span> will route orders here. Gains are subject to CGT.</p>
-          <button onClick={clearT212Credentials} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
+          <button onClick={handleDisconnect} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
             <LogOut className="h-3.5 w-3.5" /> Disconnect
           </button>
         </div>
@@ -159,6 +185,7 @@ function IsaAccountCard() {
   const {
     t212IsaConnected, t212IsaAccountInfo,
     setT212IsaCredentials, setT212IsaConnected, setT212IsaAccountInfo, clearT212IsaCredentials,
+    linkedAccountIds, setLinkedAccountId, clearLinkedAccountId,
   } = useClearGainsStore();
 
   const [key, setKey] = useState('');
@@ -185,6 +212,14 @@ function IsaAccountCard() {
         setT212IsaAccountInfo({ id: data.accountId, currency: data.currency });
         setT212IsaConnected(true);
         setKey(''); setSecret('');
+        // Register account-link server-side
+        const linkRes = await fetch('/api/auth/account-link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: cleanKey, apiSecret: cleanSecret, accountType: 'isa' }),
+        });
+        const linkData = await linkRes.json();
+        if (linkData.ok) setLinkedAccountId('isa', linkData.keyHashPrefix);
       } else {
         setError(data.error ?? 'Connection failed.');
       }
@@ -193,6 +228,16 @@ function IsaAccountCard() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function handleDisconnect() {
+    clearT212IsaCredentials();
+    clearLinkedAccountId('isa');
+    await fetch('/api/auth/account-link', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountType: 'isa' }),
+    }).catch(() => {});
   }
 
   return (
@@ -229,13 +274,19 @@ function IsaAccountCard() {
         <div className="space-y-3">
           <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-lg px-3 py-2.5 text-xs text-indigo-400">
             <div className="flex items-center gap-1.5 mb-0.5"><CheckCircle2 className="h-3.5 w-3.5" /> ISA account verified</div>
-            {t212IsaAccountInfo && <p className="text-indigo-400/70">ID: {t212IsaAccountInfo.id} · {t212IsaAccountInfo.currency}</p>}
+            {t212IsaAccountInfo && <p className="text-indigo-400/70">T212 ID: {t212IsaAccountInfo.id} · {t212IsaAccountInfo.currency}</p>}
+            {linkedAccountIds['isa'] && (
+              <div className="flex items-center gap-1.5 mt-1 text-indigo-400/70">
+                <Key className="h-3 w-3" />
+                <span>Account key: <span className="font-mono">{linkedAccountIds['isa']}…</span> (strategies saved to this key)</span>
+              </div>
+            )}
           </div>
           <p className="text-xs text-gray-500">
             Strategies set to <span className="text-indigo-400">ISA</span> will route orders here.
             Gains inside an ISA are <span className="text-indigo-400 font-medium">exempt from CGT and income tax</span>.
           </p>
-          <button onClick={clearT212IsaCredentials} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
+          <button onClick={handleDisconnect} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
             <LogOut className="h-3.5 w-3.5" /> Disconnect
           </button>
         </div>
@@ -289,6 +340,7 @@ function PracticeAccountCard() {
   const {
     t212DemoConnected, t212DemoAccountInfo,
     setT212DemoCredentials, setT212DemoConnected, setT212DemoAccountInfo, clearT212DemoCredentials,
+    linkedAccountIds, setLinkedAccountId, clearLinkedAccountId,
   } = useClearGainsStore();
 
   const [key, setKey] = useState('');
@@ -315,6 +367,15 @@ function PracticeAccountCard() {
         setT212DemoAccountInfo({ id: data.accountId, currency: data.currency });
         setT212DemoConnected(true);
         setKey(''); setSecret('');
+        // Register account-link server-side (signs an HTTP-only cookie granting
+        // this session permission to execute demo trades on this account)
+        const linkRes = await fetch('/api/auth/account-link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: cleanKey, apiSecret: cleanSecret, accountType: 'demo' }),
+        });
+        const linkData = await linkRes.json();
+        if (linkData.ok) setLinkedAccountId('demo', linkData.keyHashPrefix);
       } else {
         setError(data.error ?? 'Connection failed.');
       }
@@ -323,6 +384,16 @@ function PracticeAccountCard() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function handleDisconnect() {
+    clearT212DemoCredentials();
+    clearLinkedAccountId('demo');
+    await fetch('/api/auth/account-link', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountType: 'demo' }),
+    }).catch(() => {});
   }
 
   return (
@@ -347,12 +418,19 @@ function PracticeAccountCard() {
         <div className="space-y-3">
           <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2.5 text-xs text-blue-400">
             <div className="flex items-center gap-1.5 mb-0.5"><CheckCircle2 className="h-3.5 w-3.5" /> Practice account verified</div>
-            {t212DemoAccountInfo && <p className="text-blue-400/70">ID: {t212DemoAccountInfo.id} · {t212DemoAccountInfo.currency}</p>}
+            {t212DemoAccountInfo && <p className="text-blue-400/70">T212 ID: {t212DemoAccountInfo.id} · {t212DemoAccountInfo.currency}</p>}
+            {linkedAccountIds['demo'] && (
+              <div className="flex items-center gap-1.5 mt-1 text-blue-400/70">
+                <Key className="h-3 w-3" />
+                <span>Account key: <span className="font-mono">{linkedAccountIds['demo']}…</span> (strategies saved to this key)</span>
+              </div>
+            )}
           </div>
           <p className="text-xs text-gray-500">
             Strategies set to <span className="text-blue-400">Practice</span> will place orders on this demo account — no real money involved.
+            This session is authorised to execute trades on this account.
           </p>
-          <button onClick={clearT212DemoCredentials} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
+          <button onClick={handleDisconnect} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
             <LogOut className="h-3.5 w-3.5" /> Disconnect
           </button>
         </div>
