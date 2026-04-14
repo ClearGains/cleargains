@@ -203,18 +203,24 @@ export async function POST(request: NextRequest) {
   const roundedQty = Math.max(1, Math.round(quantity * 100) / 100);
 
   // ── Place order ───────────────────────────────────────────────────────────
+  const orderUrl = `${base}/equity/orders/market`;
+  const orderBody = { quantity: roundedQty, ticker: resolvedTicker };
+  console.log(`[t212/live-order] → ${env} ${orderUrl}`, JSON.stringify(orderBody));
+
   try {
-    const res = await fetch(`${base}/equity/orders/market`, {
+    const res = await fetch(orderUrl, {
       method: 'POST',
       headers: {
         Authorization: 'Basic ' + encoded,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ quantity: roundedQty, ticker: resolvedTicker }),
+      body: JSON.stringify(orderBody),
       signal: AbortSignal.timeout(10_000),
     });
 
     const text = await res.text();
+    console.log(`[t212/live-order] ← HTTP ${res.status}:`, text.slice(0, 500));
+
     let data: Record<string, unknown> = {};
     try { data = JSON.parse(text); } catch { /* non-JSON body */ }
 
@@ -230,18 +236,29 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Extract the most useful error message from T212's response
+    // Extract the most useful error message from T212's response.
+    // Use || not ?? so empty strings fall through to the next option.
+    // T212 uses 'message', 'code', and 'errorCode' across different error types.
     const t212Message =
-      (data.message as string) ??
-      (data.error as string) ??
-      (data.errorCode as string) ??
-      text ??
+      (data.message as string) ||
+      (data.code as string) ||
+      (data.error as string) ||
+      (data.errorCode as string) ||
+      text.trim() ||
       `HTTP ${res.status}`;
+
+    // Detect market-hours rejection specifically
+    const isMarketClosed =
+      res.status === 400 &&
+      (t212Message.toLowerCase().includes('trading hours') ||
+       t212Message.toLowerCase().includes('outtradinghoursexception') ||
+       t212Message.toLowerCase().includes('market') ||
+       (data.code as string || '').toLowerCase().includes('hours'));
 
     // If precision error, retry with integer quantity
     if (res.status === 400 && t212Message.toLowerCase().includes('precision')) {
       const intQty = Math.max(1, Math.floor(quantity));
-      const retry = await fetch(`${base}/equity/orders/market`, {
+      const retry = await fetch(orderUrl, {
         method: 'POST',
         headers: { Authorization: 'Basic ' + encoded, 'Content-Type': 'application/json' },
         body: JSON.stringify({ quantity: intQty, ticker: resolvedTicker }),
@@ -250,6 +267,7 @@ export async function POST(request: NextRequest) {
       const retryText = await retry.text();
       let retryData: Record<string, unknown> = {};
       try { retryData = JSON.parse(retryText); } catch { /* ok */ }
+      console.log(`[t212/live-order] ← retry HTTP ${retry.status}:`, retryText.slice(0, 300));
 
       if (retry.ok) {
         return NextResponse.json({
@@ -267,12 +285,13 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       ok: false,
-      error: t212Message,
+      error: isMarketClosed ? `Market closed — ${t212Message}` : t212Message,
       t212Status: res.status,
       t212Body: text,
       ticker: resolvedTicker,
       quantity: roundedQty,
       env,
+      marketClosed: isMarketClosed,
     });
   } catch (err) {
     return NextResponse.json({

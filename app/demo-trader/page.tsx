@@ -1534,6 +1534,8 @@ export default function DemoTraderPage() {
   const [t212OrderResults, setT212OrderResults] = useState<
     { symbol: string; status: 'placed' | 'failed' | 'paper'; message: string }[]
   >([]);
+  const [testOrderResult, setTestOrderResult] = useState<string | null>(null);
+  const [testOrderLoading, setTestOrderLoading] = useState(false);
 
   // ── Portfolio management state ─────────────────────────────────────────────
   const [portfolios, setPortfolios] = useState<PortfolioMeta[]>([]);
@@ -1800,6 +1802,42 @@ export default function DemoTraderPage() {
     setConfirmReset(false);
   }
 
+  // ── Test order (1× AAPL on Practice account) ──────────────────────────────
+  async function runTestOrder() {
+    const demoKey = t212DemoApiKey;
+    const demoSecret = t212DemoApiSecret;
+    if (!demoKey || !demoSecret) {
+      setTestOrderResult('✗ No demo credentials stored — reconnect Practice account in Settings → Accounts');
+      return;
+    }
+    const encoded = btoa(demoKey + ':' + demoSecret);
+    setTestOrderLoading(true);
+    const reqBody = { ticker: 'AAPL_US_EQ', quantity: 1, env: 'demo' };
+    setTestOrderResult(`→ Sending: POST /api/t212/live-order\n   Body: ${JSON.stringify(reqBody)}\n   Auth: Basic ${encoded.slice(0, 8)}…`);
+    try {
+      const res = await fetch('/api/t212/live-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-t212-auth': encoded },
+        body: JSON.stringify(reqBody),
+      });
+      const data = await res.json();
+      const lines = [
+        `→ URL: POST https://demo.trading212.com/api/v0/equity/orders/market`,
+        `→ Body sent: ${JSON.stringify(reqBody)}`,
+        `← HTTP status: ${res.status}`,
+        `← Full response: ${JSON.stringify(data)}`,
+        data.ok
+          ? `✓ SUCCESS — Order #${data.orderId ?? '?'} · ticker: ${data.ticker ?? '?'} · qty: ${data.quantity ?? '?'}`
+          : `✗ FAILED — ${data.error || `HTTP ${data.t212Status ?? res.status}`}${data.t212Body ? `\n   T212 body: ${data.t212Body}` : ''}`,
+      ];
+      setTestOrderResult(lines.join('\n'));
+    } catch (err) {
+      setTestOrderResult(`✗ Network error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setTestOrderLoading(false);
+    }
+  }
+
   // ── Refresh prices for open positions ──────────────────────────────────────
   const refreshPrices = useCallback(async (silent = false) => {
     if (demoPositions.length === 0) return;
@@ -2040,12 +2078,32 @@ export default function DemoTraderPage() {
         accountLabel = 'T212 ISA';
       }
 
-      if (orderAuth) {
+      type OrderResp = {
+        ok: boolean;
+        orderId?: unknown;
+        error?: string;
+        ticker?: string;
+        quantity?: number;
+        note?: string;
+        t212Status?: number;
+        t212Body?: string;
+        data?: Record<string, unknown>;
+        env?: string;
+        marketClosed?: boolean;
+      };
+
+      // ── Explicit credential checks before attempting orders ────────────────
+      if (execAccount === 'practice' && !t212DemoConnected) {
+        setRunLog(l => [...l, `  ✗ T212 Practice: Not connected — go to Settings → Accounts to connect`]);
+        setT212OrderResults(buys.map(s => ({ symbol: s.symbol, status: 'failed' as const, message: '✗ Practice account not connected' })));
+      } else if (execAccount === 'practice' && t212DemoConnected && !demoEncoded) {
+        setRunLog(l => [...l, `  ✗ T212 Practice: Credentials missing from store — reconnect the Practice account`]);
+        setT212OrderResults(buys.map(s => ({ symbol: s.symbol, status: 'failed' as const, message: '✗ Demo credentials missing — reconnect' })));
+      } else if (orderAuth) {
         // Pass invest creds as fallback for instrument resolution (demo instruments endpoint returns 403)
         const liveAuthFallback = investEncoded || orderAuth;
-        setRunLog(l => [...l, `📲 Placing ${buys.length} order(s) on ${accountLabel}…`]);
+        setRunLog(l => [...l, `📲 Placing ${buys.length} order(s) on ${accountLabel} (env: ${orderEnv})…`]);
 
-        type OrderResp = { ok: boolean; orderId?: unknown; error?: string; ticker?: string; note?: string };
         const orderResults = await Promise.allSettled(
           buys.map(signal => {
             // Use same sizing logic as paper position above
@@ -2057,7 +2115,10 @@ export default function DemoTraderPage() {
             } else {
               liveSize = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
             }
-            const qty = Math.max(1, Math.round((liveSize / signal.currentPrice) * 100) / 100);
+            // Use integer quantity only — T212 rejects fractional shares for market orders
+            const qty = Math.max(1, Math.floor(liveSize / signal.currentPrice));
+            const reqBody = { ticker: signal.t212Ticker, quantity: qty, env: orderEnv };
+            setRunLog(l => [...l, `  → ${signal.symbol}: ticker=${signal.t212Ticker} qty=${qty} env=${orderEnv}`]);
             return fetch('/api/t212/live-order', {
               method: 'POST',
               headers: {
@@ -2065,12 +2126,12 @@ export default function DemoTraderPage() {
                 'x-t212-auth': orderAuth,
                 'x-t212-live-auth': liveAuthFallback,
               },
-              body: JSON.stringify({
-                ticker: signal.t212Ticker,
-                quantity: qty,
-                env: orderEnv,
-              }),
-            }).then(r => r.json() as Promise<OrderResp>);
+              body: JSON.stringify(reqBody),
+            }).then(async r => {
+              const data = await r.json() as OrderResp;
+              setRunLog(l => [...l, `  ← ${signal.symbol}: HTTP ${r.status} — ${JSON.stringify(data).slice(0, 200)}`]);
+              return data;
+            });
           })
         );
 
@@ -2079,14 +2140,24 @@ export default function DemoTraderPage() {
           const sym = buys[i].symbol;
           if (result.status === 'fulfilled' && result.value.ok) {
             const note = result.value.note ? ` (${result.value.note})` : '';
-            setRunLog(l => [...l, `  ✅ ${accountLabel} order placed: ${sym} → ${result.value.ticker ?? ''} (id: ${result.value.orderId ?? '?'})${note}`]);
-            newStatuses.push({ symbol: sym, status: 'placed', message: `Placed on ${accountLabel} ✓ (id: ${result.value.orderId ?? '?'})` });
+            const orderId = result.value.orderId ?? '?';
+            const resolvedTicker = result.value.ticker ?? sym;
+            setRunLog(l => [...l, `  ✅ ${accountLabel}: ${sym} → ticker=${resolvedTicker} qty=${result.value.quantity ?? '?'} id=${orderId}${note}`]);
+            newStatuses.push({ symbol: sym, status: 'placed', message: `✓ Order #${orderId} placed (${resolvedTicker})` });
           } else {
-            const err = result.status === 'fulfilled'
-              ? (result.value.error ?? 'Unknown error')
-              : String(result.reason);
-            setRunLog(l => [...l, `  ⚠ ${accountLabel}: ${sym}: ${err}`]);
-            newStatuses.push({ symbol: sym, status: 'failed', message: `${accountLabel}: ${err}` });
+            const fullResp = result.status === 'fulfilled' ? result.value : null;
+            const rejectedReason = result.status === 'rejected' ? String((result as PromiseRejectedResult).reason) : 'Unknown error';
+            const isMarketClosed = fullResp?.marketClosed === true;
+            const err = fullResp
+              ? (fullResp.error || (fullResp.t212Body ? `HTTP ${fullResp.t212Status}: ${fullResp.t212Body.slice(0, 80)}` : `HTTP ${fullResp.t212Status ?? '?'}`))
+              : rejectedReason;
+            const t212Detail = fullResp?.t212Body ? ` [T212: ${fullResp.t212Body.slice(0, 100)}]` : '';
+            setRunLog(l => [...l, `  ${isMarketClosed ? '⏰' : '✗'} ${accountLabel}: ${sym}: ${isMarketClosed ? 'Market closed' : 'FAILED'} — ${err}${t212Detail}`]);
+            newStatuses.push({
+              symbol: sym,
+              status: 'failed',
+              message: isMarketClosed ? `⏰ Market closed — order not placed` : `✗ ${err}`,
+            });
           }
         });
         setT212OrderResults(newStatuses);
@@ -2636,6 +2707,28 @@ export default function DemoTraderPage() {
                   <a href="/settings/accounts" className="mt-2 flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 transition-colors">
                     <ArrowRight className="h-3 w-3" /> Connect account in Settings
                   </a>
+                )}
+
+                {/* Test Order button — Practice account only */}
+                {isPractice && accountConnected && (
+                  <div className="mt-3 pt-3 border-t border-gray-800">
+                    <div className="flex items-center gap-2 mb-2">
+                      <button
+                        onClick={runTestOrder}
+                        disabled={testOrderLoading}
+                        className="text-[11px] px-3 py-1.5 rounded-lg bg-blue-600/20 border border-blue-500/30 text-blue-300 hover:bg-blue-600/30 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                      >
+                        <FlaskConical className="h-3 w-3" />
+                        {testOrderLoading ? 'Sending…' : '🧪 Test Order (1× AAPL)'}
+                      </button>
+                      <span className="text-[10px] text-gray-600">Places 1 real demo order to confirm connection</span>
+                    </div>
+                    {testOrderResult && (
+                      <pre className="text-[10px] font-mono bg-gray-950 border border-gray-800 rounded p-2 text-gray-300 whitespace-pre-wrap break-all max-h-40 overflow-y-auto leading-relaxed">
+                        {testOrderResult}
+                      </pre>
+                    )}
+                  </div>
                 )}
 
                 {showExecAccountPicker && (
