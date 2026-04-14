@@ -1454,6 +1454,9 @@ export default function DemoTraderPage() {
   const [debugOpen, setDebugOpen] = useState(false);
   const [lastStrategyRun, setLastStrategyRun] = useState<string | null>(null);
   const [lastScanCount, setLastScanCount] = useState<number>(0);
+  const [t212OrderResults, setT212OrderResults] = useState<
+    { symbol: string; status: 'placed' | 'failed' | 'paper'; message: string }[]
+  >([]);
 
   // ── Portfolio management state ─────────────────────────────────────────────
   const [portfolios, setPortfolios] = useState<PortfolioMeta[]>([]);
@@ -1842,29 +1845,57 @@ export default function DemoTraderPage() {
       // ── Place orders on T212 Demo account if connected ────────────────────
       if (t212DemoConnected && t212DemoApiKey && t212DemoApiSecret) {
         const demoEncoded = btoa(t212DemoApiKey + ':' + t212DemoApiSecret);
+        // Pass live credentials too so the route can fall back to live instruments if needed
+        const liveEncoded = t212ApiKey && t212ApiSecret
+          ? btoa(t212ApiKey + ':' + t212ApiSecret)
+          : demoEncoded;
         setRunLog(l => [...l, `📲 Placing ${buys.length} order(s) on T212 Demo account…`]);
+
+        type OrderResp = { ok: boolean; orderId?: unknown; error?: string; ticker?: string; note?: string };
         const orderResults = await Promise.allSettled(
-          buys.map(signal =>
-            fetch('/api/t212/demo-order', {
+          buys.map(signal => {
+            const qty = Math.max(1, Math.round(
+              ((mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize) / signal.currentPrice) * 100
+            ) / 100);
+            return fetch('/api/t212/live-order', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-t212-auth': demoEncoded },
-              body: JSON.stringify({ ticker: signal.t212Ticker, quantity: Math.max(1, Math.floor(
-                (mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize) / signal.currentPrice
-              )) }),
-            }).then(r => r.json() as Promise<{ ok: boolean; orderId?: unknown; error?: string }>)
-          )
+              headers: {
+                'Content-Type': 'application/json',
+                'x-t212-auth': demoEncoded,
+                'x-t212-live-auth': liveEncoded,
+              },
+              body: JSON.stringify({
+                ticker: signal.t212Ticker,
+                quantity: qty,
+                env: 'demo',
+              }),
+            }).then(r => r.json() as Promise<OrderResp>);
+          })
         );
+
+        const newStatuses: typeof t212OrderResults = [];
         orderResults.forEach((result, i) => {
           const sym = buys[i].symbol;
           if (result.status === 'fulfilled' && result.value.ok) {
-            setRunLog(l => [...l, `  ✓ T212 Demo order placed: ${sym} (id: ${result.value.orderId ?? '?'})`]);
+            const note = result.value.note ? ` (${result.value.note})` : '';
+            setRunLog(l => [...l, `  ✅ T212 Demo order placed: ${sym} → ${result.value.ticker ?? ''} (id: ${result.value.orderId ?? '?'})${note}`]);
+            newStatuses.push({ symbol: sym, status: 'placed', message: `Placed on T212 Demo ✓ (id: ${result.value.orderId ?? '?'})` });
           } else {
-            const err = result.status === 'fulfilled' ? result.value.error : result.reason;
-            setRunLog(l => [...l, `  ⚠ T212 Demo order failed for ${sym}: ${err}`]);
+            const err = result.status === 'fulfilled'
+              ? (result.value.error ?? 'Unknown error')
+              : String(result.reason);
+            setRunLog(l => [...l, `  ⚠ T212 Demo: ${sym}: ${err}`]);
+            newStatuses.push({ symbol: sym, status: 'failed', message: `T212 Demo: ${err}` });
           }
         });
+        setT212OrderResults(newStatuses);
       } else {
         setRunLog(l => [...l, `  ℹ Paper only — connect T212 Demo to place real demo orders`]);
+        setT212OrderResults(buys.map(s => ({
+          symbol: s.symbol,
+          status: 'paper' as const,
+          message: 'Paper only — T212 demo not connected',
+        })));
       }
 
       // Update pending signal count for sidebar badge
@@ -2515,6 +2546,15 @@ export default function DemoTraderPage() {
                             <p className="font-semibold text-white">{pos.ticker}</p>
                           </TickerTooltip>
                           <p className="text-gray-600">{hoursAgo(pos.openedAt)}</p>
+                          {(() => {
+                            const r = t212OrderResults.find(x => x.symbol === pos.ticker);
+                            if (!r) return null;
+                            return (
+                              <p className={clsx('text-[10px] mt-0.5', r.status === 'placed' ? 'text-emerald-400' : r.status === 'failed' ? 'text-amber-400' : 'text-gray-600')}>
+                                {r.message}
+                              </p>
+                            );
+                          })()}
                         </td>
                         <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{pos.quantity}</td>
                         <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtUSD(pos.entryPrice)}</td>
