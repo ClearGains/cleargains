@@ -43,6 +43,8 @@ export function Navbar() {
   const { selectedCountry } = useClearGainsStore();
   const [mobileOpen, setMobileOpen] = useState(false);
 
+  if (pathname === '/login') return null;
+
   const handleLogout = useCallback(async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
     router.push('/login');

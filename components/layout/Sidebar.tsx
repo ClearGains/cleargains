@@ -43,6 +43,8 @@ export function Sidebar() {
   const pathname = usePathname();
   const { t212Connected, t212AccountType, t212LastSync, pendingSignalCount } = useClearGainsStore();
 
+  if (pathname === '/login') return null;
+
   return (
     <aside className="hidden xl:flex flex-col w-56 flex-shrink-0 bg-gray-950 border-r border-gray-800 min-h-screen sticky top-14 h-[calc(100vh-3.5rem)]">
       <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">

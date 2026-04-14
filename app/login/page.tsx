@@ -279,17 +279,17 @@ function LoginForm() {
   }
 
   return (
-    <div className="fixed inset-0 z-[200] bg-gray-950 overflow-y-auto">
+    <div className="min-h-screen bg-gray-950 overflow-y-auto">
       {/* Close / skip button */}
       <button
         onClick={() => router.replace(from)}
-        className="fixed top-4 right-4 z-[210] flex items-center justify-center w-9 h-9 rounded-full bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
+        className="absolute top-4 right-4 flex items-center justify-center w-9 h-9 rounded-full bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
         title="Close"
       >
         <X className="h-4 w-4" />
       </button>
 
-      <div className="flex flex-col items-center pt-20 pb-12 px-4">
+      <div className="flex flex-col items-center py-16 px-4">
         <div className="w-full max-w-md">
 
           {/* Logo */}
