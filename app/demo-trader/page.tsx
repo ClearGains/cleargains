@@ -1516,6 +1516,7 @@ export default function DemoTraderPage() {
 
   const [traderTab, setTraderTab] = useState<'stocks' | 'forex'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
+  const [showExecAccountPicker, setShowExecAccountPicker] = useState(false);
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
   const [sizePreset, setSizePreset] = useState<SizePreset>(100);
   const [customSizeStr, setCustomSizeStr] = useState('');
@@ -1736,6 +1737,17 @@ export default function DemoTraderPage() {
     const updated = { ...meta, status: newStatus };
     savePortfolioMeta(updated);
     setPortfolios(prev => prev.map(p => p.id === id ? updated : p));
+  }
+
+  function changeExecutionAccount(acc: ExecutionAccount) {
+    if (!activePortfolioId) return;
+    const meta = portfolios.find(p => p.id === activePortfolioId);
+    if (!meta) return;
+    const updated = { ...meta, executionAccount: acc };
+    savePortfolioMeta(updated);
+    setPortfolios(prev => prev.map(p => p.id === activePortfolioId ? updated : p));
+    setShowExecAccountPicker(false);
+    showToast(`Execution account set to ${EXECUTION_ACCOUNT_LABELS[acc]}`);
   }
 
   function showToast(msg: string) {
@@ -2043,9 +2055,16 @@ export default function DemoTraderPage() {
         type OrderResp = { ok: boolean; orderId?: unknown; error?: string; ticker?: string; note?: string };
         const orderResults = await Promise.allSettled(
           buys.map(signal => {
-            const qty = Math.max(1, Math.round(
-              ((mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize) / signal.currentPrice) * 100
-            ) / 100);
+            // Use same sizing logic as paper position above
+            let liveSize: number;
+            if (isSmartMoney) {
+              const riskAmount = paperBudget * (SMART_MONEY_RISK_PCT / 100);
+              const slDistance = signal.currentPrice * (SMART_MONEY_SL_PCT / 100);
+              liveSize = (riskAmount / slDistance) * signal.currentPrice;
+            } else {
+              liveSize = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
+            }
+            const qty = Math.max(1, Math.round((liveSize / signal.currentPrice) * 100) / 100);
             return fetch('/api/t212/live-order', {
               method: 'POST',
               headers: {
@@ -2570,6 +2589,106 @@ export default function DemoTraderPage() {
               </div>
             </div>
           </Card>
+
+          {/* ── Execution Account card ─────────────────────────────────────── */}
+          {(() => {
+            const activeMeta = portfolios.find(p => p.id === activePortfolioId);
+            const execAcc = activeMeta?.executionAccount ?? 'paper';
+            const isLive = execAcc === 'invest' || execAcc === 'isa';
+            const isPractice = execAcc === 'practice';
+            const accountConnected =
+              execAcc === 'paper' ? true :
+              execAcc === 'practice' ? t212DemoConnected :
+              execAcc === 'invest' ? (!!t212ApiKey && !!t212ApiSecret) :
+              execAcc === 'isa' ? t212IsaConnected : false;
+
+            return (
+              <Card>
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <p className="text-xs font-semibold text-gray-300">Execution Account</p>
+                    <p className="text-[10px] text-gray-500 mt-0.5">Where strategy orders are placed</p>
+                  </div>
+                  <button
+                    onClick={() => setShowExecAccountPicker(v => !v)}
+                    className="text-[11px] px-2.5 py-1 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-600 transition-colors"
+                  >
+                    Change
+                  </button>
+                </div>
+
+                <div className={clsx('flex items-center gap-2 rounded-lg px-3 py-2.5 border',
+                  isLive ? 'bg-amber-500/10 border-amber-500/30' :
+                  isPractice ? 'bg-blue-500/10 border-blue-500/30' :
+                  'bg-gray-800/50 border-gray-700'
+                )}>
+                  <span className="text-base">{
+                    execAcc === 'paper' ? '📝' :
+                    execAcc === 'practice' ? '🎮' :
+                    execAcc === 'invest' ? '📊' : '📈'
+                  }</span>
+                  <div className="flex-1">
+                    <p className={clsx('text-xs font-semibold', isLive ? 'text-amber-300' : isPractice ? 'text-blue-300' : 'text-gray-300')}>
+                      {execAcc === 'paper' ? 'Paper Only' :
+                       execAcc === 'practice' ? 'T212 Practice (Demo)' :
+                       execAcc === 'invest' ? 'T212 Invest (Live)' : 'T212 Stocks ISA (Live)'}
+                    </p>
+                    <p className={clsx('text-[10px] mt-0.5', accountConnected ? 'text-emerald-400' : 'text-red-400')}>
+                      {execAcc === 'paper' ? 'Simulated · no real orders' :
+                       accountConnected ? '● Connected · ready to trade' : '● Not connected — go to Settings → Accounts'}
+                    </p>
+                  </div>
+                  {isLive && accountConnected && (
+                    <span className="flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 font-bold">LIVE</span>
+                  )}
+                </div>
+
+                {isLive && accountConnected && (
+                  <p className="mt-2 text-[11px] text-amber-400/70 leading-snug">
+                    ⚠ "Run Strategy" will place real market orders on your {execAcc === 'isa' ? 'ISA' : 'Invest'} account. You are fully responsible for all trading decisions.
+                  </p>
+                )}
+
+                {!accountConnected && execAcc !== 'paper' && (
+                  <a href="/settings/accounts" className="mt-2 flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 transition-colors">
+                    <ArrowRight className="h-3 w-3" /> Connect account in Settings
+                  </a>
+                )}
+
+                {showExecAccountPicker && (
+                  <div className="mt-3 pt-3 border-t border-gray-800 space-y-1.5">
+                    <p className="text-[11px] text-gray-500 mb-2">Select where strategy orders are sent:</p>
+                    {(['paper', 'practice', 'invest', 'isa'] as ExecutionAccount[]).map(acc => {
+                      const avail =
+                        acc === 'paper' ? true :
+                        acc === 'practice' ? t212DemoConnected :
+                        acc === 'invest' ? (!!t212ApiKey && !!t212ApiSecret) :
+                        acc === 'isa' ? t212IsaConnected : false;
+                      const isLiveAcc = acc === 'invest' || acc === 'isa';
+                      return (
+                        <button
+                          key={acc}
+                          disabled={!avail}
+                          onClick={() => changeExecutionAccount(acc)}
+                          className={clsx(
+                            'w-full flex items-center gap-2 px-3 py-2 rounded-lg border text-left text-xs transition-colors',
+                            !avail ? 'opacity-40 cursor-not-allowed border-gray-800 bg-gray-900 text-gray-600' :
+                            execAcc === acc ? (isLiveAcc ? 'border-amber-500/40 bg-amber-500/10 text-amber-300' : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300') :
+                            'border-gray-700 bg-gray-800 text-gray-400 hover:text-gray-200 hover:border-gray-600'
+                          )}
+                        >
+                          <span>{acc === 'paper' ? '📝' : acc === 'practice' ? '🎮' : acc === 'invest' ? '📊' : '📈'}</span>
+                          <span className="flex-1">{EXECUTION_ACCOUNT_LABELS[acc]}</span>
+                          {!avail && <span className="text-[10px] text-gray-600">Not connected</span>}
+                          {execAcc === acc && <span className="text-[10px] text-emerald-400">✓ Active</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </Card>
+            );
+          })()}
 
           <Button
             onClick={runStrategy}

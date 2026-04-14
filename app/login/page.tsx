@@ -4,7 +4,7 @@ import { useState, FormEvent, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   TrendingUp, Lock, AlertCircle, Eye, EyeOff,
-  ChevronRight, CheckCircle2, Loader2,
+  ChevronRight, CheckCircle2, Loader2, X,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { clsx } from 'clsx';
@@ -280,7 +280,16 @@ function LoginForm() {
 
   return (
     <div className="min-h-screen bg-gray-950 overflow-y-auto">
-      <div className="min-h-screen flex flex-col items-center justify-center py-10 px-4">
+      {/* Close / skip button */}
+      <button
+        onClick={() => router.replace(from)}
+        className="fixed top-4 right-4 z-50 flex items-center justify-center w-9 h-9 rounded-full bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
+        title="Close"
+      >
+        <X className="h-4 w-4" />
+      </button>
+
+      <div className="flex flex-col items-center pt-20 pb-12 px-4">
         <div className="w-full max-w-md">
 
           {/* Logo */}
@@ -429,7 +438,7 @@ function LoginForm() {
   );
 }
 
-// ── Page export ───────────────────────────────────────────────────────────────
+// ── Page export ─────────────────────────────────────────────────────────────
 export default function LoginPage() {
   return (
     <Suspense>
