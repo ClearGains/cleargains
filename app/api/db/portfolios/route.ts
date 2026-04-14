@@ -1,23 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { DB } from '@/lib/db';
+import { DB, isRedisConfigured } from '@/lib/db';
 
 export async function GET() {
-  try {
-    const data = await DB.getPortfolios();
-    return NextResponse.json(data);
-  } catch (err) {
-    console.error('[db/portfolios GET]', err);
-    return NextResponse.json([], { status: 500 });
-  }
+  if (!isRedisConfigured) return NextResponse.json([]);
+  try { return NextResponse.json(await DB.getPortfolios()); }
+  catch { return NextResponse.json([]); }
 }
 
 export async function POST(req: NextRequest) {
+  if (!isRedisConfigured) return NextResponse.json({ ok: true });
   try {
-    const body = await req.json() as unknown[];
-    await DB.savePortfolios(body);
+    await DB.savePortfolios(await req.json() as unknown[]);
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error('[db/portfolios POST]', err);
     return NextResponse.json({ ok: false, error: String(err) }, { status: 500 });
   }
 }

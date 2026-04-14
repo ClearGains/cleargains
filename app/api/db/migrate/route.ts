@@ -1,12 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { DB } from '@/lib/db';
+import { DB, isRedisConfigured } from '@/lib/db';
 
-/**
- * POST /api/db/migrate
- * Called once per device when localStorage data exists but hasn't been uploaded to Redis.
- * Body: { portfolios, activePortfolioId, portfolioData, watchlist, cgtHistory, fxPositions, fxTrades, manualStocks, pendingOrders }
- */
+/** POST /api/db/migrate — bulk-upload localStorage data to Redis on first device */
 export async function POST(req: NextRequest) {
+  if (!isRedisConfigured) return NextResponse.json({ ok: true, migrated: 0 });
   try {
     const body = await req.json() as {
       portfolios?: unknown[];
@@ -27,16 +24,15 @@ export async function POST(req: NextRequest) {
 
     const ops: Promise<unknown>[] = [];
 
-    if (body.portfolios?.length)      ops.push(DB.savePortfolios(body.portfolios));
-    if (body.activePortfolioId)        ops.push(DB.setActivePortfolio(body.activePortfolioId));
-    if (body.watchlist?.length)        ops.push(DB.saveWatchlist(body.watchlist));
-    if (body.cgtHistory?.length)       ops.push(DB.saveCGTHistory(body.cgtHistory as never));
-    if (body.fxPositions?.length)      ops.push(DB.saveFXPositions('global', body.fxPositions as never));
-    if (body.fxTrades?.length)         ops.push(DB.saveFXTrades('global', body.fxTrades as never));
-    if (body.manualStocks?.length)     ops.push(DB.saveManualStocks(body.manualStocks));
-    if (body.pendingOrders?.length)    ops.push(DB.savePendingOrders(body.pendingOrders));
+    if (body.portfolios?.length)   ops.push(DB.savePortfolios(body.portfolios));
+    if (body.activePortfolioId)    ops.push(DB.setActivePortfolio(body.activePortfolioId));
+    if (body.watchlist?.length)    ops.push(DB.saveWatchlist(body.watchlist));
+    if (body.cgtHistory?.length)   ops.push(DB.saveCGTHistory(body.cgtHistory as never));
+    if (body.fxPositions?.length)  ops.push(DB.saveFXPositions('global', body.fxPositions as never));
+    if (body.fxTrades?.length)     ops.push(DB.saveFXTrades('global', body.fxTrades as never));
+    if (body.manualStocks?.length) ops.push(DB.saveManualStocks(body.manualStocks));
+    if (body.pendingOrders?.length) ops.push(DB.savePendingOrders(body.pendingOrders));
 
-    // Per-portfolio data
     if (body.portfolioData) {
       for (const [id, data] of Object.entries(body.portfolioData)) {
         if (data.positions !== undefined) ops.push(DB.savePositions(id, data.positions as never));
@@ -48,7 +44,6 @@ export async function POST(req: NextRequest) {
 
     await Promise.all(ops);
     await DB.setMigrationDone();
-
     return NextResponse.json({ ok: true, migrated: ops.length });
   } catch (err) {
     console.error('[db/migrate POST]', err);
@@ -58,10 +53,10 @@ export async function POST(req: NextRequest) {
 
 /** GET /api/db/migrate — check if migration has already been done */
 export async function GET() {
+  if (!isRedisConfigured) return NextResponse.json({ done: false });
   try {
-    const done = await DB.isMigrationDone();
-    return NextResponse.json({ done });
-  } catch (err) {
-    return NextResponse.json({ done: false, error: String(err) });
+    return NextResponse.json({ done: await DB.isMigrationDone() });
+  } catch {
+    return NextResponse.json({ done: false });
   }
 }

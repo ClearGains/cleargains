@@ -1,31 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { DB } from '@/lib/db';
+import { DB, isRedisConfigured } from '@/lib/db';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ portfolioId: string }> }
 ) {
+  if (!isRedisConfigured) return NextResponse.json(null);
   try {
     const { portfolioId } = await params;
-    const data = await DB.getStrategySettings(portfolioId);
-    return NextResponse.json(data ?? null);
-  } catch (err) {
-    console.error('[db/settings GET]', err);
-    return NextResponse.json(null);
-  }
+    return NextResponse.json((await DB.getStrategySettings(portfolioId)) ?? null);
+  } catch { return NextResponse.json(null); }
 }
 
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ portfolioId: string }> }
 ) {
+  if (!isRedisConfigured) return NextResponse.json({ ok: true });
   try {
     const { portfolioId } = await params;
-    const body = await req.json();
-    await DB.saveStrategySettings(portfolioId, body);
+    await DB.saveStrategySettings(portfolioId, await req.json());
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error('[db/settings POST]', err);
     return NextResponse.json({ ok: false, error: String(err) }, { status: 500 });
   }
 }
