@@ -4,67 +4,55 @@ import { useState, FormEvent, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   TrendingUp, Lock, AlertCircle, Eye, EyeOff,
-  ChevronRight, CheckCircle2, Loader2, X,
+  ChevronRight, CheckCircle2, Loader2, X, ArrowLeft,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { clsx } from 'clsx';
 
-// ── Account type definitions ──────────────────────────────────────────────────
 type T212AccountType = 'demo' | 'live' | 'isa';
 
-const ACCOUNTS: {
-  type: T212AccountType;
-  label: string;
-  sublabel: string;
-  icon: string;
-  color: string;
-  border: string;
-  activeBg: string;
-  activeBorder: string;
-  btnClass: string;
-}[] = [
+const ACCOUNTS = [
   {
-    type: 'demo',
+    type: 'demo' as T212AccountType,
     label: 'Practice / Demo',
-    sublabel: 'Virtual money · no risk',
+    sublabel: 'Virtual money · zero risk',
     icon: '🎮',
-    color: 'text-blue-400',
-    border: 'border-gray-800',
-    activeBg: 'bg-blue-500/10',
-    activeBorder: 'border-blue-500/50',
-    btnClass: 'bg-blue-600 hover:bg-blue-500',
+    accent: 'border-blue-500/40 hover:border-blue-500/70',
+    pill: 'bg-blue-500/15 text-blue-300',
+    btn: 'bg-blue-600 hover:bg-blue-500',
+    glow: 'shadow-blue-900/30',
   },
   {
-    type: 'live',
+    type: 'live' as T212AccountType,
     label: 'Invest Account',
     sublabel: 'Live trading · taxable gains',
     icon: '📊',
-    color: 'text-emerald-400',
-    border: 'border-gray-800',
-    activeBg: 'bg-emerald-500/10',
-    activeBorder: 'border-emerald-500/50',
-    btnClass: 'bg-emerald-600 hover:bg-emerald-500',
+    accent: 'border-emerald-500/40 hover:border-emerald-500/70',
+    pill: 'bg-emerald-500/15 text-emerald-300',
+    btn: 'bg-emerald-600 hover:bg-emerald-500',
+    glow: 'shadow-emerald-900/30',
   },
   {
-    type: 'isa',
+    type: 'isa' as T212AccountType,
     label: 'Stocks ISA',
     sublabel: 'Tax-free wrapper · live trading',
     icon: '📈',
-    color: 'text-indigo-400',
-    border: 'border-gray-800',
-    activeBg: 'bg-indigo-500/10',
-    activeBorder: 'border-indigo-500/50',
-    btnClass: 'bg-indigo-600 hover:bg-indigo-500',
+    accent: 'border-indigo-500/40 hover:border-indigo-500/70',
+    pill: 'bg-indigo-500/15 text-indigo-300',
+    btn: 'bg-indigo-600 hover:bg-indigo-500',
+    glow: 'shadow-indigo-900/30',
   },
 ];
 
-// ── T212 login form ───────────────────────────────────────────────────────────
+// ── API key form ──────────────────────────────────────────────────────────────
 function T212LoginForm({
   accountType,
   onSuccess,
+  onBack,
 }: {
   accountType: T212AccountType;
   onSuccess: () => void;
+  onBack: () => void;
 }) {
   const acc = ACCOUNTS.find(a => a.type === accountType)!;
   const store = useClearGainsStore();
@@ -84,10 +72,8 @@ function T212LoginForm({
       setError('Both API key and secret are required.');
       return;
     }
-
     setLoading(true);
     setError(null);
-
     try {
       const res = await fetch('/api/auth/login-with-t212', {
         method: 'POST',
@@ -98,13 +84,8 @@ function T212LoginForm({
         ok: boolean; error?: string;
         accountId?: string; currency?: string; cash?: number; keyHashPrefix?: string;
       };
+      if (!data.ok) { setError(data.error ?? 'Connection failed.'); return; }
 
-      if (!data.ok) {
-        setError(data.error ?? 'Connection failed.');
-        return;
-      }
-
-      // Persist credentials + connection state in localStorage via Zustand
       const info = { id: data.accountId ?? '', currency: data.currency ?? 'GBP' };
       if (accountType === 'demo') {
         store.setT212DemoCredentials(cleanKey, cleanSecret);
@@ -120,10 +101,7 @@ function T212LoginForm({
         store.setT212IsaAccountInfo(info);
         store.setT212IsaConnected(true);
       }
-      if (data.keyHashPrefix) {
-        store.setLinkedAccountId(accountType, data.keyHashPrefix);
-      }
-
+      if (data.keyHashPrefix) store.setLinkedAccountId(accountType, data.keyHashPrefix);
       onSuccess();
     } catch (err) {
       setError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -133,74 +111,108 @@ function T212LoginForm({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="mt-4 space-y-3">
-      {/* API Key */}
-      <div>
-        <label className="block text-xs font-medium text-gray-400 mb-1.5">API Key</label>
-        <div className="relative">
-          <input
-            type={showKey ? 'text' : 'password'}
-            value={key}
-            onChange={e => setKey(e.target.value)}
-            placeholder={`${acc.label} API key`}
-            autoFocus
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 pr-10"
-          />
-          <button type="button" onClick={() => setShowKey(v => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
-            {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
-        </div>
-      </div>
-
-      {/* API Secret */}
-      <div>
-        <label className="block text-xs font-medium text-gray-400 mb-1.5">API Secret</label>
-        <div className="relative">
-          <input
-            type={showSecret ? 'text' : 'password'}
-            value={secret}
-            onChange={e => setSecret(e.target.value)}
-            placeholder={`${acc.label} API secret`}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 pr-10"
-          />
-          <button type="button" onClick={() => setShowSecret(v => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
-            {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2.5 text-xs text-red-400">
-          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-          <span>{error}</span>
-        </div>
-      )}
-
-      <button
-        type="submit"
-        disabled={loading}
-        className={clsx(
-          'w-full text-white font-semibold rounded-lg py-2.5 text-sm transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed',
-          acc.btnClass
-        )}
-      >
-        {loading
-          ? <><Loader2 className="h-4 w-4 animate-spin" /> Connecting…</>
-          : <>Connect {acc.label} <ChevronRight className="h-4 w-4" /></>
-        }
+    <div className="space-y-4">
+      {/* Back + header */}
+      <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-300 transition-colors mb-2">
+        <ArrowLeft className="h-3.5 w-3.5" /> Back
       </button>
 
-      <p className="text-[11px] text-gray-600 text-center">
-        Your credentials are validated against T212 and stored only in your browser.
+      <div className="flex items-center gap-3 mb-1">
+        <span className="text-3xl">{acc.icon}</span>
+        <div>
+          <h2 className="text-lg font-bold text-white">{acc.label}</h2>
+          <p className="text-xs text-gray-500">{acc.sublabel}</p>
+        </div>
+      </div>
+
+      {/* How to get key */}
+      <details className="group bg-gray-800/50 rounded-xl border border-gray-700/50">
+        <summary className="flex items-center justify-between px-4 py-3 cursor-pointer select-none list-none text-sm text-gray-400 hover:text-gray-200 transition-colors">
+          <span>How to get your API key</span>
+          <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
+        </summary>
+        <ol className="px-4 pb-4 space-y-2 border-t border-gray-700/50 pt-3">
+          {(accountType === 'demo'
+            ? ['Open the Trading 212 app', 'Tap your name → switch to Practice account', 'Settings → API (Beta)', 'Generate key — enable read + order permissions']
+            : accountType === 'isa'
+            ? ['Open the Trading 212 app', 'Tap your name → switch to Stocks ISA', 'Settings → API (Beta)', 'Generate key — enable read + order permissions']
+            : ['Open Trading 212 app or website', 'Switch to your Invest account', 'Settings → API (Beta)', 'Generate key — enable read + order permissions']
+          ).map((step, i) => (
+            <li key={i} className="flex items-start gap-3 text-xs text-gray-400">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-gray-700 text-gray-300 font-bold flex items-center justify-center text-[10px] mt-0.5">{i + 1}</span>
+              {step}
+            </li>
+          ))}
+        </ol>
+      </details>
+
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-1.5">API Key</label>
+          <div className="relative">
+            <input
+              type={showKey ? 'text' : 'password'}
+              value={key}
+              onChange={e => setKey(e.target.value)}
+              placeholder="Paste your API key"
+              autoFocus
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20 pr-11 transition-colors"
+            />
+            <button type="button" onClick={() => setShowKey(v => !v)}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+              {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-1.5">API Secret</label>
+          <div className="relative">
+            <input
+              type={showSecret ? 'text' : 'password'}
+              value={secret}
+              onChange={e => setSecret(e.target.value)}
+              placeholder="Paste your API secret"
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20 pr-11 transition-colors"
+            />
+            <button type="button" onClick={() => setShowSecret(v => !v)}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+              {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+        </div>
+
+        {error && (
+          <div className="flex items-start gap-2.5 bg-red-500/10 border border-red-500/25 rounded-xl px-4 py-3 text-xs text-red-400">
+            <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={loading}
+          className={clsx(
+            'w-full text-white font-semibold rounded-xl py-3 text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg',
+            acc.btn, acc.glow
+          )}
+        >
+          {loading
+            ? <><Loader2 className="h-4 w-4 animate-spin" /> Connecting…</>
+            : <>Connect {acc.label} <ChevronRight className="h-4 w-4" /></>
+          }
+        </button>
+      </form>
+
+      <p className="text-center text-[11px] text-gray-600">
+        Keys are validated with T212 and stored only in your browser — never on our servers.
       </p>
-    </form>
+    </div>
   );
 }
 
-// ── Site-password form ────────────────────────────────────────────────────────
-function SitePasswordForm({ onSuccess }: { onSuccess: () => void }) {
+// ── Site password form ────────────────────────────────────────────────────────
+function SitePasswordForm({ onSuccess, onBack }: { onSuccess: () => void; onBack: () => void }) {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading]   = useState(false);
@@ -227,40 +239,48 @@ function SitePasswordForm({ onSuccess }: { onSuccess: () => void }) {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-3">
-      <div>
-        <label className="block text-xs font-medium text-gray-400 mb-1.5">Site Password</label>
+    <div className="space-y-4">
+      <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-300 transition-colors">
+        <ArrowLeft className="h-3.5 w-3.5" /> Back
+      </button>
+      <div className="flex items-center gap-3 mb-1">
+        <div className="w-10 h-10 rounded-xl bg-gray-800 flex items-center justify-center">
+          <Lock className="h-5 w-5 text-gray-400" />
+        </div>
+        <div>
+          <h2 className="text-lg font-bold text-white">Site Password</h2>
+          <p className="text-xs text-gray-500">Admin access only</p>
+        </div>
+      </div>
+      <form onSubmit={handleSubmit} className="space-y-3">
         <div className="relative">
           <input
             type={showPassword ? 'text' : 'password'}
             value={password}
             onChange={e => setPassword(e.target.value)}
             autoFocus
-            placeholder="Enter password"
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 pr-10"
+            placeholder="Enter site password"
+            className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20 pr-11 transition-colors"
           />
           <button type="button" onClick={() => setShowPassword(v => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
             {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
           </button>
         </div>
-      </div>
-
-      {error && (
-        <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2.5 text-xs text-red-400">
-          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
-          {error}
-        </div>
-      )}
-
-      <button
-        type="submit"
-        disabled={loading}
-        className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-lg py-2.5 text-sm transition-colors flex items-center justify-center gap-2"
-      >
-        {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Verifying…</> : 'Enter'}
-      </button>
-    </form>
+        {error && (
+          <div className="flex items-center gap-2.5 bg-red-500/10 border border-red-500/25 rounded-xl px-4 py-3 text-xs text-red-400">
+            <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {error}
+          </div>
+        )}
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 text-sm transition-colors flex items-center justify-center gap-2"
+        >
+          {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Verifying…</> : 'Enter'}
+        </button>
+      </form>
+    </div>
   );
 }
 
@@ -275,162 +295,114 @@ function LoginForm() {
 
   function handleSuccess() {
     setSuccess(true);
-    setTimeout(() => router.replace(from), 600);
+    setTimeout(() => router.replace(from), 700);
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 overflow-y-auto">
-      {/* Close / skip button */}
+    <div className="min-h-screen bg-gray-950 flex flex-col">
+
+      {/* Skip / close button — top-right corner */}
       <button
         onClick={() => router.replace(from)}
-        className="absolute top-4 right-4 flex items-center justify-center w-9 h-9 rounded-full bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
-        title="Close"
+        className="fixed top-5 right-5 z-50 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gray-800/80 border border-gray-700 text-xs text-gray-400 hover:text-white hover:bg-gray-700 backdrop-blur-sm transition-all"
+        title="Skip for now"
       >
-        <X className="h-4 w-4" />
+        <X className="h-3.5 w-3.5" />
+        Skip
       </button>
 
-      <div className="flex flex-col items-center py-16 px-4">
-        <div className="w-full max-w-md">
+      {/* Vertically centred content */}
+      <div className="flex-1 flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-[440px]">
 
-          {/* Logo */}
-          <div className="flex items-center justify-center gap-2.5 mb-8">
-            <div className="bg-emerald-600 rounded-xl p-2.5 shadow-lg shadow-emerald-900/40">
-              <TrendingUp className="h-6 w-6 text-white" />
+          {/* ── Logo ────────────────────────────────────────────────────── */}
+          <div className="flex items-center justify-center gap-3 mb-10">
+            <div className="bg-emerald-600 rounded-2xl p-3 shadow-xl shadow-emerald-900/50">
+              <TrendingUp className="h-7 w-7 text-white" />
             </div>
-            <span className="text-2xl font-bold text-white tracking-tight">
+            <span className="text-3xl font-bold text-white tracking-tight">
               Clear<span className="text-emerald-400">Gains</span>
             </span>
           </div>
 
-          {/* Success state */}
-          {success ? (
-            <div className="bg-gray-900 border border-emerald-500/30 rounded-2xl p-8 shadow-2xl text-center">
-              <CheckCircle2 className="h-12 w-12 text-emerald-400 mx-auto mb-3" />
-              <p className="text-white font-semibold text-lg">Connected!</p>
-              <p className="text-gray-500 text-sm mt-1">Redirecting to your dashboard…</p>
-            </div>
-          ) : mode === 'choose' ? (
-            /* ── Account picker ─────────────────────────────────────────── */
-            <div>
-              <div className="text-center mb-6">
-                <h1 className="text-xl font-bold text-white">Sign in to ClearGains</h1>
-                <p className="text-sm text-gray-500 mt-1">Connect a Trading 212 account to get started</p>
-              </div>
+          {/* ── Card ────────────────────────────────────────────────────── */}
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl p-7">
 
-              <div className="space-y-3">
-                {ACCOUNTS.map(acc => (
-                  <button
-                    key={acc.type}
-                    onClick={() => setMode(acc.type)}
-                    className={clsx(
-                      'w-full flex items-center gap-4 bg-gray-900 border rounded-xl px-4 py-4 transition-all hover:border-gray-600 group text-left',
-                      acc.border
-                    )}
-                  >
-                    <span className="text-2xl flex-shrink-0">{acc.icon}</span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold text-white group-hover:text-white">{acc.label}</p>
-                      <p className={clsx('text-xs mt-0.5', acc.color)}>{acc.sublabel}</p>
-                    </div>
-                    <ChevronRight className="h-4 w-4 text-gray-600 group-hover:text-gray-400 flex-shrink-0 transition-colors" />
-                  </button>
-                ))}
-              </div>
-
-              {/* Divider */}
-              <div className="flex items-center gap-3 my-5">
-                <div className="flex-1 h-px bg-gray-800" />
-                <span className="text-xs text-gray-600">or</span>
-                <div className="flex-1 h-px bg-gray-800" />
-              </div>
-
-              <button
-                onClick={() => setMode('password')}
-                className="w-full flex items-center gap-3 bg-gray-900 border border-gray-800 rounded-xl px-4 py-3.5 hover:border-gray-600 transition-all group text-left"
-              >
-                <Lock className="h-5 w-5 text-gray-500 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-300 group-hover:text-white transition-colors">Site Password</p>
-                  <p className="text-xs text-gray-600 mt-0.5">Admin access</p>
+            {/* Success */}
+            {success ? (
+              <div className="py-8 text-center space-y-3">
+                <div className="w-16 h-16 rounded-full bg-emerald-500/15 flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="h-8 w-8 text-emerald-400" />
                 </div>
-                <ChevronRight className="h-4 w-4 text-gray-600 group-hover:text-gray-400 flex-shrink-0 transition-colors" />
-              </button>
-
-              <p className="text-center text-[11px] text-gray-700 mt-6">
-                Don&apos;t have an API key? Generate one in Trading 212 → Settings → API.
-              </p>
-            </div>
-
-          ) : mode === 'password' ? (
-            /* ── Site password ──────────────────────────────────────────── */
-            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-2xl">
-              <div className="flex items-center gap-2 mb-1">
-                <Lock className="h-4 w-4 text-gray-400" />
-                <h2 className="text-base font-semibold text-white">Site Password</h2>
+                <p className="text-white font-semibold text-lg">Connected!</p>
+                <p className="text-gray-500 text-sm">Redirecting you now…</p>
               </div>
-              <p className="text-xs text-gray-500 mb-5">Enter the admin password to access the site.</p>
-              <SitePasswordForm onSuccess={handleSuccess} />
-              <button
-                onClick={() => setMode('choose')}
-                className="mt-4 text-xs text-gray-600 hover:text-gray-400 transition-colors"
-              >
-                ← Back to account selection
-              </button>
-            </div>
 
-          ) : (
-            /* ── T212 credential form ───────────────────────────────────── */
-            (() => {
-              const acc = ACCOUNTS.find(a => a.type === mode)!;
-              return (
-                <div className={clsx('bg-gray-900 border rounded-2xl p-6 shadow-2xl', acc.activeBorder)}>
-                  {/* Header */}
-                  <div className="flex items-center gap-3 mb-1">
-                    <span className="text-2xl">{acc.icon}</span>
-                    <div>
-                      <h2 className="text-base font-semibold text-white">{acc.label}</h2>
-                      <p className={clsx('text-xs', acc.color)}>{acc.sublabel}</p>
-                    </div>
+            ) : mode === 'choose' ? (
+              /* ── Account picker ───────────────────────────────────────── */
+              <div className="space-y-5">
+                <div>
+                  <h1 className="text-xl font-bold text-white">Sign in to ClearGains</h1>
+                  <p className="text-sm text-gray-500 mt-1">Connect your Trading 212 account to get started</p>
+                </div>
+
+                <div className="space-y-2.5">
+                  {ACCOUNTS.map(acc => (
+                    <button
+                      key={acc.type}
+                      onClick={() => setMode(acc.type)}
+                      className={clsx(
+                        'w-full flex items-center gap-4 bg-gray-800/60 border rounded-xl px-4 py-4 transition-all text-left group',
+                        acc.accent
+                      )}
+                    >
+                      <span className="text-2xl flex-shrink-0">{acc.icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-white">{acc.label}</p>
+                        <p className="text-xs text-gray-500 mt-0.5">{acc.sublabel}</p>
+                      </div>
+                      <ChevronRight className="h-4 w-4 text-gray-600 group-hover:text-gray-300 flex-shrink-0 transition-colors" />
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-px bg-gray-800" />
+                  <span className="text-xs text-gray-600">or</span>
+                  <div className="flex-1 h-px bg-gray-800" />
+                </div>
+
+                <button
+                  onClick={() => setMode('password')}
+                  className="w-full flex items-center gap-3 bg-gray-800/40 border border-gray-700/60 hover:border-gray-600 rounded-xl px-4 py-3.5 transition-all text-left group"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-gray-700 flex items-center justify-center flex-shrink-0">
+                    <Lock className="h-4 w-4 text-gray-400" />
                   </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-300 group-hover:text-white transition-colors">Site Password</p>
+                    <p className="text-xs text-gray-600 mt-0.5">Admin / shared access</p>
+                  </div>
+                  <ChevronRight className="h-4 w-4 text-gray-600 group-hover:text-gray-400 transition-colors" />
+                </button>
 
-                  <p className="text-xs text-gray-500 mt-2 mb-1">
-                    Enter your Trading 212 API key and secret for this account.
-                  </p>
+                <p className="text-center text-xs text-gray-600">
+                  No account? Generate an API key in Trading 212 → Settings → API
+                </p>
+              </div>
 
-                  {/* How to get key */}
-                  <details className="mb-4 group">
-                    <summary className={clsx('text-xs cursor-pointer select-none list-none flex items-center gap-1 mt-2', acc.color)}>
-                      <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
-                      How to get an API key
-                    </summary>
-                    <ol className="mt-2 space-y-1.5 pl-4">
-                      {(mode === 'demo'
-                        ? ['Open Trading 212 app', 'Tap your account name → switch to Practice', 'Settings → API (Beta)', 'Generate key with read + order permissions']
-                        : mode === 'isa'
-                        ? ['Open Trading 212 app', 'Tap your account name → switch to Stocks ISA', 'Settings → API (Beta)', 'Generate key with read + order permissions']
-                        : ['Open Trading 212 app or web', 'Switch to your Invest account', 'Settings → API (Beta)', 'Generate key with read + order permissions']
-                      ).map((step, i) => (
-                        <li key={i} className="flex items-start gap-2 text-[11px] text-gray-400">
-                          <span className={clsx('flex-shrink-0 w-4 h-4 rounded-full text-[10px] font-bold flex items-center justify-center mt-0.5', acc.activeBg, acc.color)}>
-                            {i + 1}
-                          </span>
-                          {step}
-                        </li>
-                      ))}
-                    </ol>
-                  </details>
+            ) : mode === 'password' ? (
+              <SitePasswordForm onSuccess={handleSuccess} onBack={() => setMode('choose')} />
+            ) : (
+              <T212LoginForm accountType={mode} onSuccess={handleSuccess} onBack={() => setMode('choose')} />
+            )}
+          </div>
 
-                  <T212LoginForm accountType={mode} onSuccess={handleSuccess} />
-
-                  <button
-                    onClick={() => setMode('choose')}
-                    className="mt-4 text-xs text-gray-600 hover:text-gray-400 transition-colors"
-                  >
-                    ← Back to account selection
-                  </button>
-                </div>
-              );
-            })()
+          {/* Reassurance footer */}
+          {!success && mode === 'choose' && (
+            <p className="text-center text-xs text-gray-700 mt-6">
+              Your keys are stored locally in your browser and never sent to our servers.
+            </p>
           )}
         </div>
       </div>
@@ -438,7 +410,6 @@ function LoginForm() {
   );
 }
 
-// ── Page export ─────────────────────────────────────────────────────────────
 export default function LoginPage() {
   return (
     <Suspense>
