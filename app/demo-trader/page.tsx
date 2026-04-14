@@ -1545,6 +1545,25 @@ export default function DemoTraderPage() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevPricesRef = useRef<Record<string, number>>({});
 
+  // ── Refs for save-on-unmount (avoids stale closure) ───────────────────────
+  const activePortfolioIdRef = useRef<string | null>(null);
+  const demoPositionsRef     = useRef(demoPositions);
+  const demoTradesRef        = useRef(demoTrades);
+  const paperBudgetRef       = useRef(paperBudget);
+  const portfoliosRef        = useRef(portfolios);
+  const hasInitializedRef    = useRef(false); // true after mount loads data
+  const autoSaveTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [lastSaved, setLastSaved]           = useState<Date | null>(null);
+  const [saveStatus, setSaveStatus]         = useState<'idle' | 'saving' | 'saved'>('idle');
+
+  // Keep refs current so the unmount cleanup always sees latest values
+  useEffect(() => { activePortfolioIdRef.current = activePortfolioId; }, [activePortfolioId]);
+  useEffect(() => { demoPositionsRef.current = demoPositions; }, [demoPositions]);
+  useEffect(() => { demoTradesRef.current = demoTrades; }, [demoTrades]);
+  useEffect(() => { paperBudgetRef.current = paperBudget; }, [paperBudget]);
+  useEffect(() => { portfoliosRef.current = portfolios; }, [portfolios]);
+
   // ── Restore paper state from dedicated localStorage keys on mount ──────────
   useEffect(() => {
     // ── Portfolio system init ──────────────────────────────────────────────────
@@ -1592,6 +1611,8 @@ export default function DemoTraderPage() {
       loadPortfolioIntoStore(resolvedId);
     }
     setPendingSignalCount(0);
+    // Signal that initial load is done — auto-save can now run
+    setTimeout(() => { hasInitializedRef.current = true; }, 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1615,6 +1636,42 @@ export default function DemoTraderPage() {
     const meta = portfolios.find(p => p.id === activePortfolioId);
     if (meta) { savePortfolioMeta({ ...meta, lastActiveAt: new Date().toISOString() }); }
   }
+
+  // Ref-safe version — reads from refs, safe to call inside useEffect cleanups
+  function savePortfolioFromRefs() {
+    const id = activePortfolioIdRef.current;
+    if (!id) return;
+    try { localStorage.setItem(portfolioKey(id, 'positions'), JSON.stringify(demoPositionsRef.current)); } catch {}
+    try { localStorage.setItem(portfolioKey(id, 'trades'), JSON.stringify(demoTradesRef.current)); } catch {}
+    try { localStorage.setItem(portfolioKey(id, 'budget'), JSON.stringify(paperBudgetRef.current)); } catch {}
+    const meta = portfoliosRef.current.find(p => p.id === id);
+    if (meta) { savePortfolioMeta({ ...meta, lastActiveAt: new Date().toISOString() }); }
+  }
+
+  // ── Auto-save: debounced write whenever positions/trades/budget change ─────
+  useEffect(() => {
+    if (!hasInitializedRef.current || !activePortfolioId) return;
+    setSaveStatus('saving');
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      saveCurrentPortfolioToLS();
+      const now = new Date();
+      setLastSaved(now);
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 2500);
+    }, 1500); // 1.5 s debounce — avoids thrashing on rapid price refreshes
+    return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoPositions, demoTrades, paperBudget, activePortfolioId]);
+
+  // ── Save on unmount (navigate away) — uses refs to avoid stale closure ────
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      savePortfolioFromRefs();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function switchToPortfolio(id: string) {
     saveCurrentPortfolioToLS();
@@ -2130,7 +2187,42 @@ export default function DemoTraderPage() {
               : 'Automated paper trading · no real money involved'}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {/* Save status indicator */}
+          <div className="flex items-center gap-1.5 text-xs min-w-[80px] justify-end">
+            {saveStatus === 'saving' && (
+              <span className="text-amber-400/70 flex items-center gap-1">
+                <RefreshCw className="h-3 w-3 animate-spin" /> Saving…
+              </span>
+            )}
+            {saveStatus === 'saved' && (
+              <span className="text-emerald-400 flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" /> Saved
+              </span>
+            )}
+            {saveStatus === 'idle' && lastSaved && (
+              <span className="text-gray-600">
+                Saved {lastSaved.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            )}
+          </div>
+
+          {/* Manual save button */}
+          <button
+            onClick={() => {
+              saveCurrentPortfolioToLS();
+              const now = new Date();
+              setLastSaved(now);
+              setSaveStatus('saved');
+              setTimeout(() => setSaveStatus('idle'), 2500);
+              showToast('Portfolio saved');
+            }}
+            title="Save portfolio now"
+            className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-700 bg-gray-800 text-gray-400 hover:text-emerald-400 hover:border-emerald-500/40 transition-colors flex items-center gap-1.5"
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" /> Save
+          </button>
+
           <button
             onClick={() => setPortfolioView(v => v === 'compare' ? 'trader' : 'compare')}
             className={clsx('px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
