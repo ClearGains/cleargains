@@ -2110,6 +2110,7 @@ export default function DemoTraderPage() {
       const sigData = await sigRes.json() as {
         signals?: Signal[]; error?: string;
         scannedCount?: number; candidateCount?: number; apiCallsUsed?: number;
+        skippedSummary?: string | null;
         debugLog?: string[]; timestamp?: string;
       };
 
@@ -2127,7 +2128,10 @@ export default function DemoTraderPage() {
       const allSignals = sigData.signals ?? [];
       setSignals(allSignals);
       setApiCalls(sigData.apiCallsUsed ?? 0);
-      setRunLog(l => [...l, `✓ Scanned ${sigData.scannedCount ?? 0} stocks (${sigData.candidateCount ?? 0} momentum candidates) — ${allSignals.filter(s => s.signal === 'BUY').length} BUY · ${allSignals.filter(s => s.signal === 'SELL').length} SELL signals. ${sigData.apiCallsUsed ?? 0} API calls used.`]);
+      const scanSummary = sigData.skippedSummary
+        ? `✓ ${sigData.skippedSummary} — ${allSignals.filter(s => s.signal === 'BUY').length} BUY · ${allSignals.filter(s => s.signal === 'SELL').length} SELL signals.`
+        : `✓ Scanned ${sigData.scannedCount ?? 0} stocks (${sigData.candidateCount ?? 0} momentum candidates) — ${allSignals.filter(s => s.signal === 'BUY').length} BUY · ${allSignals.filter(s => s.signal === 'SELL').length} SELL signals. ${sigData.apiCallsUsed ?? 0} API calls used.`;
+      setRunLog(l => [...l, scanSummary]);
 
       // Push notifications for strong signals (score > 50)
       for (const sig of allSignals) {

@@ -1,5 +1,72 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+// ── UK quote helpers (Yahoo Finance → ADR fallback) ───────────────────────────
+// Imported inline to avoid HTTP round-trips between internal API routes.
+
+/** ADR mapping: LSE ticker → US-listed ADR symbol */
+const ADR_MAP_SIGNALS: Record<string, string> = {
+  'VOD.L': 'VOD', 'BARC.L': 'BCS', 'LLOY.L': 'LYG', 'BP.L': 'BP',
+  'SHEL.L': 'SHEL', 'AZN.L': 'AZN', 'GSK.L': 'GSK', 'RIO.L': 'RIO',
+  'HSBA.L': 'HSBC', 'DGE.L': 'DEO', 'ULVR.L': 'UL', 'RR.L': 'RYCEY',
+  'NWG.L': 'NWG', 'STAN.L': 'SCBFF', 'IAG.L': 'ICAGY',
+};
+
+type QuoteSource = 'finnhub' | 'yahoo' | 'adr';
+
+async function fetchUKQuote(ticker: string, apiKey: string): Promise<{
+  price: number; changePercent: number; open: number; high: number; low: number;
+  volume: number; prevClose: number; source: QuoteSource; displayTicker: string; badge: string;
+} | null> {
+  // Stage 1 — Yahoo Finance (LSE, GBP prices, 15-min delay)
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClearGains/1.0)', Accept: 'application/json' },
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (res.ok) {
+      const data = await res.json() as {
+        chart?: { result?: Array<{ meta?: { regularMarketPrice?: number; regularMarketChangePercent?: number; previousClose?: number; regularMarketVolume?: number; regularMarketOpen?: number; regularMarketDayHigh?: number; regularMarketDayLow?: number } }> };
+      };
+      const meta = data?.chart?.result?.[0]?.meta;
+      if (meta?.regularMarketPrice && meta.regularMarketPrice > 0) {
+        return {
+          price: meta.regularMarketPrice,
+          changePercent: meta.regularMarketChangePercent ?? 0,
+          open: meta.regularMarketOpen ?? meta.regularMarketPrice,
+          high: meta.regularMarketDayHigh ?? meta.regularMarketPrice,
+          low: meta.regularMarketDayLow ?? meta.regularMarketPrice,
+          volume: meta.regularMarketVolume ?? 0,
+          prevClose: meta.previousClose ?? meta.regularMarketPrice,
+          source: 'yahoo', displayTicker: ticker, badge: '🇬🇧 LSE · 15min delay',
+        };
+      }
+    }
+  } catch { /* fall through to ADR */ }
+
+  // Stage 2 — US ADR via Finnhub
+  const adr = ADR_MAP_SIGNALS[ticker];
+  if (adr && apiKey) {
+    try {
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${adr}&token=${apiKey}`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (res.ok) {
+        const q = await res.json() as { c: number; dp: number; o: number; h: number; l: number; v: number; pc: number };
+        if (q.c > 0) {
+          return {
+            price: q.c, changePercent: q.dp ?? 0, open: q.o ?? q.c, high: q.h ?? q.c,
+            low: q.l ?? q.c, volume: q.v ?? 0, prevClose: q.pc ?? q.c,
+            source: 'adr', displayTicker: adr, badge: `🇺🇸 ADR · USD (${adr})`,
+          };
+        }
+      }
+    } catch { /* give up */ }
+  }
+
+  return null;
+}
+
 // ── Expanded stock universe: US large + mid cap + UK LSE ──────────────────────
 const UNIVERSE: { symbol: string; name: string; t212: string; sector: string; isUK: boolean }[] = [
   // Technology — US
@@ -86,7 +153,8 @@ const UNIVERSE: { symbol: string; name: string; t212: string; sector: string; is
 ];
 
 // Reliable fallback symbols guaranteed to be in UNIVERSE (used when few qualify)
-const FALLBACK_SYMBOLS = ['AAPL', 'MSFT', 'TSLA', 'NVDA', 'AMZN', 'META', 'GOOGL', 'JPM', 'BAC', 'XOM', 'CVX', 'PFE', 'VOD.L', 'BP.L'];
+// UK .L stocks excluded — ADR equivalents (VOD, BP) included instead
+const FALLBACK_SYMBOLS = ['AAPL', 'MSFT', 'TSLA', 'NVDA', 'AMZN', 'META', 'GOOGL', 'JPM', 'BAC', 'XOM', 'CVX', 'PFE'];
 
 // Sentiment word lists
 const BULLISH = ['beats','beat','surges','surge','soars','soar','rises','rise','gains','gain',
@@ -167,11 +235,18 @@ export async function POST(request: NextRequest) {
   }
 
   // Filter universe by selected sectors
-  const universe = sectors.includes('All')
+  const filteredUniverse = sectors.includes('All')
     ? UNIVERSE
     : UNIVERSE.filter(s => sectors.includes(s.sector));
 
-  debugLog.push(`📋 Universe: ${universe.length} stocks for sectors: ${sectors.join(', ')}`);
+  // Cap at 60 stocks per run to stay within Finnhub's 60 calls/minute limit
+  const MAX_STOCKS = 60;
+  const universe = filteredUniverse.slice(0, MAX_STOCKS);
+  const cappedNote = filteredUniverse.length > MAX_STOCKS
+    ? ` (capped at ${MAX_STOCKS} of ${filteredUniverse.length})`
+    : '';
+
+  debugLog.push(`📋 Universe: ${universe.length} stocks for sectors: ${sectors.join(', ')}${cappedNote}`);
 
   if (universe.length === 0) {
     return NextResponse.json({ error: 'No stocks found for selected sectors.', debugLog }, { status: 400 });
@@ -181,54 +256,82 @@ export async function POST(request: NextRequest) {
   const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
   const sixHoursAgo = Math.floor((Date.now() - 6 * 3_600_000) / 1000);
 
-  // ── PHASE 1: Fetch quotes for the whole universe ───────────────────────────
+  // ── PHASE 1: Fetch quotes — sequential with 100ms delay to avoid 429 ────────
+  // UK stocks (.L suffix): Yahoo Finance first, ADR fallback via Finnhub.
+  // US stocks: Finnhub only.
+  // On 429: skip the stock (counted in skipped total, shown as summary not per-stock).
   type QuoteResult = {
     symbol: string; name: string; t212: string; sector: string; isUK: boolean;
     price: number; changePercent: number; open: number; high: number; low: number;
-    volume: number; prevClose: number;
+    volume: number; prevClose: number; badge?: string;
   };
 
   const quotes: QuoteResult[] = [];
-  const quoteErrors: string[] = [];
+  let skipped = 0;
+  let rateLimited = 0;
   let apiCalls = 0;
+  const ukSourceLog: string[] = [];
 
-  debugLog.push(`🔍 Phase 1: Fetching quotes for ${universe.length} stocks in batches of 8…`);
+  debugLog.push(`🔍 Phase 1: Fetching quotes for ${universe.length} stocks (100ms delay, UK via Yahoo Finance)…`);
 
-  const batchSize = 8;
-  for (let i = 0; i < universe.length; i += batchSize) {
-    const batch = universe.slice(i, i + batchSize);
-    await Promise.all(batch.map(async stock => {
-      try {
+  for (const stock of universe) {
+    // 100ms gap between every call to stay within Finnhub rate limits
+    await new Promise<void>(r => setTimeout(r, 100));
+
+    try {
+      if (stock.isUK) {
+        // UK LSE stock → Yahoo Finance (15-min delay) or ADR fallback
+        const ukQuote = await fetchUKQuote(stock.symbol, apiKey);
+        if (!ukQuote) { skipped++; continue; }
+        quotes.push({
+          symbol: stock.symbol, name: stock.name, t212: stock.t212,
+          sector: stock.sector, isUK: true,
+          price: ukQuote.price, changePercent: ukQuote.changePercent,
+          open: ukQuote.open, high: ukQuote.high, low: ukQuote.low,
+          volume: ukQuote.volume, prevClose: ukQuote.prevClose,
+          badge: ukQuote.badge,
+        });
+        ukSourceLog.push(`${stock.symbol}: ${ukQuote.source === 'yahoo' ? '🇬🇧 Yahoo' : `🇺🇸 ADR (${ukQuote.displayTicker})`}`);
+      } else {
+        // US stock → Finnhub
         const res = await fetch(
           `https://finnhub.io/api/v1/quote?symbol=${stock.symbol}&token=${apiKey}`,
           { signal: AbortSignal.timeout(5_000) }
         );
         apiCalls++;
-        if (!res.ok) {
-          quoteErrors.push(`${stock.symbol}: HTTP ${res.status}`);
-          return;
+
+        if (res.status === 429) {
+          // Rate limited — wait 1 second, skip this stock (do not retry in this scan)
+          await new Promise<void>(r => setTimeout(r, 1_000));
+          rateLimited++;
+          skipped++;
+          continue;
         }
+        if (!res.ok) { skipped++; continue; }
+
         const q = await res.json() as { c: number; dp: number; o: number; h: number; l: number; v: number; pc: number };
-        if (!q.c || q.c <= 0) {
-          quoteErrors.push(`${stock.symbol}: price=0 or null (market closed or bad symbol)`);
-          return;
-        }
+        if (!q.c || q.c <= 0) { skipped++; continue; }
+
         quotes.push({
           symbol: stock.symbol, name: stock.name, t212: stock.t212,
-          sector: stock.sector, isUK: stock.isUK,
+          sector: stock.sector, isUK: false,
           price: q.c, changePercent: q.dp ?? 0,
           open: q.o ?? q.c, high: q.h ?? q.c, low: q.l ?? q.c,
           volume: q.v ?? 0, prevClose: q.pc ?? q.c,
         });
-      } catch (e) {
-        quoteErrors.push(`${stock.symbol}: ${e instanceof Error ? e.message : 'timeout'}`);
       }
-    }));
+    } catch {
+      skipped++;
+    }
   }
 
-  debugLog.push(`✅ Phase 1 complete: ${quotes.length}/${universe.length} quotes received, ${quoteErrors.length} errors`);
-  if (quoteErrors.length > 0) {
-    debugLog.push(`⚠️ Quote errors: ${quoteErrors.slice(0, 5).join(', ')}${quoteErrors.length > 5 ? ` … +${quoteErrors.length - 5} more` : ''}`);
+  // Clean summary (no per-stock error noise)
+  debugLog.push(`✅ Phase 1 complete: ${quotes.length}/${universe.length} quotes received${skipped > 0 ? ` (${skipped} skipped${rateLimited > 0 ? ` — ${rateLimited} rate-limited` : ' — free tier limitations'})` : ''}`);
+  if (ukSourceLog.length > 0) {
+    debugLog.push(`🇬🇧 UK stocks: ${ukSourceLog.join(', ')}`);
+  }
+  if (rateLimited > 0) {
+    debugLog.push(`⚠️ Rate limited — ${rateLimited} stocks skipped, will retry next scan`);
   }
 
   if (quotes.length === 0) {
@@ -480,17 +583,23 @@ export async function POST(request: NextRequest) {
     signal: r.signal,
     badges: r.badges,
     reason: r.reason,
+    sourceBadge: r.badge,  // e.g. "🇬🇧 LSE · 15min delay" or "🇺🇸 ADR · USD (VOD)"
   }));
+
+  const skippedSummary = skipped > 0
+    ? `${quotes.length}/${universe.length} quotes received (${skipped} skipped — ${rateLimited > 0 ? `${rateLimited} rate-limited, ` : ''}free tier limitations)`
+    : null;
 
   return NextResponse.json({
     signals,
     scannedCount: quotes.length,
     candidateCount: phase2Stocks.length,
     apiCallsUsed: apiCalls,
+    skippedSummary,
     timestamp: new Date().toISOString(),
     note: isSmartMoney
       ? 'Smart Money Swing: vol ≥1.3× + news catalyst + 0.3–6% move. R:R 2:1 (SL −1.5%, TP +3%). Risk 1% portfolio per trade.'
-      : 'Selected based on momentum, volume surge, and news catalysts — not company size',
+      : 'Selected based on momentum, volume surge, and news catalysts — not company size. UK stocks shown as LSE (Yahoo Finance, 15min delay) or US ADR.',
     debugLog,
   });
 }
