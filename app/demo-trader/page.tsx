@@ -5,6 +5,7 @@ import {
   FlaskConical, Play, RefreshCw, X,
   CheckCircle2, AlertCircle, ArrowRight,
   Target, BarChart3, Trophy, Copy, Info, RotateCcw, Wallet, Clock,
+  Zap, Moon, Sun, Pause, TrendingUp, Download,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { DemoPosition, DemoTrade, FxPosition, FxTrade } from '@/lib/types';
@@ -50,6 +51,20 @@ type Signal = {
   signal: 'BUY' | 'SELL' | 'NEUTRAL';
   badges: string[];
   reason: string;
+};
+
+type StrategyLogEntry = {
+  id: string;
+  ts: string;
+  type: 'buy' | 'sell' | 'adjust' | 'pause' | 'info' | 'error';
+  ticker?: string;
+  action: string;
+  reason: string;
+  price?: number;
+  pnl?: number;
+  pnlPct?: number;
+  positionValue?: number;
+  strategy?: string;
 };
 
 // ─── PORTFOLIO TYPES ──────────────────────────────────────────────────────────
@@ -1537,6 +1552,14 @@ export default function DemoTraderPage() {
   const [testOrderResult, setTestOrderResult] = useState<string | null>(null);
   const [testOrderLoading, setTestOrderLoading] = useState(false);
 
+  // ── Strategy engine state ──────────────────────────────────────────────────
+  const [autoScanEnabled, setAutoScanEnabled] = useState(false);
+  const [nextScanIn, setNextScanIn] = useState(300);
+  const [strategyStatus, setStrategyStatus] = useState<'IDLE' | 'SCANNING' | 'HOLDING' | 'PAUSED'>('IDLE');
+  const [holdOvernight, setHoldOvernight] = useState(false);
+  const [pausedUntil, setPausedUntil] = useState<number | null>(null);
+  const [strategyLog, setStrategyLog] = useState<StrategyLogEntry[]>([]);
+
   // ── Portfolio management state ─────────────────────────────────────────────
   const [portfolios, setPortfolios] = useState<PortfolioMeta[]>([]);
   const [activePortfolioId, setActivePortfolioId] = useState<string | null>(null);
@@ -1778,11 +1801,46 @@ export default function DemoTraderPage() {
     ? (parseInt(customSizeStr.replace(/[^0-9]/g, ''), 10) || 0)
     : sizePreset;
 
-  // Auto mode: size based on signal confidence (score is 0–100)
+  // Kelly-inspired position sizing based on signal confidence
+  function kellySizing(confidence: number, capital: number): { size: number; pct: number; reason: string } {
+    const cap = capital * 0.20; // never more than 20% in one position
+    if (confidence > 80) return { size: Math.min(capital * 0.05, cap), pct: 5, reason: 'High confidence (>80%) — 5% allocation' };
+    if (confidence > 65) return { size: Math.min(capital * 0.03, cap), pct: 3, reason: 'Medium confidence (65-80%) — 3% allocation' };
+    return { size: Math.min(capital * 0.015, cap), pct: 1.5, reason: 'Lower confidence (50-65%) — 1.5% allocation' };
+  }
+
+  // Fractional quantity: 4 decimal places, min 0.0001 shares
+  function calcQuantity(positionSize: number, price: number): number {
+    return Math.max(0.0001, Math.round((positionSize / price) * 10000) / 10000);
+  }
+
+  // Sector count helper for diversification check
+  function sectorCount(sector: string): number {
+    return demoPositions.filter(p => p.sector === sector).length;
+  }
+
+  // Strategy log helper — prepends entry, keeps last 100
+  function addStratLog(entry: Omit<StrategyLogEntry, 'id' | 'ts'>) {
+    setStrategyLog(prev => [{ ...entry, id: uid(), ts: new Date().toISOString() }, ...prev].slice(0, 100));
+  }
+
+  // Export strategy log as CSV
+  function exportLogCSV() {
+    const headers = 'Timestamp,Type,Ticker,Action,Reason,Price,PnL,PnL%,Value';
+    const rows = strategyLog.map(e =>
+      [e.ts, e.type, e.ticker ?? '', e.action, `"${e.reason}"`, e.price?.toFixed(2) ?? '', e.pnl?.toFixed(2) ?? '', e.pnlPct?.toFixed(2) ?? '', e.positionValue?.toFixed(2) ?? ''].join(',')
+    );
+    const csv = [headers, ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `strategy-log-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Auto mode: backward-compat alias
   function autoTradeSize(score: number): number {
-    if (score > 80) return availableBalance * 0.05;   // High: 5%
-    if (score > 70) return availableBalance * 0.03;   // Medium: 3%
-    return availableBalance * 0.01;                   // Lower: 1%
+    return kellySizing(score, availableBalance).size;
   }
 
   const slPct = parseFloat(slPctStr) || 2;
@@ -1812,7 +1870,7 @@ export default function DemoTraderPage() {
     }
     const encoded = btoa(demoKey + ':' + demoSecret);
     setTestOrderLoading(true);
-    const reqBody = { ticker: 'AAPL_US_EQ', quantity: 1, env: 'demo' };
+    const reqBody = { ticker: 'AAPL_US_EQ', quantity: 0.01, env: 'demo' };
     setTestOrderResult(`→ Sending: POST /api/t212/live-order\n   Body: ${JSON.stringify(reqBody)}\n   Auth: Basic ${encoded.slice(0, 8)}…`);
     try {
       const res = await fetch('/api/t212/live-order', {
@@ -1868,12 +1926,22 @@ export default function DemoTraderPage() {
 
         const pnl = (currentPrice - pos.entryPrice) * pos.quantity;
         const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-        updateDemoPosition(pos.id, { currentPrice, pnl, pnlPct });
 
-        // Check SL/TP
-        if (currentPrice <= pos.stopLoss || currentPrice >= pos.takeProfit) {
+        // ── Trailing stop: once +3% in profit, move SL to breakeven ──────────
+        let updatedSl = pos.stopLoss;
+        if (pnlPct >= 3 && pos.stopLoss < pos.entryPrice) {
+          updatedSl = pos.entryPrice * 1.001; // 0.1% above entry = locks in small profit
+          updateDemoPosition(pos.id, { currentPrice, pnl, pnlPct, stopLoss: updatedSl });
+          addStratLog({ type: 'adjust', ticker: pos.ticker, action: 'Trailing stop → breakeven', reason: `+${pnlPct.toFixed(1)}% profit — SL moved to entry`, price: currentPrice, pnl, pnlPct });
+        } else {
+          updateDemoPosition(pos.id, { currentPrice, pnl, pnlPct });
+        }
+
+        // ── Check SL/TP ───────────────────────────────────────────────────────
+        const activeSl = updatedSl;
+        if (currentPrice <= activeSl || currentPrice >= pos.takeProfit) {
           const closeReason: DemoTrade['closeReason'] =
-            currentPrice <= pos.stopLoss ? 'stop-loss' : 'take-profit';
+            currentPrice <= activeSl ? 'stop-loss' : 'take-profit';
           const activeMeta = portfolios.find(p => p.id === activePortfolioId);
           addDemoTrade({
             id: uid(),
@@ -1892,6 +1960,12 @@ export default function DemoTraderPage() {
             accountType: activeMeta?.executionAccount ?? 'paper',
           });
           removeDemoPosition(pos.id);
+          addStratLog({
+            type: 'sell', ticker: pos.ticker,
+            action: closeReason === 'stop-loss' ? 'Stop-loss hit' : 'Take-profit hit',
+            reason: closeReason === 'stop-loss' ? `SL at ${fmtUSD(activeSl)} triggered` : `TP at ${fmtUSD(pos.takeProfit)} triggered`,
+            price: currentPrice, pnl, pnlPct, positionValue: currentPrice * pos.quantity,
+          });
 
           // Push notification for SL/TP hit
           const isTP = closeReason === 'take-profit';
@@ -1900,6 +1974,24 @@ export default function DemoTraderPage() {
             `${pos.companyName} · ${fmtPct(pnlPct)} · Entry ${fmtUSD(pos.entryPrice)} → Exit ${fmtUSD(currentPrice)}`,
             '/demo-trader'
           );
+          continue; // position closed — skip further checks
+        }
+
+        // ── 48-hour time-based exit for unprofitable positions ────────────────
+        const heldHours = (Date.now() - new Date(pos.openedAt).getTime()) / 3_600_000;
+        if (heldHours >= 48 && pnl <= 0) {
+          const activeMeta = portfolios.find(p => p.id === activePortfolioId);
+          addDemoTrade({
+            id: uid(), ticker: pos.ticker, t212Ticker: pos.t212Ticker,
+            companyName: pos.companyName, sector: pos.sector,
+            quantity: pos.quantity, entryPrice: pos.entryPrice,
+            exitPrice: currentPrice, pnl, pnlPct,
+            openedAt: pos.openedAt, closedAt: new Date().toISOString(),
+            closeReason: 'manual', accountType: activeMeta?.executionAccount ?? 'paper',
+          });
+          removeDemoPosition(pos.id);
+          addStratLog({ type: 'sell', ticker: pos.ticker, action: 'Time exit (48h)', reason: `Held ${heldHours.toFixed(0)}h without profit — time-based exit`, price: currentPrice, pnl, pnlPct });
+          continue;
         }
       }
 
@@ -1908,6 +2000,49 @@ export default function DemoTraderPage() {
         setPriceFlash(newFlash);
         setTimeout(() => setPriceFlash({}), 900);
       }
+
+      // ── Overnight close (3:45pm ET = 19:45 UTC in summer / 20:45 in winter) ─
+      if (!holdOvernight) {
+        const now = new Date();
+        const etHour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(now));
+        const etMin = now.getUTCMinutes();
+        const isCloseTime = etHour === 15 && etMin >= 45;
+        if (isCloseTime && demoPositions.length > 0) {
+          for (const pos of [...demoPositions]) {
+            const cp = data.prices[pos.ticker] ?? pos.currentPrice;
+            const closePnl = (cp - pos.entryPrice) * pos.quantity;
+            const closePnlPct = ((cp - pos.entryPrice) / pos.entryPrice) * 100;
+            const activeMeta2 = portfolios.find(p => p.id === activePortfolioId);
+            addDemoTrade({
+              id: uid(), ticker: pos.ticker, t212Ticker: pos.t212Ticker,
+              companyName: pos.companyName, sector: pos.sector,
+              quantity: pos.quantity, entryPrice: pos.entryPrice,
+              exitPrice: cp, pnl: closePnl, pnlPct: closePnlPct,
+              openedAt: pos.openedAt, closedAt: new Date().toISOString(),
+              closeReason: 'manual', accountType: activeMeta2?.executionAccount ?? 'paper',
+            });
+            removeDemoPosition(pos.id);
+            addStratLog({ type: 'sell', ticker: pos.ticker, action: 'End-of-day close', reason: '3:45pm ET — intraday close', price: cp, pnl: closePnl, pnlPct: closePnlPct });
+          }
+        }
+      }
+
+      // ── Drawdown protection: pause new entries if portfolio down 5% ──────────
+      const portfolioPnL = demoPositions.reduce((s, p) => s + p.pnl, 0) + demoTrades.reduce((s, t) => s + t.pnl, 0);
+      const drawdownPct = paperBudget > 0 ? (portfolioPnL / paperBudget) * 100 : 0;
+      if (drawdownPct <= -5 && pausedUntil === null && strategyStatus !== 'PAUSED') {
+        const resumeAt = Date.now() + 3_600_000;
+        setPausedUntil(resumeAt);
+        setStrategyStatus('PAUSED');
+        addStratLog({ type: 'pause', action: 'Strategy PAUSED — drawdown protection', reason: `Portfolio down ${Math.abs(drawdownPct).toFixed(1)}% — new entries paused for 1 hour` });
+      }
+      // Auto-resume after pause period
+      if (pausedUntil !== null && Date.now() > pausedUntil && strategyStatus === 'PAUSED') {
+        setPausedUntil(null);
+        setStrategyStatus(demoPositions.length > 0 ? 'HOLDING' : 'IDLE');
+        addStratLog({ type: 'info', action: 'Strategy RESUMED', reason: 'Drawdown protection period ended' });
+      }
+
       setLastRefreshed(Date.now());
     } catch {
       // Ignore refresh errors silently
@@ -1928,6 +2063,28 @@ export default function DemoTraderPage() {
     return () => clearInterval(t);
   }, []);
 
+  // ── Autonomous 5-minute scan ────────────────────────────────────────────────
+  const autoScanRef = useRef(false);
+  useEffect(() => { autoScanRef.current = autoScanEnabled; }, [autoScanEnabled]);
+
+  useEffect(() => {
+    if (!autoScanEnabled) { setNextScanIn(300); return; }
+    setNextScanIn(300);
+
+    const countdown = setInterval(() => {
+      setNextScanIn(n => (n <= 1 ? 300 : n - 1));
+    }, 1000);
+
+    const scanner = setInterval(() => {
+      if (autoScanRef.current && !scanning) runStrategy(); // eslint-disable-line react-hooks/exhaustive-deps
+    }, 300_000);
+
+    addStratLog({ type: 'info', action: 'Auto-scan ENABLED', reason: 'Strategy engine will scan every 5 minutes' });
+    setStrategyStatus('HOLDING');
+
+    return () => { clearInterval(countdown); clearInterval(scanner); };
+  }, [autoScanEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const secondsAgo = lastRefreshed > 0 ? Math.floor((Date.now() - lastRefreshed) / 1000) : null;
   void tick; // used only to trigger re-render for countdown
 
@@ -1936,6 +2093,7 @@ export default function DemoTraderPage() {
     setScanning(true);
     setScanError(null);
     setRunLog([]);
+    setStrategyStatus('SCANNING');
 
     try {
       const selectedSectors = sectors.includes('All') ? ['All'] : sectors;
@@ -1982,16 +2140,38 @@ export default function DemoTraderPage() {
         }
       }
 
-      const maxPositions = isSmartMoney ? SMART_MONEY_MAX_POS : 10;
-      const openSlots = maxPositions - demoPositions.length;
-      const buys = allSignals.filter(s => s.signal === 'BUY').slice(0, Math.max(1, Math.min(3, openSlots)));
+      // Drawdown protection check
+      if (pausedUntil !== null && Date.now() < pausedUntil) {
+        const resumeTime = new Date(pausedUntil).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        setRunLog(l => [...l, `⏸ Strategy paused (drawdown protection) — resumes at ${resumeTime}`]);
+        return;
+      }
+
+      // Build eligible buy list with diversification rules
+      const heldTickers = new Set(demoPositions.map(p => p.ticker));
+      const sectorCounts = demoPositions.reduce<Record<string, number>>((acc, p) => {
+        acc[p.sector] = (acc[p.sector] ?? 0) + 1; return acc;
+      }, {});
+
+      const buys = allSignals
+        .filter(s => s.signal === 'BUY')
+        .filter(s => !heldTickers.has(s.symbol))               // no doubling
+        .filter(s => (sectorCounts[s.sector] ?? 0) < 5)        // max 5 per sector
+        .filter(s => s.score >= 50)                             // min quality threshold
+        .slice(0, isSmartMoney ? SMART_MONEY_MAX_POS : 20);    // cap at 20 new positions per run
+
       if (buys.length === 0) {
-        setRunLog(l => [...l, 'ℹ No BUY signals returned — check debug panel for details.']);
+        const reason = heldTickers.size > 0
+          ? `ℹ No new BUY signals (${heldTickers.size} positions open, sector limits or quality filter applied)`
+          : 'ℹ No BUY signals returned — check debug panel for details.';
+        setRunLog(l => [...l, reason]);
         setDebugOpen(true);
         return;
       }
-      if (isSmartMoney && openSlots <= 0) {
-        setRunLog(l => [...l, `⚠ Smart Money max ${SMART_MONEY_MAX_POS} positions reached — close existing trades first.`]);
+
+      // Capital check: skip if less than 0.5% of budget available
+      if (availableBalance < paperBudget * 0.005) {
+        setRunLog(l => [...l, `⚠ Available capital (${fmtGBP(availableBalance)}) too low — close existing positions first.`]);
         return;
       }
 
@@ -2005,18 +2185,26 @@ export default function DemoTraderPage() {
       for (const signal of buys) {
         const entryPrice = signal.currentPrice;
 
-        // Smart-Money: size so that SL loss = 1% of portfolio; others use existing logic
+        // Smart-Money: size so that SL loss = 1% of portfolio; others use Kelly sizing
         let size: number;
+        let sizeReason: string;
         if (isSmartMoney) {
           const riskAmount = paperBudget * (SMART_MONEY_RISK_PCT / 100);
           const slDistance = entryPrice * (SMART_MONEY_SL_PCT / 100);
           const sharesForRisk = riskAmount / slDistance;
-          size = sharesForRisk * entryPrice;
+          size = Math.min(sharesForRisk * entryPrice, availableBalance * 0.20);
+          sizeReason = `Smart Money 1% risk — ${fmtGBP(size)}`;
+        } else if (mode === 'auto') {
+          const kelly = kellySizing(signal.score, availableBalance);
+          size = kelly.size;
+          sizeReason = kelly.reason;
         } else {
-          size = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
+          size = Math.min(manualTradeSize, availableBalance * 0.20);
+          sizeReason = `Manual ${fmtGBP(size)}`;
         }
 
-        const quantity = Math.max(1, Math.floor(size / entryPrice));
+        // Fractional quantity: 4 decimal places, min 0.0001
+        const quantity = calcQuantity(size, entryPrice);
         const useSl = isSmartMoney ? SMART_MONEY_SL_PCT : slPct;
         const useTp = isSmartMoney ? SMART_MONEY_TP_PCT : tpPct;
         const sl = entryPrice * (1 - useSl / 100);
@@ -2040,13 +2228,17 @@ export default function DemoTraderPage() {
         };
 
         addDemoPosition(position);
-        const sizeLabel = isSmartMoney
-          ? `1% risk ${fmtGBP(size)}`
-          : mode === 'auto' ? `auto ${fmtGBP(size)} (${signal.score}% conf)` : fmtGBP(size);
         setRunLog(l => [
           ...l,
-          `  → BUY ${quantity}× ${signal.symbol} @ ${fmtUSD(entryPrice)} [${sizeLabel}] SL ${fmtUSD(sl)} (−${useSl}%) TP ${fmtUSD(tp)} (+${useTp}%)`,
+          `  → BUY ${quantity.toFixed(4)}× ${signal.symbol} @ ${fmtUSD(entryPrice)} [${fmtGBP(size)} · ${sizeReason.split(' —')[0]}] SL ${fmtUSD(sl)} TP ${fmtUSD(tp)}`,
         ]);
+        addStratLog({
+          type: 'buy', ticker: signal.symbol,
+          action: `BUY ${quantity.toFixed(4)}× @ ${fmtUSD(entryPrice)}`,
+          reason: sizeReason,
+          price: entryPrice, positionValue: size,
+          strategy: activeStrategy,
+        });
       }
 
       setRunLog(l => [...l, '✅ Strategy complete — positions tracked in paper engine.']);
@@ -2115,8 +2307,8 @@ export default function DemoTraderPage() {
             } else {
               liveSize = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
             }
-            // Use integer quantity only — T212 rejects fractional shares for market orders
-            const qty = Math.max(1, Math.floor(liveSize / signal.currentPrice));
+            // Fractional quantity — T212 supports fractional shares
+            const qty = calcQuantity(liveSize, signal.currentPrice);
             const reqBody = { ticker: signal.t212Ticker, quantity: qty, env: orderEnv };
             setRunLog(l => [...l, `  → ${signal.symbol}: ticker=${signal.t212Ticker} qty=${qty} env=${orderEnv}`]);
             return fetch('/api/t212/live-order', {
@@ -2180,6 +2372,7 @@ export default function DemoTraderPage() {
       setScanError(`Strategy failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setScanning(false);
+      setStrategyStatus(demoPositions.length > 0 ? 'HOLDING' : 'IDLE');
     }
   }
 
@@ -2203,6 +2396,7 @@ export default function DemoTraderPage() {
       accountType: activeMeta?.executionAccount ?? 'paper',
     });
     removeDemoPosition(pos.id);
+    addStratLog({ type: 'sell', ticker: pos.ticker, action: 'Manual close', reason: 'User closed position', price: pos.currentPrice, pnl: pos.pnl, pnlPct: pos.pnlPct });
   }
 
   function toggleSector(s: Sector) {
@@ -2638,7 +2832,8 @@ export default function DemoTraderPage() {
                     <div className="flex justify-between"><span>Take-profit</span><span className="text-emerald-400">+{tpPct}%</span></div>
                   </>
                 )}
-                <div className="flex justify-between"><span>Max positions / run</span><span>3 (top BUY signals)</span></div>
+                <div className="flex justify-between"><span>Max positions / run</span><span>Capital-based · max 20% each</span></div>
+                <div className="flex justify-between"><span>Sector limit</span><span>5 per sector</span></div>
                 <div className="flex justify-between"><span>Price refresh</span><span>every 60s</span></div>
               </div>
             </div>
@@ -2766,6 +2961,95 @@ export default function DemoTraderPage() {
             );
           })()}
 
+          {/* ── Strategy Engine Status ─────────────────────────────────── */}
+          <Card>
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <p className="text-xs font-semibold text-gray-300">Strategy Engine</p>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={clsx('text-[10px] px-2 py-0.5 rounded-full font-bold',
+                    strategyStatus === 'SCANNING' ? 'bg-blue-500/20 text-blue-400' :
+                    strategyStatus === 'PAUSED' ? 'bg-red-500/20 text-red-400' :
+                    strategyStatus === 'HOLDING' ? 'bg-amber-500/20 text-amber-400' :
+                    'bg-gray-700 text-gray-500'
+                  )}>
+                    {strategyStatus}
+                  </span>
+                  {pausedUntil !== null && Date.now() < pausedUntil && (
+                    <span className="text-[10px] text-red-400">
+                      Resumes {new Date(pausedUntil).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={() => setAutoScanEnabled(v => !v)}
+                className={clsx('px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-colors flex items-center gap-1.5',
+                  autoScanEnabled ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200'
+                )}
+              >
+                {autoScanEnabled ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+                {autoScanEnabled ? 'Auto ON' : 'Auto OFF'}
+              </button>
+            </div>
+
+            {autoScanEnabled && (
+              <div className="flex items-center gap-2 mb-2 bg-emerald-500/5 border border-emerald-500/20 rounded-lg px-3 py-1.5">
+                <RefreshCw className="h-3 w-3 text-emerald-400" style={{ animation: 'spin 3s linear infinite' }} />
+                <span className="text-[11px] text-gray-400">Next scan in</span>
+                <span className="text-[11px] font-mono text-emerald-400">
+                  {Math.floor(nextScanIn / 60)}:{String(nextScanIn % 60).padStart(2, '0')}
+                </span>
+              </div>
+            )}
+
+            <div className="space-y-0.5 text-[10px] text-gray-600 mb-3">
+              <div className="flex justify-between"><span>Position cap</span><span className="text-gray-500">20% per stock · 5 per sector</span></div>
+              <div className="flex justify-between"><span>Sizing</span><span className="text-gray-500">5% / 3% / 1.5% (confidence)</span></div>
+              <div className="flex justify-between"><span>Trailing stop</span><span className="text-gray-500">→ breakeven after +3%</span></div>
+              <div className="flex justify-between"><span>Time exit</span><span className="text-gray-500">48h if not profitable</span></div>
+              <div className="flex justify-between"><span>Drawdown guard</span><span className="text-gray-500">Pause 1h if −5%</span></div>
+            </div>
+
+            <button
+              onClick={() => setHoldOvernight(v => !v)}
+              className={clsx('w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs transition-colors mb-2',
+                holdOvernight ? 'bg-indigo-500/10 border-indigo-500/20 text-indigo-300' : 'bg-gray-800/60 border-gray-700 text-gray-400 hover:text-gray-200'
+              )}
+            >
+              <span className="flex items-center gap-1.5">
+                {holdOvernight ? <Moon className="h-3 w-3" /> : <Sun className="h-3 w-3" />}
+                {holdOvernight ? 'Hold overnight: ON' : 'Close at 3:45pm ET'}
+              </span>
+              <span className={clsx('text-[10px] px-1.5 py-0.5 rounded-full', holdOvernight ? 'bg-indigo-500/20 text-indigo-400' : 'bg-gray-700 text-gray-500')}>
+                {holdOvernight ? 'OVERNIGHT' : 'INTRADAY'}
+              </span>
+            </button>
+
+            {/* Sector exposure heat map */}
+            {demoPositions.length > 0 && (() => {
+              const sectorMap = demoPositions.reduce<Record<string, number>>((acc, p) => {
+                acc[p.sector] = (acc[p.sector] ?? 0) + 1; return acc;
+              }, {});
+              return (
+                <div className="pt-2 border-t border-gray-800">
+                  <p className="text-[10px] text-gray-600 mb-1.5">Sector exposure</p>
+                  <div className="space-y-1">
+                    {Object.entries(sectorMap).map(([sector, count]) => (
+                      <div key={sector} className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-500 w-16 truncate">{sector}</span>
+                        <div className="flex-1 bg-gray-800 rounded-full h-1">
+                          <div className="h-1 rounded-full bg-amber-500" style={{ width: `${Math.min(100, (count / 5) * 100)}%` }} />
+                        </div>
+                        <span className="text-[10px] text-gray-500 w-6 text-right">{count}/5</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+          </Card>
+
           <Button
             onClick={runStrategy}
             loading={scanning}
@@ -2783,9 +3067,61 @@ export default function DemoTraderPage() {
           )}
 
           {runLog.length > 0 && (
-            <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 font-mono text-[11px] text-gray-400 space-y-0.5 max-h-48 overflow-y-auto">
-              {runLog.map((line, i) => <p key={i}>{line}</p>)}
+            <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 font-mono text-[11px] space-y-0.5 max-h-48 overflow-y-auto">
+              {runLog.map((line, i) => (
+                <p key={i} className={clsx(
+                  line.startsWith('  ✅') || line.startsWith('✅') ? 'text-emerald-400' :
+                  line.startsWith('  ✗') || line.startsWith('  ⏰') ? 'text-red-400' :
+                  line.startsWith('  →') || line.startsWith('📲') ? 'text-blue-400' :
+                  line.startsWith('⚠') ? 'text-amber-400' :
+                  'text-gray-400'
+                )}>{line}</p>
+              ))}
             </div>
+          )}
+
+          {/* Strategy Log */}
+          {strategyLog.length > 0 && (
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold text-gray-300">Strategy Log</p>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-gray-600">{strategyLog.length} entries</span>
+                  <button
+                    onClick={exportLogCSV}
+                    className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 hover:text-gray-200 transition-colors"
+                  >
+                    <Download className="h-2.5 w-2.5" /> CSV
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-0.5 max-h-48 overflow-y-auto">
+                {strategyLog.slice(0, 50).map(entry => (
+                  <div key={entry.id} className="flex items-start gap-2 text-[10px] py-0.5 border-b border-gray-800/50 last:border-0">
+                    <span className="text-gray-700 flex-shrink-0 font-mono">
+                      {new Date(entry.ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </span>
+                    {entry.ticker && (
+                      <span className={clsx('flex-shrink-0 font-bold w-12',
+                        entry.type === 'buy' ? 'text-emerald-400' :
+                        entry.type === 'sell' ? 'text-red-400' :
+                        entry.type === 'adjust' ? 'text-amber-400' :
+                        entry.type === 'pause' ? 'text-red-500' :
+                        'text-gray-500'
+                      )}>
+                        {entry.ticker}
+                      </span>
+                    )}
+                    <span className="text-gray-400 flex-1 leading-tight">{entry.action} · <span className="text-gray-600">{entry.reason}</span></span>
+                    {entry.pnlPct !== undefined && (
+                      <span className={clsx('font-mono flex-shrink-0', entry.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {entry.pnlPct >= 0 ? '+' : ''}{entry.pnlPct.toFixed(2)}%
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </Card>
           )}
 
           {/* Debug Panel */}
@@ -3018,7 +3354,10 @@ export default function DemoTraderPage() {
                             );
                           })()}
                         </td>
-                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{pos.quantity}</td>
+                        <td className="py-1.5 pr-3 text-right font-mono text-gray-300">
+                          <div>{pos.quantity.toFixed(4)}</div>
+                          <div className="text-[10px] text-gray-600">{fmtUSD(pos.entryPrice * pos.quantity)}</div>
+                        </td>
                         <td className="py-1.5 pr-3 text-right font-mono text-gray-300">{fmtUSD(pos.entryPrice)}</td>
                         <td className={clsx('py-1.5 pr-3 text-right font-mono text-gray-300 rounded',
                           priceFlash[pos.ticker] === 'up' ? 'price-flash-up' :
