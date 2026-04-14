@@ -160,12 +160,6 @@ interface ClearGainsState {
   setTaxMonitorLastPoll: (ts: string) => void;
   setTaxMonitorLivePositions: (positions: T212Position[]) => void;
 
-  // API key storage preference — 'local' keeps keys in this browser only;
-  // 'encrypted' stores AES-256-encrypted blobs in Redis for cross-device use.
-  // Raw keys are NEVER sent to any server regardless of mode.
-  keyStorageMode: 'local' | 'encrypted';
-  setKeyStorageMode: (mode: 'local' | 'encrypted') => void;
-
   reset: () => void;
 }
 
@@ -210,7 +204,6 @@ export const useClearGainsStore = create<ClearGainsState>()(
       carriedForwardLosses: 0,
       taxMonitorLastPoll: null,
       taxMonitorLivePositions: [],
-      keyStorageMode: 'local',
 
       setCountry: (country) => set({ selectedCountry: country }),
       setHasOnboarded: (v) => set({ hasOnboarded: v }),
@@ -378,8 +371,6 @@ export const useClearGainsStore = create<ClearGainsState>()(
       setTaxMonitorLastPoll: (ts) => set({ taxMonitorLastPoll: ts }),
       setTaxMonitorLivePositions: (positions) => set({ taxMonitorLivePositions: positions }),
 
-      setKeyStorageMode: (mode) => set({ keyStorageMode: mode }),
-
       setLinkedAccountId: (accountType, keyHashPrefix) =>
         set((state) => ({
           linkedAccountIds: { ...state.linkedAccountIds, [accountType]: keyHashPrefix },
@@ -472,7 +463,6 @@ export const useClearGainsStore = create<ClearGainsState>()(
         cgtAlerts: state.cgtAlerts,
         carriedForwardLosses: state.carriedForwardLosses,
         taxMonitorLivePositions: state.taxMonitorLivePositions,
-        keyStorageMode: state.keyStorageMode,
       }),
     }
   )

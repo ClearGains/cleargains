@@ -23,7 +23,6 @@ import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useClearGainsStore } from '@/lib/store';
 import { T212NavButton } from '@/components/t212/T212NavButton';
-import { SyncIndicator } from '@/components/sync/SyncIndicator';
 
 const navLinks = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -89,7 +88,6 @@ export function Navbar() {
         {/* Right-side actions */}
         <div className="flex items-center gap-2">
           <T212NavButton />
-          <SyncIndicator />
 
           <Link
             href="/onboarding"

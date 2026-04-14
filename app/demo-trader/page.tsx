@@ -126,21 +126,6 @@ function loadPortfolioBudget(id: string): number | null {
   try { const v = localStorage.getItem(portfolioKey(id, 'budget')); return v ? Number(JSON.parse(v)) : null; } catch { return null; }
 }
 
-// ── Redis sync helpers (fire-and-forget, localStorage stays primary) ───────────
-const JSON_H = { 'Content-Type': 'application/json' };
-function redisPost(path: string, body: unknown) {
-  fetch(path, { method: 'POST', headers: JSON_H, body: JSON.stringify(body) }).catch(() => {});
-}
-function syncPortfolioToRedis(id: string, allMetas: unknown[]) {
-  redisPost('/api/db/portfolios', allMetas);
-  redisPost('/api/db/active-portfolio', { id });
-  redisPost(`/api/db/positions/${id}`, loadPortfolioPositions(id));
-  redisPost(`/api/db/trades/${id}`,    loadPortfolioTrades(id));
-  const budget = loadPortfolioBudget(id);
-  if (budget !== null) redisPost(`/api/db/budget/${id}`, { amount: budget });
-  const meta = loadPortfolioMeta(id);
-  if (meta) redisPost(`/api/db/settings/${id}`, meta);
-}
 
 const STRATEGY_LABELS: Record<PortfolioStrategy, string> = {
   'smart-money': '🧠 Smart Money Swing',
@@ -1663,33 +1648,6 @@ export default function DemoTraderPage() {
     let ids = loadPortfolioIds();
     let activeId = localStorage.getItem(ACTIVE_PORTFOLIO_KEY);
 
-    // ── Cross-device load: if localStorage empty, pull from Redis ─────────────
-    // (SyncService handles the full Zustand state; here we just restore portfolios)
-    // The SyncService will restore localStorage from Redis if empty, so we defer
-    // the portfolio init by 800ms to give SyncService a chance to populate first.
-    if (ids.length === 0 && !localStorage.getItem('paper_positions') && !localStorage.getItem('paper_budget')) {
-      // Attempt to load from Redis — SyncService will have already populated localStorage
-      // by the time we check again, so schedule a re-check after a short delay
-      const retryTimer = setTimeout(() => {
-        const retryIds = loadPortfolioIds();
-        const retryActiveId = localStorage.getItem(ACTIVE_PORTFOLIO_KEY);
-        if (retryIds.length > 0) {
-          const allMeta = retryIds.map(id => loadPortfolioMeta(id)).filter(Boolean) as PortfolioMeta[];
-          setPortfolios(allMeta);
-          const resolvedId = retryActiveId && retryIds.includes(retryActiveId) ? retryActiveId : retryIds[0];
-          if (resolvedId) { setActivePortfolioId(resolvedId); loadPortfolioIntoStore(resolvedId); }
-          const savedManual = localStorage.getItem('manual_strategy_stocks');
-          if (savedManual) { try { setManualAddedStocks(JSON.parse(savedManual) as ManualStock[]); } catch {} }
-          const savedPending = localStorage.getItem('pending_orders');
-          if (savedPending) { try { setPendingOrders(JSON.parse(savedPending) as PendingOrder[]); } catch {} }
-          hasInitializedRef.current = true;
-        }
-      }, 800);
-      // Still proceed with normal init below (may create default portfolio if Redis also empty)
-      // The retry above will override if Redis data arrives
-      return () => clearTimeout(retryTimer);
-    }
-
     // Migrate legacy data: if no portfolios exist but legacy data does
     if (ids.length === 0) {
       const legacyPos = localStorage.getItem('paper_positions');
@@ -1767,7 +1725,6 @@ export default function DemoTraderPage() {
     const meta = portfolios.find(p => p.id === activePortfolioId);
     if (meta) { savePortfolioMeta({ ...meta, lastActiveAt: new Date().toISOString() }); }
     // Sync to Redis (fire-and-forget, localStorage stays primary)
-    syncPortfolioToRedis(activePortfolioId, portfolios);
   }
 
   // Ref-safe version — reads from refs, safe to call inside useEffect cleanups
@@ -1780,7 +1737,6 @@ export default function DemoTraderPage() {
     const meta = portfoliosRef.current.find(p => p.id === id);
     if (meta) { savePortfolioMeta({ ...meta, lastActiveAt: new Date().toISOString() }); }
     // Sync to Redis (ref-safe)
-    syncPortfolioToRedis(id, portfoliosRef.current);
   }
 
   // ── Auto-save: debounced write whenever positions/trades/budget change ─────
@@ -1812,7 +1768,6 @@ export default function DemoTraderPage() {
     saveCurrentPortfolioToLS();
     setActivePortfolioId(id);
     localStorage.setItem(ACTIVE_PORTFOLIO_KEY, id);
-    redisPost('/api/db/active-portfolio', { id });
     loadPortfolioIntoStore(id);
     const meta = portfolios.find(p => p.id === id);
     if (meta) {
@@ -1834,9 +1789,6 @@ export default function DemoTraderPage() {
     savePortfolioIds(newIds);
     const newPortfolios = [...portfolios, meta];
     setPortfolios(newPortfolios);
-    redisPost('/api/db/portfolios', newPortfolios);
-    redisPost(`/api/db/settings/${id}`, meta);
-    redisPost(`/api/db/budget/${id}`, { amount: data.paperBudget });
     switchToPortfolio(id);
   }
 
@@ -1850,9 +1802,6 @@ export default function DemoTraderPage() {
     const remaining = portfolios.filter(p => p.id !== id);
     setPortfolios(remaining);
     // Sync deletion to Redis
-    redisPost('/api/db/portfolios', remaining);
-    redisPost(`/api/db/positions/${id}`, []);
-    redisPost(`/api/db/trades/${id}`, []);
     setShowDeleteConfirm(null);
     if (activePortfolioId === id) {
       const nextId = ids[0];
@@ -1875,8 +1824,6 @@ export default function DemoTraderPage() {
     savePortfolioMeta(updated);
     const updatedPortfolios = portfolios.map(p => p.id === id ? updated : p);
     setPortfolios(updatedPortfolios);
-    redisPost('/api/db/portfolios', updatedPortfolios);
-    redisPost(`/api/db/settings/${id}`, updated);
   }
 
   function changeExecutionAccount(acc: ExecutionAccount) {
@@ -1887,8 +1834,6 @@ export default function DemoTraderPage() {
     savePortfolioMeta(updated);
     const updatedPortfolios = portfolios.map(p => p.id === activePortfolioId ? updated : p);
     setPortfolios(updatedPortfolios);
-    redisPost('/api/db/portfolios', updatedPortfolios);
-    redisPost(`/api/db/settings/${activePortfolioId}`, updated);
     setShowExecAccountPicker(false);
     showToast(`Execution account set to ${EXECUTION_ACCOUNT_LABELS[acc]}`);
   }
@@ -2021,7 +1966,6 @@ export default function DemoTraderPage() {
     const updated = [...manualAddedStocks.filter(s => s.symbol !== r.symbol), stock];
     setManualAddedStocks(updated);
     localStorage.setItem('manual_strategy_stocks', JSON.stringify(updated));
-    redisPost('/api/db/manual-stocks', updated);
     setManualStockQuery('');
     setManualStockResults([]);
   }
@@ -2030,7 +1974,6 @@ export default function DemoTraderPage() {
     const updated = manualAddedStocks.filter(s => s.symbol !== symbol);
     setManualAddedStocks(updated);
     localStorage.setItem('manual_strategy_stocks', JSON.stringify(updated));
-    redisPost('/api/db/manual-stocks', updated);
   }
 
   // ── Execute pending orders ─────────────────────────────────────────────────
@@ -2066,7 +2009,6 @@ export default function DemoTraderPage() {
 
     setPendingOrders(stillPending);
     localStorage.setItem('pending_orders', JSON.stringify(stillPending));
-    redisPost('/api/db/pending-orders', stillPending);
     setExecutingPending(false);
   }
 
@@ -2607,7 +2549,6 @@ export default function DemoTraderPage() {
           const updatedPending = [...pendingOrders, ...newPending];
           setPendingOrders(updatedPending);
           localStorage.setItem('pending_orders', JSON.stringify(updatedPending));
-          redisPost('/api/db/pending-orders', updatedPending);
           setRunLog(l => [...l, `  ⏰ ${closedBuys.length} order(s) queued — will auto-execute when market opens`]);
           setT212OrderResults(closedBuys.map(s => ({ symbol: s.symbol, status: 'failed' as const, message: `⏰ Queued — market closed` })));
         }
@@ -3488,7 +3429,7 @@ export default function DemoTraderPage() {
                     {executingPending ? 'Executing…' : 'Execute Now'}
                   </button>
                   <button
-                    onClick={() => { setPendingOrders([]); localStorage.removeItem('pending_orders'); redisPost('/api/db/pending-orders', []); }}
+                    onClick={() => { setPendingOrders([]); localStorage.removeItem('pending_orders'); }}
                     className="text-[11px] px-2 py-1 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-red-400 transition-colors"
                   >
                     Dismiss All
@@ -3508,7 +3449,6 @@ export default function DemoTraderPage() {
                       const updated = pendingOrders.filter(x => x.id !== o.id);
                       setPendingOrders(updated);
                       localStorage.setItem('pending_orders', JSON.stringify(updated));
-                      redisPost('/api/db/pending-orders', updated);
                     }} className="text-gray-700 hover:text-red-400 transition-colors">
                       <X className="h-2.5 w-2.5" />
                     </button>
