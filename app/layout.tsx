@@ -7,6 +7,8 @@ import { Disclaimer } from '@/components/layout/Disclaimer';
 import { T212AutoConnect } from '@/components/t212/T212AutoConnect';
 import { ToastProvider } from '@/components/ui/Toast';
 import { TaxMonitorService } from '@/components/tax/TaxMonitorService';
+import { SyncProvider } from '@/lib/syncContext';
+import { SyncService } from '@/components/sync/SyncService';
 
 const geist = Geist({
   variable: '--font-geist-sans',
@@ -27,9 +29,11 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${geist.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col bg-gray-950 text-gray-100">
+        <SyncProvider>
         <ToastProvider>
           <T212AutoConnect />
           <TaxMonitorService />
+          <SyncService />
           <Navbar />
           <div className="flex flex-1 min-h-0">
             <Sidebar />
@@ -39,6 +43,7 @@ export default function RootLayout({
             </main>
           </div>
         </ToastProvider>
+        </SyncProvider>
       </body>
     </html>
   );
