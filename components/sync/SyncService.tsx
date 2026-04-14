@@ -41,7 +41,7 @@ function portfolioKey(id: string, suffix: string) { return `portfolio_${id}_${su
 
 // ── Main service ───────────────────────────────────────────────────────────────
 export function SyncService() {
-  const { setSyncing, setSynced, setError, setMigrationMessage } = useSyncContext();
+  const { setSyncing, setSynced, setError, setMigrationMessage, setReconnectNotice } = useSyncContext();
   const migratedRef = useRef(false);
 
   // ── 1. Migration & cross-device load on mount ──────────────────────────────
@@ -175,6 +175,19 @@ export function SyncService() {
 
         setMigrationMessage('Data loaded from cloud — synced across devices');
         setTimeout(() => setMigrationMessage(null), 5_000);
+
+        // ── Welcome back: portfolios loaded but T212 keys not present ───────────
+        const hasT212 = store.t212Connected || store.t212DemoConnected || store.t212IsaConnected;
+        if (!hasT212) {
+          // Check if encrypted keys are stored — if so, offer to decrypt
+          const encRes = await fetch('/api/db/encrypted-keys').catch(() => null);
+          const encData = encRes ? await encRes.json().catch(() => null) : null;
+          if (encData && (encData.live || encData.isa || encData.demo)) {
+            setReconnectNotice('encrypted');
+          } else {
+            setReconnectNotice('manual');
+          }
+        }
       }
       setSynced();
     } catch (err) {

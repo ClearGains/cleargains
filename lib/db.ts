@@ -20,6 +20,8 @@ const K = {
   budget:          (id: string) => `budget:${id}`,
   pendingOrders:   'pending_orders',
   migrationDone:   'migration_done',
+  // Encrypted T212 credentials — only encrypted blobs stored; raw keys never touch server
+  encryptedKeys:   'encrypted_t212_keys',
 };
 
 // ── DB helpers (server-side only) ─────────────────────────────────────────────
@@ -75,4 +77,27 @@ export const DB = {
   // Migration flag
   async isMigrationDone():                           Promise<boolean> { return (await redis.get<boolean>(K.migrationDone)) ?? false; },
   async setMigrationDone():                          Promise<void> { await redis.set(K.migrationDone, true); },
+
+  // Encrypted T212 credentials (AES-256-GCM blobs — safe to store, useless without password)
+  async getEncryptedKeys(): Promise<{
+    live?: { key: string; secret: string };
+    isa?:  { key: string; secret: string };
+    demo?: { key: string; secret: string };
+  } | null> {
+    return redis.get<{
+      live?: { key: string; secret: string };
+      isa?:  { key: string; secret: string };
+      demo?: { key: string; secret: string };
+    }>(K.encryptedKeys);
+  },
+  async saveEncryptedKeys(data: {
+    live?: { key: string; secret: string };
+    isa?:  { key: string; secret: string };
+    demo?: { key: string; secret: string };
+  }): Promise<void> {
+    await redis.set(K.encryptedKeys, data);
+  },
+  async deleteEncryptedKeys(): Promise<void> {
+    await redis.del(K.encryptedKeys);
+  },
 };

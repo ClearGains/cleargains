@@ -374,11 +374,17 @@ function ErrorBox({ message }: { message: string }) {
 
 function SecurityNote() {
   return (
-    <div className="bg-gray-800/60 border border-gray-700/50 rounded-xl px-4 py-3 flex items-start gap-2.5">
-      <ShieldCheck className="h-4 w-4 text-emerald-400 flex-shrink-0 mt-0.5" />
-      <p className="text-xs text-gray-400">
-        Credentials are stored only in your browser and sent directly to Trading 212. They are never logged or stored on our servers.
-      </p>
+    <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl px-4 py-3 space-y-1.5">
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="h-3.5 w-3.5 text-emerald-400 flex-shrink-0" />
+        <p className="text-xs font-semibold text-emerald-400">Your credentials never leave this browser</p>
+      </div>
+      <ul className="text-[11px] text-gray-500 space-y-1 ml-5 list-disc leading-snug">
+        <li>Stored only in your browser&apos;s localStorage — never on our servers</li>
+        <li>Sent directly to Trading 212&apos;s API — ClearGains never sees the raw keys</li>
+        <li>Not included in cloud sync — you must re-enter on each device</li>
+        <li>To enable cross-device use, see <span className="text-gray-400">Settings → API Key Storage Mode</span></li>
+      </ul>
     </div>
   );
 }

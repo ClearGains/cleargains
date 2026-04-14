@@ -1,25 +1,23 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck, Bell, ChevronRight } from 'lucide-react';
+import { Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck, Bell, ChevronRight, Lock, Cloud, Database } from 'lucide-react';
 import Link from 'next/link';
 import { useClearGainsStore } from '@/lib/store';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { getPermission, requestPermission } from '@/lib/pushNotifications';
+import { encryptAllCredentials, decryptAllCredentials } from '@/lib/crypto';
 
 export default function SettingsPage() {
   const {
-    t212ApiKey,
-    t212ApiSecret,
-    t212Connected,
-    t212AccountInfo,
-    t212LastSync,
-    setT212Credentials,
-    setT212Connected,
-    setT212AccountInfo,
+    t212ApiKey, t212ApiSecret, t212Connected, t212AccountInfo, t212LastSync,
+    t212DemoApiKey, t212DemoApiSecret, t212DemoConnected,
+    t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
+    setT212Credentials, setT212Connected, setT212AccountInfo,
     clearT212Credentials,
+    keyStorageMode, setKeyStorageMode,
     reset,
   } = useClearGainsStore();
 
@@ -33,6 +31,23 @@ export default function SettingsPage() {
   // Push notifications
   const [notifPermission, setNotifPermission] = useState<string>('default');
   const [notifLoading, setNotifLoading] = useState(false);
+
+  // Encrypted key storage
+  const [encryptPassword, setEncryptPassword] = useState('');
+  const [showEncryptPw, setShowEncryptPw] = useState(false);
+  const [encryptStatus, setEncryptStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const [encrypting, setEncrypting] = useState(false);
+  const [decryptPassword, setDecryptPassword] = useState('');
+  const [showDecryptPw, setShowDecryptPw] = useState(false);
+  const [decryptStatus, setDecryptStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const [decrypting, setDecrypting] = useState(false);
+  const [encryptedKeysExist, setEncryptedKeysExist] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/db/encrypted-keys').then(r => r.json()).then(data => {
+      setEncryptedKeysExist(!!(data?.live || data?.isa || data?.demo));
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     setNotifPermission(getPermission());
@@ -90,6 +105,60 @@ export default function SettingsPage() {
     setApiKey('');
     setApiSecret('');
     setResult(null);
+  }
+
+  async function handleEncryptAndStore() {
+    if (!encryptPassword) { setEncryptStatus({ ok: false, message: 'Enter your site password.' }); return; }
+    setEncrypting(true); setEncryptStatus(null);
+    try {
+      const encrypted = await encryptAllCredentials({
+        live: t212Connected && t212ApiKey    ? { key: t212ApiKey,    secret: t212ApiSecret    } : undefined,
+        isa:  t212IsaConnected && t212IsaApiKey  ? { key: t212IsaApiKey,  secret: t212IsaApiSecret  } : undefined,
+        demo: t212DemoConnected && t212DemoApiKey ? { key: t212DemoApiKey, secret: t212DemoApiSecret } : undefined,
+      }, encryptPassword);
+
+      const res = await fetch('/api/db/encrypted-keys', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(encrypted),
+      });
+      if (res.ok) {
+        setKeyStorageMode('encrypted');
+        setEncryptedKeysExist(true);
+        setEncryptStatus({ ok: true, message: 'Keys encrypted and stored. They will auto-load on new devices after you enter your password.' });
+        setEncryptPassword('');
+      } else {
+        setEncryptStatus({ ok: false, message: 'Failed to store encrypted keys.' });
+      }
+    } catch {
+      setEncryptStatus({ ok: false, message: 'Encryption failed — check your password and try again.' });
+    } finally { setEncrypting(false); }
+  }
+
+  async function handleDecryptAndLoad() {
+    if (!decryptPassword) { setDecryptStatus({ ok: false, message: 'Enter your site password.' }); return; }
+    setDecrypting(true); setDecryptStatus(null);
+    try {
+      const res = await fetch('/api/db/encrypted-keys');
+      const encData = await res.json();
+      if (!encData) { setDecryptStatus({ ok: false, message: 'No encrypted keys found in cloud.' }); return; }
+
+      const decrypted = await decryptAllCredentials(encData, decryptPassword);
+      if (decrypted.live) {
+        setT212Credentials(decrypted.live.key, decrypted.live.secret);
+        setT212Connected(true);
+      }
+      setDecryptStatus({ ok: true, message: 'Credentials decrypted and loaded into this browser.' });
+      setDecryptPassword('');
+    } catch {
+      setDecryptStatus({ ok: false, message: 'Decryption failed — incorrect password.' });
+    } finally { setDecrypting(false); }
+  }
+
+  async function handleDisableEncryption() {
+    await fetch('/api/db/encrypted-keys', { method: 'DELETE' });
+    setKeyStorageMode('local');
+    setEncryptedKeysExist(false);
+    setEncryptStatus({ ok: true, message: 'Encrypted keys deleted from cloud. Keys are now local only.' });
   }
 
   return (
@@ -259,6 +328,191 @@ export default function SettingsPage() {
             </Button>
           </div>
         )}
+      </Card>
+
+      {/* ── API Key Storage Mode ────────────────────────────────────────────── */}
+      <Card className="mb-4">
+        <CardHeader
+          title="API Key Storage Mode"
+          subtitle="Choose how your Trading 212 credentials are stored"
+          icon={<Lock className="h-4 w-4" />}
+        />
+
+        <div className="space-y-3 mb-4">
+          {/* Option A — Local only */}
+          <button
+            onClick={() => { setKeyStorageMode('local'); setEncryptStatus(null); }}
+            className={`w-full text-left rounded-xl border p-3.5 transition-colors ${
+              keyStorageMode === 'local'
+                ? 'border-emerald-500/40 bg-emerald-500/5'
+                : 'border-gray-700 bg-gray-800/40 hover:border-gray-600'
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <div className={`mt-0.5 w-4 h-4 rounded-full border-2 flex-shrink-0 ${keyStorageMode === 'local' ? 'border-emerald-400 bg-emerald-400' : 'border-gray-600'}`} />
+              <div>
+                <p className="text-sm font-semibold text-white flex items-center gap-1.5">
+                  <Lock className="h-3.5 w-3.5 text-emerald-400" /> Local only
+                  <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-medium">Recommended</span>
+                </p>
+                <p className="text-xs text-gray-500 mt-1 leading-snug">
+                  Keys stored only in this browser. Real orders execute only when this device is open. Paper trading syncs automatically across all devices.
+                </p>
+              </div>
+            </div>
+          </button>
+
+          {/* Option B — Encrypted cloud */}
+          <button
+            onClick={() => setKeyStorageMode('encrypted')}
+            className={`w-full text-left rounded-xl border p-3.5 transition-colors ${
+              keyStorageMode === 'encrypted'
+                ? 'border-indigo-500/40 bg-indigo-500/5'
+                : 'border-gray-700 bg-gray-800/40 hover:border-gray-600'
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <div className={`mt-0.5 w-4 h-4 rounded-full border-2 flex-shrink-0 ${keyStorageMode === 'encrypted' ? 'border-indigo-400 bg-indigo-400' : 'border-gray-600'}`} />
+              <div>
+                <p className="text-sm font-semibold text-white flex items-center gap-1.5">
+                  <Cloud className="h-3.5 w-3.5 text-indigo-400" /> Encrypted cloud
+                </p>
+                <p className="text-xs text-gray-500 mt-1 leading-snug">
+                  Keys encrypted with AES-256 using your login password before storage. Raw keys are never sent to our servers. Enables automated trading from any device.
+                </p>
+              </div>
+            </div>
+          </button>
+        </div>
+
+        {/* Encrypted mode controls */}
+        {keyStorageMode === 'encrypted' && (
+          <div className="space-y-3">
+            {!encryptedKeysExist ? (
+              <>
+                <p className="text-xs text-gray-400">
+                  Encrypt your current T212 credentials and store them in the cloud. Enter your site login password below:
+                </p>
+                <div className="relative">
+                  <input
+                    type={showEncryptPw ? 'text' : 'password'}
+                    value={encryptPassword}
+                    onChange={e => setEncryptPassword(e.target.value)}
+                    placeholder="Your site password"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 pr-10"
+                  />
+                  <button type="button" onClick={() => setShowEncryptPw(v => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+                    {showEncryptPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+                {encryptStatus && (
+                  <div className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs ${encryptStatus.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'}`}>
+                    {encryptStatus.ok ? <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /> : <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />}
+                    {encryptStatus.message}
+                  </div>
+                )}
+                <Button onClick={handleEncryptAndStore} loading={encrypting} fullWidth icon={<Lock className="h-4 w-4" />}>
+                  {encrypting ? 'Encrypting…' : 'Encrypt & Store in Cloud'}
+                </Button>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 text-xs text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 rounded-lg px-3 py-2.5">
+                  <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
+                  Encrypted credentials stored in cloud — will auto-load on new devices
+                </div>
+                {encryptStatus && (
+                  <div className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs ${encryptStatus.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'}`}>
+                    {encryptStatus.ok ? <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /> : <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />}
+                    {encryptStatus.message}
+                  </div>
+                )}
+                <p className="text-xs text-gray-500">To load credentials on this device, enter your password:</p>
+                <div className="relative">
+                  <input
+                    type={showDecryptPw ? 'text' : 'password'}
+                    value={decryptPassword}
+                    onChange={e => setDecryptPassword(e.target.value)}
+                    placeholder="Your site password"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 pr-10"
+                  />
+                  <button type="button" onClick={() => setShowDecryptPw(v => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+                    {showDecryptPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+                {decryptStatus && (
+                  <div className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs ${decryptStatus.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'}`}>
+                    {decryptStatus.ok ? <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /> : <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />}
+                    {decryptStatus.message}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <Button onClick={handleDecryptAndLoad} loading={decrypting} fullWidth icon={<Key className="h-4 w-4" />}>
+                    {decrypting ? 'Decrypting…' : 'Decrypt & Load Keys'}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleDisableEncryption} icon={<Trash2 className="h-3.5 w-3.5" />}>
+                    Remove
+                  </Button>
+                </div>
+              </>
+            )}
+            <div className="flex items-start gap-2 bg-gray-800/60 border border-gray-700/50 rounded-lg px-3 py-2.5">
+              <ShieldCheck className="h-3.5 w-3.5 text-indigo-400 flex-shrink-0 mt-0.5" />
+              <p className="text-[11px] text-gray-500 leading-snug">
+                Encryption happens entirely in your browser. Raw API keys are never sent to ClearGains servers.
+                The encrypted blob stored in Redis is useless without your password.
+              </p>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* ── Data Privacy ────────────────────────────────────────────────────── */}
+      <Card className="mb-4">
+        <CardHeader
+          title="Data Privacy"
+          subtitle="What is stored where"
+          icon={<Database className="h-4 w-4" />}
+        />
+        <div className="space-y-3">
+          <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/15 p-3.5">
+            <p className="text-xs font-semibold text-emerald-400 mb-2 flex items-center gap-1.5">
+              <Cloud className="h-3.5 w-3.5" /> Stored in cloud (synced across devices)
+            </p>
+            <ul className="text-xs text-gray-400 space-y-1">
+              <li className="flex items-center gap-2"><CheckCircle2 className="h-3 w-3 text-emerald-500 flex-shrink-0" /> Portfolio data and paper trade history</li>
+              <li className="flex items-center gap-2"><CheckCircle2 className="h-3 w-3 text-emerald-500 flex-shrink-0" /> Watchlist and strategy settings</li>
+              <li className="flex items-center gap-2"><CheckCircle2 className="h-3 w-3 text-emerald-500 flex-shrink-0" /> CGT calculations and Section 104 pool</li>
+              <li className="flex items-center gap-2"><CheckCircle2 className="h-3 w-3 text-emerald-500 flex-shrink-0" /> FX trade history and pending orders</li>
+              {keyStorageMode === 'encrypted' && (
+                <li className="flex items-center gap-2"><CheckCircle2 className="h-3 w-3 text-indigo-400 flex-shrink-0" /> T212 API keys (AES-256 encrypted — unreadable without your password)</li>
+              )}
+            </ul>
+          </div>
+
+          <div className="rounded-xl bg-gray-800/40 border border-gray-700/50 p-3.5">
+            <p className="text-xs font-semibold text-gray-300 mb-2 flex items-center gap-1.5">
+              <Lock className="h-3.5 w-3.5 text-amber-400" /> Stored locally only (never leaves this device)
+            </p>
+            <ul className="text-xs text-gray-400 space-y-1">
+              {keyStorageMode === 'local' && (
+                <li className="flex items-center gap-2"><Lock className="h-3 w-3 text-amber-400 flex-shrink-0" /> Trading 212 API credentials</li>
+              )}
+              <li className="flex items-center gap-2"><Lock className="h-3 w-3 text-amber-400 flex-shrink-0" /> Login password</li>
+              <li className="flex items-center gap-2"><Lock className="h-3 w-3 text-amber-400 flex-shrink-0" /> Session cookies and auth tokens</li>
+            </ul>
+          </div>
+
+          <div className="rounded-xl bg-blue-500/5 border border-blue-500/15 px-3.5 py-3">
+            <p className="text-[11px] text-blue-400/80 leading-snug">
+              Portfolio data and trade history are not sensitive — they contain no financial account access.
+              Your T212 API keys can only be used to trade on your behalf, which is why they are
+              {keyStorageMode === 'encrypted' ? ' encrypted before cloud storage.' : ' kept local by default.'}
+            </p>
+          </div>
+        </div>
       </Card>
 
       <Card>
