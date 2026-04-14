@@ -78,6 +78,10 @@ interface ClearGainsState {
   fxPositions: FxPosition[];
   fxTrades: FxTrade[];
 
+  // T212 Demo connection state (separate from live)
+  t212DemoConnected: boolean;
+  t212DemoAccountInfo: { id: string; currency: string } | null;
+
   // In-memory only (not persisted)
   pendingSignalCount: number;
 
@@ -104,6 +108,8 @@ interface ClearGainsState {
   toggleDeadlineReminder: (countryCode: string) => void;
   setT212DemoCredentials: (key: string, secret: string) => void;
   clearT212DemoCredentials: () => void;
+  setT212DemoConnected: (v: boolean) => void;
+  setT212DemoAccountInfo: (info: { id: string; currency: string } | null) => void;
   addDemoPosition: (pos: DemoPosition) => void;
   removeDemoPosition: (id: string) => void;
   updateDemoPosition: (id: string, update: Partial<DemoPosition>) => void;
@@ -145,6 +151,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
       deadlineReminders: [],
       t212DemoApiKey: '',
       t212DemoApiSecret: '',
+      t212DemoConnected: false,
+      t212DemoAccountInfo: null,
       demoPositions: [],
       demoTrades: [],
       paperBudget: 1000,
@@ -226,9 +234,12 @@ export const useClearGainsStore = create<ClearGainsState>()(
         set({ t212DemoApiKey: key, t212DemoApiSecret: secret }),
 
       clearT212DemoCredentials: () => {
-        lsRemove(LS_POSITIONS, LS_TRADES);
-        set({ t212DemoApiKey: '', t212DemoApiSecret: '', demoPositions: [], demoTrades: [] });
+        set({ t212DemoApiKey: '', t212DemoApiSecret: '', t212DemoConnected: false, t212DemoAccountInfo: null });
       },
+
+      setT212DemoConnected: (v) => set({ t212DemoConnected: v }),
+
+      setT212DemoAccountInfo: (info) => set({ t212DemoAccountInfo: info }),
 
       addDemoPosition: (pos) =>
         set((state) => {
@@ -317,6 +328,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
           deadlineReminders: [],
           t212DemoApiKey: '',
           t212DemoApiSecret: '',
+          t212DemoConnected: false,
+          t212DemoAccountInfo: null,
           demoPositions: [],
           demoTrades: [],
           paperBudget: 1000,

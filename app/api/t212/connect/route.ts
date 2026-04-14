@@ -4,16 +4,21 @@ export async function POST(request: NextRequest) {
   // Credentials are base64-encoded by the browser (btoa) and sent as a header.
   // We pass the encoded value directly to Trading 212 — no server-side re-encoding.
   const encoded = request.headers.get('x-t212-auth');
+  const accountType = request.headers.get('x-t212-account-type') ?? 'LIVE';
 
   if (!encoded) {
     return NextResponse.json({ ok: false, error: 'Missing x-t212-auth header.' }, { status: 400 });
   }
 
+  const baseUrl = accountType === 'DEMO'
+    ? 'https://demo.trading212.com/api/v0'
+    : 'https://live.trading212.com/api/v0';
+
   let status: number;
   let rawBody: string;
 
   try {
-    const response = await fetch('https://live.trading212.com/api/v0/equity/account/cash', {
+    const response = await fetch(`${baseUrl}/equity/account/cash`, {
       method: 'GET',
       headers: {
         Authorization: 'Basic ' + encoded,
@@ -24,7 +29,7 @@ export async function POST(request: NextRequest) {
     rawBody = await response.text();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ ok: false, error: `Request to Trading 212 failed: ${msg}` });
+    return NextResponse.json({ ok: false, error: `Request to Trading 212 (${accountType}) failed: ${msg}` });
   }
 
   if (status >= 200 && status < 300) {
@@ -46,7 +51,7 @@ export async function POST(request: NextRequest) {
       rawBody,
       error: trimmed
         ? `Trading 212 returned 401: ${trimmed}`
-        : 'Trading 212 returned 401 with empty response — check your API key and secret are correct',
+        : `Trading 212 ${accountType} returned 401 — check your API key and secret are correct`,
     });
   }
 

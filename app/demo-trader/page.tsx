@@ -581,14 +581,15 @@ const FX_TP_PIPS = 30;
 const FX_TRAIL_TRIGGER = 20; // activate trailing at +20 pips
 const FX_MAX_POSITIONS = 3;
 const FX_SCAN_MS = 5 * 60_000;
-const FX_MOMENTUM_PCT = 0.002; // 0.2% threshold
-const FX_MIN_CONFIDENCE = 45;
+const FX_MOMENTUM_PCT = 0.001; // 0.1% threshold (lowered from 0.2%)
+const FX_MIN_CONFIDENCE = 30;  // lowered from 45
 const FX_TRADE_UNITS = 1_000;
 const FX_DEFAULT_BUDGET = 1_000;
 const LS_FX_HISTORY = 'fx_rate_history';
 const LS_FX_LAST_SCAN = 'fx_last_scan';
 const LS_FX_AUTO = 'fx_auto_pairs';
 const LS_FX_BUDGET = 'fx_budget';
+const LS_FX_GLOBAL_AUTO = 'fx_global_auto';
 
 type FxRateSnapshot = { ts: number; rates: Record<string, number> };
 type FxSignalResult = {
@@ -736,6 +737,7 @@ function ForexTrader() {
   const [rateHistory, setRateHistory] = useState<FxRateSnapshot[]>([]);
   const [fxSignals, setFxSignals] = useState<Record<string, FxSignalResult>>({});
   const [autoEnabled, setAutoEnabled] = useState<Record<string, boolean>>({});
+  const [globalFxAutoEnabled, setGlobalFxAutoEnabled] = useState(false);
   const [flashPairs, setFlashPairs] = useState<Record<string, 'up' | 'down'>>({});
   const [fxBudget, setFxBudgetState] = useState(FX_DEFAULT_BUDGET);
   const [autoLog, setAutoLog] = useState<string[]>([]);
@@ -745,11 +747,13 @@ function ForexTrader() {
   // Refs to avoid stale closures in intervals
   const rateHistoryRef = useRef<FxRateSnapshot[]>([]);
   const autoEnabledRef = useRef<Record<string, boolean>>({});
+  const globalFxAutoEnabledRef = useRef(false);
   const fxPositionsRef = useRef<FxPosition[]>([]);
   const prevRatesRef = useRef<Record<string, number>>({});
 
   useEffect(() => { rateHistoryRef.current = rateHistory; }, [rateHistory]);
   useEffect(() => { autoEnabledRef.current = autoEnabled; }, [autoEnabled]);
+  useEffect(() => { globalFxAutoEnabledRef.current = globalFxAutoEnabled; }, [globalFxAutoEnabled]);
   useEffect(() => { fxPositionsRef.current = fxPositions; }, [fxPositions]);
 
   const gbpUsd = gbpRates['USD'] ? 1 / gbpRates['USD'] : (rates.GBP ? 1 / rates.GBP : 1.265);
@@ -780,6 +784,10 @@ function ForexTrader() {
     try {
       const a = localStorage.getItem(LS_FX_AUTO);
       if (a) { const parsed = JSON.parse(a) as Record<string, boolean>; setAutoEnabled(parsed); autoEnabledRef.current = parsed; }
+    } catch {}
+    try {
+      const g = localStorage.getItem(LS_FX_GLOBAL_AUTO);
+      if (g === 'true') { setGlobalFxAutoEnabled(true); globalFxAutoEnabledRef.current = true; }
     } catch {}
     setActiveSessions(getActiveSessionsNow());
 
@@ -850,8 +858,10 @@ function ForexTrader() {
 
     // Background scan: if 5+ min since last scan, run immediately
     const last = localStorage.getItem(LS_FX_LAST_SCAN);
-    if (last && Date.now() - Number(last) >= FX_SCAN_MS) {
-      setTimeout(() => fetchRates(true), 3000);
+    const needsScan = !last || Date.now() - Number(last) >= FX_SCAN_MS;
+    if (needsScan) {
+      // Run scan after rates + history are loaded (wait 4s)
+      setTimeout(() => fetchRates(true), 4000);
     }
 
     return () => clearInterval(id);
@@ -929,13 +939,18 @@ function ForexTrader() {
 
     const signals = computeFxSignals(currentRates, rateHistoryRef.current);
     const enabled = autoEnabledRef.current;
-    const log: string[] = [`[${new Date().toLocaleTimeString('en-GB')}] Auto-scan`];
+    const globalAuto = globalFxAutoEnabledRef.current;
+    const log: string[] = [`[${new Date().toLocaleTimeString('en-GB')}] Auto-scan (global=${globalAuto})`];
     let opened = 0;
 
+    // Main scan pass — global auto bypasses per-pair toggle
     for (const pair of FX_PAIRS) {
-      if (!enabled[pair]) continue;
+      if (!globalAuto && !enabled[pair]) continue;
       const sig = signals[pair];
-      if (!sig || sig.direction === 'NEUTRAL' || sig.confidence < FX_MIN_CONFIDENCE) continue;
+      if (!sig || sig.direction === 'NEUTRAL' || sig.confidence < FX_MIN_CONFIDENCE) {
+        log.push(`  ○ ${pair}: ${sig ? `${sig.direction} conf=${sig.confidence}` : 'no signal'}`);
+        continue;
+      }
 
       if (openPositions.length + opened >= FX_MAX_POSITIONS) {
         log.push(`  ⛔ Max ${FX_MAX_POSITIONS} positions — stopped`);
@@ -957,10 +972,62 @@ function ForexTrader() {
       log.push(`  ✓ ${dir.toUpperCase()} ${pair} @ ${fmtRate(entryRate, pair)} (${sig.confidence}% conf)`);
     }
 
+    // Volatility fallback: if global auto on, no positions opened, and no positions exist —
+    // always open at least 1 using the biggest absolute movers
+    if (globalAuto && opened === 0 && openPositions.length === 0) {
+      log.push('  ⚡ Volatility fallback — picking top movers');
+      const pairMoves = [...FX_PAIRS]
+        .map(pair => ({
+          pair,
+          change: signals[pair]?.change1hPct ?? 0,
+          absChange: Math.abs(signals[pair]?.change1hPct ?? 0),
+        }))
+        .sort((a, b) => b.absChange - a.absChange);
+
+      // Open LONG on biggest up-mover + SHORT on biggest down-mover (if different pairs)
+      const upMover   = pairMoves.find(p => p.change > 0);
+      const downMover = pairMoves.find(p => p.change < 0);
+
+      for (const candidate of [upMover, downMover]) {
+        if (!candidate) continue;
+        if (openPositions.some(p => p.pair === candidate.pair)) continue;
+        if (openPositions.length + opened >= FX_MAX_POSITIONS) break;
+        const dir: 'long' | 'short' = candidate.change >= 0 ? 'long' : 'short';
+        if (hasCorrelationConflict(candidate.pair, dir, openPositions)) continue;
+        const entryRate = derivePairRate(candidate.pair, currentRates);
+        addFxPosition({ id: uid(), pair: candidate.pair, direction: dir, units: FX_TRADE_UNITS, entryRate, currentRate: entryRate, stopLossPips: FX_SL_PIPS, takeProfitPips: FX_TP_PIPS, pnlPips: 0, pnlGbp: 0, openedAt: new Date().toISOString(), trailingActive: false, autoManaged: true });
+        openPositions = [...openPositions, { id: 'tmp', pair: candidate.pair, direction: dir, units: FX_TRADE_UNITS, entryRate, currentRate: entryRate, stopLossPips: FX_SL_PIPS, takeProfitPips: FX_TP_PIPS, pnlPips: 0, pnlGbp: 0, openedAt: '' }];
+        opened++;
+        log.push(`  ✓ Fallback ${dir.toUpperCase()} ${candidate.pair} @ ${fmtRate(entryRate, candidate.pair)} (${candidate.absChange.toFixed(3)}% move)`);
+      }
+    }
+
     if (opened === 0) log.push('  — No new positions opened');
     log.push(`  Done — ${opened} opened`);
-    setAutoLog(prev => [...log, '', ...prev].slice(0, 60));
+    setAutoLog(prev => [...log, '', ...prev].slice(0, 80));
     setScanning(false);
+  }
+
+  function toggleGlobalFxAuto() {
+    setGlobalFxAutoEnabled(prev => {
+      const next = !prev;
+      globalFxAutoEnabledRef.current = next;
+      try { localStorage.setItem(LS_FX_GLOBAL_AUTO, String(next)); } catch {}
+      // Trigger immediate scan when enabling
+      if (next && Object.keys(prevRatesRef.current).length > 0) {
+        setTimeout(() => runAutoScan(prevRatesRef.current, fxPositionsRef.current), 100);
+      }
+      return next;
+    });
+  }
+
+  function forceOpenTestPositions() {
+    if (Object.keys(rates).length === 0) return;
+    const eurRate = derivePairRate('EUR/USD', rates);
+    const gbpRate = derivePairRate('GBP/USD', rates);
+    addFxPosition({ id: uid(), pair: 'EUR/USD', direction: 'long',  units: FX_TRADE_UNITS, entryRate: eurRate, currentRate: eurRate, stopLossPips: FX_SL_PIPS, takeProfitPips: FX_TP_PIPS, pnlPips: 0, pnlGbp: 0, openedAt: new Date().toISOString(), trailingActive: false, autoManaged: false });
+    addFxPosition({ id: uid(), pair: 'GBP/USD', direction: 'short', units: FX_TRADE_UNITS, entryRate: gbpRate, currentRate: gbpRate, stopLossPips: FX_SL_PIPS, takeProfitPips: FX_TP_PIPS, pnlPips: 0, pnlGbp: 0, openedAt: new Date().toISOString(), trailingActive: false, autoManaged: false });
+    setAutoLog(prev => [`[${new Date().toLocaleTimeString('en-GB')}] Force-opened test positions: LONG EUR/USD @ ${fmtRate(eurRate,'EUR/USD')}, SHORT GBP/USD @ ${fmtRate(gbpRate,'GBP/USD')}`, '', ...prev].slice(0, 80));
   }
 
   function toggleAutoEnabled(pair: string) {
@@ -1008,14 +1075,39 @@ function ForexTrader() {
             )}
           </div>
         </div>
-        <button
-          onClick={() => { if (Object.keys(rates).length > 0) runAutoScan(rates, fxPositionsRef.current); }}
-          disabled={scanning || Object.keys(rates).length === 0}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <RefreshCw className={clsx('h-3 w-3', scanning && 'animate-spin')} />
-          {scanning ? 'Scanning…' : 'Scan Now'}
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Global auto-trade toggle */}
+          <button
+            onClick={toggleGlobalFxAuto}
+            className={clsx(
+              'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+              globalFxAutoEnabled
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/30'
+                : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200'
+            )}
+          >
+            <span className={clsx('w-1.5 h-1.5 rounded-full', globalFxAutoEnabled ? 'bg-emerald-400 animate-pulse' : 'bg-gray-500')} />
+            {globalFxAutoEnabled ? 'Auto-Trade ON' : 'Auto-Trade OFF'}
+          </button>
+
+          <button
+            onClick={() => { if (Object.keys(rates).length > 0) runAutoScan(rates, fxPositionsRef.current); }}
+            disabled={scanning || Object.keys(rates).length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RefreshCw className={clsx('h-3 w-3', scanning && 'animate-spin')} />
+            {scanning ? 'Scanning…' : 'Scan Now'}
+          </button>
+
+          <button
+            onClick={forceOpenTestPositions}
+            disabled={Object.keys(rates).length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-500/20 text-blue-300 border border-blue-500/30 hover:bg-blue-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Immediately opens LONG EUR/USD + SHORT GBP/USD to test the position display"
+          >
+            ⚡ Force Test Position
+          </button>
+        </div>
       </div>
 
       {/* ── FX Account ─────────────────────────────────────────────────────── */}
@@ -1329,6 +1421,7 @@ function ForexTrader() {
 export default function DemoTraderPage() {
   const {
     t212ApiKey, t212ApiSecret,
+    t212DemoConnected, t212DemoApiKey, t212DemoApiSecret,
     demoPositions, demoTrades,
     paperBudget, setPaperBudget, resetPaperAccount,
     addDemoPosition, removeDemoPosition, updateDemoPosition, addDemoTrade,
@@ -1745,6 +1838,35 @@ export default function DemoTraderPage() {
 
       setRunLog(l => [...l, '✅ Strategy complete — positions tracked in paper engine.']);
       localStorage.setItem('last_signal_run', Date.now().toString());
+
+      // ── Place orders on T212 Demo account if connected ────────────────────
+      if (t212DemoConnected && t212DemoApiKey && t212DemoApiSecret) {
+        const demoEncoded = btoa(t212DemoApiKey + ':' + t212DemoApiSecret);
+        setRunLog(l => [...l, `📲 Placing ${buys.length} order(s) on T212 Demo account…`]);
+        const orderResults = await Promise.allSettled(
+          buys.map(signal =>
+            fetch('/api/t212/demo-order', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-t212-auth': demoEncoded },
+              body: JSON.stringify({ ticker: signal.t212Ticker, quantity: Math.max(1, Math.floor(
+                (mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize) / signal.currentPrice
+              )) }),
+            }).then(r => r.json() as Promise<{ ok: boolean; orderId?: unknown; error?: string }>)
+          )
+        );
+        orderResults.forEach((result, i) => {
+          const sym = buys[i].symbol;
+          if (result.status === 'fulfilled' && result.value.ok) {
+            setRunLog(l => [...l, `  ✓ T212 Demo order placed: ${sym} (id: ${result.value.orderId ?? '?'})`]);
+          } else {
+            const err = result.status === 'fulfilled' ? result.value.error : result.reason;
+            setRunLog(l => [...l, `  ⚠ T212 Demo order failed for ${sym}: ${err}`]);
+          }
+        });
+      } else {
+        setRunLog(l => [...l, `  ℹ Paper only — connect T212 Demo to place real demo orders`]);
+      }
+
       // Update pending signal count for sidebar badge
       const buyCount = allSignals.filter(s => s.signal === 'BUY').length;
       if (buyCount > 0) setPendingSignalCount(buyCount);
