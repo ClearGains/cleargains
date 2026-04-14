@@ -148,8 +148,8 @@ export default function TaxMonitorPage() {
             <ShieldCheck className="h-6 w-6 text-emerald-400" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-white">Tax Monitor</h1>
-            <p className="text-sm text-gray-500">Real-time CGT tracking — UK HMRC rules · Tax Year {taxYear.label}</p>
+            <h1 className="text-2xl font-bold text-white">Live Account CGT Tracker</h1>
+            <p className="text-sm text-gray-500">Tax Year {taxYear.label} · Tracking real disposals on your Live Invest account only</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -158,6 +158,31 @@ export default function TaxMonitorPage() {
               Export CSV
             </Button>
           )}
+        </div>
+      </div>
+
+      {/* Account scope banner */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
+          <span className="text-xl">💰</span>
+          <div>
+            <p className="text-xs font-semibold text-emerald-400">Live Invest Account</p>
+            <p className="text-xs text-gray-500">Full CGT tracking — same-day, B&B, Section 104</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-blue-500/8 border border-blue-500/20">
+          <span className="text-xl">📈</span>
+          <div>
+            <p className="text-xs font-semibold text-blue-400">ISA Account</p>
+            <p className="text-xs text-gray-500">Tax Free — not included in CGT calculations</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-gray-800/50 border border-gray-700">
+          <span className="text-xl">🎮</span>
+          <div>
+            <p className="text-xs font-semibold text-gray-400">Demo / Paper Positions</p>
+            <p className="text-xs text-gray-600">Simulated — no tax implications whatsoever</p>
+          </div>
         </div>
       </div>
 
@@ -293,7 +318,7 @@ export default function TaxMonitorPage() {
       <Card>
         <CardHeader
           title={`Disposal History — Tax Year ${taxYear.label}`}
-          subtitle={`${nonIsaYearTrades.length} non-ISA disposals · ${isaYearTrades.length} ISA disposals`}
+          subtitle={`${nonIsaYearTrades.length} Live Invest disposals · ${isaYearTrades.length} ISA (tax free) · Demo/paper excluded`}
           icon={<Clock className="h-4 w-4" />}
           action={
             yearTrades.length > 0 ? (
@@ -306,7 +331,8 @@ export default function TaxMonitorPage() {
         {yearTrades.length === 0 ? (
           <div className="py-8 text-center">
             <p className="text-gray-600 text-sm">No disposals recorded this tax year.</p>
-            <p className="text-gray-700 text-xs mt-1">Disposals are detected automatically when T212 positions close.</p>
+            <p className="text-gray-700 text-xs mt-1">Disposals are detected automatically when your Live Invest account positions close.</p>
+            <p className="text-gray-700 text-xs mt-0.5">Demo, paper, and ISA positions are excluded from CGT calculations.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -315,6 +341,7 @@ export default function TaxMonitorPage() {
                 <tr className="text-gray-500 border-b border-gray-800">
                   <th className="text-left py-2 pr-3">Date</th>
                   <th className="text-left py-2 pr-3">Ticker</th>
+                  <th className="text-left py-2 pr-3">Account</th>
                   <th className="text-right py-2 pr-3">Qty</th>
                   <th className="text-right py-2 pr-3">Proceeds</th>
                   <th className="text-right py-2 pr-3">Cost</th>
@@ -334,9 +361,15 @@ export default function TaxMonitorPage() {
                     )}
                   >
                     <td className="py-2 pr-3 text-gray-400">{fmtDate(t.disposalDate)}</td>
-                    <td className="py-2 pr-3 font-semibold text-white">
-                      {t.ticker}
-                      {t.isISA && <span className="ml-1 text-blue-400 text-[10px]">ISA</span>}
+                    <td className="py-2 pr-3 font-semibold text-white">{t.ticker}</td>
+                    <td className="py-2 pr-3">
+                      {t.isISA || t.accountType === 'isa' ? (
+                        <span className="text-blue-400 text-[10px] font-medium">📈 ISA — Tax Free</span>
+                      ) : t.accountType === 'invest' ? (
+                        <span className="text-emerald-400 text-[10px] font-medium">💰 Live — CGT tracked</span>
+                      ) : (
+                        <span className="text-gray-500 text-[10px]">💰 Live</span>
+                      )}
                     </td>
                     <td className="py-2 pr-3 text-right text-gray-300 font-mono">{t.quantity.toFixed(4)}</td>
                     <td className="py-2 pr-3 text-right text-gray-300 font-mono">{fmt(t.proceedsGBP)}</td>
@@ -520,6 +553,7 @@ export default function TaxMonitorPage() {
 
       {/* Real-time Monitor Status */}
       <Card>
+        <p className="text-xs font-semibold text-gray-400 mb-3 uppercase tracking-wide">Monitor Status — polls every 60 seconds</p>
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
             {t212Connected ? (
@@ -528,7 +562,10 @@ export default function TaxMonitorPage() {
               <WifiOff className="h-4 w-4 text-gray-600" />
             )}
             <span className="text-sm text-gray-400">
-              Live Invest: {t212Connected ? <span className="text-emerald-400 font-medium">Connected</span> : <span className="text-gray-600">Not connected</span>}
+              💰 Live Invest:{' '}
+              {t212Connected
+                ? <span className="text-emerald-400 font-medium">Connected — CGT tracked</span>
+                : <span className="text-gray-600">Not connected</span>}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -538,7 +575,16 @@ export default function TaxMonitorPage() {
               <WifiOff className="h-4 w-4 text-gray-600" />
             )}
             <span className="text-sm text-gray-400">
-              ISA Account: {t212IsaConnected ? <span className="text-blue-400 font-medium">Connected</span> : <span className="text-gray-600">Not connected</span>}
+              📈 ISA:{' '}
+              {t212IsaConnected
+                ? <span className="text-blue-400 font-medium">Connected — Tax Free (not in CGT calc)</span>
+                : <span className="text-gray-600">Not connected</span>}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <WifiOff className="h-4 w-4 text-gray-700" />
+            <span className="text-sm text-gray-600">
+              🎮 Demo / Paper: <span className="text-gray-700">Never tracked — no tax implications</span>
             </span>
           </div>
           <div className="flex items-center gap-2 ml-auto">
@@ -548,7 +594,7 @@ export default function TaxMonitorPage() {
             </span>
           </div>
           <div className="text-xs text-gray-600">
-            {taxMonitorLivePositions.length} position{taxMonitorLivePositions.length !== 1 ? 's' : ''} tracked
+            {taxMonitorLivePositions.filter(p => !p.isISA).length} invest position{taxMonitorLivePositions.filter(p => !p.isISA).length !== 1 ? 's' : ''} tracked
           </div>
         </div>
       </Card>

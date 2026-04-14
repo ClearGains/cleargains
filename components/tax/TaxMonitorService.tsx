@@ -1,5 +1,15 @@
 'use client';
 
+// ── Tax Monitor Service ───────────────────────────────────────────────────────
+// Polls T212 LIVE INVEST ACCOUNT ONLY every 60 seconds.
+//
+// Tax tracking by account type:
+//   LIVE INVEST → full CGT tracking (same-day, B&B, S104 pool)
+//   ISA          → no CGT; fires "Tax Free" toast only
+//   DEMO         → never polled; no tax implications whatsoever
+//   PAPER ENGINE → never polled; simulated only
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { useEffect, useRef } from 'react';
 import { useClearGainsStore } from '@/lib/store';
 import { useToast } from '@/components/ui/Toast';
@@ -180,7 +190,10 @@ export function TaxMonitorService() {
     async function poll() {
       const s = stateRef.current;
 
-      // Fetch live invest positions
+      // ── LIVE INVEST ACCOUNT — full CGT tracking ─────────────────────────────
+      // This is the ONLY account where CGT calculations apply.
+      // Demo and paper engine positions are never processed here.
+      let livePositions: T212Position[] = [];
       if (s.t212Connected && s.t212ApiKey) {
         const encoded = btoa(s.t212ApiKey + ':' + s.t212ApiSecret);
         try {
@@ -190,7 +203,7 @@ export function TaxMonitorService() {
           if (res.ok) {
             const data = await res.json() as { items?: Record<string, unknown>[] } | Record<string, unknown>[];
             const rawPositions: Record<string, unknown>[] = Array.isArray(data) ? data : ((data as { items?: Record<string, unknown>[] }).items ?? []);
-            const mapped: T212Position[] = rawPositions.map(p => ({
+            livePositions = rawPositions.map(p => ({
               ticker: String(p['ticker'] ?? ''),
               quantity: Number(p['quantity'] ?? p['quantityPrecision'] ?? 0),
               averagePrice: Number(p['averagePrice'] ?? p['averagePriceConverted'] ?? 0),
@@ -198,17 +211,21 @@ export function TaxMonitorService() {
               ppl: Number(p['ppl'] ?? 0),
               fxPpl: Number(p['fxPpl'] ?? 0),
               initialFillDate: String(p['initialFillDate'] ?? new Date().toISOString()),
-              isISA: false,
+              isISA: false, // live invest — CGT applies
             }));
 
-            await detectClosures(mapped, false, encoded, s);
-            s.setTaxMonitorLivePositions(mapped);
+            // Detect closures and calculate CGT for each closed position
+            await detectClosures(livePositions, false, encoded, s);
             s.setTaxMonitorLastPoll(new Date().toISOString());
           }
         } catch { /* network error, ignore */ }
       }
 
-      // Fetch ISA positions
+      // ── ISA ACCOUNT — tax-free, no CGT calculations ─────────────────────────
+      // ISA gains are completely exempt from CGT.
+      // We track position changes ONLY to fire a "Tax Free" toast — no TaxTrade
+      // records are created and no AEA is consumed.
+      let isaPositions: T212Position[] = [];
       if (s.t212IsaConnected && s.t212IsaApiKey) {
         const isaEncoded = btoa(s.t212IsaApiKey + ':' + s.t212IsaApiSecret);
         try {
@@ -218,7 +235,7 @@ export function TaxMonitorService() {
           if (res.ok) {
             const data = await res.json() as { items?: Record<string, unknown>[] } | Record<string, unknown>[];
             const rawPositions: Record<string, unknown>[] = Array.isArray(data) ? data : ((data as { items?: Record<string, unknown>[] }).items ?? []);
-            const mapped: T212Position[] = rawPositions.map(p => ({
+            isaPositions = rawPositions.map(p => ({
               ticker: String(p['ticker'] ?? ''),
               quantity: Number(p['quantity'] ?? 0),
               averagePrice: Number(p['averagePrice'] ?? 0),
@@ -226,23 +243,25 @@ export function TaxMonitorService() {
               ppl: Number(p['ppl'] ?? 0),
               fxPpl: Number(p['fxPpl'] ?? 0),
               initialFillDate: String(p['initialFillDate'] ?? new Date().toISOString()),
-              isISA: true,
+              isISA: true,  // ISA — no CGT
             }));
 
+            // Detect ISA closures (for "Tax Free" notification only — no CGT calc)
             const prevIsaPositions = s.taxMonitorLivePositions.filter(p => p.isISA);
-            const currentTickers = new Set(mapped.map(p => p.ticker));
+            const currentIsaTickers = new Set(isaPositions.map(p => p.ticker));
             for (const prev of prevIsaPositions) {
-              if (!currentTickers.has(prev.ticker)) {
+              if (!currentIsaTickers.has(prev.ticker)) {
+                const ticker = prev.ticker.replace(/_[A-Z]{2}_EQ$/, '');
                 s.addToast({
                   type: 'success',
-                  title: `${prev.ticker} — ISA Position Closed`,
-                  message: 'ISA disposal — no CGT due. This is completely tax free.',
+                  title: `${ticker} — ISA Position Closed`,
+                  message: '📈 ISA — Tax Free. No CGT due on ISA disposals.',
                 });
                 s.addCGTAlert({
                   id: Math.random().toString(36).slice(2, 10),
                   type: 'isa',
-                  ticker: prev.ticker,
-                  message: `${prev.ticker} ISA disposal — Tax Free`,
+                  ticker,
+                  message: `📈 ${ticker} ISA disposal — completely tax free, not included in CGT calculations`,
                   ts: new Date().toISOString(),
                 });
               }
@@ -250,6 +269,14 @@ export function TaxMonitorService() {
           }
         } catch { /* ignore */ }
       }
+
+      // ── DEMO ACCOUNT — never polled for tax purposes ─────────────────────────
+      // demo.trading212.com positions have zero tax implications.
+      // Paper engine positions are also never processed here.
+
+      // Store the latest snapshot of both live and ISA positions
+      // so closure detection works correctly on the next poll.
+      s.setTaxMonitorLivePositions([...livePositions, ...isaPositions]);
     }
 
     poll();

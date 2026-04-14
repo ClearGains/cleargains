@@ -3337,6 +3337,7 @@ export default function DemoTraderPage() {
                           <TickerTooltip symbol={pos.ticker}>
                             <p className="font-semibold text-white">{pos.ticker}</p>
                           </TickerTooltip>
+                          <p className="text-[10px] text-gray-600 font-medium">🎮 Simulated — no tax</p>
                           <p className="text-gray-600">{hoursAgo(pos.openedAt)}</p>
                           {/* Show trade rationale for smart-money positions */}
                           {pos.signal && pos.signal.includes('R:R') && (

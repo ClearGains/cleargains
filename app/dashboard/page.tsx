@@ -508,7 +508,9 @@ export default function DashboardPage() {
                       {formatGBP(pos.ppl)}
                     </td>
                     <td className="py-2 text-right">
-                      {pos.isISA && <Badge variant="isa">ISA</Badge>}
+                      {pos.isISA
+                        ? <span className="text-[10px] text-blue-400 font-medium">📈 ISA — Tax Free</span>
+                        : <span className="text-[10px] text-emerald-400 font-medium">💰 CGT tracked</span>}
                     </td>
                   </tr>
                 ))}

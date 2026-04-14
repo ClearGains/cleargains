@@ -39,8 +39,8 @@ export function CGTMonitorWidget() {
             aeaExceeded ? 'text-red-400' : aeaNear ? 'text-amber-400' : 'text-emerald-400'
           )} />
           <div>
-            <h3 className="text-sm font-semibold text-gray-200">CGT Monitor</h3>
-            <p className="text-xs text-gray-500">Tax Year {taxYear.label}</p>
+            <h3 className="text-sm font-semibold text-gray-200">💰 Live Account CGT Monitor</h3>
+            <p className="text-xs text-gray-500">Tax Year {taxYear.label} · Live Invest only · ISA &amp; demo excluded</p>
           </div>
         </div>
         {/* Status badge */}

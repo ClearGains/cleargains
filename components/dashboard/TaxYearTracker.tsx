@@ -133,8 +133,8 @@ export function TaxYearTracker() {
         <div className="flex items-center gap-2">
           <Calendar className="h-4 w-4 text-emerald-400" />
           <div>
-            <p className="text-sm font-semibold text-gray-200">Tax Year {taxYear.label}</p>
-            <p className="text-xs text-gray-500">{days} days remaining · 5 April {taxYear.end.getFullYear()}</p>
+            <p className="text-sm font-semibold text-gray-200">💰 Live Account CGT Tracker — {taxYear.label}</p>
+            <p className="text-xs text-gray-500">{days} days remaining · Live Invest only · ISA &amp; demo excluded</p>
           </div>
         </div>
         <div className={clsx(
@@ -227,7 +227,9 @@ export function TaxYearTracker() {
       )}
 
       {analysis.disposalCount === 0 && (
-        <p className="text-xs text-gray-600 text-center py-1">No disposals in {taxYear.label} — add trades in the Trade Ledger.</p>
+        <p className="text-xs text-gray-600 text-center py-1">
+          No Live Invest disposals in {taxYear.label}. ISA and demo positions are excluded from CGT — add trades in the Trade Ledger.
+        </p>
       )}
     </div>
   );
