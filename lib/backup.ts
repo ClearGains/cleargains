@@ -1,6 +1,6 @@
 'use client';
 
-export const BACKUP_VERSION = '1.0';
+export const BACKUP_VERSION = '1.1';
 
 // Credentials and ephemeral fields to exclude from export
 const EXCLUDED_KEYS = new Set([
@@ -48,12 +48,28 @@ export interface BackupData {
     trades: unknown[];
     budget: number | null;
   };
+  /** Strategy profiles derived from portfolio metas — reusable templates */
+  strategyProfiles?: StrategyProfile[];
+}
+
+export interface StrategyProfile {
+  id: string;
+  name: string;
+  strategy: string;
+  riskMode: string;
+  sectorFocus: string;
+  autoTrade: boolean;
+  paperBudget: number;
+  executionAccount: string;
+  createdAt: string;
 }
 
 export interface BackupFile {
   version: string;
   exportedAt: string;
   device: string;
+  /** SHA-256 fingerprint of the T212 API key (first 8 bytes → 16 hex chars) */
+  accountId?: string;
   data: BackupData;
 }
 
@@ -106,10 +122,39 @@ export function exportData(): BackupFile {
     if (b !== null) budgets[id] = b;
   }
 
+  // Auto-generate strategy profiles from portfolio metas
+  const strategyProfiles: StrategyProfile[] = ids
+    .map(id => {
+      const m = metas[id] as Record<string, unknown> | null;
+      if (!m) return null;
+      return {
+        id: String(m.id ?? id),
+        name: String(m.name ?? 'Unnamed'),
+        strategy: String(m.strategy ?? 'momentum'),
+        riskMode: String(m.riskMode ?? 'balanced'),
+        sectorFocus: String(m.sectorFocus ?? 'All'),
+        autoTrade: Boolean(m.autoTrade),
+        paperBudget: Number(m.paperBudget ?? 1000),
+        executionAccount: String(m.executionAccount ?? 'paper'),
+        createdAt: String(m.createdAt ?? new Date().toISOString()),
+      } satisfies StrategyProfile;
+    })
+    .filter((p): p is StrategyProfile => p !== null);
+
+  // Also include any explicitly saved profiles
+  const savedProfiles = lsGet<StrategyProfile[]>('strategy_profiles', []);
+  const allProfiles = [
+    ...savedProfiles,
+    ...strategyProfiles.filter(p => !savedProfiles.some(sp => sp.id === p.id)),
+  ];
+
+  const accountId = localStorage.getItem('t212_account_id') ?? undefined;
+
   return {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
     device: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+    accountId,
     data: {
       store: filteredStore,
       portfolios: { ids, activeId, metas, positions, trades, budgets },
@@ -127,6 +172,7 @@ export function exportData(): BackupFile {
         trades: lsGet<unknown[]>('paper_trades', []),
         budget: lsGet<number | null>('paper_budget', null),
       },
+      strategyProfiles: allProfiles,
     },
   };
 }
@@ -217,6 +263,10 @@ export function importData(
     lsSet('paper_trades', data.paperLegacy.trades);
     if (data.paperLegacy.budget !== null)
       lsSet('paper_budget', data.paperLegacy.budget);
+
+    if (data.strategyProfiles?.length) {
+      lsSet('strategy_profiles', data.strategyProfiles);
+    }
 
     const n = data.portfolios.ids.length;
     return {
@@ -312,12 +362,45 @@ export function importData(
     );
     lsSet('pending_orders', [...currentPending, ...importedPending]);
 
+    // Merge strategy profiles by ID
+    if (data.strategyProfiles?.length) {
+      const currentProfs = lsGet<StrategyProfile[]>('strategy_profiles', []);
+      const newProfs = data.strategyProfiles.filter(
+        p => !currentProfs.some(c => c.id === p.id),
+      );
+      lsSet('strategy_profiles', [...currentProfs, ...newProfs]);
+    }
+
     const n = newIds.length;
     return {
       portfoliosRestored: n,
       message: `Import complete — ${n} new portfolio${n !== 1 ? 's' : ''} added`,
     };
   }
+}
+
+// ── Strategy profile helpers ──────────────────────────────────────────────────
+
+export function getStrategyProfiles(): StrategyProfile[] {
+  if (typeof localStorage === 'undefined') return [];
+  try {
+    return JSON.parse(localStorage.getItem('strategy_profiles') ?? '[]') as StrategyProfile[];
+  } catch {
+    return [];
+  }
+}
+
+export function saveStrategyProfile(profile: StrategyProfile): void {
+  const existing = getStrategyProfiles();
+  const idx = existing.findIndex(p => p.id === profile.id);
+  if (idx >= 0) existing[idx] = profile;
+  else existing.push(profile);
+  try { localStorage.setItem('strategy_profiles', JSON.stringify(existing)); } catch {}
+}
+
+export function deleteStrategyProfile(id: string): void {
+  const profiles = getStrategyProfiles().filter(p => p.id !== id);
+  try { localStorage.setItem('strategy_profiles', JSON.stringify(profiles)); } catch {}
 }
 
 // ── Backup date helpers ───────────────────────────────────────────────────────

@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Key, ShieldCheck, AlertCircle, ExternalLink, Eye, EyeOff, CheckCircle2, Wifi } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
+import { generateAccountId, setStoredAccountId } from '@/lib/fingerprint';
 import Modal from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { clsx } from 'clsx';
@@ -67,6 +68,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         setT212Credentials(cleanKey, cleanSecret);
         setT212AccountInfo({ id: data.accountId, currency: data.currency });
         setT212Connected(true);
+        generateAccountId(cleanKey).then(setStoredAccountId).catch(() => {});
         onConnected();
       } else { setLiveError(data.error ?? 'Connection failed.'); }
     } catch (err) {
@@ -90,6 +92,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         setT212IsaCredentials(cleanKey, cleanSecret);
         setT212IsaAccountInfo({ id: data.accountId, currency: data.currency });
         setT212IsaConnected(true);
+        generateAccountId(cleanKey).then(setStoredAccountId).catch(() => {});
         onConnected();
       } else { setIsaError(data.error ?? 'Connection failed.'); }
     } catch (err) {
@@ -113,6 +116,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         setT212DemoCredentials(cleanKey, cleanSecret);
         setT212DemoAccountInfo({ id: data.accountId, currency: data.currency });
         setT212DemoConnected(true);
+        generateAccountId(cleanKey).then(setStoredAccountId).catch(() => {});
         onConnected();
       } else { setDemoError(data.error ?? 'Connection failed.'); }
     } catch (err) {
