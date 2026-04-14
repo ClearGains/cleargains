@@ -6,8 +6,10 @@ import {
   CheckCircle2, AlertCircle, ArrowRight,
   Target, BarChart3, Trophy, Copy, Info, RotateCcw, Wallet, Clock,
   Zap, Moon, Sun, Pause, TrendingUp, Download,
+  Search, Plus, Trash2, AlertTriangle,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
+import { getMarketStatus } from '@/lib/marketHours';
 import { DemoPosition, DemoTrade, FxPosition, FxTrade } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -135,6 +137,43 @@ const SMART_MONEY_SL_PCT  = 1.5;
 const SMART_MONEY_TP_PCT  = 3.0;
 const SMART_MONEY_RISK_PCT = 1.0;  // risk this % of portfolio per position
 const SMART_MONEY_MAX_POS  = 4;
+
+// ── T212 fee constants ────────────────────────────────────────────────────────
+const FX_FEE_PCT   = 0.15;                       // T212 GBP→USD conversion fee
+const SPREAD_PCT   = 0.20;                       // typical bid/ask spread
+const US_TOTAL_FEE = FX_FEE_PCT + SPREAD_PCT;   // 0.35% for US stocks
+const UK_TOTAL_FEE = 0.15;                       // ~0.15% for UK (no FX)
+
+// ── Pending order type (T212 orders queued while market is closed) ────────────
+type PendingOrder = {
+  id: string;
+  symbol: string;
+  name: string;
+  t212Ticker: string;
+  quantity: number;
+  entryPrice: number;
+  size: number;
+  sl: number;
+  tp: number;
+  breakeven: number;
+  feePct: number;
+  feeAmount: number;
+  netProfitPct: number;
+  orderAuth: string;
+  orderEnv: 'live' | 'demo';
+  accountLabel: string;
+  isUK: boolean;
+  queuedAt: string;
+};
+
+// ── Manual added stock type ───────────────────────────────────────────────────
+type ManualStock = {
+  symbol: string;
+  name: string;
+  t212Ticker: string;
+  isUK: boolean;
+};
+
 const RISK_LABELS: Record<PortfolioRiskMode, string> = {
   conservative: '🛡 Conservative (1%)', balanced: '⚖️ Balanced (3%)', aggressive: '🔥 Aggressive (5%)',
 };
@@ -1560,6 +1599,17 @@ export default function DemoTraderPage() {
   const [pausedUntil, setPausedUntil] = useState<number | null>(null);
   const [strategyLog, setStrategyLog] = useState<StrategyLogEntry[]>([]);
 
+  // ── Manual stock search state ───────────────────────────────────────────────
+  const [manualStockQuery, setManualStockQuery] = useState('');
+  const [manualStockResults, setManualStockResults] = useState<{symbol:string;description:string;type:string;t212Ticker:string;isUK:boolean}[]>([]);
+  const [manualAddedStocks, setManualAddedStocks] = useState<ManualStock[]>([]);
+  const [stockSearchLoading, setStockSearchLoading] = useState(false);
+
+  // ── Pending orders (queued while market closed) ────────────────────────────
+  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
+  const [executingPending, setExecutingPending] = useState(false);
+  const pendingOrdersRef = useRef<PendingOrder[]>([]);
+
   // ── Portfolio management state ─────────────────────────────────────────────
   const [portfolios, setPortfolios] = useState<PortfolioMeta[]>([]);
   const [activePortfolioId, setActivePortfolioId] = useState<string | null>(null);
@@ -1589,6 +1639,7 @@ export default function DemoTraderPage() {
   useEffect(() => { demoTradesRef.current = demoTrades; }, [demoTrades]);
   useEffect(() => { paperBudgetRef.current = paperBudget; }, [paperBudget]);
   useEffect(() => { portfoliosRef.current = portfolios; }, [portfolios]);
+  useEffect(() => { pendingOrdersRef.current = pendingOrders; }, [pendingOrders]);
 
   // ── Restore paper state from dedicated localStorage keys on mount ──────────
   useEffect(() => {
@@ -1637,6 +1688,17 @@ export default function DemoTraderPage() {
       loadPortfolioIntoStore(resolvedId);
     }
     setPendingSignalCount(0);
+
+    // ── Load persisted strategy preferences ───────────────────────────────────
+    const savedAmt = localStorage.getItem('custom_trade_amount');
+    if (savedAmt) { setCustomSizeStr(savedAmt); setSizePreset('custom'); }
+
+    const savedManual = localStorage.getItem('manual_strategy_stocks');
+    if (savedManual) { try { setManualAddedStocks(JSON.parse(savedManual) as ManualStock[]); } catch {} }
+
+    const savedPending = localStorage.getItem('pending_orders');
+    if (savedPending) { try { setPendingOrders(JSON.parse(savedPending) as PendingOrder[]); } catch {} }
+
     // Signal that initial load is done — auto-save can now run
     setTimeout(() => { hasInitializedRef.current = true; }, 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1796,9 +1858,9 @@ export default function DemoTraderPage() {
   const totalClosedPnL = demoTrades.reduce((s, t) => s + t.pnl, 0);
   const totalPaperPnL = totalOpenPnL + totalClosedPnL;
 
-  // Manual mode: fixed trade size from preset buttons
+  // Manual mode: fixed trade size from preset buttons (supports any decimal)
   const manualTradeSize = sizePreset === 'custom'
-    ? (parseInt(customSizeStr.replace(/[^0-9]/g, ''), 10) || 0)
+    ? (parseFloat(customSizeStr) || 0)
     : sizePreset;
 
   // Kelly-inspired position sizing based on signal confidence
@@ -1841,6 +1903,105 @@ export default function DemoTraderPage() {
   // Auto mode: backward-compat alias
   function autoTradeSize(score: number): number {
     return kellySizing(score, availableBalance).size;
+  }
+
+  // ── Fee-aware calculations ──────────────────────────────────────────────────
+  function calcFees(entry: number, size: number, isUK: boolean) {
+    const feePct = isUK ? UK_TOTAL_FEE : US_TOTAL_FEE;
+    const feeAmount = size * (feePct / 100);
+    // Break-even: covers fee on entry + fee on exit
+    const breakeven = entry * (1 + (2 * feePct) / 100);
+    // Net profit potential (TP minus fees, as % of entry)
+    const tpPrice = entry * (1 + tpPct / 100);
+    const netProfitPct = ((tpPrice * (1 - feePct / 100) - entry * (1 + feePct / 100)) / (entry * (1 + feePct / 100))) * 100;
+    return { feePct, feeAmount, breakeven, netProfitPct };
+  }
+
+  // ── UK market hours check ─────────────────────────────────────────────────
+  function isUKMarketOpen(): boolean {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+    }).formatToParts(now);
+    const day = parts.find(p => p.type === 'weekday')?.value ?? '';
+    const hour = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10);
+    const minute = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+    const dayNum = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(day);
+    const isWeekday = dayNum >= 1 && dayNum <= 5;
+    const timeInMins = hour * 60 + minute;
+    return isWeekday && timeInMins >= 8 * 60 && timeInMins < 16 * 60 + 30;
+  }
+
+  function isMarketOpenNow(isUK: boolean): boolean {
+    return isUK ? isUKMarketOpen() : getMarketStatus().status === 'open';
+  }
+
+  // ── Manual stock search ───────────────────────────────────────────────────
+  async function searchStocks() {
+    const q = manualStockQuery.trim();
+    if (!q) return;
+    setStockSearchLoading(true);
+    try {
+      const res = await fetch(`/api/t212/search?q=${encodeURIComponent(q)}`);
+      const data = await res.json() as { results: typeof manualStockResults };
+      setManualStockResults(data.results ?? []);
+    } catch {
+      setManualStockResults([]);
+    } finally {
+      setStockSearchLoading(false);
+    }
+  }
+
+  function addManualStock(r: typeof manualStockResults[number]) {
+    const stock: ManualStock = { symbol: r.symbol, name: r.description, t212Ticker: r.t212Ticker, isUK: r.isUK };
+    const updated = [...manualAddedStocks.filter(s => s.symbol !== r.symbol), stock];
+    setManualAddedStocks(updated);
+    localStorage.setItem('manual_strategy_stocks', JSON.stringify(updated));
+    setManualStockQuery('');
+    setManualStockResults([]);
+  }
+
+  function removeManualStock(symbol: string) {
+    const updated = manualAddedStocks.filter(s => s.symbol !== symbol);
+    setManualAddedStocks(updated);
+    localStorage.setItem('manual_strategy_stocks', JSON.stringify(updated));
+  }
+
+  // ── Execute pending orders ─────────────────────────────────────────────────
+  async function executePendingOrders(ordersToRun?: PendingOrder[]) {
+    const orders = ordersToRun ?? pendingOrders;
+    if (orders.length === 0) return;
+    setExecutingPending(true);
+    setRunLog(l => [...l, `📲 Executing ${orders.length} queued order(s)…`]);
+
+    type OrderResp = { ok: boolean; orderId?: unknown; ticker?: string; quantity?: number; error?: string; t212Status?: number; t212Body?: string };
+    const results = await Promise.allSettled(
+      orders.map(o =>
+        fetch('/api/t212/live-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-t212-auth': o.orderAuth },
+          body: JSON.stringify({ ticker: o.t212Ticker, quantity: o.quantity, env: o.orderEnv }),
+        }).then(r => r.json() as Promise<OrderResp>)
+      )
+    );
+
+    const stillPending: PendingOrder[] = [];
+    results.forEach((result, i) => {
+      const o = orders[i];
+      if (result.status === 'fulfilled' && result.value.ok) {
+        setRunLog(l => [...l, `  ✅ ${o.accountLabel}: ${o.symbol} → Order #${result.value.orderId ?? '?'} placed`]);
+        addStratLog({ type: 'buy', ticker: o.symbol, action: `→ OPENED ${o.quantity.toFixed(4)}× @ ${fmtUSD(o.entryPrice)}`, reason: `Queued order executed · fee ${o.feePct}% · BEP ${fmtUSD(o.breakeven)}`, price: o.entryPrice, positionValue: o.size });
+      } else {
+        const err = result.status === 'fulfilled' ? (result.value.error ?? `HTTP ${result.value.t212Status}`) : String((result as PromiseRejectedResult).reason);
+        setRunLog(l => [...l, `  ✗ ${o.symbol}: ${err} — kept in queue`]);
+        stillPending.push(o);
+      }
+    });
+
+    setPendingOrders(stillPending);
+    localStorage.setItem('pending_orders', JSON.stringify(stillPending));
+    setExecutingPending(false);
   }
 
   const slPct = parseFloat(slPctStr) || 2;
@@ -2044,12 +2205,24 @@ export default function DemoTraderPage() {
       }
 
       setLastRefreshed(Date.now());
+
+      // ── Auto-execute pending orders when market opens ──────────────────────
+      const pending = pendingOrdersRef.current;
+      if (pending.length > 0) {
+        const usOpen = getMarketStatus().status === 'open';
+        const ukOpen = isUKMarketOpen();
+        const executableNow = pending.filter(o => (o.isUK ? ukOpen : usOpen));
+        if (executableNow.length > 0) {
+          setRunLog(l => [...l, `⏰ Market opened — auto-executing ${executableNow.length} queued order(s)…`]);
+          executePendingOrders(executableNow).catch(() => {});
+        }
+      }
     } catch {
       // Ignore refresh errors silently
     } finally {
       if (!silent) setRefreshing(false);
     }
-  }, [demoPositions, updateDemoPosition, addDemoTrade, removeDemoPosition]);
+  }, [demoPositions, updateDemoPosition, addDemoTrade, removeDemoPosition]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 60-second background price refresh
   useEffect(() => {
@@ -2157,7 +2330,27 @@ export default function DemoTraderPage() {
         acc[p.sector] = (acc[p.sector] ?? 0) + 1; return acc;
       }, {});
 
-      const buys = allSignals
+      // Inject manually added stocks as forced BUY signals (fetch live quotes)
+      const enrichedSignals = [...allSignals];
+      for (const ms of manualAddedStocks) {
+        if (!enrichedSignals.find(s => s.symbol === ms.symbol)) {
+          try {
+            const q = await fetch(`/api/stock/profile?symbol=${encodeURIComponent(ms.symbol)}`).then(r => r.json()) as { price?: number; changePercent?: number };
+            if (q.price && q.price > 0) {
+              enrichedSignals.push({
+                symbol: ms.symbol, name: ms.name, t212Ticker: ms.t212Ticker,
+                sector: 'Custom', isUK: ms.isUK,
+                score: 100, currentPrice: q.price, changePercent: q.changePercent ?? 0,
+                volume: 0, volRatio: 1, newsCount: 0, recentNewsCount: 0,
+                signal: 'BUY', badges: ['Manual'], reason: 'Manual override',
+              });
+              setRunLog(l => [...l, `  ➕ Manual: ${ms.symbol} @ ${ms.isUK ? fmtGBP(q.price!) : fmtUSD(q.price!)}`]);
+            }
+          } catch { /* skip if quote fails */ }
+        }
+      }
+
+      const buys = enrichedSignals
         .filter(s => s.signal === 'BUY')
         .filter(s => !heldTickers.has(s.symbol))               // no doubling
         .filter(s => (sectorCounts[s.sector] ?? 0) < 5)        // max 5 per sector
@@ -2211,8 +2404,18 @@ export default function DemoTraderPage() {
         const quantity = calcQuantity(size, entryPrice);
         const useSl = isSmartMoney ? SMART_MONEY_SL_PCT : slPct;
         const useTp = isSmartMoney ? SMART_MONEY_TP_PCT : tpPct;
-        const sl = entryPrice * (1 - useSl / 100);
+
+        // Fee-aware calculations
+        const fees = calcFees(entryPrice, size, signal.isUK);
+        // Adjust SL to account for fees (need slightly more room to cover costs)
+        const sl = entryPrice * (1 - (useSl + fees.feePct) / 100);
         const tp = entryPrice * (1 + useTp / 100);
+
+        // Skip if net profit potential after fees is negligible (<0.5%)
+        if (fees.netProfitPct < 0.5) {
+          setRunLog(l => [...l, `  ⚠ Skipping ${signal.symbol} — net profit after ${fees.feePct}% fees is only ${fees.netProfitPct.toFixed(2)}%`]);
+          continue;
+        }
 
         const position: DemoPosition = {
           id: uid(),
@@ -2234,12 +2437,12 @@ export default function DemoTraderPage() {
         addDemoPosition(position);
         setRunLog(l => [
           ...l,
-          `  → BUY ${quantity.toFixed(4)}× ${signal.symbol} @ ${fmtUSD(entryPrice)} [${fmtGBP(size)} · ${sizeReason.split(' —')[0]}] SL ${fmtUSD(sl)} TP ${fmtUSD(tp)}`,
+          `  → OPENING ${quantity.toFixed(4)}× ${signal.symbol} @ ${signal.isUK ? fmtGBP(entryPrice) : fmtUSD(entryPrice)} · ${fmtGBP(size)} · Fee ${fees.feePct}% (${fmtGBP(fees.feeAmount)}) · BEP ${signal.isUK ? fmtGBP(fees.breakeven) : fmtUSD(fees.breakeven)} · SL ${signal.isUK ? fmtGBP(sl) : fmtUSD(sl)} · TP ${signal.isUK ? fmtGBP(tp) : fmtUSD(tp)} · Net +${fees.netProfitPct.toFixed(2)}%`,
         ]);
         addStratLog({
           type: 'buy', ticker: signal.symbol,
-          action: `BUY ${quantity.toFixed(4)}× @ ${fmtUSD(entryPrice)}`,
-          reason: sizeReason,
+          action: `→ OPENED ${quantity.toFixed(4)}× @ ${signal.isUK ? fmtGBP(entryPrice) : fmtUSD(entryPrice)}`,
+          reason: `${sizeReason} · fee ${fees.feePct}% · BEP ${signal.isUK ? fmtGBP(fees.breakeven) : fmtUSD(fees.breakeven)}`,
           price: entryPrice, positionValue: size,
           strategy: activeStrategy,
         });
@@ -2296,13 +2499,21 @@ export default function DemoTraderPage() {
         setRunLog(l => [...l, `  ✗ T212 Practice: Credentials missing from store — reconnect the Practice account`]);
         setT212OrderResults(buys.map(s => ({ symbol: s.symbol, status: 'failed' as const, message: '✗ Demo credentials missing — reconnect' })));
       } else if (orderAuth) {
-        // Pass invest creds as fallback for instrument resolution (demo instruments endpoint returns 403)
-        const liveAuthFallback = investEncoded || orderAuth;
-        setRunLog(l => [...l, `📲 Placing ${buys.length} order(s) on ${accountLabel} (env: ${orderEnv})…`]);
+        // ── Market hours check: separate open vs closed market orders ──────────
+        const openBuys: Signal[]  = [];
+        const closedBuys: Signal[] = [];
+        for (const signal of buys) {
+          if (isMarketOpenNow(signal.isUK)) {
+            openBuys.push(signal);
+          } else {
+            closedBuys.push(signal);
+          }
+        }
 
-        const orderResults = await Promise.allSettled(
-          buys.map(signal => {
-            // Use same sizing logic as paper position above
+        // Queue closed-market orders as pending
+        if (closedBuys.length > 0) {
+          const { nextOpenStr } = getMarketStatus();
+          const newPending: PendingOrder[] = closedBuys.map(signal => {
             let liveSize: number;
             if (isSmartMoney) {
               const riskAmount = paperBudget * (SMART_MONEY_RISK_PCT / 100);
@@ -2311,52 +2522,93 @@ export default function DemoTraderPage() {
             } else {
               liveSize = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
             }
-            // Fractional quantity — T212 supports fractional shares
             const qty = calcQuantity(liveSize, signal.currentPrice);
-            const reqBody = { ticker: signal.t212Ticker, quantity: qty, env: orderEnv };
-            setRunLog(l => [...l, `  → ${signal.symbol}: ticker=${signal.t212Ticker} qty=${qty} env=${orderEnv}`]);
-            return fetch('/api/t212/live-order', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-t212-auth': orderAuth,
-                'x-t212-live-auth': liveAuthFallback,
-              },
-              body: JSON.stringify(reqBody),
-            }).then(async r => {
-              const data = await r.json() as OrderResp;
-              setRunLog(l => [...l, `  ← ${signal.symbol}: HTTP ${r.status} — ${JSON.stringify(data).slice(0, 200)}`]);
-              return data;
-            });
-          })
-        );
+            const fees = calcFees(signal.currentPrice, liveSize, signal.isUK);
+            const netProfitPct = fees.netProfitPct;
+            setRunLog(l => [...l, `  → QUEUED: ${signal.symbol} × ${qty.toFixed(4)} · Market closed (${nextOpenStr ?? 'check schedule'})`]);
+            return {
+              id: uid(), symbol: signal.symbol, name: signal.name,
+              t212Ticker: signal.t212Ticker, quantity: qty,
+              entryPrice: signal.currentPrice, size: liveSize,
+              sl: signal.currentPrice * (1 - ((isSmartMoney ? SMART_MONEY_SL_PCT : slPct) + fees.feePct) / 100),
+              tp: signal.currentPrice * (1 + (isSmartMoney ? SMART_MONEY_TP_PCT : tpPct) / 100),
+              breakeven: fees.breakeven, feePct: fees.feePct,
+              feeAmount: fees.feeAmount, netProfitPct,
+              orderAuth, orderEnv, accountLabel,
+              isUK: signal.isUK, queuedAt: new Date().toISOString(),
+            };
+          });
+          const updatedPending = [...pendingOrders, ...newPending];
+          setPendingOrders(updatedPending);
+          localStorage.setItem('pending_orders', JSON.stringify(updatedPending));
+          setRunLog(l => [...l, `  ⏰ ${closedBuys.length} order(s) queued — will auto-execute when market opens`]);
+          setT212OrderResults(closedBuys.map(s => ({ symbol: s.symbol, status: 'failed' as const, message: `⏰ Queued — market closed` })));
+        }
 
-        const newStatuses: typeof t212OrderResults = [];
-        orderResults.forEach((result, i) => {
-          const sym = buys[i].symbol;
-          if (result.status === 'fulfilled' && result.value.ok) {
-            const note = result.value.note ? ` (${result.value.note})` : '';
-            const orderId = result.value.orderId ?? '?';
-            const resolvedTicker = result.value.ticker ?? sym;
-            setRunLog(l => [...l, `  ✅ ${accountLabel}: ${sym} → ticker=${resolvedTicker} qty=${result.value.quantity ?? '?'} id=${orderId}${note}`]);
-            newStatuses.push({ symbol: sym, status: 'placed', message: `✓ Order #${orderId} placed (${resolvedTicker})` });
-          } else {
-            const fullResp = result.status === 'fulfilled' ? result.value : null;
-            const rejectedReason = result.status === 'rejected' ? String((result as PromiseRejectedResult).reason) : 'Unknown error';
-            const isMarketClosed = fullResp?.marketClosed === true;
-            const err = fullResp
-              ? (fullResp.error || (fullResp.t212Body ? `HTTP ${fullResp.t212Status}: ${fullResp.t212Body.slice(0, 80)}` : `HTTP ${fullResp.t212Status ?? '?'}`))
-              : rejectedReason;
-            const t212Detail = fullResp?.t212Body ? ` [T212: ${fullResp.t212Body.slice(0, 100)}]` : '';
-            setRunLog(l => [...l, `  ${isMarketClosed ? '⏰' : '✗'} ${accountLabel}: ${sym}: ${isMarketClosed ? 'Market closed' : 'FAILED'} — ${err}${t212Detail}`]);
-            newStatuses.push({
-              symbol: sym,
-              status: 'failed',
-              message: isMarketClosed ? `⏰ Market closed — order not placed` : `✗ ${err}`,
-            });
-          }
-        });
-        setT212OrderResults(newStatuses);
+        // Place open-market orders immediately
+        if (openBuys.length > 0) {
+          const liveAuthFallback = investEncoded || orderAuth;
+          setRunLog(l => [...l, `📲 Placing ${openBuys.length} order(s) on ${accountLabel} (env: ${orderEnv})…`]);
+
+          const orderResults = await Promise.allSettled(
+            openBuys.map(signal => {
+              let liveSize: number;
+              if (isSmartMoney) {
+                const riskAmount = paperBudget * (SMART_MONEY_RISK_PCT / 100);
+                const slDistance = signal.currentPrice * (SMART_MONEY_SL_PCT / 100);
+                liveSize = (riskAmount / slDistance) * signal.currentPrice;
+              } else {
+                liveSize = mode === 'auto' ? autoTradeSize(signal.score) : manualTradeSize;
+              }
+              const qty = calcQuantity(liveSize, signal.currentPrice);
+              const reqBody = { ticker: signal.t212Ticker, quantity: qty, env: orderEnv };
+              setRunLog(l => [...l, `  → OPENING: ${signal.symbol} ticker=${signal.t212Ticker} qty=${qty}`]);
+              return fetch('/api/t212/live-order', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-t212-auth': orderAuth,
+                  'x-t212-live-auth': liveAuthFallback,
+                },
+                body: JSON.stringify(reqBody),
+              }).then(async r => {
+                const data = await r.json() as OrderResp;
+                return data;
+              });
+            })
+          );
+
+          const newStatuses: typeof t212OrderResults = [];
+          orderResults.forEach((result, i) => {
+            const sym = openBuys[i].symbol;
+            if (result.status === 'fulfilled' && result.value.ok) {
+              const note = result.value.note ? ` (${result.value.note})` : '';
+              const orderId = result.value.orderId ?? '?';
+              const resolvedTicker = result.value.ticker ?? sym;
+              setRunLog(l => [...l, `  → OPENED: ${accountLabel}: ${sym} · Order #${orderId} · ticker=${resolvedTicker} qty=${result.value.quantity ?? '?'}${note}`]);
+              newStatuses.push({ symbol: sym, status: 'placed', message: `✓ Order #${orderId} placed (${resolvedTicker})` });
+            } else {
+              const fullResp = result.status === 'fulfilled' ? result.value : null;
+              const rejectedReason = result.status === 'rejected' ? String((result as PromiseRejectedResult).reason) : 'Unknown error';
+              const isMarketClosed = fullResp?.marketClosed === true;
+              const err = fullResp
+                ? (fullResp.error || (fullResp.t212Body ? `HTTP ${fullResp.t212Status}: ${fullResp.t212Body.slice(0, 80)}` : `HTTP ${fullResp.t212Status ?? '?'}`))
+                : rejectedReason;
+              const t212Detail = fullResp?.t212Body ? ` [T212: ${fullResp.t212Body.slice(0, 100)}]` : '';
+              setRunLog(l => [...l, `  ${isMarketClosed ? '⏰' : '✗'} ${accountLabel}: ${sym}: ${isMarketClosed ? 'Market closed — auto-queuing' : 'FAILED'} — ${err}${t212Detail}`]);
+              newStatuses.push({
+                symbol: sym,
+                status: 'failed',
+                message: isMarketClosed ? `⏰ Market closed — queued for next open` : `✗ ${err}`,
+              });
+            }
+          });
+          setT212OrderResults(prev => [...prev, ...newStatuses]);
+        }
+
+        if (openBuys.length === 0 && closedBuys.length === 0) {
+          setT212OrderResults([]);
+        }
       } else {
         const reason = execAccount === 'paper'
           ? 'Paper only — set execution account to place real orders'
@@ -2758,16 +3010,24 @@ export default function DemoTraderPage() {
                       <div className="relative mb-2">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
                         <input
-                          type="text" inputMode="numeric" autoFocus
+                          type="text" inputMode="decimal" autoFocus
                           value={customSizeStr}
-                          onChange={e => setCustomSizeStr(e.target.value.replace(/[^0-9]/g, ''))}
+                          onChange={e => {
+                            // Allow any decimal, e.g. £5, £10.50, £1000
+                            const v = e.target.value.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1');
+                            setCustomSizeStr(v);
+                            localStorage.setItem('custom_trade_amount', v);
+                          }}
                           className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-7 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
-                          placeholder="Enter amount"
+                          placeholder="e.g. 10.50"
                         />
                       </div>
                     )}
                     <p className="text-xs text-gray-500">
                       Each trade will use <span className="text-amber-400 font-semibold">{fmtGBP(manualTradeSize)}</span> of your <span className="text-white font-semibold">{fmtGBP(paperBudget)}</span> budget
+                      {sizePreset === 'custom' && manualTradeSize > 0 && (
+                        <span className="block text-gray-600 text-[11px] mt-0.5">Any decimal supported · e.g. £5, £10.50, £100</span>
+                      )}
                     </p>
                   </div>
 
@@ -2824,6 +3084,66 @@ export default function DemoTraderPage() {
                 </div>
               </div>
 
+              {/* ── Manual Stock Additions ─────────────────────────────── */}
+              <div>
+                <label className="text-xs text-gray-400 mb-2 block">Manual Stock Additions</label>
+                <div className="flex gap-1.5 mb-2">
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      value={manualStockQuery}
+                      onChange={e => setManualStockQuery(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && searchStocks()}
+                      placeholder="Search ticker or name…"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg pl-3 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                  <button
+                    onClick={searchStocks}
+                    disabled={stockSearchLoading || !manualStockQuery.trim()}
+                    className="px-2.5 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-600 transition-colors disabled:opacity-40 flex items-center gap-1"
+                  >
+                    <Search className="h-3 w-3" />
+                  </button>
+                </div>
+                {/* Search results dropdown */}
+                {manualStockResults.length > 0 && (
+                  <div className="bg-gray-950 border border-gray-700 rounded-lg mb-2 overflow-hidden max-h-44 overflow-y-auto">
+                    {manualStockResults.map(r => (
+                      <button
+                        key={r.symbol}
+                        onClick={() => addManualStock(r)}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-gray-800 transition-colors text-left border-b border-gray-800 last:border-0"
+                      >
+                        {r.isUK && <span>🇬🇧</span>}
+                        <span className="font-bold text-white w-14 truncate">{r.symbol}</span>
+                        <span className="text-gray-400 flex-1 truncate">{r.description}</span>
+                        <span className="text-gray-600 text-[10px] flex-shrink-0">{r.type}</span>
+                        <Plus className="h-3 w-3 text-emerald-400 flex-shrink-0" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {/* Added stocks */}
+                {manualAddedStocks.length > 0 && (
+                  <div className="space-y-1">
+                    {manualAddedStocks.map(ms => (
+                      <div key={ms.symbol} className="flex items-center gap-2 bg-gray-800/60 border border-gray-700 rounded-lg px-2.5 py-1.5">
+                        {ms.isUK && <span className="text-[10px]">🇬🇧</span>}
+                        <span className="text-xs font-bold text-amber-400 w-14 truncate">{ms.symbol}</span>
+                        <span className="text-[10px] text-gray-400 flex-1 truncate">{ms.name}</span>
+                        <span className="text-[10px] text-emerald-400/70 flex-shrink-0">Manual</span>
+                        <button onClick={() => removeManualStock(ms.symbol)} className="text-gray-600 hover:text-red-400 transition-colors flex-shrink-0">
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                    <p className="text-[10px] text-gray-600">Included in next strategy run · override entry criteria</p>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Fee summary ───────────────────────────────────────────── */}
               <div className="bg-gray-800/50 rounded-lg px-3 py-2 text-xs text-gray-500 space-y-0.5">
                 {mode === 'auto' ? (
                   <>
@@ -2836,8 +3156,9 @@ export default function DemoTraderPage() {
                     <div className="flex justify-between"><span>Take-profit</span><span className="text-emerald-400">+{tpPct}%</span></div>
                   </>
                 )}
+                <div className="flex justify-between"><span>US stock fees</span><span className="text-amber-400/70">{US_TOTAL_FEE}% (FX {FX_FEE_PCT}% + spread {SPREAD_PCT}%)</span></div>
+                <div className="flex justify-between"><span>UK stock fees</span><span className="text-amber-400/70">{UK_TOTAL_FEE}% (spread only)</span></div>
                 <div className="flex justify-between"><span>Max positions / run</span><span>Capital-based · max 20% each</span></div>
-                <div className="flex justify-between"><span>Sector limit</span><span>5 per sector</span></div>
                 <div className="flex justify-between"><span>Price refresh</span><span>every 60s</span></div>
               </div>
             </div>
@@ -3054,6 +3375,81 @@ export default function DemoTraderPage() {
             })()}
           </Card>
 
+          {/* ── Market status banner ─────────────────────────────────── */}
+          {(() => {
+            const usStatus = getMarketStatus();
+            const ukOpen = isUKMarketOpen();
+            const usOpen = usStatus.status === 'open';
+            if (!usOpen && !ukOpen) {
+              return (
+                <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-300">
+                  <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+                  <div>
+                    <span className="font-semibold">Markets closed</span>
+                    <span className="text-amber-300/60 ml-1">· US opens {usStatus.nextOpenStr ?? 'Mon 9:30am ET'} · UK 8am–4:30pm GMT</span>
+                    <span className="block text-[11px] text-amber-300/50 mt-0.5">Orders will be auto-queued and executed when market opens</span>
+                  </div>
+                </div>
+              );
+            }
+            if (usOpen && !ukOpen) return (
+              <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-2.5 py-1.5 text-[11px] text-emerald-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
+                US market open · UK market closed (8am–4:30pm GMT)
+              </div>
+            );
+            return null;
+          })()}
+
+          {/* ── Pending Orders card ───────────────────────────────────── */}
+          {pendingOrders.length > 0 && (
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <p className="text-xs font-semibold text-amber-300 flex items-center gap-1.5">
+                    <Clock className="h-3.5 w-3.5" /> {pendingOrders.length} Queued Order{pendingOrders.length > 1 ? 's' : ''}
+                  </p>
+                  <p className="text-[10px] text-gray-500 mt-0.5">Waiting for market to open</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => executePendingOrders()}
+                    disabled={executingPending}
+                    className="text-[11px] px-2.5 py-1 rounded-lg bg-emerald-600/20 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-600/30 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    <Play className="h-3 w-3" />
+                    {executingPending ? 'Executing…' : 'Execute Now'}
+                  </button>
+                  <button
+                    onClick={() => { setPendingOrders([]); localStorage.removeItem('pending_orders'); }}
+                    className="text-[11px] px-2 py-1 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-red-400 transition-colors"
+                  >
+                    Dismiss All
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                {pendingOrders.map(o => (
+                  <div key={o.id} className="flex items-center gap-2 text-[10px] bg-gray-800/50 rounded px-2.5 py-1.5">
+                    {o.isUK && <span>🇬🇧</span>}
+                    <span className="font-bold text-amber-400 w-12">{o.symbol}</span>
+                    <span className="text-gray-400 flex-1">× {o.quantity.toFixed(4)} @ {o.isUK ? fmtGBP(o.entryPrice) : fmtUSD(o.entryPrice)}</span>
+                    <span className="text-gray-600">Fee {o.feePct}%</span>
+                    <span className="text-emerald-400/70">Net +{o.netProfitPct.toFixed(2)}%</span>
+                    <span className="text-gray-700 ml-1">{hoursAgo(o.queuedAt)}</span>
+                    <button onClick={() => {
+                      const updated = pendingOrders.filter(x => x.id !== o.id);
+                      setPendingOrders(updated);
+                      localStorage.setItem('pending_orders', JSON.stringify(updated));
+                    }} className="text-gray-700 hover:text-red-400 transition-colors">
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
           <Button
             onClick={runStrategy}
             loading={scanning}
@@ -3074,10 +3470,12 @@ export default function DemoTraderPage() {
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 font-mono text-[11px] space-y-0.5 max-h-48 overflow-y-auto">
               {runLog.map((line, i) => (
                 <p key={i} className={clsx(
-                  line.startsWith('  ✅') || line.startsWith('✅') ? 'text-emerald-400' :
-                  line.startsWith('  ✗') || line.startsWith('  ⏰') ? 'text-red-400' :
-                  line.startsWith('  →') || line.startsWith('📲') ? 'text-blue-400' :
+                  line.startsWith('  ✅') || line.startsWith('✅') || line.includes('→ OPENED') ? 'text-emerald-400' :
+                  line.startsWith('  ✗') ? 'text-red-400' :
+                  line.includes('→ QUEUED') || line.startsWith('  ⏰') || line.startsWith('⏰') ? 'text-amber-400' :
+                  line.includes('→ OPENING') || line.startsWith('  →') || line.startsWith('📲') ? 'text-blue-400' :
                   line.startsWith('⚠') ? 'text-amber-400' :
+                  line.startsWith('  ➕') ? 'text-purple-400' :
                   'text-gray-400'
                 )}>{line}</p>
               ))}
@@ -3342,6 +3740,16 @@ export default function DemoTraderPage() {
                             <p className="font-semibold text-white">{pos.ticker}</p>
                           </TickerTooltip>
                           <p className="text-[10px] text-gray-600 font-medium">🎮 Simulated — no tax</p>
+                          {(() => {
+                            const isUK = pos.ticker.endsWith('.L');
+                            const feePct = isUK ? UK_TOTAL_FEE : US_TOTAL_FEE;
+                            const bep = pos.entryPrice * (1 + (2 * feePct) / 100);
+                            return (
+                              <p className="text-[10px] text-gray-700 mt-0.5">
+                                BEP {isUK ? fmtGBP(bep) : fmtUSD(bep)} · Fee {feePct}%
+                              </p>
+                            );
+                          })()}
                           <p className="text-gray-600">{hoursAgo(pos.openedAt)}</p>
                           {/* Show trade rationale for smart-money positions */}
                           {pos.signal && pos.signal.includes('R:R') && (
