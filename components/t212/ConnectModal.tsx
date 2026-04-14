@@ -129,14 +129,10 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
   }
 
   return (
-    /* Overlay — click backdrop to close */
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      {/* Modal panel — stop propagation so clicks inside don't close */}
+    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="flex min-h-full items-center justify-center p-4">
       <div
-        className="relative w-full max-w-lg max-h-[calc(100vh-80px)] overflow-y-auto rounded-2xl bg-gray-900 border border-gray-800 shadow-2xl flex flex-col"
+        className="relative w-full max-w-lg bg-gray-900 border border-gray-700 rounded-xl shadow-2xl flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         {/* ── Sticky header ─────────────────────────────────────────── */}
@@ -357,6 +353,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
             Done
           </button>
         </div>
+      </div>
       </div>
     </div>
   );

@@ -230,8 +230,9 @@ function CreatePortfolioModal({ onClose, onCreate }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-md max-h-[calc(100vh-80px)] overflow-y-auto shadow-2xl p-6 space-y-4" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="flex min-h-full items-center justify-center p-4">
+      <div className="relative w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6 space-y-4" onClick={e => e.stopPropagation()}>
         <h2 className="text-base font-semibold text-white">New Demo Portfolio</h2>
 
         <div>
@@ -357,6 +358,7 @@ function CreatePortfolioModal({ onClose, onCreate }: {
             Create Portfolio
           </button>
         </div>
+      </div>
       </div>
     </div>
   );
@@ -536,8 +538,9 @@ function CopyToLiveModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-md max-h-[calc(100vh-80px)] overflow-y-auto shadow-2xl p-6" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="flex min-h-full items-center justify-center p-4">
+      <div className="relative w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
         <button onClick={onClose} className="absolute right-4 top-4 p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors z-10">
           <X className="h-5 w-5" />
         </button>
@@ -621,6 +624,7 @@ function CopyToLiveModal({
             Confirm — Place Live Market Order
           </Button>
         )}
+      </div>
       </div>
     </div>
   );
@@ -2174,8 +2178,9 @@ export default function DemoTraderPage() {
 
       {/* Confirm reset dialog */}
       {confirmReset && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setConfirmReset(false)}>
-          <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm max-h-[calc(100vh-80px)] overflow-y-auto shadow-2xl p-6" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={() => setConfirmReset(false)}>
+          <div className="flex min-h-full items-center justify-center p-4">
+          <div className="relative w-full max-w-sm bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
             <h2 className="text-base font-semibold text-white mb-2">Reset Paper Account?</h2>
             <p className="text-sm text-gray-400 mb-5">
               This will permanently clear all open positions and trade history. Your paper budget will remain at {fmtGBP(paperBudget)}.
@@ -2186,6 +2191,7 @@ export default function DemoTraderPage() {
                 Reset Account
               </Button>
             </div>
+          </div>
           </div>
         </div>
       )}
@@ -2199,14 +2205,16 @@ export default function DemoTraderPage() {
 
       {/* Delete confirm */}
       {showDeleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowDeleteConfirm(null)}>
-          <div className="relative bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-sm max-h-[calc(100vh-80px)] overflow-y-auto shadow-2xl p-6" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={() => setShowDeleteConfirm(null)}>
+          <div className="flex min-h-full items-center justify-center p-4">
+          <div className="relative w-full max-w-sm bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
             <h2 className="text-base font-semibold text-white mb-2">Delete Portfolio?</h2>
             <p className="text-sm text-gray-400 mb-4">This cannot be undone. All positions and trades in this portfolio will be permanently deleted.</p>
             <div className="flex gap-2">
               <button onClick={() => setShowDeleteConfirm(null)} className="flex-1 py-2 rounded-lg border border-gray-700 text-sm text-gray-400">Cancel</button>
               <button onClick={() => deletePortfolio(showDeleteConfirm)} className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-sm font-semibold text-white">Delete</button>
             </div>
+          </div>
           </div>
         </div>
       )}
