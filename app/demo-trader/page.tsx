@@ -14,6 +14,7 @@ import { TickerTooltip } from '@/components/ui/TickerTooltip';
 import { MarketStatusBadge } from '@/components/ui/MarketStatusBadge';
 import { clsx } from 'clsx';
 import { sendPush } from '@/lib/pushNotifications';
+import Modal from '@/components/ui/Modal';
 
 const SECTORS = ['All', 'Technology', 'Healthcare', 'Energy', 'Finance', 'Consumer'] as const;
 type Sector = typeof SECTORS[number];
@@ -230,9 +231,8 @@ function CreatePortfolioModal({ onClose, onCreate }: {
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex min-h-full items-center justify-center p-4">
-      <div className="relative w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6 space-y-4" onClick={e => e.stopPropagation()}>
+    <Modal isOpen onClose={onClose} maxWidth="max-w-md">
+      <div className="space-y-4">
         <h2 className="text-base font-semibold text-white">New Demo Portfolio</h2>
 
         <div>
@@ -359,8 +359,7 @@ function CreatePortfolioModal({ onClose, onCreate }: {
           </button>
         </div>
       </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -538,13 +537,7 @@ function CopyToLiveModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex min-h-full items-center justify-center p-4">
-      <div className="relative w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
-        <button onClick={onClose} className="absolute right-4 top-4 p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors z-10">
-          <X className="h-5 w-5" />
-        </button>
-
+    <Modal isOpen onClose={onClose} maxWidth="max-w-md">
         <div className="flex items-center gap-2 mb-4">
           <Copy className="h-5 w-5 text-emerald-400" />
           <h2 className="text-lg font-semibold text-white">Copy Trade to Live Account</h2>
@@ -624,9 +617,7 @@ function CopyToLiveModal({
             Confirm — Place Live Market Order
           </Button>
         )}
-      </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -2177,24 +2168,18 @@ export default function DemoTraderPage() {
       )}
 
       {/* Confirm reset dialog */}
-      {confirmReset && (
-        <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={() => setConfirmReset(false)}>
-          <div className="flex min-h-full items-center justify-center p-4">
-          <div className="relative w-full max-w-sm bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
-            <h2 className="text-base font-semibold text-white mb-2">Reset Paper Account?</h2>
-            <p className="text-sm text-gray-400 mb-5">
-              This will permanently clear all open positions and trade history. Your paper budget will remain at {fmtGBP(paperBudget)}.
-            </p>
-            <div className="flex gap-2">
-              <Button variant="outline" fullWidth onClick={() => setConfirmReset(false)}>Cancel</Button>
-              <Button fullWidth onClick={handleReset} icon={<RotateCcw className="h-4 w-4" />}>
-                Reset Account
-              </Button>
-            </div>
-          </div>
-          </div>
+      <Modal isOpen={confirmReset} onClose={() => setConfirmReset(false)} maxWidth="max-w-sm">
+        <h2 className="text-base font-semibold text-white mb-2">Reset Paper Account?</h2>
+        <p className="text-sm text-gray-400 mb-5">
+          This will permanently clear all open positions and trade history. Your paper budget will remain at {fmtGBP(paperBudget)}.
+        </p>
+        <div className="flex gap-2">
+          <Button variant="outline" fullWidth onClick={() => setConfirmReset(false)}>Cancel</Button>
+          <Button fullWidth onClick={handleReset} icon={<RotateCcw className="h-4 w-4" />}>
+            Reset Account
+          </Button>
         </div>
-      )}
+      </Modal>
 
       {/* Toast */}
       {toast && (
@@ -2204,20 +2189,14 @@ export default function DemoTraderPage() {
       )}
 
       {/* Delete confirm */}
-      {showDeleteConfirm && (
-        <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={() => setShowDeleteConfirm(null)}>
-          <div className="flex min-h-full items-center justify-center p-4">
-          <div className="relative w-full max-w-sm bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
-            <h2 className="text-base font-semibold text-white mb-2">Delete Portfolio?</h2>
-            <p className="text-sm text-gray-400 mb-4">This cannot be undone. All positions and trades in this portfolio will be permanently deleted.</p>
-            <div className="flex gap-2">
-              <button onClick={() => setShowDeleteConfirm(null)} className="flex-1 py-2 rounded-lg border border-gray-700 text-sm text-gray-400">Cancel</button>
-              <button onClick={() => deletePortfolio(showDeleteConfirm)} className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-sm font-semibold text-white">Delete</button>
-            </div>
-          </div>
-          </div>
+      <Modal isOpen={!!showDeleteConfirm} onClose={() => setShowDeleteConfirm(null)} maxWidth="max-w-sm">
+        <h2 className="text-base font-semibold text-white mb-2">Delete Portfolio?</h2>
+        <p className="text-sm text-gray-400 mb-4">This cannot be undone. All positions and trades in this portfolio will be permanently deleted.</p>
+        <div className="flex gap-2">
+          <button onClick={() => setShowDeleteConfirm(null)} className="flex-1 py-2 rounded-lg border border-gray-700 text-sm text-gray-400">Cancel</button>
+          {showDeleteConfirm && <button onClick={() => deletePortfolio(showDeleteConfirm)} className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-sm font-semibold text-white">Delete</button>}
         </div>
-      )}
+      </Modal>
 
       {/* Create portfolio modal */}
       {showCreatePortfolio && (

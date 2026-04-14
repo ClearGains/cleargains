@@ -3,8 +3,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Bookmark, RefreshCw, Trash2, TrendingUp, TrendingDown, Minus,
-  FlaskConical, CheckCircle2, AlertCircle, X, Clock,
+  FlaskConical, CheckCircle2, AlertCircle, Clock,
 } from 'lucide-react';
+import Modal from '@/components/ui/Modal';
 import { useClearGainsStore } from '@/lib/store';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -66,16 +67,11 @@ function PaperBuyModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex min-h-full items-center justify-center p-4">
-      <div className="relative w-full max-w-sm bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
-        <button onClick={onClose} className="absolute right-4 top-4 p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors z-10">
-          <X className="h-5 w-5" />
-        </button>
-        <div className="flex items-center gap-2 mb-4">
-          <FlaskConical className="h-5 w-5 text-amber-400" />
-          <h2 className="text-base font-semibold text-white">Paper Trade — {ticker}</h2>
-        </div>
+    <Modal isOpen onClose={onClose} maxWidth="max-w-sm">
+      <div className="flex items-center gap-2 mb-4">
+        <FlaskConical className="h-5 w-5 text-amber-400" />
+        <h2 className="text-base font-semibold text-white">Paper Trade — {ticker}</h2>
+      </div>
         <div className="bg-gray-800/50 rounded-lg p-4 mb-4 space-y-2 text-sm">
           <div className="flex justify-between">
             <span className="text-gray-400">Live price</span>
@@ -125,9 +121,7 @@ function PaperBuyModal({
             Open Paper Position
           </Button>
         )}
-      </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { X, Key, ShieldCheck, AlertCircle, ExternalLink, Eye, EyeOff, CheckCircle2, Wifi } from 'lucide-react';
+import { useState } from 'react';
+import { Key, ShieldCheck, AlertCircle, ExternalLink, Eye, EyeOff, CheckCircle2, Wifi } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
+import Modal from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { clsx } from 'clsx';
 
@@ -25,15 +26,6 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
   } = useClearGainsStore();
 
   const [tab, setTab] = useState<Tab>('live');
-
-  // Escape key to close
-  const handleEsc = useCallback((e: KeyboardEvent) => {
-    if (e.key === 'Escape') onClose();
-  }, [onClose]);
-  useEffect(() => {
-    window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
-  }, [handleEsc]);
 
   // LIVE form state
   const [liveKey, setLiveKey] = useState('');
@@ -129,14 +121,9 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex min-h-full items-center justify-center p-4">
-      <div
-        className="relative w-full max-w-lg bg-gray-900 border border-gray-700 rounded-xl shadow-2xl flex flex-col"
-        onClick={e => e.stopPropagation()}
-      >
-        {/* ── Sticky header ─────────────────────────────────────────── */}
-        <div className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 border-b border-gray-800 bg-gray-900 rounded-t-2xl">
+    <Modal isOpen onClose={onClose}>
+        {/* ── Header ────────────────────────────────────────────────── */}
+        <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-emerald-600/20 flex items-center justify-center">
               <Key className="h-4 w-4 text-emerald-400" />
@@ -146,12 +133,6 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
               <p className="text-xs text-gray-500">Link your accounts to enable live trading</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
         </div>
 
         {/* ── Tab switcher ──────────────────────────────────────────── */}
@@ -344,8 +325,8 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
           )}
         </div>
 
-        {/* ── Sticky footer ─────────────────────────────────────────── */}
-        <div className="sticky bottom-0 px-6 py-4 border-t border-gray-800 bg-gray-900 rounded-b-2xl">
+        {/* ── Footer ────────────────────────────────────────────────── */}
+        <div className="mt-4 pt-4 border-t border-gray-800">
           <button
             onClick={onClose}
             className="w-full py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 border border-gray-700 text-sm font-medium text-gray-300 hover:text-white transition-colors"
@@ -353,9 +334,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
             Done
           </button>
         </div>
-      </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

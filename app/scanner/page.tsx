@@ -5,8 +5,9 @@ import {
   Search, Newspaper, AlertTriangle, TrendingUp, TrendingDown, Minus,
   Clock, RefreshCw, BookmarkPlus, BookmarkCheck, Trash2, ChevronRight,
   ShieldCheck, ShieldAlert, ShieldX, Zap, ExternalLink, FlaskConical,
-  CheckCircle2, AlertCircle, X,
+  CheckCircle2, AlertCircle,
 } from 'lucide-react';
+import Modal from '@/components/ui/Modal';
 import { useClearGainsStore } from '@/lib/store';
 import { ScanResult } from '@/lib/types';
 import { Card, CardHeader } from '@/components/ui/Card';
@@ -145,97 +146,90 @@ function PaperBuyModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex min-h-full items-center justify-center p-4">
-      <div className="relative w-full max-w-sm bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
-        <button onClick={onClose} className="absolute right-4 top-4 p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors z-10">
-          <X className="h-5 w-5" />
-        </button>
-        <div className="flex items-center gap-2 mb-4">
-          <FlaskConical className="h-5 w-5 text-amber-400" />
-          <h2 className="text-base font-semibold text-white">Paper Trade</h2>
-        </div>
+    <Modal isOpen onClose={onClose} maxWidth="max-w-sm">
+      <div className="flex items-center gap-2 mb-4">
+        <FlaskConical className="h-5 w-5 text-amber-400" />
+        <h2 className="text-base font-semibold text-white">Paper Trade</h2>
+      </div>
 
-        {loading ? (
-          <div className="flex items-center gap-2 text-sm text-gray-400 py-4">
-            <RefreshCw className="h-4 w-4 animate-spin" />
-            Fetching live price…
-          </div>
-        ) : price == null ? (
-          <div className="text-sm text-red-400 py-4">Could not fetch price for {stock.ticker}. Market may be closed.</div>
-        ) : (
-          <>
-            <div className="bg-gray-800/50 rounded-lg p-4 mb-4 space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-400">Stock</span>
-                <span className="text-white font-semibold">{stock.ticker} · {stock.companyName}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Live price</span>
-                <span className="text-white font-mono">${price.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Available budget</span>
-                <span className={clsx('font-mono', available > 0 ? 'text-emerald-400' : 'text-red-400')}>
-                  £{available.toFixed(0)}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-400">Position size</span>
-                <div className="relative">
-                  <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500 text-xs">£</span>
-                  <input
-                    type="text" inputMode="numeric"
-                    value={sizeStr}
-                    onChange={e => setSizeStr(e.target.value.replace(/[^0-9]/g, ''))}
-                    className="w-20 pl-5 pr-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white text-right focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Quantity</span>
-                <span className="text-white font-mono">{quantity} shares</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Est. cost</span>
-                <span className="text-white font-mono">${estimatedCost.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-gray-500">Stop-loss −2%</span>
-                <span className="text-red-400 font-mono">${sl.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-gray-500">Take-profit +4%</span>
-                <span className="text-emerald-400 font-mono">${tp.toFixed(2)}</span>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-gray-400 py-4">
+          <RefreshCw className="h-4 w-4 animate-spin" />
+          Fetching live price…
+        </div>
+      ) : price == null ? (
+        <div className="text-sm text-red-400 py-4">Could not fetch price for {stock.ticker}. Market may be closed.</div>
+      ) : (
+        <>
+          <div className="bg-gray-800/50 rounded-lg p-4 mb-4 space-y-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-400">Stock</span>
+              <span className="text-white font-semibold">{stock.ticker} · {stock.companyName}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Live price</span>
+              <span className="text-white font-mono">${price.toFixed(2)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Available budget</span>
+              <span className={clsx('font-mono', available > 0 ? 'text-emerald-400' : 'text-red-400')}>
+                £{available.toFixed(0)}
+              </span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-400">Position size</span>
+              <div className="relative">
+                <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500 text-xs">£</span>
+                <input
+                  type="text" inputMode="numeric"
+                  value={sizeStr}
+                  onChange={e => setSizeStr(e.target.value.replace(/[^0-9]/g, ''))}
+                  className="w-20 pl-5 pr-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-white text-right focus:outline-none focus:border-amber-500"
+                />
               </div>
             </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Quantity</span>
+              <span className="text-white font-mono">{quantity} shares</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Est. cost</span>
+              <span className="text-white font-mono">${estimatedCost.toFixed(2)}</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-500">Stop-loss −2%</span>
+              <span className="text-red-400 font-mono">${sl.toFixed(2)}</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-500">Take-profit +4%</span>
+              <span className="text-emerald-400 font-mono">${tp.toFixed(2)}</span>
+            </div>
+          </div>
 
-            {estimatedCost > available && (
-              <div className="text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2 mb-3">
-                Position size exceeds available budget. Reduce size.
-              </div>
-            )}
+          {estimatedCost > available && (
+            <div className="text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2 mb-3">
+              Position size exceeds available budget. Reduce size.
+            </div>
+          )}
 
-            {done ? (
-              <div className={clsx('flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs', done.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400')}>
-                {done.ok ? <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
-                {done.message}
-              </div>
-            ) : (
-              <Button
-                onClick={handleBuy}
-                fullWidth
-                disabled={quantity < 1 || estimatedCost > available}
-                icon={<FlaskConical className="h-4 w-4" />}
-              >
-                Open Paper Position
-              </Button>
-            )}
-          </>
-        )}
-      </div>
-      </div>
-    </div>
+          {done ? (
+            <div className={clsx('flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs', done.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400')}>
+              {done.ok ? <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
+              {done.message}
+            </div>
+          ) : (
+            <Button
+              onClick={handleBuy}
+              fullWidth
+              disabled={quantity < 1 || estimatedCost > available}
+              icon={<FlaskConical className="h-4 w-4" />}
+            >
+              Open Paper Position
+            </Button>
+          )}
+        </>
+      )}
+    </Modal>
   );
 }
 
