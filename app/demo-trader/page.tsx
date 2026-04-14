@@ -1357,6 +1357,10 @@ export default function DemoTraderPage() {
   const [lastRefreshed, setLastRefreshed] = useState<number>(0);
   const [tick, setTick] = useState(0);
   const [apiCalls, setApiCalls] = useState(0);
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [lastStrategyRun, setLastStrategyRun] = useState<string | null>(null);
+  const [lastScanCount, setLastScanCount] = useState<number>(0);
 
   // ── Portfolio management state ─────────────────────────────────────────────
   const [portfolios, setPortfolios] = useState<PortfolioMeta[]>([]);
@@ -1663,18 +1667,28 @@ export default function DemoTraderPage() {
       const sigData = await sigRes.json() as {
         signals?: Signal[]; error?: string;
         scannedCount?: number; candidateCount?: number; apiCallsUsed?: number;
+        debugLog?: string[]; timestamp?: string;
       };
 
-      if (sigData.error) { setScanError(sigData.error); return; }
+      // Capture debug info from API
+      if (sigData.debugLog) setDebugLog(sigData.debugLog);
+      if (sigData.timestamp) setLastStrategyRun(sigData.timestamp);
+      if (sigData.scannedCount) setLastScanCount(sigData.scannedCount);
+
+      if (sigData.error) {
+        setScanError(sigData.error);
+        setDebugOpen(true); // auto-open debug panel on error
+        return;
+      }
 
       const allSignals = sigData.signals ?? [];
       setSignals(allSignals);
       setApiCalls(sigData.apiCallsUsed ?? 0);
       setRunLog(l => [...l, `✓ Scanned ${sigData.scannedCount ?? 0} stocks (${sigData.candidateCount ?? 0} momentum candidates) — ${allSignals.filter(s => s.signal === 'BUY').length} BUY · ${allSignals.filter(s => s.signal === 'SELL').length} SELL signals. ${sigData.apiCallsUsed ?? 0} API calls used.`]);
 
-      // Push notifications for strong signals (score > 70)
+      // Push notifications for strong signals (score > 50)
       for (const sig of allSignals) {
-        if (sig.score > 70) {
+        if (sig.score > 50) {
           sendPush(
             `${sig.signal} Signal — ${sig.symbol}`,
             `${sig.name} · Strength ${sig.score}% · $${sig.currentPrice.toFixed(2)} (${sig.changePercent >= 0 ? '+' : ''}${sig.changePercent.toFixed(2)}%)`,
@@ -1685,7 +1699,8 @@ export default function DemoTraderPage() {
 
       const buys = allSignals.filter(s => s.signal === 'BUY').slice(0, 3);
       if (buys.length === 0) {
-        setRunLog(l => [...l, 'ℹ No strong BUY signals — strategy not executed.']);
+        setRunLog(l => [...l, 'ℹ No BUY signals returned — check debug panel for details.']);
+        setDebugOpen(true);
         return;
       }
 
@@ -2163,6 +2178,94 @@ export default function DemoTraderPage() {
               {runLog.map((line, i) => <p key={i}>{line}</p>)}
             </div>
           )}
+
+          {/* Debug Panel */}
+          <div className="border border-gray-800 rounded-lg overflow-hidden">
+            <button
+              onClick={() => setDebugOpen(o => !o)}
+              className="w-full flex items-center justify-between px-3 py-2 bg-gray-900 hover:bg-gray-800 text-xs text-gray-500 transition-colors"
+            >
+              <span className="flex items-center gap-1.5">
+                <Info className="h-3.5 w-3.5" />
+                Debug Panel
+                {scanError && <span className="ml-1 px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400 text-[10px]">error</span>}
+              </span>
+              <span className="text-gray-600">{debugOpen ? '▲' : '▼'}</span>
+            </button>
+            {debugOpen && (
+              <div className="bg-gray-950 border-t border-gray-800 p-3 space-y-2 text-[11px]">
+                <div className="grid grid-cols-2 gap-2 text-gray-500 mb-2">
+                  <div>
+                    <span className="text-gray-600">Last run:</span>{' '}
+                    <span className="text-gray-300">
+                      {lastStrategyRun
+                        ? new Date(lastStrategyRun).toLocaleTimeString('en-GB')
+                        : 'Never'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Stocks scanned:</span>{' '}
+                    <span className="text-gray-300">{lastScanCount}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">API calls used:</span>{' '}
+                    <span className="text-gray-300">{apiCalls}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Signals generated:</span>{' '}
+                    <span className="text-gray-300">
+                      {signals.filter(s => s.signal === 'BUY').length} BUY ·{' '}
+                      {signals.filter(s => s.signal === 'SELL').length} SELL ·{' '}
+                      {signals.filter(s => s.signal === 'NEUTRAL').length} NEUTRAL
+                    </span>
+                  </div>
+                </div>
+                {signals.length > 0 && (
+                  <div className="mb-2">
+                    <p className="text-gray-600 mb-1">Signal confidence scores:</p>
+                    <div className="space-y-0.5">
+                      {signals.slice(0, 6).map(s => (
+                        <div key={s.symbol} className="flex items-center gap-2">
+                          <span className={clsx('w-12 text-[10px] font-bold', s.signal === 'BUY' ? 'text-emerald-400' : s.signal === 'SELL' ? 'text-red-400' : 'text-gray-500')}>
+                            {s.signal}
+                          </span>
+                          <span className="w-14 font-mono text-gray-400">{s.symbol}</span>
+                          <div className="flex-1 bg-gray-800 rounded-full h-1.5">
+                            <div
+                              className={clsx('h-1.5 rounded-full', s.score >= 50 ? 'bg-amber-500' : 'bg-gray-600')}
+                              style={{ width: `${s.score}%` }}
+                            />
+                          </div>
+                          <span className="w-10 text-right font-mono text-gray-500">{s.score}/100</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {debugLog.length > 0 && (
+                  <div>
+                    <p className="text-gray-600 mb-1">API debug log:</p>
+                    <div className="bg-gray-900 rounded p-2 font-mono space-y-0.5 max-h-36 overflow-y-auto">
+                      {debugLog.map((line, i) => (
+                        <p key={i} className={clsx(
+                          line.startsWith('❌') ? 'text-red-400' :
+                          line.startsWith('⚠️') || line.startsWith('⚠') ? 'text-amber-400' :
+                          line.startsWith('✅') ? 'text-emerald-400' :
+                          'text-gray-500'
+                        )}>{line}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {scanError && (
+                  <div className="flex items-start gap-1.5 bg-red-500/10 border border-red-500/20 rounded p-2 text-red-400">
+                    <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                    <span>{scanError}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Right: signals + positions */}

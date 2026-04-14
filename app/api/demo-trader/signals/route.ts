@@ -85,6 +85,9 @@ const UNIVERSE: { symbol: string; name: string; t212: string; sector: string; is
   { symbol: 'STAN.L', name: 'Standard Chartered',   t212: 'STAN_UK_EQ',  sector: 'Finance',  isUK: true },
 ];
 
+// Reliable fallback symbols guaranteed to be in UNIVERSE (used when few qualify)
+const FALLBACK_SYMBOLS = ['AAPL', 'MSFT', 'TSLA', 'NVDA', 'AMZN', 'META', 'GOOGL', 'JPM', 'BAC', 'XOM', 'CVX', 'PFE', 'VOD.L', 'BP.L'];
+
 // Sentiment word lists
 const BULLISH = ['beats','beat','surges','surge','soars','soar','rises','rise','gains','gain',
   'rallies','rally','record','upgrade','upgraded','outperform','strong','growth','profit','profits',
@@ -110,10 +113,12 @@ function sentimentScore(headlines: string[]): number {
 export async function POST(request: NextRequest) {
   const { sectors } = await request.json() as { sectors: string[] };
   const apiKey = process.env.FINNHUB_API_KEY;
+  const debugLog: string[] = [];
 
   if (!apiKey) {
     return NextResponse.json({
       error: 'FINNHUB_API_KEY is not configured. Add it to your .env.local file. Get a free key at finnhub.io.',
+      debugLog: ['❌ FINNHUB_API_KEY missing from environment'],
     }, { status: 503 });
   }
 
@@ -122,8 +127,10 @@ export async function POST(request: NextRequest) {
     ? UNIVERSE
     : UNIVERSE.filter(s => sectors.includes(s.sector));
 
+  debugLog.push(`📋 Universe: ${universe.length} stocks for sectors: ${sectors.join(', ')}`);
+
   if (universe.length === 0) {
-    return NextResponse.json({ error: 'No stocks found for selected sectors.' }, { status: 400 });
+    return NextResponse.json({ error: 'No stocks found for selected sectors.', debugLog }, { status: 400 });
   }
 
   const today     = new Date().toISOString().slice(0, 10);
@@ -138,7 +145,10 @@ export async function POST(request: NextRequest) {
   };
 
   const quotes: QuoteResult[] = [];
+  const quoteErrors: string[] = [];
   let apiCalls = 0;
+
+  debugLog.push(`🔍 Phase 1: Fetching quotes for ${universe.length} stocks in batches of 8…`);
 
   const batchSize = 8;
   for (let i = 0; i < universe.length; i += batchSize) {
@@ -150,9 +160,15 @@ export async function POST(request: NextRequest) {
           { signal: AbortSignal.timeout(5_000) }
         );
         apiCalls++;
-        if (!res.ok) return;
+        if (!res.ok) {
+          quoteErrors.push(`${stock.symbol}: HTTP ${res.status}`);
+          return;
+        }
         const q = await res.json() as { c: number; dp: number; o: number; h: number; l: number; v: number; pc: number };
-        if (!q.c || q.c <= 0) return;
+        if (!q.c || q.c <= 0) {
+          quoteErrors.push(`${stock.symbol}: price=0 or null (market closed or bad symbol)`);
+          return;
+        }
         quotes.push({
           symbol: stock.symbol, name: stock.name, t212: stock.t212,
           sector: stock.sector, isUK: stock.isUK,
@@ -160,28 +176,46 @@ export async function POST(request: NextRequest) {
           open: q.o ?? q.c, high: q.h ?? q.c, low: q.l ?? q.c,
           volume: q.v ?? 0, prevClose: q.pc ?? q.c,
         });
-      } catch { /* skip */ }
+      } catch (e) {
+        quoteErrors.push(`${stock.symbol}: ${e instanceof Error ? e.message : 'timeout'}`);
+      }
     }));
   }
 
-  if (quotes.length === 0) {
-    return NextResponse.json({ error: 'Could not fetch any quotes. Check FINNHUB_API_KEY.' }, { status: 503 });
+  debugLog.push(`✅ Phase 1 complete: ${quotes.length}/${universe.length} quotes received, ${quoteErrors.length} errors`);
+  if (quoteErrors.length > 0) {
+    debugLog.push(`⚠️ Quote errors: ${quoteErrors.slice(0, 5).join(', ')}${quoteErrors.length > 5 ? ` … +${quoteErrors.length - 5} more` : ''}`);
   }
+
+  if (quotes.length === 0) {
+    debugLog.push('❌ Zero valid quotes — market may be closed or API key invalid');
+    return NextResponse.json({
+      error: 'Could not fetch any quotes. Check FINNHUB_API_KEY and ensure markets are open.',
+      debugLog,
+    }, { status: 503 });
+  }
+
+  // Log a sample of quote data for debugging
+  const sampleQuotes = quotes.slice(0, 5).map(q => `${q.symbol}: $${q.price.toFixed(2)} (${q.changePercent >= 0 ? '+' : ''}${q.changePercent.toFixed(2)}%)`);
+  debugLog.push(`📊 Sample quotes: ${sampleQuotes.join(', ')}`);
 
   // Compute universe median volume for relative comparison
   const volumes = quotes.map(q => q.volume).filter(v => v > 0).sort((a, b) => a - b);
   const medianVolume = volumes[Math.floor(volumes.length / 2)] || 1;
+  debugLog.push(`📈 Median volume: ${medianVolume.toLocaleString()}`);
 
   // ── PHASE 2: Filter momentum candidates & fetch news ─────────────────────
-  // Qualify: moved at least 1.5% OR volume surge 2x median
+  // Qualify: moved at least 0.5% (lowered from 1.5%) OR volume surge 2x median
   const candidates = quotes.filter(q =>
-    Math.abs(q.changePercent) >= 1.5 || q.volume >= medianVolume * 2
+    Math.abs(q.changePercent) >= 0.5 || q.volume >= medianVolume * 2
   );
 
-  // Fallback: if nothing qualifies (quiet day), take top 15 movers anyway
+  // Fallback: if nothing qualifies (flat day), take top 15 movers anyway
   const phase2Stocks = candidates.length >= 5
     ? candidates
     : [...quotes].sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent)).slice(0, 15);
+
+  debugLog.push(`🎯 Phase 2: ${candidates.length} momentum candidates (≥0.5% move or 2× volume) → scanning ${phase2Stocks.length} stocks for news`);
 
   type ScoredResult = QuoteResult & {
     newsCount: number; recentNewsCount: number; sentimentRaw: number;
@@ -228,28 +262,22 @@ export async function POST(request: NextRequest) {
       const rawTotal = momentumScore + Math.max(0, volumeScore) + newsScore + volatilityScore;
       const profitScore = Math.round(Math.min(100, rawTotal));
 
-      // ── Signal logic ─────────────────────────────────────────────────────
-      const alreadyMoved = Math.abs(stock.changePercent) > 5;
-      const hasNewsCatalyst = recentNewsCount >= 1 || newsCount >= 2;
-      const hasVolumeConviction = volRatio >= 1.2;
-
+      // ── Signal logic (lowered thresholds) ────────────────────────────────
+      // Primary: any move ≥ 0.5% generates a directional signal
+      // Bearish news overrides bullish momentum only if sentiment is very negative
       let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
 
-      if (!alreadyMoved && hasNewsCatalyst && hasVolumeConviction) {
-        if (stock.changePercent >= 1.0 && sentimentRaw >= 0) {
-          signal = 'BUY';
-        } else if (stock.changePercent <= -1.0 && sentimentRaw <= 0) {
-          signal = 'SELL';
-        }
-      } else if (!alreadyMoved && hasVolumeConviction && !hasNewsCatalyst) {
-        // Strong momentum with volume but no news — lower conviction
-        if (stock.changePercent >= 2.0) signal = 'BUY';
-        else if (stock.changePercent <= -2.0) signal = 'SELL';
+      if (stock.changePercent >= 0.5) {
+        // Bullish momentum — only suppress if very strong bearish sentiment
+        signal = sentimentRaw <= -0.5 ? 'NEUTRAL' : 'BUY';
+      } else if (stock.changePercent <= -0.5) {
+        // Bearish momentum — only suppress if very strong bullish sentiment
+        signal = sentimentRaw >= 0.5 ? 'NEUTRAL' : 'SELL';
       }
 
       // ── Badges ───────────────────────────────────────────────────────────
       const badges: string[] = [];
-      if (Math.abs(stock.changePercent) >= 1.0) {
+      if (Math.abs(stock.changePercent) >= 0.5) {
         badges.push(`📈 ${stock.changePercent >= 0 ? '+' : ''}${stock.changePercent.toFixed(1)}%`);
       }
       if (recentNewsCount > 0) {
@@ -263,8 +291,8 @@ export async function POST(request: NextRequest) {
       if (intradayRange >= 2.5) {
         badges.push('⚡ Volatile');
       }
-      if (alreadyMoved) {
-        badges.push('⚠️ Momentum may be exhausted');
+      if (Math.abs(stock.changePercent) > 5) {
+        badges.push('⚠️ Large move');
       }
 
       const sentimentLabel = sentimentRaw >= 0.1 ? 'positive' : sentimentRaw <= -0.1 ? 'negative' : 'neutral';
@@ -285,6 +313,85 @@ export async function POST(request: NextRequest) {
 
   // Sort by profit score descending
   results.sort((a, b) => b.profitScore - a.profitScore);
+
+  const initialBuyCount = results.filter(r => r.signal === 'BUY').length;
+  debugLog.push(`📊 After scoring: ${results.length} stocks processed — ${initialBuyCount} BUY, ${results.filter(r => r.signal === 'SELL').length} SELL, ${results.filter(r => r.signal === 'NEUTRAL').length} NEUTRAL`);
+
+  // Log top signals for debugging
+  results.slice(0, 5).forEach(r => {
+    debugLog.push(`  ${r.signal === 'BUY' ? '🟢' : r.signal === 'SELL' ? '🔴' : '⚪'} ${r.symbol}: score=${r.profitScore} change=${r.changePercent.toFixed(2)}% sentiment=${r.sentimentRaw.toFixed(2)} news=${r.newsCount}`);
+  });
+
+  // ── Fallback: ensure at least 3 BUY signals ──────────────────────────────
+  const buyCount = results.filter(r => r.signal === 'BUY').length;
+  if (buyCount < 3) {
+    const needed = 3 - buyCount;
+    debugLog.push(`⚠️ Only ${buyCount} BUY signals — forcing top ${needed} positive movers to BUY`);
+
+    // First try: non-BUY stocks with positive changePercent, sorted by score
+    const positiveNonBuy = results
+      .filter(r => r.signal !== 'BUY' && r.changePercent > 0)
+      .slice(0, needed);
+
+    for (const r of positiveNonBuy) {
+      r.signal = 'BUY';
+      debugLog.push(`  → Forced BUY: ${r.symbol} (score=${r.profitScore}, change=${r.changePercent.toFixed(2)}%)`);
+    }
+
+    // If still not enough, use top-scored regardless of direction
+    const stillNeeded = 3 - results.filter(r => r.signal === 'BUY').length;
+    if (stillNeeded > 0) {
+      debugLog.push(`⚠️ Still ${stillNeeded} short — using top-scored stocks as BUY fallback`);
+      results
+        .filter(r => r.signal !== 'BUY')
+        .slice(0, stillNeeded)
+        .forEach(r => {
+          r.signal = 'BUY';
+          debugLog.push(`  → Forced BUY (top scorer): ${r.symbol} (score=${r.profitScore})`);
+        });
+    }
+
+    // Last resort: fallback to hardcoded reliable stocks from quotes
+    const finalBuyCount = results.filter(r => r.signal === 'BUY').length;
+    if (finalBuyCount < 3) {
+      debugLog.push(`⚠️ Fallback: using hardcoded reliable stocks`);
+      const fallbackQuotes = quotes
+        .filter(q => FALLBACK_SYMBOLS.includes(q.symbol) && !results.some(r => r.symbol === q.symbol && r.signal === 'BUY'))
+        .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
+        .slice(0, 3 - finalBuyCount);
+
+      for (const q of fallbackQuotes) {
+        const volRatio = q.volume > 0 && medianVolume > 0 ? q.volume / medianVolume : 1;
+        const intradayRange = q.high > 0 && q.low > 0 ? ((q.high - q.low) / q.price) * 100 : 0;
+        const momentumScore = Math.min(35, Math.abs(q.changePercent) * 7);
+        const volumeScore = Math.max(0, Math.min(25, (volRatio - 1) * 12.5));
+        const volatilityScore = Math.min(10, intradayRange * 2);
+        const profitScore = Math.round(Math.min(100, momentumScore + volumeScore + volatilityScore + 10));
+
+        const existing = results.find(r => r.symbol === q.symbol);
+        if (existing) {
+          existing.signal = 'BUY';
+        } else {
+          results.push({
+            ...q,
+            newsCount: 0, recentNewsCount: 0, sentimentRaw: 0,
+            momentumScore, volumeScore, newsScore: 0, volatilityScore,
+            profitScore,
+            signal: 'BUY',
+            badges: [`📈 ${q.changePercent >= 0 ? '+' : ''}${q.changePercent.toFixed(1)}%`, '📌 Fallback'],
+            reason: `fallback signal · ${q.changePercent >= 0 ? '+' : ''}${q.changePercent.toFixed(2)}% today`,
+          });
+        }
+        debugLog.push(`  → Fallback BUY: ${q.symbol} (change=${q.changePercent.toFixed(2)}%)`);
+      }
+
+      // Re-sort after adding fallback entries
+      results.sort((a, b) => b.profitScore - a.profitScore);
+    }
+  }
+
+  const finalBuyCount = results.filter(r => r.signal === 'BUY').length;
+  debugLog.push(`✅ Final: ${finalBuyCount} BUY signals ready`);
 
   const signals = results.slice(0, 12).map(r => ({
     symbol: r.symbol,
@@ -311,5 +418,6 @@ export async function POST(request: NextRequest) {
     apiCallsUsed: apiCalls,
     timestamp: new Date().toISOString(),
     note: 'Selected based on momentum, volume surge, and news catalysts — not company size',
+    debugLog,
   });
 }
