@@ -29,11 +29,23 @@ export type StrategySignal = {
 
 export type Timeframe = 'hourly' | 'daily' | 'longterm' | 'rsi2';
 
+export type MarketType = 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO';
+
 export type WatchlistMarket = {
   epic: string;
   name: string;
   enabled: boolean;
+  marketType?: MarketType; // used to calibrate signal scoring and stop distances
+  forceOpen?: boolean;     // trade regardless of signal strength
 };
+
+/** Classify an IG epic by market type. */
+export function getMarketType(epic: string): MarketType {
+  if (epic.startsWith('IX.D.')) return 'INDEX';
+  if (epic.includes('BITCOIN') || epic.includes('ETHUSD') || epic.includes('CRYPTO')) return 'CRYPTO';
+  if (epic.startsWith('CS.D.') && /USD|EUR|GBP|JPY|CHF|AUD|NZD|CAD/.test(epic) && !epic.includes('CRUDEOIL') && !epic.includes('GOLD') && !epic.includes('SILVER')) return 'FOREX';
+  return 'COMMODITY';
+}
 
 export type IGSavedStrategy = {
   id: string;
@@ -71,16 +83,25 @@ export type IGSavedStrategy = {
  * and 3 markets: 215 × 3 = 645 pts/day = 4 515 pts/week.
  */
 export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
-  { epic: 'IX.D.FTSE.DAILY.IP',       name: 'FTSE 100',     enabled: true  },
-  { epic: 'IX.D.SPTRD.DAILY.IP',      name: 'S&P 500',      enabled: true  },
-  { epic: 'CS.D.CFDGOLD.CFDGC.IP',    name: 'Gold',         enabled: true  },
-  { epic: 'IX.D.NASDAQ.DAILY.IP',     name: 'NASDAQ 100',   enabled: false },
-  { epic: 'IX.D.DAX.DAILY.IP',        name: 'Germany 40',   enabled: false },
-  { epic: 'IX.D.DOW.DAILY.IP',        name: 'Wall Street',  enabled: false },
-  { epic: 'CS.D.CRUDEOIL.TODAY.IP',   name: 'Oil (WTI)',    enabled: false },
-  { epic: 'CS.D.GBPUSD.TODAY.IP',     name: 'GBP/USD',      enabled: false },
-  { epic: 'CS.D.EURUSD.TODAY.IP',     name: 'EUR/USD',      enabled: false },
-  { epic: 'CS.D.BITCOIN.CFD.IP',      name: 'Bitcoin',      enabled: false },
+  // ── Indices (Daily Funded Bets) ─────────────────────────────────────────────
+  { epic: 'IX.D.FTSE.DAILY.IP',      name: 'FTSE 100',    enabled: true,  marketType: 'INDEX'     },
+  { epic: 'IX.D.SPTRD.DAILY.IP',     name: 'S&P 500',     enabled: true,  marketType: 'INDEX'     },
+  { epic: 'IX.D.NASDAQ.DAILY.IP',    name: 'NASDAQ 100',  enabled: false, marketType: 'INDEX'     },
+  { epic: 'IX.D.DOW.DAILY.IP',       name: 'Wall Street', enabled: false, marketType: 'INDEX'     },
+  { epic: 'IX.D.DAX.DAILY.IP',       name: 'Germany 40',  enabled: false, marketType: 'INDEX'     },
+  { epic: 'IX.D.NIKKEI.DAILY.IP',    name: 'Japan 225',   enabled: false, marketType: 'INDEX'     },
+  // ── Commodities ─────────────────────────────────────────────────────────────
+  { epic: 'CS.D.CFDGOLD.CFDGC.IP',  name: 'Gold',        enabled: true,  marketType: 'COMMODITY' },
+  { epic: 'CS.D.CRUDEOIL.TODAY.IP',  name: 'Oil (WTI)',   enabled: false, marketType: 'COMMODITY' },
+  { epic: 'CS.D.SILVER.TODAY.IP',    name: 'Silver',      enabled: false, marketType: 'COMMODITY' },
+  // ── Forex ───────────────────────────────────────────────────────────────────
+  { epic: 'CS.D.GBPUSD.TODAY.IP',    name: 'GBP/USD',     enabled: false, marketType: 'FOREX'     },
+  { epic: 'CS.D.EURUSD.TODAY.IP',    name: 'EUR/USD',     enabled: false, marketType: 'FOREX'     },
+  { epic: 'CS.D.USDJPY.TODAY.IP',    name: 'USD/JPY',     enabled: false, marketType: 'FOREX'     },
+  { epic: 'CS.D.EURGBP.TODAY.IP',    name: 'EUR/GBP',     enabled: false, marketType: 'FOREX'     },
+  // ── Crypto ──────────────────────────────────────────────────────────────────
+  { epic: 'CS.D.BITCOIN.TODAY.IP',   name: 'Bitcoin',     enabled: false, marketType: 'CRYPTO'    },
+  { epic: 'CS.D.ETHUSD.TODAY.IP',    name: 'Ethereum',    enabled: false, marketType: 'CRYPTO'    },
 ];
 
 // ── Technical indicators ──────────────────────────────────────────────────────

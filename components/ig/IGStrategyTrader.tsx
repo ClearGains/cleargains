@@ -12,9 +12,9 @@ import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import {
   type Timeframe, type IGSavedStrategy, type StrategySignal,
-  type WatchlistMarket,
+  type WatchlistMarket, type MarketType,
   loadStrategies, saveStrategy, deleteStrategy,
-  TIMEFRAME_CONFIG, DEFAULT_WATCHLIST,
+  TIMEFRAME_CONFIG, DEFAULT_WATCHLIST, getMarketType,
 } from '@/lib/igStrategyEngine';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -163,6 +163,50 @@ function MarketSearch({ session, env, onSelect }: {
   );
 }
 
+// ── Market-type helpers ───────────────────────────────────────────────────────
+
+/** Stop/limit distances in POINTS (IG spread-bet "points" = pips for forex). */
+function getStopLimitDist(mType: MarketType): { stopDist: number; limitDist: number } {
+  switch (mType) {
+    case 'INDEX':     return { stopDist: 20, limitDist: 40 };
+    case 'FOREX':     return { stopDist: 20, limitDist: 40 };
+    case 'COMMODITY': return { stopDist: 2,  limitDist: 4  };
+    case 'CRYPTO':    return { stopDist: 50, limitDist: 100 };
+  }
+}
+
+/**
+ * Calibrated signal scoring for spread-bet markets.
+ * Indices / forex move much less than individual stocks, so the
+ * thresholds are scaled per asset class.
+ */
+function calibrateSignal(
+  changePercent: number,
+  rawSignal: 'BUY' | 'SELL' | 'NEUTRAL',
+  mType: MarketType,
+): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
+  const pct = Math.abs(changePercent);
+  const dir: 'BUY' | 'SELL' | 'HOLD' =
+    rawSignal === 'BUY' ? 'BUY' : rawSignal === 'SELL' ? 'SELL' : 'HOLD';
+
+  let strength: number;
+  switch (mType) {
+    case 'INDEX':
+      strength = pct >= 1.0 ? 85 : pct >= 0.5 ? 75 : pct >= 0.3 ? 65 : Math.round((pct / 0.3) * 60);
+      break;
+    case 'FOREX':
+      strength = pct >= 0.3 ? 85 : pct >= 0.2 ? 75 : pct >= 0.1 ? 65 : Math.round((pct / 0.1) * 60);
+      break;
+    case 'COMMODITY':
+      strength = pct >= 2.0 ? 85 : pct >= 1.0 ? 75 : pct >= 0.5 ? 65 : Math.round((pct / 0.5) * 60);
+      break;
+    case 'CRYPTO':
+      strength = pct >= 3.0 ? 85 : pct >= 2.0 ? 75 : pct >= 1.0 ? 65 : Math.round((pct / 1.0) * 60);
+      break;
+  }
+  return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function IGStrategyTrader() {
@@ -232,7 +276,7 @@ export function IGStrategyTrader() {
   const [bTimeframe, setBTimeframe]         = useState<Timeframe>('daily');
   const [bSize, setBSize]                   = useState(1);
   const [bMaxPos, setBMaxPos]               = useState(3);
-  const [bMinStrength, setBMinStrength]     = useState(60);
+  const [bMinStrength, setBMinStrength]     = useState(55);
   const [bAccounts, setBAccounts]           = useState<('demo'|'live')[]>(['demo']);
   const [bAutoClose, setBAutoClose]         = useState(true);
   const [bWatchlist, setBWatchlist]         = useState<WatchlistMarket[]>([...DEFAULT_WATCHLIST]);
@@ -428,13 +472,14 @@ export function IGStrategyTrader() {
   // ── Place / close ──────────────────────────────────────────────────────────
   async function placeOrder(env: 'demo'|'live', epic:string, direction:'BUY'|'SELL', size:number, stopDist?:number, limitDist?:number) {
     const sess = sessions[env];
-    if (!sess) return { ok:false, error:`No ${env} session` };
+    if (!sess) return { ok:false as const, error:`No ${env} session`, epic, sentPayload: null, igBody: null };
+    const body = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist, currencyCode:'GBP' };
     const r = await fetch('/api/ig/order', {
       method:'POST',
       headers: { ...makeHeaders(sess, env), 'Content-Type':'application/json' },
-      body: JSON.stringify({ epic, direction, size, stopDistance: stopDist, profitDistance: limitDist, currencyCode:'GBP' }),
+      body: JSON.stringify(body),
     });
-    return r.json() as Promise<{ok:boolean;dealReference?:string;error?:string}>;
+    return r.json() as Promise<{ok:boolean;dealReference?:string;error?:string;epic?:string;resolvedVia?:string;sentPayload?:unknown;igBody?:unknown;igStatus?:number}>;
   }
 
   async function closePos(env: 'demo'|'live', pos: IGPosition) {
@@ -472,44 +517,57 @@ export function IGStrategyTrader() {
       return null;
     }
 
-    // Derive StrategySignal from daily % change
-    const direction: 'BUY'|'SELL'|'HOLD' =
-      snapshot.signal === 'BUY'  ? 'BUY'  :
-      snapshot.signal === 'SELL' ? 'SELL' : 'HOLD';
-    const strength = Math.min(100, Math.round(Math.abs(snapshot.changePercent) * 20));
-    const stopPts   = Math.max(1, Math.round(snapshot.price * 0.01));
-    const targetPts = Math.max(2, Math.round(snapshot.price * 0.02));
+    // ── Calibrated signal scoring by market type ──────────────────────────────
+    const mType = market.marketType ?? getMarketType(market.epic);
+    const { stopDist, limitDist } = getStopLimitDist(mType);
+    const { direction, strength } = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
+    const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
+
     const sig: StrategySignal = {
       direction,
       strength,
-      reason: `Daily ${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`,
-      stopPoints:   stopPts,
-      targetPoints: targetPts,
-      riskReward:   `1:${(targetPts / stopPts).toFixed(1)}`,
+      reason: `Daily ${pctStr} (${mType})`,
+      stopPoints:   stopDist,
+      targetPoints: limitDist,
+      riskReward:   `1:${(limitDist / stopDist).toFixed(1)}`,
       indicators: [
-        { label: 'Daily Change', value: `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`, status: direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral' },
+        { label: 'Daily Change', value: pctStr,                   status: direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral' },
+        { label: 'Type',        value: mType,                     status: 'neutral' },
+        { label: 'Stop dist',   value: `${stopDist}pt`,           status: 'neutral' },
+        { label: 'TP dist',     value: `${limitDist}pt`,          status: 'neutral' },
+        { label: 'Max loss',    value: `£${strat.size * stopDist}`, status: 'neutral' },
       ],
     };
 
     setScans(p => ({
       ...p,
       [market.epic]: {
-        epic:market.epic, name:market.name, signal:sig,
-        price:snapshot.price, changePercent:snapshot.changePercent, source:snapshot.source,
-        scanning:false, status:'ok', lastScanned:new Date().toISOString(),
+        epic: market.epic, name: market.name, signal: sig,
+        price: snapshot.price, changePercent: snapshot.changePercent, source: snapshot.source,
+        scanning: false, status: 'ok', lastScanned: new Date().toISOString(),
       },
     }));
 
-    // Execute on each account if autoTrade and signal is strong enough
-    if (strat.autoTrade && sig.direction !== 'HOLD' && sig.strength >= strat.minStrength) {
+    // ── Decide whether to trade ───────────────────────────────────────────────
+    // forceOpen = trade regardless of signal strength; always use snapshot direction
+    const forceOpen = market.forceOpen === true;
+    const tradeDir: 'BUY' | 'SELL' | null =
+      forceOpen
+        ? (direction !== 'HOLD' ? direction : snapshot.changePercent >= 0 ? 'BUY' : 'SELL')
+        : direction !== 'HOLD' && strength >= strat.minStrength ? direction
+        : null;
+
+    if (!strat.autoTrade || !tradeDir) {
+      if (direction !== 'HOLD' && !forceOpen)
+        log('signal', `${market.name} (${market.epic}) → ${direction} ${strength}% ${forceOpen ? '' : `(min ${strat.minStrength}% — no trade)`}`);
+    } else {
       for (const env of envs) {
         const envPos = positions[env];
-        const existing = envPos.filter(p => p.epic === market.epic);
-        const opposite = sig.direction === 'BUY' ? 'SELL' : 'BUY';
+        const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
 
         // Auto-close opposing positions
         if (strat.autoClose) {
-          for (const opp of existing.filter(p => p.direction === opposite)) {
+          for (const opp of envPos.filter(p => p.epic === market.epic && p.direction === opposite)) {
             log('close', `[${env.toUpperCase()}] Auto-closing ${opp.direction} ${market.name} — signal reversed`);
             const cr = await closePos(env, opp);
             if (cr.ok) log('close', `[${env.toUpperCase()}] ✅ Closed ${market.name}`);
@@ -526,34 +584,32 @@ export function IGStrategyTrader() {
         }
 
         // Don't open if already same direction
-        const alreadyOpen = positions[env].some(p => p.epic === market.epic && p.direction === sig.direction);
-        if (alreadyOpen) continue;
+        if (positions[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
         // One-time disclaimer before first live trade
         if (env === 'live') {
           const ok = await confirmLiveTrade();
-          if (!ok) {
-            log('info', `[LIVE] First-trade disclaimer declined — skipping ${market.name}`);
-            continue;
-          }
+          if (!ok) { log('info', `[LIVE] Disclaimer declined — skipping ${market.name}`); continue; }
         }
 
-        // Open position with inline stop-loss and take-profit
-        const slPts = sig.stopPoints;
-        const tpPts = sig.targetPoints;
-        log(sig.direction === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}] → ${sig.direction} £${strat.size}/pt ${market.name} + SL stop ${slPts}pt + TP limit ${tpPts}pt (strength ${sig.strength}%)`);
-        const or = await placeOrder(env, market.epic, sig.direction, strat.size, slPts, tpPts);
+        const maxLoss = strat.size * stopDist;
+        log(tradeDir === 'BUY' ? 'buy' : 'sell',
+          `[${env.toUpperCase()}] → ${tradeDir} ${market.name} | epic: ${market.epic} | £${strat.size}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss} | signal ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+
+        const or = await placeOrder(env, market.epic, tradeDir, strat.size, stopDist, limitDist);
+
         if (or.ok) {
-          log(sig.direction === 'BUY' ? 'buy' : 'sell', `[${env.toUpperCase()}] ✅ Filled — ref ${or.dealReference ?? 'n/a'}`);
-          showToast(true, `[${env}] ${sig.direction} ${market.name}`);
+          log(tradeDir === 'BUY' ? 'buy' : 'sell',
+            `[${env.toUpperCase()}] ✅ Filled — ref ${or.dealReference ?? 'n/a'} · epic used: ${or.epic ?? market.epic}${or.resolvedVia && or.resolvedVia !== 'verified' ? ` (resolved via ${or.resolvedVia})` : ''}`);
+          showToast(true, `[${env}] ${tradeDir} ${market.name}`);
           await loadPositions(env);
         } else {
-          log('error', `[${env.toUpperCase()}] ❌ ${market.name}: ${or.error ?? 'unknown'}`);
+          log('error', `[${env.toUpperCase()}] ❌ ${market.name} FAILED`);
+          log('error', `  epic: ${or.epic ?? market.epic} | error: ${or.error ?? 'unknown'}`);
+          if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
+          if (or.igBody)      log('error', `  ig:   ${JSON.stringify(or.igBody)}`);
         }
       }
-    } else if (sig.direction !== 'HOLD') {
-      log('signal', `${market.name} → ${sig.direction} ${sig.strength}% (below ${strat.minStrength}% threshold — no trade)`);
     }
 
     return sig;
@@ -771,7 +827,7 @@ export function IGStrategyTrader() {
     if (existing) {
       setEditId(existing.id); setBName(existing.name); setBTimeframe(existing.timeframe);
       setBSize(existing.size); setBMaxPos(existing.maxPositions);
-      setBMinStrength(existing.minStrength ?? 60);
+      setBMinStrength(existing.minStrength ?? 55);
       setBAccounts(existing.accounts); setBAutoClose(existing.autoClose ?? true);
       setBWatchlist(existing.watchlist?.length ? existing.watchlist : [...DEFAULT_WATCHLIST]);
       setBSignalScanMs(existing.signalScanMs ?? 5 * 60_000);
@@ -1198,20 +1254,31 @@ export function IGStrategyTrader() {
               </div>
               <div className="space-y-1 max-h-56 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800/50">
                 {bWatchlist.map((m, i) => (
-                  <div key={m.epic} className="flex items-center justify-between px-3 py-2">
-                    <div className="flex items-center gap-2 min-w-0">
+                  <div key={m.epic} className="flex items-center justify-between px-3 py-2 gap-2">
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
                       <button onClick={() => setBWatchlist(p => p.map((x,xi) => xi===i ? {...x,enabled:!x.enabled} : x))}
                         className={clsx('w-4 h-4 rounded flex items-center justify-center flex-shrink-0 transition-all',
                           m.enabled ? 'bg-orange-500' : 'bg-gray-700 border border-gray-600')}>
                         {m.enabled && <span className="text-white text-[8px] font-bold">✓</span>}
                       </button>
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <p className="text-xs text-white font-medium">{m.name}</p>
                         <p className="text-[10px] text-gray-500 font-mono truncate">{m.epic}</p>
                       </div>
                     </div>
+                    {/* Force Trade toggle */}
+                    <button
+                      onClick={() => setBWatchlist(p => p.map((x,xi) => xi===i ? {...x,forceOpen:!x.forceOpen} : x))}
+                      title={m.forceOpen ? 'Force: always trade this market regardless of signal' : 'Signal only: trade when signal meets threshold'}
+                      className={clsx('text-[9px] px-1.5 py-0.5 rounded border flex-shrink-0 transition-all font-semibold',
+                        m.forceOpen
+                          ? 'bg-orange-500/25 text-orange-400 border-orange-500/40'
+                          : 'bg-gray-800 text-gray-600 border-gray-700 hover:text-gray-400'
+                      )}>
+                      {m.forceOpen ? 'FORCE' : 'signal'}
+                    </button>
                     <button onClick={() => setBWatchlist(p => p.filter((_,xi) => xi!==i))}
-                      className="text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 ml-2">
+                      className="text-gray-600 hover:text-red-400 transition-colors flex-shrink-0">
                       <X className="h-3 w-3" />
                     </button>
                   </div>
@@ -1273,7 +1340,7 @@ export function IGStrategyTrader() {
                       {strat.autoClose && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400">AutoClose</span>}
                     </div>
                     <p className="text-[11px] text-gray-500">
-                      {enabledMarkets.length} markets · £{strat.size}/pt · max {strat.maxPositions} pos · min {strat.minStrength ?? 60}% signal
+                      {enabledMarkets.length} markets · £{strat.size}/pt · max {strat.maxPositions} pos · min {strat.minStrength ?? 55}% signal
                       {strat.lastRunAt && (
                         <span> · last {fmtTime(strat.lastRunAt)}
                           {strat.lastRunEnv && (

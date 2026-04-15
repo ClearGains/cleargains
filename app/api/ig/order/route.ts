@@ -1,5 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+// ── Verified IG epic map (spread-bet rolling instruments) ─────────────────────
+const VERIFIED_EPICS: Record<string, string> = {
+  'FTSE 100':    'IX.D.FTSE.DAILY.IP',
+  'S&P 500':     'IX.D.SPTRD.DAILY.IP',
+  'NASDAQ 100':  'IX.D.NASDAQ.DAILY.IP',
+  'Wall Street': 'IX.D.DOW.DAILY.IP',
+  'Germany 40':  'IX.D.DAX.DAILY.IP',
+  'Japan 225':   'IX.D.NIKKEI.DAILY.IP',
+  'GBP/USD':     'CS.D.GBPUSD.TODAY.IP',
+  'EUR/USD':     'CS.D.EURUSD.TODAY.IP',
+  'USD/JPY':     'CS.D.USDJPY.TODAY.IP',
+  'EUR/GBP':     'CS.D.EURGBP.TODAY.IP',
+  'Gold':        'CS.D.CFDGOLD.CFDGC.IP',
+  'Oil (WTI)':   'CS.D.CRUDEOIL.TODAY.IP',
+  'Silver':      'CS.D.SILVER.TODAY.IP',
+  'Bitcoin':     'CS.D.BITCOIN.TODAY.IP',
+  'Ethereum':    'CS.D.ETHUSD.TODAY.IP',
+};
+
+const VERIFIED_EPIC_SET = new Set(Object.values(VERIFIED_EPICS));
+
+/** If the epic isn't in our verified set, search IG and return the best match. */
+async function resolveEpic(
+  epic: string,
+  apiKey: string, cst: string, securityToken: string,
+  base: string,
+): Promise<{ epic: string; resolvedVia: string }> {
+  if (VERIFIED_EPIC_SET.has(epic)) return { epic, resolvedVia: 'verified' };
+  // Try searching by epic string itself
+  try {
+    const r = await fetch(`${base}/markets?searchTerm=${encodeURIComponent(epic)}&pageSize=5`, {
+      headers: igHeaders(apiKey, cst, securityToken, '1'),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (r.ok) {
+      const d = await r.json() as { markets?: Array<{ epic: string; instrumentType: string }> };
+      const match = d.markets?.find(m => ['CURRENCIES', 'INDICES', 'COMMODITIES', 'SHARES'].includes(m.instrumentType));
+      if (match) return { epic: match.epic, resolvedVia: 'search' };
+    }
+  } catch { /* ignore */ }
+  return { epic, resolvedVia: 'unresolved' };
+}
+
 function igHeaders(apiKey: string, cst: string, securityToken: string, version = '2'): Record<string, string> {
   return {
     'X-IG-API-KEY': apiKey,
@@ -56,14 +99,17 @@ export async function POST(request: NextRequest) {
     const base = baseUrl(env);
     const orderType = body.orderType ?? 'MARKET';
 
+    // Resolve epic — validate against verified set, search IG if unknown
+    const { epic: resolvedEpic, resolvedVia } = await resolveEpic(body.epic, apiKey, cst, securityToken, base);
+
     // ── Working order (LIMIT or STOP) ─────────────────────────────────────────
     if (orderType === 'LIMIT' || orderType === 'STOP') {
       if (!body.level) {
         return NextResponse.json({ ok: false, error: 'level is required for LIMIT/STOP working orders' }, { status: 400 });
       }
       const woPayload = {
-        epic:          body.epic,
-        expiry:        body.expiry ?? 'DFB',
+        epic:          resolvedEpic,
+        expiry:        body.expiry ?? '-',
         direction:     body.direction,
         size:          body.size,
         level:         body.level,
@@ -77,23 +123,23 @@ export async function POST(request: NextRequest) {
         timeInForce:   body.timeInForce ?? 'GOOD_TILL_CANCELLED',
         forceOpen:     body.forceOpen ?? true,
       };
-      const res = await fetch(`${base}/workingorders/otc`, {
+      const wRes = await fetch(`${base}/workingorders/otc`, {
         method: 'POST',
         headers: igHeaders(apiKey, cst, securityToken, '2'),
         body: JSON.stringify(woPayload),
       });
-      let data: { dealReference?: string; errorCode?: string } = {};
-      try { data = await res.json() as typeof data; } catch {}
-      if (!res.ok) {
-        return NextResponse.json({ ok: false, error: data.errorCode ?? `IG API error ${res.status}` }, { status: res.status });
+      let wData: { dealReference?: string; errorCode?: string } = {};
+      try { wData = await wRes.json() as typeof wData; } catch {}
+      if (!wRes.ok) {
+        return NextResponse.json({ ok: false, error: wData.errorCode ?? `IG API error ${wRes.status}`, epic: resolvedEpic, sentPayload: woPayload, igBody: wData }, { status: wRes.status });
       }
-      return NextResponse.json({ ok: true, dealReference: data.dealReference, orderType });
+      return NextResponse.json({ ok: true, dealReference: wData.dealReference, orderType, epic: resolvedEpic, resolvedVia });
     }
 
     // ── Market position ───────────────────────────────────────────────────────
     const payload = {
-      epic:          body.epic,
-      expiry:        body.expiry ?? 'DFB',
+      epic:          resolvedEpic,
+      expiry:        body.expiry ?? '-',
       direction:     body.direction,
       size:          body.size,
       orderType:     'MARKET',
@@ -108,19 +154,24 @@ export async function POST(request: NextRequest) {
       forceOpen:     body.forceOpen ?? true,
     };
 
+    console.log(`[ig/order] POST → ${env} ${resolvedEpic} (via ${resolvedVia})`, JSON.stringify(payload));
+
     const res = await fetch(`${base}/positions/otc`, {
       method: 'POST',
       headers: igHeaders(apiKey, cst, securityToken, '2'),
       body: JSON.stringify(payload),
     });
 
+    const resText = await res.text();
     let data: { dealReference?: string; errorCode?: string } = {};
-    try { data = await res.json() as typeof data; } catch {}
+    try { data = JSON.parse(resText) as typeof data; } catch {}
+
+    console.log(`[ig/order] IG response ${res.status}:`, resText.slice(0, 500));
 
     if (!res.ok) {
-      return NextResponse.json({ ok: false, error: data.errorCode ?? `IG API error ${res.status}` }, { status: res.status });
+      return NextResponse.json({ ok: false, error: data.errorCode ?? `IG API error ${res.status}`, epic: resolvedEpic, sentPayload: payload, igBody: data, igStatus: res.status }, { status: res.status });
     }
-    return NextResponse.json({ ok: true, dealReference: data.dealReference, orderType: 'MARKET' });
+    return NextResponse.json({ ok: true, dealReference: data.dealReference, orderType: 'MARKET', epic: resolvedEpic, resolvedVia, sentPayload: payload });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }
