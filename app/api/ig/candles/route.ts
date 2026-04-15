@@ -18,17 +18,24 @@ import { NextRequest, NextResponse } from 'next/server';
 // ── Symbol map ────────────────────────────────────────────────────────────────
 
 const YAHOO_MAP: Record<string, string> = {
+  // Indices
   'FTSE 100':   '^FTSE',
   'S&P 500':    '^GSPC',
   'NASDAQ 100': '^IXIC',
   'Germany 40': '^GDAXI',
   'Wall Street':'^DJI',
+  'Japan 225':  '^N225',
+  // Commodities
   'Gold':       'GC=F',
   'Oil (WTI)':  'CL=F',
   'Brent Crude':'BZ=F',
+  'Silver':     'SI=F',
+  // Forex
   'GBP/USD':    'GBPUSD=X',
   'EUR/USD':    'EURUSD=X',
   'EUR/GBP':    'EURGBP=X',
+  'USD/JPY':    'JPY=X',
+  // Crypto
   'Bitcoin':    'BTC-USD',
   'Ethereum':   'ETH-USD',
 };

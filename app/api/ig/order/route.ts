@@ -171,7 +171,53 @@ export async function POST(request: NextRequest) {
     if (!res.ok) {
       return NextResponse.json({ ok: false, error: data.errorCode ?? `IG API error ${res.status}`, epic: resolvedEpic, sentPayload: payload, igBody: data, igStatus: res.status }, { status: res.status });
     }
-    return NextResponse.json({ ok: true, dealReference: data.dealReference, orderType: 'MARKET', epic: resolvedEpic, resolvedVia, sentPayload: payload });
+
+    const dealRef = data.dealReference;
+
+    // ── Confirm the deal was ACCEPTED (IG processes deals asynchronously) ────
+    type ConfirmData = { dealStatus?: string; dealId?: string; reason?: string; status?: string; level?: number; size?: number };
+    let confirm: ConfirmData = {};
+    if (dealRef) {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await new Promise(r => setTimeout(r, 600));
+        try {
+          const cr = await fetch(`${base}/confirms/${encodeURIComponent(dealRef)}`, {
+            headers: igHeaders(apiKey, cst, securityToken, '1'),
+            signal: AbortSignal.timeout(5_000),
+          });
+          if (cr.ok) {
+            confirm = await cr.json() as ConfirmData;
+            console.log(`[ig/order] confirm attempt ${attempt + 1}:`, JSON.stringify(confirm));
+            if (confirm.dealStatus === 'ACCEPTED' || confirm.dealStatus === 'REJECTED') break;
+          }
+        } catch { /* retry */ }
+      }
+    }
+
+    if (confirm.dealStatus === 'REJECTED') {
+      return NextResponse.json({
+        ok: false,
+        error: `Deal REJECTED by IG: ${confirm.reason ?? confirm.status ?? 'unknown reason'}`,
+        dealReference: dealRef,
+        dealStatus: 'REJECTED',
+        reason: confirm.reason,
+        epic: resolvedEpic,
+        sentPayload: payload,
+        igBody: confirm,
+      }, { status: 422 });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      dealReference: dealRef,
+      dealId: confirm.dealId,
+      dealStatus: confirm.dealStatus ?? 'UNKNOWN',
+      level: confirm.level,
+      orderType: 'MARKET',
+      epic: resolvedEpic,
+      resolvedVia,
+      sentPayload: payload,
+    });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }

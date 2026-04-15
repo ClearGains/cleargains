@@ -219,6 +219,8 @@ export function IGStrategyTrader() {
   const [positions, setPositions] = useState<PositionMap>({ demo:[], live:[] });
   const [loadingPos, setLoadingPos] = useState(false);
   const [closingId, setClosingId]   = useState<string|null>(null);
+  const [posError, setPosError]     = useState<string|null>(null);
+  const posRefreshRef = useRef<ReturnType<typeof setInterval>|null>(null);
 
   // ── Strategies ─────────────────────────────────────────────────────────────
   const [strategies, setStrategies]     = useState<IGSavedStrategy[]>([]);
@@ -362,14 +364,28 @@ export function IGStrategyTrader() {
   const loadPositions = useCallback(async (envFilter?: 'demo'|'live') => {
     const envs: ('demo'|'live')[] = envFilter ? [envFilter] : ['demo','live'];
     setLoadingPos(true);
+    setPosError(null);
     for (const env of envs) {
-      const sess = sessions[env];
+      let sess = sessions[env];
       if (!sess) continue;
       try {
-        const r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
-        const d = await r.json() as { ok:boolean; positions?: IGPosition[] };
-        if (d.ok) setPositions(p => ({...p, [env]: d.positions ?? []}));
-      } catch {}
+        let r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+        // 401 → re-authenticate and retry once
+        if (r.status === 401) {
+          const fresh = await connectIG(env);
+          if (fresh) { setSessions(s => ({...s,[env]:fresh})); sess = fresh; }
+          r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+        }
+        const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
+        if (d.ok) {
+          setPositions(p => ({...p, [env]: d.positions ?? []}));
+        } else {
+          const msg = `[${env.toUpperCase()}] Positions error: ${d.error ?? 'unknown'}${d.detail ? ` — ${d.detail}` : ''}`;
+          setPosError(msg);
+        }
+      } catch (e) {
+        setPosError(`[${env.toUpperCase()}] Failed to fetch positions: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
     setLoadingPos(false);
   }, [sessions]);
@@ -378,8 +394,13 @@ export function IGStrategyTrader() {
     if (Object.values(sessions).some(Boolean)) {
       void loadPositions();
       void loadWorkingOrders();
+      // Auto-refresh positions every 30 seconds
+      if (posRefreshRef.current) clearInterval(posRefreshRef.current);
+      posRefreshRef.current = setInterval(() => { void loadPositions(); }, 30_000);
     }
-  }, [sessions, loadPositions]);
+    return () => { if (posRefreshRef.current) clearInterval(posRefreshRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions]);
 
   // ── Load working orders ────────────────────────────────────────────────────
   const loadWorkingOrders = useCallback(async (envFilter?: 'demo'|'live') => {
@@ -479,7 +500,7 @@ export function IGStrategyTrader() {
       headers: { ...makeHeaders(sess, env), 'Content-Type':'application/json' },
       body: JSON.stringify(body),
     });
-    return r.json() as Promise<{ok:boolean;dealReference?:string;error?:string;epic?:string;resolvedVia?:string;sentPayload?:unknown;igBody?:unknown;igStatus?:number}>;
+    return r.json() as Promise<{ok:boolean;dealReference?:string;dealId?:string;dealStatus?:string;level?:number;reason?:string;error?:string;epic?:string;resolvedVia?:string;sentPayload?:unknown;igBody?:unknown;igStatus?:number}>;
   }
 
   async function closePos(env: 'demo'|'live', pos: IGPosition) {
@@ -600,12 +621,15 @@ export function IGStrategyTrader() {
 
         if (or.ok) {
           log(tradeDir === 'BUY' ? 'buy' : 'sell',
-            `[${env.toUpperCase()}] ✅ Filled — ref ${or.dealReference ?? 'n/a'} · epic used: ${or.epic ?? market.epic}${or.resolvedVia && or.resolvedVia !== 'verified' ? ` (resolved via ${or.resolvedVia})` : ''}`);
+            `[${env.toUpperCase()}] ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · filled @ ${or.level ?? '?'} · epic: ${or.epic ?? market.epic}`);
           showToast(true, `[${env}] ${tradeDir} ${market.name}`);
+          // Small delay then refresh so IG has time to register the position
+          await sleep(1500);
           await loadPositions(env);
+          await loadWorkingOrders(env);
         } else {
-          log('error', `[${env.toUpperCase()}] ❌ ${market.name} FAILED`);
-          log('error', `  epic: ${or.epic ?? market.epic} | error: ${or.error ?? 'unknown'}`);
+          log('error', `[${env.toUpperCase()}] ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}`);
+          log('error', `  epic: ${or.epic ?? market.epic}${or.reason ? ` | reason: ${or.reason}` : ''}`);
           if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
           if (or.igBody)      log('error', `  ig:   ${JSON.stringify(or.igBody)}`);
         }
@@ -750,8 +774,9 @@ export function IGStrategyTrader() {
   }
 
   useEffect(() => () => {
-    if (timerRef.current)    clearInterval(timerRef.current);
-    if (posTimerRef.current) clearInterval(posTimerRef.current);
+    if (timerRef.current)      clearInterval(timerRef.current);
+    if (posTimerRef.current)   clearInterval(posTimerRef.current);
+    if (posRefreshRef.current) clearInterval(posRefreshRef.current);
   }, []);
 
   // ── Manual close ───────────────────────────────────────────────────────────
@@ -812,11 +837,15 @@ export function IGStrategyTrader() {
       manualStop !== '' ? Number(manualStop) : undefined,
       manualLimit !== '' ? Number(manualLimit) : undefined);
     if (r.ok) {
-      log(manualDir === 'BUY' ? 'buy' : 'sell', `[${manualEnv.toUpperCase()}] Manual ${manualDir} £${manualSize}/pt ${manualName || manualEpic}`);
+      log(manualDir === 'BUY' ? 'buy' : 'sell',
+        `[${manualEnv.toUpperCase()}] Manual ${manualDir} £${manualSize}/pt ${manualName || manualEpic} — ${r.dealStatus ?? 'ACCEPTED'} · ref ${r.dealReference ?? 'n/a'} · dealId ${r.dealId ?? 'pending'}`);
       showToast(true, `${manualDir} placed on ${manualName || manualEpic}`);
+      await sleep(1500);
       await loadPositions(manualEnv);
     } else {
-      log('error', `[${manualEnv.toUpperCase()}] Manual order failed: ${r.error ?? 'unknown'}`);
+      log('error', `[${manualEnv.toUpperCase()}] Manual order failed: ${r.error ?? 'unknown'}${r.reason ? ` (${r.reason})` : ''}`);
+      if (r.sentPayload) log('error', `  sent: ${JSON.stringify(r.sentPayload)}`);
+      if (r.igBody)      log('error', `  ig:   ${JSON.stringify(r.igBody)}`);
       showToast(false, r.error ?? 'Order failed');
     }
     setPlacingManual(false);
@@ -1560,7 +1589,14 @@ export function IGStrategyTrader() {
           <>
             <div className="flex items-center justify-between mb-3">
               <p className="text-xs text-gray-500">{allPositions.length} open · P&L: <span className={clsx('font-semibold', totalPnL>=0?'text-emerald-400':'text-red-400')}>{totalPnL>=0?'+':''}{fmt(totalPnL)}</span></p>
+              <span className="text-[10px] text-gray-600">Auto-refresh every 30s</span>
             </div>
+            {posError && (
+              <div className="mb-3 flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400">
+                <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                <span className="break-all">{posError}</span>
+              </div>
+            )}
             {allPositions.length === 0 ? (
               <p className="text-sm text-gray-500 py-3 text-center">No open positions</p>
             ) : (

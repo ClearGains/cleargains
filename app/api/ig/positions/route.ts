@@ -26,7 +26,12 @@ export async function GET(request: NextRequest) {
     });
 
     if (!res.ok) {
-      return NextResponse.json({ ok: false, error: `IG API error ${res.status}` }, { status: res.status });
+      const errText = await res.text();
+      console.error(`[ig/positions] IG ${res.status}:`, errText.slice(0, 300));
+      return NextResponse.json(
+        { ok: false, error: `IG positions error ${res.status}`, detail: errText.slice(0, 200) },
+        { status: res.status },
+      );
     }
 
     const data = await res.json() as {
@@ -37,11 +42,11 @@ export async function GET(request: NextRequest) {
           direction?: string;
           level?: number;
           currency?: string;
-          upl?: number;
           stopLevel?: number;
           limitLevel?: number;
           contractSize?: number;
           createdDate?: string;
+          createdDateUTC?: string;
         };
         market?: {
           epic?: string;
@@ -49,28 +54,42 @@ export async function GET(request: NextRequest) {
           bid?: number;
           offer?: number;
           instrumentType?: string;
+          netChange?: number;
+          percentageChange?: number;
         };
       }>;
     };
 
-    const positions = (data.positions ?? []).map(p => ({
-      dealId:         p.position?.dealId,
-      direction:      p.position?.direction,
-      size:           p.position?.size,
-      level:          p.position?.level,
-      upl:            p.position?.upl,
-      currency:       p.position?.currency,
-      stopLevel:      p.position?.stopLevel,
-      limitLevel:     p.position?.limitLevel,
-      contractSize:   p.position?.contractSize,
-      createdDate:    p.position?.createdDate,
-      epic:           p.market?.epic,
-      instrumentName: p.market?.instrumentName,
-      bid:            p.market?.bid,
-      offer:          p.market?.offer,
-      instrumentType: p.market?.instrumentType,
-    }));
+    const positions = (data.positions ?? []).map(p => {
+      const direction = p.position?.direction ?? '';
+      const level     = p.position?.level ?? 0;
+      const size      = p.position?.size ?? 0;
+      const bid       = p.market?.bid ?? 0;
+      const offer     = p.market?.offer ?? 0;
+      // IG doesn't return UPL directly — calculate it
+      const upl = direction === 'BUY'
+        ? (bid   - level) * size
+        : (level - offer) * size;
+      return {
+        dealId:         p.position?.dealId         ?? '',
+        direction,
+        size,
+        level,
+        upl:            Math.round(upl * 100) / 100,
+        currency:       p.position?.currency        ?? 'GBP',
+        stopLevel:      p.position?.stopLevel,
+        limitLevel:     p.position?.limitLevel,
+        contractSize:   p.position?.contractSize,
+        createdDate:    p.position?.createdDateUTC ?? p.position?.createdDate,
+        epic:           p.market?.epic              ?? '',
+        instrumentName: p.market?.instrumentName    ?? '',
+        bid,
+        offer,
+        instrumentType: p.market?.instrumentType,
+      };
+    });
 
+    console.log(`[ig/positions] ${env} → ${positions.length} position(s)`);
     return NextResponse.json({ ok: true, positions });
   } catch (err) {
     return NextResponse.json(
