@@ -1,10 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { Key, ShieldCheck, AlertCircle, ExternalLink, Eye, EyeOff, CheckCircle2, Wifi } from 'lucide-react';
+import { Key, ShieldCheck, AlertCircle, ExternalLink, Eye, EyeOff, CheckCircle2, Wifi, Download, X } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
-import { generateAccountId, setStoredAccountId } from '@/lib/fingerprint';
+import { generateAccountId, setStoredAccountId, getStoredSyncUrl } from '@/lib/fingerprint';
+import { importData, getBackupSummary } from '@/lib/backup';
 import Modal from '@/components/ui/Modal';
+import type { BackupFile } from '@/lib/backup';
 import { Button } from '@/components/ui/Button';
 import { clsx } from 'clsx';
 
@@ -27,6 +29,54 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
   } = useClearGainsStore();
 
   const [tab, setTab] = useState<Tab>('live');
+
+  // Post-connection restore flow
+  const [postConnectAccountId, setPostConnectAccountId] = useState<string | null>(null);
+  const [restoreUrl, setRestoreUrl] = useState('');
+  const [restoreLoading, setRestoreLoading] = useState(false);
+  const [restoreMsg, setRestoreMsg] = useState<string | null>(null);
+
+  async function handleRestore() {
+    const url = restoreUrl.trim();
+    if (!url) return;
+    setRestoreLoading(true);
+    setRestoreMsg(null);
+    try {
+      const res = await fetch('/api/sync/download?url=' + encodeURIComponent(url));
+      const data = await res.json() as { ok: boolean; backup?: BackupFile; error?: string };
+      if (data.ok && data.backup) {
+        importData(data.backup, 'replace');
+        setRestoreMsg('✓ ' + getBackupSummary(data.backup) + ' — reloading…');
+        setTimeout(() => { onConnected(); window.location.reload(); }, 1200);
+      } else {
+        setRestoreMsg('⚠ ' + (data.error ?? 'Load failed.'));
+        setRestoreLoading(false);
+      }
+    } catch (err) {
+      setRestoreMsg('⚠ ' + (err instanceof Error ? err.message : String(err)));
+      setRestoreLoading(false);
+    }
+  }
+
+  async function handleRestoreByAccountId(accountId: string) {
+    setRestoreLoading(true);
+    setRestoreMsg(null);
+    try {
+      const res = await fetch('/api/sync/download?accountId=' + accountId);
+      const data = await res.json() as { ok: boolean; backup?: BackupFile; error?: string };
+      if (data.ok && data.backup) {
+        importData(data.backup, 'replace');
+        setRestoreMsg('✓ ' + getBackupSummary(data.backup) + ' — reloading…');
+        setTimeout(() => { onConnected(); window.location.reload(); }, 1200);
+      } else {
+        // No cloud data found — skip silently, user can still paste URL
+        setRestoreMsg(null);
+        setRestoreLoading(false);
+      }
+    } catch {
+      setRestoreLoading(false);
+    }
+  }
 
   // LIVE form state
   const [liveKey, setLiveKey] = useState('');
@@ -68,8 +118,11 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         setT212Credentials(cleanKey, cleanSecret);
         setT212AccountInfo({ id: data.accountId, currency: data.currency });
         setT212Connected(true);
-        generateAccountId(cleanKey).then(setStoredAccountId).catch(() => {});
-        onConnected();
+        const fp = await generateAccountId(cleanKey);
+        setStoredAccountId(fp);
+        setPostConnectAccountId(fp);
+        const savedUrl = getStoredSyncUrl(fp);
+        if (savedUrl) { setRestoreUrl(savedUrl); handleRestoreByAccountId(fp); }
       } else { setLiveError(data.error ?? 'Connection failed.'); }
     } catch (err) {
       setLiveError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -92,8 +145,11 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         setT212IsaCredentials(cleanKey, cleanSecret);
         setT212IsaAccountInfo({ id: data.accountId, currency: data.currency });
         setT212IsaConnected(true);
-        generateAccountId(cleanKey).then(setStoredAccountId).catch(() => {});
-        onConnected();
+        const fp = await generateAccountId(cleanKey);
+        setStoredAccountId(fp);
+        setPostConnectAccountId(fp);
+        const savedUrl = getStoredSyncUrl(fp);
+        if (savedUrl) { setRestoreUrl(savedUrl); handleRestoreByAccountId(fp); }
       } else { setIsaError(data.error ?? 'Connection failed.'); }
     } catch (err) {
       setIsaError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -116,8 +172,11 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
         setT212DemoCredentials(cleanKey, cleanSecret);
         setT212DemoAccountInfo({ id: data.accountId, currency: data.currency });
         setT212DemoConnected(true);
-        generateAccountId(cleanKey).then(setStoredAccountId).catch(() => {});
-        onConnected();
+        const fp = await generateAccountId(cleanKey);
+        setStoredAccountId(fp);
+        setPostConnectAccountId(fp);
+        const savedUrl = getStoredSyncUrl(fp);
+        if (savedUrl) { setRestoreUrl(savedUrl); handleRestoreByAccountId(fp); }
       } else { setDemoError(data.error ?? 'Connection failed.'); }
     } catch (err) {
       setDemoError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -329,6 +388,56 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
           )}
         </div>
 
+        {/* ── Post-connect restore panel ─────────────────────────── */}
+        {postConnectAccountId && (
+          <div className="mx-6 mb-2 p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl space-y-2.5">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-blue-300">
+                Restore strategies from another device?
+              </p>
+              <button
+                onClick={() => { setPostConnectAccountId(null); onConnected(); }}
+                className="text-gray-600 hover:text-gray-400"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <p className="text-[11px] text-gray-500">
+              Account ID: <code className="font-mono text-gray-400">{postConnectAccountId}</code>
+              {' '}— paste your sync URL to load all portfolios and strategies.
+            </p>
+            {restoreMsg ? (
+              <p className="text-xs text-emerald-400">{restoreMsg}</p>
+            ) : (
+              <>
+                <input
+                  type="text"
+                  value={restoreUrl}
+                  onChange={e => setRestoreUrl(e.target.value)}
+                  placeholder="https://api.npoint.io/…"
+                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleRestore}
+                    disabled={restoreLoading || !restoreUrl.trim()}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-semibold text-white transition-colors"
+                  >
+                    <Download className="h-3 w-3" />
+                    {restoreLoading ? 'Loading…' : 'Load Strategies'}
+                  </button>
+                  <button
+                    onClick={() => { setPostConnectAccountId(null); onConnected(); }}
+                    className="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-xs font-semibold text-gray-400 hover:text-white transition-colors"
+                  >
+                    Start Fresh
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* ── Footer ────────────────────────────────────────────────── */}
         <div className="mt-4 pt-4 border-t border-gray-800">
           <button
@@ -387,7 +496,7 @@ function SecurityNote() {
         <li>Stored only in your browser&apos;s localStorage — never on our servers</li>
         <li>Sent directly to Trading 212&apos;s API — ClearGains never sees the raw keys</li>
         <li>Not included in cloud sync — you must re-enter on each device</li>
-        <li>To enable cross-device use, see <span className="text-gray-400">Settings → API Key Storage Mode</span></li>
+        <li>For cross-device strategies, see <span className="text-emerald-400">Settings → Strategy Accounts</span></li>
       </ul>
     </div>
   );

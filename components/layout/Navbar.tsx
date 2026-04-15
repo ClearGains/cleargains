@@ -17,6 +17,9 @@ import {
   X,
   LogOut,
   FlaskConical,
+  Cloud,
+  CloudUpload,
+  CloudOff,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useState, useCallback } from 'react';
@@ -40,7 +43,7 @@ const navLinks = [
 export function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
-  const { selectedCountry } = useClearGainsStore();
+  const { selectedCountry, syncStatus, autoSaveEnabled } = useClearGainsStore();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   if (pathname === '/login') return null;
@@ -87,6 +90,28 @@ export function Navbar() {
 
         {/* Right-side actions */}
         <div className="flex items-center gap-2">
+          {/* Cloud sync status indicator — only shown when auto-save is on */}
+          {autoSaveEnabled && (
+            <div
+              title={
+                syncStatus === 'saving' ? 'Saving strategies…' :
+                syncStatus === 'saved'  ? 'Strategies saved' :
+                syncStatus === 'error'  ? 'Sync error — check Settings' :
+                'Auto-save enabled'
+              }
+              className="hidden sm:flex items-center"
+            >
+              {syncStatus === 'saving' ? (
+                <CloudUpload className="h-4 w-4 text-blue-400 animate-pulse" />
+              ) : syncStatus === 'saved' ? (
+                <Cloud className="h-4 w-4 text-emerald-400" />
+              ) : syncStatus === 'error' ? (
+                <CloudOff className="h-4 w-4 text-red-400" />
+              ) : (
+                <Cloud className="h-4 w-4 text-gray-600" />
+              )}
+            </div>
+          )}
           <T212NavButton />
 
           <Link

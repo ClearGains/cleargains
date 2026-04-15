@@ -4,10 +4,9 @@ import { useState, useEffect, useRef } from 'react';
 import {
   Eye, EyeOff, Save, Trash2, CheckCircle2, AlertCircle, Key, ShieldCheck,
   Bell, ChevronRight, Download, Upload, Database, X, FileText, Info,
-  Cloud, Link2, Copy, QrCode, Fingerprint, Zap,
+  Cloud, Link2, Copy, QrCode, Fingerprint, Zap, RefreshCw, ToggleLeft, ToggleRight,
 } from 'lucide-react';
 import Link from 'next/link';
-import { QRCodeSVG } from 'qrcode.react';
 import { useClearGainsStore } from '@/lib/store';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -15,42 +14,45 @@ import { Badge } from '@/components/ui/Badge';
 import { getPermission, requestPermission } from '@/lib/pushNotifications';
 import Modal from '@/components/ui/Modal';
 import {
-  exportData,
-  importData,
-  getBackupSummary,
-  getLastBackupDate,
-  getLastImportDate,
-  recordBackup,
-  recordImport,
-  shouldShowBackupReminder,
-  dismissBackupReminder,
-  daysSinceBackup,
-  formatBackupDate,
-  getStrategyProfiles,
-  deleteStrategyProfile,
-  type BackupFile,
-  type StrategyProfile,
+  exportData, importData, getBackupSummary,
+  getLastBackupDate, getLastImportDate, recordBackup, recordImport,
+  shouldShowBackupReminder, dismissBackupReminder, daysSinceBackup, formatBackupDate,
+  getStrategyProfiles, deleteStrategyProfile,
+  type BackupFile, type StrategyProfile,
 } from '@/lib/backup';
 import {
-  generateAccountId,
-  setStoredAccountId,
-  getStoredAccountId,
-  getStoredSyncUrl,
-  setStoredSyncUrl,
-  clearStoredSyncUrl,
+  generateAccountId, setStoredAccountId, getStoredAccountId,
+  getStoredSyncUrl, setStoredSyncUrl,
 } from '@/lib/fingerprint';
+
+// ── Google Charts QR (no package needed) ─────────────────────────────────────
+function QRImage({ value, size = 200 }: { value: string; size?: number }) {
+  return (
+    <img
+      src={`https://chart.googleapis.com/chart?chs=${size}x${size}&cht=qr&chl=${encodeURIComponent(value)}&choe=UTF-8`}
+      alt="QR code"
+      width={size}
+      height={size}
+      className="rounded-lg"
+    />
+  );
+}
+
+// ── Relative time helper ──────────────────────────────────────────────────────
+function relativeTime(iso: string): string {
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
 
 export default function SettingsPage() {
   const {
-    t212ApiKey,
-    t212ApiSecret,
-    t212Connected,
-    t212AccountInfo,
-    t212LastSync,
-    setT212Credentials,
-    setT212Connected,
-    setT212AccountInfo,
-    clearT212Credentials,
+    t212ApiKey, t212ApiSecret, t212Connected, t212AccountInfo, t212LastSync,
+    setT212Credentials, setT212Connected, setT212AccountInfo, clearT212Credentials,
+    syncStatus, syncLastSaved, autoSaveEnabled,
+    setSyncStatus, setSyncLastSaved, setAutoSaveEnabled,
     reset,
   } = useClearGainsStore();
 
@@ -61,14 +63,14 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
 
-  // Push notifications
+  // Notifications
   const [notifPermission, setNotifPermission] = useState<string>('default');
   const [notifLoading, setNotifLoading] = useState(false);
 
   // Account fingerprint
   const [accountId, setAccountId] = useState<string | null>(null);
   const [showWelcomeBanner, setShowWelcomeBanner] = useState(false);
-  const [welcomeBackUrl, setWelcomeBackUrl] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState(false);
 
   // Cloud sync
   const [syncUrl, setSyncUrl] = useState('');
@@ -78,8 +80,9 @@ export default function SettingsPage() {
   const [showQr, setShowQr] = useState(false);
   const [cloudMsg, setCloudMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [now, setNow] = useState(Date.now());
 
-  // Backup / restore state
+  // Local backup
   const [lastBackup, setLastBackup] = useState<string | null>(null);
   const [lastImport, setLastImport] = useState<string | null>(null);
   const [showBanner, setShowBanner] = useState(false);
@@ -98,6 +101,12 @@ export default function SettingsPage() {
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Tick every 30 s for "X minutes ago" display
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
   useEffect(() => {
     setNotifPermission(getPermission());
     setLastBackup(getLastBackupDate());
@@ -112,13 +121,11 @@ export default function SettingsPage() {
       const url = getStoredSyncUrl(storedId);
       if (url) {
         setSyncUrl(url);
-        // Show welcome-back if never imported on this device
-        if (!getLastImportDate()) {
-          setWelcomeBackUrl(url);
-          setShowWelcomeBanner(true);
-        }
+        if (!getLastImportDate()) setShowWelcomeBanner(true);
       }
     }
+    void now; // suppress unused warning
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleEnableNotifications() {
@@ -128,18 +135,16 @@ export default function SettingsPage() {
     setNotifLoading(false);
   }
 
+  // ── T212 connect ───────────────────────────────────────────────────────────
   async function handleSave() {
     const cleanKey = apiKey.replace(/[\s\n\r\t]/g, '');
     const cleanSecret = apiSecret.replace(/[\s\n\r\t]/g, '');
-
     if (!cleanKey || !cleanSecret) {
       setResult({ ok: false, message: 'Both API key and secret are required.' });
       return;
     }
-
     setSaving(true);
     setResult(null);
-
     try {
       const encoded = btoa(cleanKey + ':' + cleanSecret);
       const res = await fetch('/api/t212/connect', {
@@ -147,25 +152,16 @@ export default function SettingsPage() {
         headers: { 'x-t212-auth': encoded },
       });
       const data = await res.json();
-
       if (data.ok) {
         setT212Credentials(cleanKey, cleanSecret);
         setT212AccountInfo({ id: data.accountId, currency: data.currency });
         setT212Connected(true);
         setResult({ ok: true, message: `Connected — account ${data.accountId} (${data.currency})` });
-
-        // Generate fingerprint and check for saved sync URL
         const fp = await generateAccountId(cleanKey);
         setStoredAccountId(fp);
         setAccountId(fp);
         const savedUrl = getStoredSyncUrl(fp);
-        if (savedUrl) {
-          setSyncUrl(savedUrl);
-          if (!getLastImportDate()) {
-            setWelcomeBackUrl(savedUrl);
-            setShowWelcomeBanner(true);
-          }
-        }
+        if (savedUrl) { setSyncUrl(savedUrl); setShowWelcomeBanner(true); }
       } else {
         setResult({ ok: false, message: data.error ?? 'Connection failed.' });
       }
@@ -183,40 +179,46 @@ export default function SettingsPage() {
     setResult(null);
   }
 
-  // ── Cloud sync ──────────────────────────────────────────────────────────────
-
+  // ── Cloud save ─────────────────────────────────────────────────────────────
   async function handleSaveToCloud() {
     setCloudSaving(true);
     setCloudMsg(null);
+    setSyncStatus('saving');
     try {
       const backup = exportData();
       const res = await fetch('/api/sync/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(backup),
+        body: JSON.stringify({ backup, accountId: accountId ?? undefined }),
       });
-      const data = await res.json();
-
-      if (data.ok) {
-        const url: string = data.syncUrl;
+      const data = await res.json() as { ok: boolean; syncUrl?: string; error?: string };
+      if (data.ok && data.syncUrl) {
+        const url = data.syncUrl;
         setSyncUrl(url);
         if (accountId) setStoredSyncUrl(accountId, url);
         recordBackup();
-        setLastBackup(new Date().toISOString());
+        const now = new Date().toISOString();
+        setLastBackup(now);
+        setSyncLastSaved(now);
+        setSyncStatus('saved');
         setShowBanner(false);
         setDaysSince(0);
-        setCloudMsg({ ok: true, text: 'Saved to cloud! Share the URL or scan the QR code on your other device.' });
+        setCloudMsg({ ok: true, text: 'Strategies saved to cloud!' });
         setShowQr(true);
+        setTimeout(() => setSyncStatus('idle'), 8000);
       } else {
+        setSyncStatus('error');
         setCloudMsg({ ok: false, text: data.error ?? 'Upload failed.' });
       }
     } catch (err) {
+      setSyncStatus('error');
       setCloudMsg({ ok: false, text: `Upload failed: ${err instanceof Error ? err.message : String(err)}` });
     } finally {
       setCloudSaving(false);
     }
   }
 
+  // ── Cloud load ─────────────────────────────────────────────────────────────
   async function handleLoadFromCloud() {
     const url = cloudLoadInput.trim();
     if (!url) return;
@@ -224,11 +226,10 @@ export default function SettingsPage() {
     setCloudMsg(null);
     try {
       const res = await fetch('/api/sync/download?url=' + encodeURIComponent(url));
-      const data = await res.json();
-
-      if (data.ok) {
-        setImportPreview(data.backup as BackupFile);
-        setImportSummary(getBackupSummary(data.backup as BackupFile));
+      const data = await res.json() as { ok: boolean; backup?: BackupFile; error?: string };
+      if (data.ok && data.backup) {
+        setImportPreview(data.backup);
+        setImportSummary(getBackupSummary(data.backup));
         setImportModalOpen(true);
       } else {
         setCloudMsg({ ok: false, text: data.error ?? 'Load failed.' });
@@ -240,16 +241,41 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleCopySyncUrl() {
+  // ── Welcome-back restore ───────────────────────────────────────────────────
+  async function handleWelcomeRestore() {
+    if (!accountId) return;
+    setCloudLoadLoading(true);
     try {
-      await navigator.clipboard.writeText(syncUrl);
-      setCopiedUrl(true);
-      setTimeout(() => setCopiedUrl(false), 2000);
-    } catch {}
+      const res = await fetch('/api/sync/download?accountId=' + accountId);
+      const data = await res.json() as { ok: boolean; backup?: BackupFile; error?: string };
+      if (data.ok && data.backup) {
+        setImportPreview(data.backup);
+        setImportSummary(getBackupSummary(data.backup));
+        setImportModalOpen(true);
+        setShowWelcomeBanner(false);
+      } else if (syncUrl) {
+        // Fall back to stored URL
+        const res2 = await fetch('/api/sync/download?url=' + encodeURIComponent(syncUrl));
+        const data2 = await res2.json() as { ok: boolean; backup?: BackupFile; error?: string };
+        if (data2.ok && data2.backup) {
+          setImportPreview(data2.backup);
+          setImportSummary(getBackupSummary(data2.backup));
+          setImportModalOpen(true);
+          setShowWelcomeBanner(false);
+        } else {
+          setShowWelcomeBanner(false);
+        }
+      } else {
+        setShowWelcomeBanner(false);
+      }
+    } catch {
+      setShowWelcomeBanner(false);
+    } finally {
+      setCloudLoadLoading(false);
+    }
   }
 
-  // ── Local export ─────────────────────────────────────────────────────────────
-
+  // ── Local export / import ──────────────────────────────────────────────────
   function handleExport() {
     try {
       const backup = exportData();
@@ -265,7 +291,6 @@ export default function SettingsPage() {
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
-
       recordBackup();
       setLastBackup(new Date().toISOString());
       setShowBanner(false);
@@ -277,27 +302,23 @@ export default function SettingsPage() {
     }
   }
 
-  // ── Local import ─────────────────────────────────────────────────────────────
-
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setImportError(null);
-    setImportPreview(null);
-
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
         const parsed = JSON.parse(ev.target?.result as string) as BackupFile;
         if (!parsed.version || !parsed.data || !parsed.exportedAt) {
-          setImportError('This does not appear to be a valid ClearGains backup file.');
+          setImportError('Not a valid ClearGains backup file.');
           return;
         }
         setImportPreview(parsed);
         setImportSummary(getBackupSummary(parsed));
         setImportModalOpen(true);
       } catch {
-        setImportError('Could not parse the file. Make sure it is a valid JSON backup.');
+        setImportError('Could not parse the file — ensure it is a valid JSON backup.');
       }
     };
     reader.readAsText(file);
@@ -319,37 +340,12 @@ export default function SettingsPage() {
     }
   }
 
-  function handleDismissBanner() {
-    dismissBackupReminder();
-    setShowBanner(false);
-  }
-
-  function handleDeleteProfile(id: string) {
-    deleteStrategyProfile(id);
-    setProfiles(prev => prev.filter(p => p.id !== id));
-  }
-
-  // ── Welcome-back restore ──────────────────────────────────────────────────────
-
-  async function handleWelcomeRestore() {
-    if (!welcomeBackUrl) return;
-    setCloudLoadLoading(true);
+  async function handleCopy(text: string, setCopied: (v: boolean) => void) {
     try {
-      const res = await fetch('/api/sync/download?url=' + encodeURIComponent(welcomeBackUrl));
-      const data = await res.json();
-      if (data.ok) {
-        setImportPreview(data.backup as BackupFile);
-        setImportSummary(getBackupSummary(data.backup as BackupFile));
-        setImportModalOpen(true);
-        setShowWelcomeBanner(false);
-      } else {
-        setShowWelcomeBanner(false);
-      }
-    } catch {
-      setShowWelcomeBanner(false);
-    } finally {
-      setCloudLoadLoading(false);
-    }
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
   }
 
   return (
@@ -363,14 +359,14 @@ export default function SettingsPage() {
       {showWelcomeBanner && (
         <div className="mb-4 px-4 py-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl">
           <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-2.5 min-w-0">
+            <div className="flex items-start gap-2.5">
               <Zap className="h-4 w-4 text-emerald-400 flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-xs font-semibold text-emerald-400">
                   Welcome back — account <code className="font-mono">{accountId}</code> recognised
                 </p>
                 <p className="text-xs text-emerald-400/70 mt-0.5">
-                  Your strategy data was found in cloud backup. Restore it now?
+                  Your strategy data was found. Restore it now?
                 </p>
               </div>
             </div>
@@ -379,36 +375,26 @@ export default function SettingsPage() {
             </button>
           </div>
           <div className="flex gap-2 mt-3">
-            <Button
-              size="sm"
-              loading={cloudLoadLoading}
-              onClick={handleWelcomeRestore}
-              icon={<Download className="h-3.5 w-3.5" />}
-            >
+            <Button size="sm" loading={cloudLoadLoading} onClick={handleWelcomeRestore} icon={<Download className="h-3.5 w-3.5" />}>
               Restore Strategies
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setShowWelcomeBanner(false)}>
-              Skip
-            </Button>
+            <Button size="sm" variant="outline" onClick={() => setShowWelcomeBanner(false)}>Skip</Button>
           </div>
         </div>
       )}
 
-      {/* Auto-backup reminder banner */}
+      {/* Auto-backup reminder */}
       {showBanner && (
         <div className="mb-4 flex items-center justify-between gap-3 px-4 py-3 bg-amber-500/10 border border-amber-500/30 rounded-xl">
           <div className="flex items-center gap-2.5 min-w-0">
             <span className="text-base flex-shrink-0">💾</span>
             <p className="text-xs text-amber-300">
               {daysSince === null
-                ? "You haven't backed up your data yet — consider exporting it below."
-                : `Last backup was ${daysSince} day${daysSince !== 1 ? 's' : ''} ago — consider exporting your data.`}
+                ? "You haven't backed up yet — save your strategies below."
+                : `Last backup was ${daysSince} day${daysSince !== 1 ? 's' : ''} ago.`}
             </p>
           </div>
-          <button
-            onClick={handleDismissBanner}
-            className="flex-shrink-0 text-gray-500 hover:text-gray-300 transition-colors"
-          >
+          <button onClick={() => { dismissBackupReminder(); setShowBanner(false); }} className="flex-shrink-0 text-gray-500 hover:text-gray-300">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -452,16 +438,6 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {accountId && (
-          <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-gray-800/60 border border-gray-700 rounded-lg">
-            <Fingerprint className="h-3.5 w-3.5 text-gray-500 flex-shrink-0" />
-            <div className="min-w-0 flex-1">
-              <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wide">Account ID </span>
-              <code className="text-xs text-gray-300 font-mono">{accountId}</code>
-            </div>
-          </div>
-        )}
-
         <div className="space-y-3 mb-4">
           <div>
             <label className="text-xs text-gray-400 font-medium mb-1.5 block">API Key</label>
@@ -473,16 +449,11 @@ export default function SettingsPage() {
                 placeholder="Paste your T212 API key"
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 pr-10"
               />
-              <button
-                type="button"
-                onClick={() => setShowKey(!showKey)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
-              >
+              <button type="button" onClick={() => setShowKey(!showKey)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
                 {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
           </div>
-
           <div>
             <label className="text-xs text-gray-400 font-medium mb-1.5 block">API Secret</label>
             <div className="relative">
@@ -493,11 +464,7 @@ export default function SettingsPage() {
                 placeholder="Paste your T212 API secret"
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 pr-10"
               />
-              <button
-                type="button"
-                onClick={() => setShowSecret(!showSecret)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
-              >
+              <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
                 {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
@@ -505,23 +472,15 @@ export default function SettingsPage() {
         </div>
 
         {result && (
-          <div className={`flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs mb-4 ${
-            result.ok
-              ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-              : 'bg-red-500/10 border border-red-500/30 text-red-400'
-          }`}>
-            {result.ok
-              ? <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-              : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
+          <div className={`flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs mb-4 ${result.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'}`}>
+            {result.ok ? <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
             <span className="break-all">{result.message}</span>
           </div>
         )}
 
         <div className="flex gap-2">
           {t212Connected && (
-            <Button variant="outline" size="sm" onClick={handleDisconnect} icon={<Trash2 className="h-3.5 w-3.5" />}>
-              Disconnect
-            </Button>
+            <Button variant="outline" size="sm" onClick={handleDisconnect} icon={<Trash2 className="h-3.5 w-3.5" />}>Disconnect</Button>
           )}
           <Button onClick={handleSave} loading={saving} fullWidth icon={<Save className="h-4 w-4" />}>
             {saving ? 'Verifying...' : 'Save & Verify'}
@@ -531,11 +490,166 @@ export default function SettingsPage() {
         <div className="flex items-start gap-2 mt-4 px-3 py-2.5 bg-blue-500/10 border border-blue-500/20 rounded-lg">
           <ShieldCheck className="h-3.5 w-3.5 text-blue-400 flex-shrink-0 mt-0.5" />
           <p className="text-xs text-blue-400/80">
-            Credentials are encoded in your browser using <code className="font-mono">btoa()</code> and
-            sent directly to Trading 212 via our API route. They are never logged or stored server-side.
+            Credentials are encoded in your browser using <code className="font-mono">btoa()</code> and sent directly to Trading 212. Never logged or stored server-side.
           </p>
         </div>
       </Card>
+
+      {/* ── Strategy Accounts ─────────────────────────────────────────────────── */}
+      <div id="strategy-accounts">
+      <Card className="mb-4">
+        <CardHeader
+          title="Strategy Accounts"
+          subtitle="Save and restore all your portfolios, strategies, and trade history across devices"
+          icon={<Cloud className="h-4 w-4" />}
+        />
+
+        {/* Concept explanation */}
+        <div className="mb-4 px-3 py-3 bg-gray-800/50 border border-gray-700 rounded-lg">
+          <p className="text-xs text-gray-300 leading-relaxed">
+            Your strategies are saved to your <span className="text-white font-medium">Account ID</span> — a unique code generated from your API key.
+            Enter the same API key on any device to instantly load all your strategies and portfolios.
+          </p>
+        </div>
+
+        {/* Account ID */}
+        {accountId ? (
+          <div className="mb-4 flex items-center gap-2 px-3 py-2.5 bg-gray-800/60 border border-gray-700 rounded-lg">
+            <Fingerprint className="h-3.5 w-3.5 text-gray-500 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wide">Your Account ID </span>
+              <code className="text-sm text-white font-mono">{accountId}</code>
+            </div>
+            <button
+              onClick={() => handleCopy(accountId, setCopiedId)}
+              className="flex-shrink-0 text-gray-500 hover:text-emerald-400 transition-colors"
+              title="Copy Account ID"
+            >
+              {copiedId ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+        ) : (
+          <div className="mb-4 flex items-center gap-2 px-3 py-2.5 bg-gray-800/40 border border-gray-700/50 rounded-lg">
+            <Fingerprint className="h-3.5 w-3.5 text-gray-600 flex-shrink-0" />
+            <p className="text-xs text-gray-600">Connect your T212 API key above to generate your Account ID.</p>
+          </div>
+        )}
+
+        {/* API keys note */}
+        <div className="flex items-start gap-2 mb-4 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+          <Info className="h-3.5 w-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-400/80">
+            API keys are <strong>not</strong> included in any backup. You will need to re-enter them on each device.
+          </p>
+        </div>
+
+        {/* Cloud status message */}
+        {cloudMsg && (
+          <div className={`flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs mb-4 ${cloudMsg.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/30 text-red-400'}`}>
+            {cloudMsg.ok ? <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
+            <span>{cloudMsg.text}</span>
+          </div>
+        )}
+
+        {/* Save to Cloud */}
+        <div className="space-y-3 mb-4">
+          <div className="flex gap-2">
+            <Button
+              onClick={handleSaveToCloud}
+              loading={cloudSaving}
+              fullWidth
+              icon={
+                syncStatus === 'saving' ? <RefreshCw className="h-4 w-4 animate-spin" /> :
+                syncStatus === 'saved'  ? <CheckCircle2 className="h-4 w-4" /> :
+                <Cloud className="h-4 w-4" />
+              }
+            >
+              {cloudSaving ? 'Saving…' : syncStatus === 'saved' ? 'Saved!' : 'Save to Cloud'}
+            </Button>
+          </div>
+
+          {/* Last saved time */}
+          {syncLastSaved && (
+            <p className="text-[11px] text-gray-500">
+              Last saved: {relativeTime(syncLastSaved)} · {formatBackupDate(syncLastSaved)}
+            </p>
+          )}
+
+          {/* Auto-save toggle */}
+          <button
+            onClick={() => setAutoSaveEnabled(!autoSaveEnabled)}
+            className="flex items-center justify-between w-full px-3 py-2.5 bg-gray-800/60 border border-gray-700 rounded-lg hover:border-gray-600 transition-colors"
+          >
+            <div>
+              <p className="text-xs font-semibold text-white text-left">Auto-save</p>
+              <p className="text-[11px] text-gray-500 text-left">Automatically saves strategies every 10 minutes</p>
+            </div>
+            {autoSaveEnabled
+              ? <ToggleRight className="h-5 w-5 text-emerald-400 flex-shrink-0" />
+              : <ToggleLeft className="h-5 w-5 text-gray-600 flex-shrink-0" />
+            }
+          </button>
+        </div>
+
+        {/* Sync URL + QR */}
+        {syncUrl && (
+          <div className="mb-4 space-y-2">
+            <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">Sync URL</p>
+            <div className="flex items-center gap-2 px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg">
+              <Link2 className="h-3.5 w-3.5 text-gray-500 flex-shrink-0" />
+              <p className="text-[11px] text-gray-300 font-mono truncate flex-1">{syncUrl}</p>
+              <button
+                onClick={() => handleCopy(syncUrl, setCopiedUrl)}
+                className="flex-shrink-0 text-gray-500 hover:text-emerald-400 transition-colors"
+                title="Copy URL"
+              >
+                {copiedUrl ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+              </button>
+              <button
+                onClick={() => setShowQr(v => !v)}
+                className={`flex-shrink-0 transition-colors ${showQr ? 'text-blue-400' : 'text-gray-500 hover:text-blue-400'}`}
+                title="Toggle QR code"
+              >
+                <QrCode className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            {showQr && (
+              <div className="flex flex-col items-center gap-2 p-4 bg-white rounded-xl">
+                <QRImage value={syncUrl} size={180} />
+                <p className="text-[10px] text-gray-600 text-center">
+                  Scan on your other device → open ClearGains → Strategy Accounts → Paste Sync URL
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Load from URL */}
+        <div className="pt-3 border-t border-gray-700 space-y-2">
+          <p className="text-xs font-medium text-gray-400">Load from sync URL</p>
+          <p className="text-[11px] text-gray-500">Paste a sync URL from your other device to restore all strategies.</p>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={cloudLoadInput}
+              onChange={e => setCloudLoadInput(e.target.value)}
+              placeholder="https://api.npoint.io/…"
+              className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500"
+            />
+            <Button
+              size="sm"
+              loading={cloudLoadLoading}
+              onClick={handleLoadFromCloud}
+              disabled={!cloudLoadInput.trim()}
+              icon={<Download className="h-3.5 w-3.5" />}
+            >
+              Load
+            </Button>
+          </div>
+        </div>
+      </Card>
+      </div>
 
       {/* ── Notifications ─────────────────────────────────────────────────────── */}
       <Card className="mb-4">
@@ -544,28 +658,19 @@ export default function SettingsPage() {
           subtitle="Get alerted for signals, paper trades, and CGT warnings"
           icon={<Bell className="h-4 w-4" />}
         />
-
         {notifPermission === 'unsupported' ? (
-          <p className="text-xs text-gray-500">Browser notifications are not supported in this browser.</p>
+          <p className="text-xs text-gray-500">Not supported in this browser.</p>
         ) : notifPermission === 'denied' ? (
           <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5 text-xs text-red-400">
             <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-            Notifications are blocked. To re-enable, click the lock icon in your browser address bar and allow notifications, then reload the page.
+            Notifications are blocked. Click the lock icon in your browser address bar to re-enable, then reload.
           </div>
         ) : notifPermission === 'granted' ? (
-          <div className="space-y-3">
+          <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs text-emerald-400">
               <CheckCircle2 className="h-3.5 w-3.5" />
-              Notifications enabled — you&apos;ll be alerted for:
+              Enabled — alerts for BUY/SELL signals, SL/TP hits, and CGT warnings.
             </div>
-            <ul className="text-xs text-gray-400 space-y-1 list-disc list-inside ml-1">
-              <li>BUY/SELL signals with strength &gt; 70%</li>
-              <li>Paper trade take-profit or stop-loss hit</li>
-              <li>CGT exempt amount within £500 of the £3,000 limit</li>
-            </ul>
-            <p className="text-xs text-gray-600">
-              To disable, click the lock icon in your browser address bar and block notifications.
-            </p>
           </div>
         ) : (
           <div className="space-y-3">
@@ -582,120 +687,15 @@ export default function SettingsPage() {
         )}
       </Card>
 
-      {/* ── Data & Backup ──────────────────────────────────────────────────────── */}
+      {/* ── Local Backup ──────────────────────────────────────────────────────── */}
       <Card className="mb-4">
         <CardHeader
-          title="Data &amp; Backup"
-          subtitle="Cloud sync and local export — move your strategies between devices"
+          title="Local Backup"
+          subtitle="Download a backup file to keep on your device"
           icon={<Database className="h-4 w-4" />}
         />
 
-        {/* Credentials note */}
-        <div className="flex items-start gap-2 mb-4 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-          <Info className="h-3.5 w-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
-          <p className="text-xs text-amber-400/80">
-            Your Trading 212 API keys are <strong>not</strong> included in any backup for security. You will need to re-enter them on each new device.
-          </p>
-        </div>
-
-        {/* ── Cloud Sync ─────────────────────────────────────────────────────── */}
-        <div className="mb-4 p-3 bg-gray-800/50 border border-gray-700 rounded-xl space-y-3">
-          <div className="flex items-center gap-2">
-            <Cloud className="h-3.5 w-3.5 text-blue-400" />
-            <p className="text-xs font-semibold text-white">Cloud Sync</p>
-            <span className="text-[10px] text-gray-500">via paste.rs · free · no account needed</span>
-          </div>
-
-          {cloudMsg && (
-            <div className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs ${
-              cloudMsg.ok
-                ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                : 'bg-red-500/10 border border-red-500/30 text-red-400'
-            }`}>
-              {cloudMsg.ok ? <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
-              <span>{cloudMsg.text}</span>
-            </div>
-          )}
-
-          {/* Save to Cloud */}
-          <Button
-            onClick={handleSaveToCloud}
-            loading={cloudSaving}
-            fullWidth
-            icon={<Cloud className="h-4 w-4" />}
-          >
-            {cloudSaving ? 'Uploading…' : 'Save to Cloud'}
-          </Button>
-
-          {/* Sync URL + QR code */}
-          {syncUrl && (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg">
-                <Link2 className="h-3.5 w-3.5 text-gray-500 flex-shrink-0" />
-                <p className="text-[11px] text-gray-300 font-mono truncate flex-1">{syncUrl}</p>
-                <button
-                  onClick={handleCopySyncUrl}
-                  className="flex-shrink-0 text-gray-500 hover:text-emerald-400 transition-colors"
-                  title="Copy URL"
-                >
-                  {copiedUrl ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                </button>
-                <button
-                  onClick={() => setShowQr(v => !v)}
-                  className="flex-shrink-0 text-gray-500 hover:text-blue-400 transition-colors"
-                  title="Show QR code"
-                >
-                  <QrCode className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  onClick={() => {
-                    if (accountId) clearStoredSyncUrl(accountId);
-                    setSyncUrl('');
-                    setShowQr(false);
-                  }}
-                  className="flex-shrink-0 text-gray-500 hover:text-red-400 transition-colors"
-                  title="Clear saved URL"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-
-              {showQr && (
-                <div className="flex flex-col items-center gap-2 p-4 bg-white rounded-xl">
-                  <QRCodeSVG value={syncUrl} size={180} />
-                  <p className="text-[10px] text-gray-600 text-center">
-                    Scan on your other device → open ClearGains → Settings → Paste Sync URL
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Load from Cloud */}
-          <div className="pt-1 border-t border-gray-700 space-y-2">
-            <p className="text-[11px] text-gray-500 font-medium">Load from cloud URL:</p>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={cloudLoadInput}
-                onChange={e => setCloudLoadInput(e.target.value)}
-                placeholder="https://paste.rs/…"
-                className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500"
-              />
-              <Button
-                size="sm"
-                loading={cloudLoadLoading}
-                onClick={handleLoadFromCloud}
-                disabled={!cloudLoadInput.trim()}
-                icon={<Download className="h-3.5 w-3.5" />}
-              >
-                Load
-              </Button>
-            </div>
-          </div>
-        </div>
-
-        {/* Backup history */}
+        {/* History */}
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div className="px-3 py-2.5 bg-gray-800/60 border border-gray-700 rounded-lg">
             <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wide mb-1">Last exported</p>
@@ -707,7 +707,6 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Export success message */}
         {exportMsg && (
           <div className="flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs mb-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
             <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
@@ -715,7 +714,6 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* Import error (file pick stage) */}
         {importError && !importModalOpen && (
           <div className="flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs mb-4 bg-red-500/10 border border-red-500/30 text-red-400">
             <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
@@ -723,19 +721,9 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* Local export / import */}
         <div className="flex gap-2">
-          <Button onClick={handleExport} fullWidth icon={<Download className="h-4 w-4" />}>
-            Export File
-          </Button>
-          <Button
-            variant="outline"
-            fullWidth
-            onClick={() => fileInputRef.current?.click()}
-            icon={<Upload className="h-4 w-4" />}
-          >
-            Import File
-          </Button>
+          <Button onClick={handleExport} fullWidth icon={<Download className="h-4 w-4" />}>Export File</Button>
+          <Button variant="outline" fullWidth onClick={() => fileInputRef.current?.click()} icon={<Upload className="h-4 w-4" />}>Import File</Button>
           <input ref={fileInputRef} type="file" accept=".json" className="hidden" onChange={handleFileSelect} />
         </div>
       </Card>
@@ -745,7 +733,7 @@ export default function SettingsPage() {
         <Card className="mb-4">
           <CardHeader
             title="Strategy Profiles"
-            subtitle="Saved portfolio templates — restored from your last import"
+            subtitle="Saved portfolio templates restored from your backup"
             icon={<Zap className="h-4 w-4" />}
           />
           <div className="space-y-2">
@@ -757,19 +745,13 @@ export default function SettingsPage() {
                     {profile.strategy} · {profile.riskMode} · {profile.sectorFocus} · £{profile.paperBudget.toLocaleString()}
                   </p>
                 </div>
-                <button
-                  onClick={() => handleDeleteProfile(profile.id)}
-                  className="ml-3 flex-shrink-0 text-gray-600 hover:text-red-400 transition-colors"
-                  title="Remove profile"
-                >
+                <button onClick={() => { deleteStrategyProfile(profile.id); setProfiles(p => p.filter(x => x.id !== profile.id)); }}
+                  className="ml-3 flex-shrink-0 text-gray-600 hover:text-red-400 transition-colors">
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               </div>
             ))}
           </div>
-          <p className="text-[11px] text-gray-600 mt-3">
-            Profiles are auto-generated from your portfolio configurations. Load them when creating new portfolios in Demo Trader.
-          </p>
         </Card>
       )}
 
@@ -781,8 +763,7 @@ export default function SettingsPage() {
           icon={<Trash2 className="h-4 w-4" />}
         />
         <p className="text-xs text-gray-500 mb-4">
-          This will permanently delete all your local trades, CGT calculations, and T212 connection.
-          This action cannot be undone.
+          This will permanently delete all your local trades, CGT calculations, and T212 connection. Cannot be undone.
         </p>
         <Button variant="outline" size="sm" onClick={reset} icon={<Trash2 className="h-3.5 w-3.5" />}>
           Reset All Data
@@ -797,7 +778,6 @@ export default function SettingsPage() {
       >
         {importPreview && (
           <div className="space-y-4">
-            {/* Account ID match notice */}
             {importPreview.accountId && accountId && importPreview.accountId === accountId && (
               <div className="flex items-center gap-2 px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
                 <Fingerprint className="h-3.5 w-3.5 text-emerald-400 flex-shrink-0" />
@@ -807,69 +787,30 @@ export default function SettingsPage() {
               </div>
             )}
 
-            {/* Summary */}
             <div className="flex items-start gap-2 px-3 py-2.5 bg-blue-500/10 border border-blue-500/20 rounded-lg">
               <FileText className="h-3.5 w-3.5 text-blue-400 flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-xs font-semibold text-blue-300">{importSummary}</p>
-                <p className="text-[11px] text-gray-500 mt-0.5">
-                  Exported {formatBackupDate(importPreview.exportedAt)}
-                </p>
+                <p className="text-[11px] text-gray-500 mt-0.5">Exported {formatBackupDate(importPreview.exportedAt)}</p>
               </div>
             </div>
 
-            {/* Credentials note */}
             <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg">
               <Info className="h-3.5 w-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-amber-400/80">
-                API keys are not included in backups. Reconnect your Trading 212 accounts after importing.
-              </p>
+              <p className="text-xs text-amber-400/80">API keys are not included. Reconnect your T212 accounts after importing.</p>
             </div>
 
-            {/* Strategy resume note */}
-            {importPreview.data.portfolios.ids.length > 0 && (
-              <div className="flex items-start gap-2 px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg">
-                <Zap className="h-3.5 w-3.5 text-yellow-400 flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-gray-400">
-                  After importing, visit <span className="text-white font-medium">Demo Trader</span> to resume auto-trading on any portfolios that had it enabled.
-                </p>
-              </div>
-            )}
-
-            {/* Mode selector */}
             <div className="space-y-2">
               <p className="text-xs font-medium text-gray-400">How would you like to import?</p>
-
-              <button
-                onClick={() => setImportMode('merge')}
-                className={`w-full text-left px-3 py-3 rounded-lg border transition-colors ${
-                  importMode === 'merge'
-                    ? 'border-emerald-500/50 bg-emerald-500/10'
-                    : 'border-gray-700 bg-gray-800/60 hover:border-gray-600'
-                }`}
-              >
-                <p className={`text-xs font-semibold ${importMode === 'merge' ? 'text-emerald-400' : 'text-white'}`}>
-                  Merge with existing data
-                </p>
-                <p className="text-[11px] text-gray-500 mt-0.5">
-                  Adds portfolios, trades, and watchlist items without deleting your current data. Duplicates are skipped.
-                </p>
+              <button onClick={() => setImportMode('merge')}
+                className={`w-full text-left px-3 py-3 rounded-lg border transition-colors ${importMode === 'merge' ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-gray-700 bg-gray-800/60 hover:border-gray-600'}`}>
+                <p className={`text-xs font-semibold ${importMode === 'merge' ? 'text-emerald-400' : 'text-white'}`}>Merge with existing data</p>
+                <p className="text-[11px] text-gray-500 mt-0.5">Adds portfolios and trades without deleting current data. Duplicates skipped.</p>
               </button>
-
-              <button
-                onClick={() => setImportMode('replace')}
-                className={`w-full text-left px-3 py-3 rounded-lg border transition-colors ${
-                  importMode === 'replace'
-                    ? 'border-red-500/50 bg-red-500/10'
-                    : 'border-gray-700 bg-gray-800/60 hover:border-gray-600'
-                }`}
-              >
-                <p className={`text-xs font-semibold ${importMode === 'replace' ? 'text-red-400' : 'text-white'}`}>
-                  Replace all data
-                </p>
-                <p className="text-[11px] text-gray-500 mt-0.5">
-                  Clears everything and imports fresh from the backup. Cannot be undone.
-                </p>
+              <button onClick={() => setImportMode('replace')}
+                className={`w-full text-left px-3 py-3 rounded-lg border transition-colors ${importMode === 'replace' ? 'border-red-500/50 bg-red-500/10' : 'border-gray-700 bg-gray-800/60 hover:border-gray-600'}`}>
+                <p className={`text-xs font-semibold ${importMode === 'replace' ? 'text-red-400' : 'text-white'}`}>Replace all data</p>
+                <p className="text-[11px] text-gray-500 mt-0.5">Clears everything and imports fresh. Cannot be undone.</p>
               </button>
             </div>
 
@@ -881,19 +822,8 @@ export default function SettingsPage() {
             )}
 
             <div className="flex gap-2 pt-1">
-              <Button
-                variant="outline"
-                fullWidth
-                onClick={() => { setImportModalOpen(false); setImportPreview(null); setImportError(null); }}
-              >
-                Cancel
-              </Button>
-              <Button
-                fullWidth
-                loading={importing}
-                onClick={handleConfirmImport}
-                icon={<Upload className="h-4 w-4" />}
-              >
+              <Button variant="outline" fullWidth onClick={() => { setImportModalOpen(false); setImportPreview(null); setImportError(null); }}>Cancel</Button>
+              <Button fullWidth loading={importing} onClick={handleConfirmImport} icon={<Upload className="h-4 w-4" />}>
                 {importing ? 'Importing…' : `Confirm ${importMode === 'replace' ? 'Replace' : 'Merge'}`}
               </Button>
             </div>

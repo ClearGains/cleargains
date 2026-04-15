@@ -104,6 +104,11 @@ interface ClearGainsState {
   // In-memory only (not persisted)
   pendingSignalCount: number;
 
+  // Cloud sync state
+  syncStatus: 'idle' | 'saving' | 'saved' | 'error';
+  syncLastSaved: string | null;
+  autoSaveEnabled: boolean;
+
   // Actions
   setCountry: (country: Country) => void;
   setHasOnboarded: (v: boolean) => void;
@@ -160,6 +165,10 @@ interface ClearGainsState {
   setTaxMonitorLastPoll: (ts: string) => void;
   setTaxMonitorLivePositions: (positions: T212Position[]) => void;
 
+  setSyncStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
+  setSyncLastSaved: (ts: string | null) => void;
+  setAutoSaveEnabled: (v: boolean) => void;
+
   reset: () => void;
 }
 
@@ -199,6 +208,9 @@ export const useClearGainsStore = create<ClearGainsState>()(
       fxTrades: [],
       linkedAccountIds: {},
       pendingSignalCount: 0,
+      syncStatus: 'idle',
+      syncLastSaved: null,
+      autoSaveEnabled: false,
       taxTrades: [],
       cgtAlerts: [],
       carriedForwardLosses: 0,
@@ -371,6 +383,10 @@ export const useClearGainsStore = create<ClearGainsState>()(
       setTaxMonitorLastPoll: (ts) => set({ taxMonitorLastPoll: ts }),
       setTaxMonitorLivePositions: (positions) => set({ taxMonitorLivePositions: positions }),
 
+      setSyncStatus: (status) => set({ syncStatus: status }),
+      setSyncLastSaved: (ts) => set({ syncLastSaved: ts }),
+      setAutoSaveEnabled: (v) => set({ autoSaveEnabled: v }),
+
       setLinkedAccountId: (accountType, keyHashPrefix) =>
         set((state) => ({
           linkedAccountIds: { ...state.linkedAccountIds, [accountType]: keyHashPrefix },
@@ -423,6 +439,9 @@ export const useClearGainsStore = create<ClearGainsState>()(
           carriedForwardLosses: 0,
           taxMonitorLastPoll: null,
           taxMonitorLivePositions: [],
+          syncStatus: 'idle',
+          syncLastSaved: null,
+          autoSaveEnabled: false,
         });
       },
     }),
@@ -459,6 +478,8 @@ export const useClearGainsStore = create<ClearGainsState>()(
         fxPositions: state.fxPositions,
         fxTrades: state.fxTrades,
         linkedAccountIds: state.linkedAccountIds,
+        syncLastSaved: state.syncLastSaved,
+        autoSaveEnabled: state.autoSaveEnabled,
         taxTrades: state.taxTrades,
         cgtAlerts: state.cgtAlerts,
         carriedForwardLosses: state.carriedForwardLosses,

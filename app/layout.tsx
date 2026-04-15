@@ -7,6 +7,7 @@ import { Disclaimer } from '@/components/layout/Disclaimer';
 import { T212AutoConnect } from '@/components/t212/T212AutoConnect';
 import { ToastProvider } from '@/components/ui/Toast';
 import { TaxMonitorService } from '@/components/tax/TaxMonitorService';
+import { AutoSaveService } from '@/components/sync/AutoSaveService';
 
 const geist = Geist({
   variable: '--font-geist-sans',
@@ -30,6 +31,7 @@ export default function RootLayout({
         <ToastProvider>
           <T212AutoConnect />
           <TaxMonitorService />
+          <AutoSaveService />
           <Navbar />
           <div className="flex flex-1 min-h-0">
             <Sidebar />
