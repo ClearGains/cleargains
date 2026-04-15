@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-function getIGHeaders(apiKey: string, cst: string, securityToken: string, version = '2'): Record<string, string> {
+function igHeaders(apiKey: string, cst: string, securityToken: string, version = '2'): Record<string, string> {
   return {
     'X-IG-API-KEY': apiKey,
     'CST': cst,
@@ -46,20 +46,25 @@ export async function POST(request: NextRequest) {
       direction: body.direction,
       size: body.size,
       orderType: body.orderType ?? 'MARKET',
+      level: null,
+      limitLevel: null,
+      stopLevel: null,
       guaranteedStop: body.guaranteedStop ?? false,
-      stopDistance: body.stopDistance ?? 20,
-      limitDistance: body.profitDistance ?? 40,
+      trailingStop: false,
+      stopDistance: body.stopDistance ?? null,
+      limitDistance: body.profitDistance ?? null,
       currencyCode: body.currencyCode ?? 'GBP',
       forceOpen: body.forceOpen ?? true,
     };
 
     const res = await fetch(`${baseUrl}/positions/otc`, {
       method: 'POST',
-      headers: getIGHeaders(apiKey, cst, securityToken),
+      headers: igHeaders(apiKey, cst, securityToken, '2'),
       body: JSON.stringify(payload),
     });
 
-    const data = await res.json() as { dealReference?: string; errorCode?: string };
+    let data: { dealReference?: string; errorCode?: string } = {};
+    try { data = await res.json() as typeof data; } catch {}
 
     if (!res.ok) {
       return NextResponse.json(
@@ -77,7 +82,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/** DELETE — close an existing position */
+/** DELETE — close an existing position (IG requires POST with _method override header) */
 export async function DELETE(request: NextRequest) {
   try {
     const cst = request.headers.get('x-ig-cst') ?? '';
@@ -99,21 +104,29 @@ export async function DELETE(request: NextRequest) {
       ? 'https://demo-api.ig.com/gateway/deal'
       : 'https://api.ig.com/gateway/deal';
 
+    // IG API: close uses POST with _method=DELETE override header (Version 1)
     const closePayload = {
       dealId: body.dealId,
+      epic: null,
+      expiry: null,
       direction: body.direction,
       size: body.size,
+      level: null,
       orderType: 'MARKET',
+      timeInForce: null,
+      quoteId: null,
     };
 
-    // IG uses a DELETE with _method override for close
+    const headers = igHeaders(apiKey, cst, securityToken, '1');
+
     const res = await fetch(`${baseUrl}/positions/otc`, {
       method: 'POST',
-      headers: { ...getIGHeaders(apiKey, cst, securityToken), '_method': 'DELETE' },
+      headers: { ...headers, '_method': 'DELETE' },
       body: JSON.stringify(closePayload),
     });
 
-    const data = await res.json() as { dealReference?: string; errorCode?: string };
+    let data: { dealReference?: string; errorCode?: string } = {};
+    try { data = await res.json() as typeof data; } catch {}
 
     if (!res.ok) {
       return NextResponse.json(
