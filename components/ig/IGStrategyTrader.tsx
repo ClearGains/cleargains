@@ -189,6 +189,14 @@ export function IGStrategyTrader() {
   const [showLiveConfirm, setShowLiveConfirm] = useState(false);
   const [pendingRunAction, setPendingRunAction] = useState<(() => void)|null>(null);
 
+  // ── First-live-trade disclaimer (shown once ever) ──────────────────────────
+  const liveTradeAckedRef   = useRef(false);
+  const liveTradeResolveRef = useRef<((ok: boolean) => void)|null>(null);
+  const [showLiveTradeDisclaimer, setShowLiveTradeDisclaimer] = useState(false);
+
+  // ── Test-run mode (single cycle, max 1 position) ───────────────────────────
+  const [testRunning, setTestRunning] = useState(false);
+
   // ── Scan frequency settings ────────────────────────────────────────────────
   const [signalScanMs, setSignalScanMs] = useState(5 * 60_000);
   const [posMonitorMs, setPosMonitorMs] = useState(60_000);
@@ -257,9 +265,19 @@ export function IGStrategyTrader() {
     localStorage.setItem('ig_active_mode', mode);
   }
 
+  /** Returns true if the trade should proceed. For live, shows a one-time disclaimer first. */
+  function confirmLiveTrade(): Promise<boolean> {
+    if (liveTradeAckedRef.current) return Promise.resolve(true);
+    return new Promise(resolve => {
+      liveTradeResolveRef.current = resolve;
+      setShowLiveTradeDisclaimer(true);
+    });
+  }
+
   // ── Connect on mount ───────────────────────────────────────────────────────
   useEffect(() => {
     setStrategies(loadStrategies());
+    liveTradeAckedRef.current = localStorage.getItem('ig_live_first_trade_ack') === '1';
     const savedMode = localStorage.getItem('ig_active_mode') as 'demo'|'live'|null;
     (['demo','live'] as const).forEach(env => {
       setConnecting(c => ({...c,[env]:true}));
@@ -511,6 +529,15 @@ export function IGStrategyTrader() {
         const alreadyOpen = positions[env].some(p => p.epic === market.epic && p.direction === sig.direction);
         if (alreadyOpen) continue;
 
+        // One-time disclaimer before first live trade
+        if (env === 'live') {
+          const ok = await confirmLiveTrade();
+          if (!ok) {
+            log('info', `[LIVE] First-trade disclaimer declined — skipping ${market.name}`);
+            continue;
+          }
+        }
+
         // Open position with inline stop-loss and take-profit
         const slPts = sig.stopPoints;
         const tpPts = sig.targetPoints;
@@ -627,6 +654,32 @@ export function IGStrategyTrader() {
       posStartRef.current = Date.now();
       void runPositionMonitor(strat);
     }, pMonMs);
+  }
+
+  // ── Test run: one scan cycle, max 1 position opened, then stops ───────────
+  async function runTestScan(strat: IGSavedStrategy) {
+    if (testRunning || isRunning) return;
+    setTestRunning(true);
+    runningRef.current = true;
+    const testStrat: IGSavedStrategy = { ...strat, maxPositions: 1 };
+    log('info', `🧪 Test run started — "${strat.name}" · max 1 position · scanning…`);
+    const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
+    let placed = 0;
+    for (let i = 0; i < markets.length; i++) {
+      if (!runningRef.current || placed >= 1) break;
+      const m = markets[i];
+      setScanProgress(`${m.name} (${i+1}/${markets.length})`);
+      const sig = await scanMarket(testStrat, m);
+      if (sig && sig.direction !== 'HOLD' && sig.strength >= strat.minStrength) placed++;
+      if (i < markets.length - 1) await sleep(500);
+    }
+    setScanProgress('');
+    runningRef.current = false;
+    setTestRunning(false);
+    log('info', placed > 0
+      ? `🧪 Test complete — ${placed} position opened. Check Positions tab.`
+      : `🧪 Test complete — no signals met the ${strat.minStrength}% threshold this scan.`
+    );
   }
 
   function stopAutoRun() {
@@ -902,6 +955,43 @@ export function IGStrategyTrader() {
               <Button fullWidth className="bg-amber-500 hover:bg-amber-400 text-black font-bold"
                 onClick={() => { setActiveMode('live'); setShowLiveConfirm(false); if (pendingRunAction) { pendingRunAction(); setPendingRunAction(null); } }}>
                 Confirm — Use Live
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── First live trade disclaimer modal ──────────────────────────── */}
+      {showLiveTradeDisclaimer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="bg-gray-900 border border-red-500/50 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center text-xl">⚠️</div>
+              <div>
+                <h3 className="text-sm font-bold text-white">First Live Trade Warning</h3>
+                <p className="text-xs text-red-400">Real money — read carefully</p>
+              </div>
+            </div>
+            <div className="space-y-2 text-xs text-gray-300 mb-5">
+              <p>Your strategy is about to open a <span className="text-white font-semibold">real spread-bet position</span> on your IG Live account.</p>
+              <p>Spread bets are leveraged products. You can lose more than your initial deposit.</p>
+              <p className="text-amber-400">This warning will only appear once. All future live trades will execute automatically without prompting.</p>
+            </div>
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" onClick={() => {
+                liveTradeResolveRef.current?.(false);
+                liveTradeResolveRef.current = null;
+                setShowLiveTradeDisclaimer(false);
+              }}>Cancel Trade</Button>
+              <Button fullWidth className="bg-red-600 hover:bg-red-500 text-white font-bold"
+                onClick={() => {
+                  liveTradeAckedRef.current = true;
+                  localStorage.setItem('ig_live_first_trade_ack', '1');
+                  liveTradeResolveRef.current?.(true);
+                  liveTradeResolveRef.current = null;
+                  setShowLiveTradeDisclaimer(false);
+                }}>
+                I Understand — Place Trade
               </Button>
             </div>
           </div>
@@ -1218,6 +1308,13 @@ export function IGStrategyTrader() {
                         {strat.accounts.includes('live') ? '⚠️ Run Live' : (isActive ? 'Start' : 'Run')}
                       </Button>
                     )}
+                    <Button size="sm" variant="outline"
+                      loading={testRunning && isActive}
+                      disabled={isRunning || testRunning}
+                      onClick={() => { setActiveStratId(strat.id); void runTestScan(strat); }}
+                      title="Run one scan cycle — opens max 1 position">
+                      Test
+                    </Button>
                     <button onClick={() => openBuilder(strat)} className="p-1.5 text-gray-600 hover:text-orange-400 transition-colors"><Edit2 className="h-3.5 w-3.5" /></button>
                     <button onClick={() => { deleteStrategy(strat.id); setStrategies(loadStrategies()); if (activeStratId===strat.id) stopAutoRun(); }}
                       className="p-1.5 text-gray-600 hover:text-red-400 transition-colors"><Trash2 className="h-3.5 w-3.5" /></button>
