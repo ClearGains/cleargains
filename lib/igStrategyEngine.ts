@@ -39,6 +39,7 @@ export type IGSavedStrategy = {
   maxPositions: number;
   accounts: ('demo' | 'live')[];
   autoTrade: boolean;
+  autoClose: boolean;
   createdAt: string;
   lastRunAt?: string;
   lastSignal?: SignalDirection;

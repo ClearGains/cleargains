@@ -4,8 +4,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play, Square, Save, Trash2, Plus, RefreshCw, Search,
   AlertCircle, CheckCircle2, Clock, BarChart3, Target,
-  TrendingUp, TrendingDown, Minus, Wifi, WifiOff, X, Copy,
-  ChevronDown, ChevronRight, Zap,
+  TrendingUp, TrendingDown, Minus, Wifi, X, Zap,
+  ChevronDown, ChevronUp, Edit2, ArrowUpDown,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Card, CardHeader } from '@/components/ui/Card';
@@ -17,7 +17,7 @@ import {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type IGSession = { cst: string; securityToken: string; accountId: string };
+type IGSession = { cst: string; securityToken: string; accountId: string; apiKey: string };
 
 type IGPosition = {
   dealId: string;
@@ -47,34 +47,54 @@ type RunLog = {
   msg: string;
 };
 
+type PositionMap = Record<'demo' | 'live', IGPosition[]>;
+
 function uid() { return Math.random().toString(36).slice(2, 9); }
 function fmt(n: number) { return `£${Math.abs(n).toFixed(2)}`; }
 function fmtTime(iso: string) {
   return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-// ── Session / header helpers ──────────────────────────────────────────────────
+// ── Session helpers ───────────────────────────────────────────────────────────
 
-function makeHeaders(session: IGSession, apiKey: string, env: 'demo' | 'live', extra?: Record<string, string>) {
+function makeHeaders(session: IGSession, env: 'demo' | 'live', extra?: Record<string, string>) {
   return {
     'x-ig-cst': session.cst,
     'x-ig-security-token': session.securityToken,
-    'x-ig-api-key': apiKey,
+    'x-ig-api-key': session.apiKey,
     'x-ig-env': env,
     ...extra,
   };
+}
+
+async function connectIG(env: 'demo' | 'live'): Promise<IGSession | null> {
+  const storageKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+  try {
+    const saved = localStorage.getItem(storageKey);
+    if (!saved) return null;
+    const creds = JSON.parse(saved) as { username: string; password: string; apiKey: string; connected?: boolean };
+    if (!creds.connected) return null;
+    const res = await fetch('/api/ig/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env }),
+    });
+    const data = await res.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string };
+    if (data.ok && data.cst && data.securityToken) {
+      return { cst: data.cst, securityToken: data.securityToken, accountId: data.accountId ?? '', apiKey: creds.apiKey };
+    }
+  } catch {}
+  return null;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function SignalBadge({ signal }: { signal: StrategySignal }) {
   const color =
-    signal.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' :
+    signal.direction === 'BUY'  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' :
     signal.direction === 'SELL' ? 'bg-red-500/20 text-red-400 border-red-500/30' :
     'bg-gray-700 text-gray-400 border-gray-600';
-
   const Icon = signal.direction === 'BUY' ? TrendingUp : signal.direction === 'SELL' ? TrendingDown : Minus;
-
   return (
     <div className={clsx('inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-sm font-bold', color)}>
       <Icon className="h-4 w-4" />
@@ -84,13 +104,51 @@ function SignalBadge({ signal }: { signal: StrategySignal }) {
   );
 }
 
-function IndicatorRow({ label, value, status }: { label: string; value: string; status: 'bullish' | 'bearish' | 'neutral' }) {
+function MarketSearch({
+  session, env, onSelect, placeholder = 'Search market…',
+}: {
+  session: IGSession;
+  env: 'demo' | 'live';
+  onSelect: (m: IGMarketResult) => void;
+  placeholder?: string;
+}) {
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState<IGMarketResult[]>([]);
+  const [searching, setSearching] = useState(false);
+
+  async function search() {
+    if (!q.trim()) return;
+    setSearching(true);
+    try {
+      const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(q)}`, { headers: makeHeaders(session, env) });
+      const data = await res.json() as { ok: boolean; markets?: IGMarketResult[] };
+      if (data.ok) setResults(data.markets ?? []);
+    } catch {}
+    setSearching(false);
+  }
+
   return (
-    <div className="flex items-center justify-between py-1.5 border-b border-gray-800 last:border-0">
-      <span className="text-xs text-gray-500">{label}</span>
-      <span className={clsx('text-xs font-mono font-semibold',
-        status === 'bullish' ? 'text-emerald-400' : status === 'bearish' ? 'text-red-400' : 'text-gray-400'
-      )}>{value}</span>
+    <div>
+      <div className="flex gap-2">
+        <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && void search()}
+          placeholder={placeholder}
+          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
+        <Button size="sm" onClick={search} loading={searching} icon={<Search className="h-3.5 w-3.5" />}>Search</Button>
+      </div>
+      {results.length > 0 && (
+        <div className="mt-2 space-y-1 max-h-44 overflow-y-auto border border-gray-700 rounded-lg divide-y divide-gray-800">
+          {results.slice(0, 8).map(m => (
+            <button key={m.epic} onClick={() => { onSelect(m); setResults([]); setQ(''); }}
+              className="w-full flex items-center justify-between px-3 py-2 text-left text-xs hover:bg-gray-800/80 transition-colors">
+              <div>
+                <p className="font-semibold text-white">{m.instrumentName}</p>
+                <p className="text-gray-500 font-mono text-[10px]">{m.epic} · {m.instrumentType}</p>
+              </div>
+              <p className="text-gray-400 font-mono">{m.bid} / {m.offer}</p>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -98,35 +156,43 @@ function IndicatorRow({ label, value, status }: { label: string; value: string; 
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function IGStrategyTrader() {
-  // ── Connection state ───────────────────────────────────────────────────────
-  const [igEnv, setIgEnv] = useState<'demo' | 'live'>('demo');
-  const [session, setSession] = useState<IGSession | null>(null);
-  const [igApiKey, setIgApiKey] = useState('');
-  const [connecting, setConnecting] = useState(false);
-  const [connError, setConnError] = useState<string | null>(null);
+  // ── Sessions (demo + live independently) ──────────────────────────────────
+  const [sessions, setSessions] = useState<Partial<Record<'demo' | 'live', IGSession>>>({});
+  const [connecting, setConnecting] = useState<Partial<Record<'demo' | 'live', boolean>>>({});
+  const [activeEnv, setActiveEnv] = useState<'demo' | 'live'>('demo');
 
-  // ── Positions ──────────────────────────────────────────────────────────────
-  const [positions, setPositions] = useState<IGPosition[]>([]);
+  // ── Positions per env ──────────────────────────────────────────────────────
+  const [positions, setPositions] = useState<PositionMap>({ demo: [], live: [] });
   const [loadingPos, setLoadingPos] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
 
-  // ── Market search ──────────────────────────────────────────────────────────
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<IGMarketResult[]>([]);
-  const [searching, setSearching] = useState(false);
-
-  // ── Strategy builder ───────────────────────────────────────────────────────
+  // ── Strategies ─────────────────────────────────────────────────────────────
   const [strategies, setStrategies] = useState<IGSavedStrategy[]>([]);
   const [activeStratId, setActiveStratId] = useState<string | null>(null);
   const [showBuilder, setShowBuilder] = useState(false);
-  const [builderName, setBuilderName] = useState('');
-  const [builderEpic, setBuilderEpic] = useState('');
-  const [builderInstrName, setBuilderInstrName] = useState('');
-  const [builderTimeframe, setBuilderTimeframe] = useState<Timeframe>('daily');
-  const [builderSize, setBuilderSize] = useState(1);
-  const [builderMaxPos, setBuilderMaxPos] = useState(2);
-  const [builderAccounts, setBuilderAccounts] = useState<('demo' | 'live')[]>(['demo']);
-  const [builderAutoTrade, setBuilderAutoTrade] = useState(false);
+  const [editingStratId, setEditingStratId] = useState<string | null>(null);
+
+  // ── Builder form ───────────────────────────────────────────────────────────
+  const [bName, setBName] = useState('');
+  const [bEpic, setBEpic] = useState('');
+  const [bInstrName, setBInstrName] = useState('');
+  const [bTimeframe, setBTimeframe] = useState<Timeframe>('daily');
+  const [bSize, setBSize] = useState(1);
+  const [bMaxPos, setBMaxPos] = useState(2);
+  const [bAccounts, setBAccounts] = useState<('demo' | 'live')[]>(['demo']);
+  const [bAutoTrade, setBAutoTrade] = useState(false);
+  const [bAutoClose, setBAutoClose] = useState(true);
+
+  // ── Manual trade ───────────────────────────────────────────────────────────
+  const [showManual, setShowManual] = useState(false);
+  const [manualEpic, setManualEpic] = useState('');
+  const [manualInstrName, setManualInstrName] = useState('');
+  const [manualDir, setManualDir] = useState<'BUY' | 'SELL'>('BUY');
+  const [manualSize, setManualSize] = useState(1);
+  const [manualStop, setManualStop] = useState<number | ''>('');
+  const [manualLimit, setManualLimit] = useState<number | ''>('');
+  const [manualEnv, setManualEnv] = useState<'demo' | 'live'>('demo');
+  const [placingManual, setPlacingManual] = useState(false);
 
   // ── Signal / analysis ──────────────────────────────────────────────────────
   const [signal, setSignal] = useState<StrategySignal | null>(null);
@@ -136,89 +202,122 @@ export function IGStrategyTrader() {
   const [isRunning, setIsRunning] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ── Notifications ──────────────────────────────────────────────────────────
+  // ── Toast ──────────────────────────────────────────────────────────────────
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
-
-  function showToast(ok: boolean, msg: string) {
-    setToast({ ok, msg });
-    setTimeout(() => setToast(null), 4000);
-  }
-
+  function showToast(ok: boolean, msg: string) { setToast({ ok, msg }); setTimeout(() => setToast(null), 4000); }
   function log(type: RunLog['type'], msg: string) {
-    setRunLog(prev => [{ id: uid(), ts: new Date().toISOString(), type, msg }, ...prev].slice(0, 100));
+    setRunLog(prev => [{ id: uid(), ts: new Date().toISOString(), type, msg }, ...prev].slice(0, 150));
   }
 
-  // ── Auto-connect on mount ──────────────────────────────────────────────────
+  // ── Connect both envs on mount ─────────────────────────────────────────────
   useEffect(() => {
     setStrategies(loadStrategies());
+    (['demo', 'live'] as const).forEach(env => {
+      setConnecting(c => ({ ...c, [env]: true }));
+      connectIG(env).then(sess => {
+        if (sess) setSessions(s => ({ ...s, [env]: sess }));
+        setConnecting(c => ({ ...c, [env]: false }));
+      });
+    });
   }, []);
 
-  useEffect(() => {
-    const storageKey = igEnv === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
-    try {
-      const saved = localStorage.getItem(storageKey);
-      if (!saved) { setSession(null); return; }
-      const creds = JSON.parse(saved) as { username: string; password: string; apiKey: string; connected?: boolean };
-      if (!creds.connected) { setSession(null); return; }
-      setConnecting(true);
-      setConnError(null);
-      fetch('/api/ig/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: igEnv }),
-      })
-        .then(r => r.json())
-        .then((data: { ok: boolean; cst?: string; securityToken?: string; accountId?: string; error?: string }) => {
-          if (data.ok && data.cst && data.securityToken) {
-            setSession({ cst: data.cst, securityToken: data.securityToken, accountId: data.accountId ?? '' });
-            setIgApiKey(creds.apiKey);
-          } else {
-            setConnError(data.error ?? 'Session failed');
-          }
-        })
-        .catch((e: unknown) => setConnError(e instanceof Error ? e.message : 'Connect failed'))
-        .finally(() => setConnecting(false));
-    } catch {}
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [igEnv]);
-
-  // ── Load positions ─────────────────────────────────────────────────────────
-  const loadPositions = useCallback(async () => {
-    if (!session) return;
+  // ── Load positions for a given env ────────────────────────────────────────
+  const loadPositions = useCallback(async (env?: 'demo' | 'live') => {
+    const envs: ('demo' | 'live')[] = env ? [env] : ['demo', 'live'];
     setLoadingPos(true);
-    try {
-      const res = await fetch('/api/ig/positions', { headers: makeHeaders(session, igApiKey, igEnv) });
-      const data = await res.json() as { ok: boolean; positions?: IGPosition[]; error?: string };
-      if (data.ok) setPositions(data.positions ?? []);
-    } catch {}
-    finally { setLoadingPos(false); }
-  }, [session, igApiKey, igEnv]);
+    for (const e of envs) {
+      const sess = sessions[e];
+      if (!sess) continue;
+      try {
+        const res = await fetch('/api/ig/positions', { headers: makeHeaders(sess, e) });
+        const data = await res.json() as { ok: boolean; positions?: IGPosition[] };
+        if (data.ok) setPositions(prev => ({ ...prev, [e]: data.positions ?? [] }));
+      } catch {}
+    }
+    setLoadingPos(false);
+  }, [sessions]);
 
-  useEffect(() => { if (session) void loadPositions(); }, [session, loadPositions]);
+  useEffect(() => {
+    const hasSessions = Object.keys(sessions).length > 0;
+    if (hasSessions) void loadPositions();
+  }, [sessions, loadPositions]);
 
-  // ── Market search ──────────────────────────────────────────────────────────
-  async function handleSearch() {
-    if (!session || !searchQuery.trim()) return;
-    setSearching(true);
-    try {
-      const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(searchQuery)}`,
-        { headers: makeHeaders(session, igApiKey, igEnv) });
-      const data = await res.json() as { ok: boolean; markets?: IGMarketResult[]; error?: string };
-      if (data.ok) setSearchResults(data.markets ?? []);
-      else showToast(false, data.error ?? 'Search failed');
-    } catch { showToast(false, 'Search failed'); }
-    finally { setSearching(false); }
+  // ── Place order ─────────────────────────────────────────────────────────────
+  async function placeOrder(
+    env: 'demo' | 'live',
+    epic: string,
+    direction: 'BUY' | 'SELL',
+    size: number,
+    stopDistance?: number,
+    limitDistance?: number,
+  ): Promise<{ ok: boolean; dealReference?: string; error?: string }> {
+    const sess = sessions[env];
+    if (!sess) return { ok: false, error: `No ${env} session` };
+    const res = await fetch('/api/ig/order', {
+      method: 'POST',
+      headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ epic, direction, size, stopDistance, profitDistance: limitDistance, currencyCode: 'GBP' }),
+    });
+    return res.json() as Promise<{ ok: boolean; dealReference?: string; error?: string }>;
   }
 
-  // ── Fetch prices + analyse ─────────────────────────────────────────────────
-  const analyseStrategy = useCallback(async (strat: IGSavedStrategy, envOverride?: 'demo' | 'live'): Promise<StrategySignal | null> => {
-    if (!session) return null;
-    const env = envOverride ?? igEnv;
+  async function closePosition(env: 'demo' | 'live', pos: IGPosition): Promise<{ ok: boolean; error?: string }> {
+    const sess = sessions[env];
+    if (!sess) return { ok: false, error: `No ${env} session` };
+    const res = await fetch('/api/ig/order', {
+      method: 'DELETE',
+      headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dealId: pos.dealId, direction: pos.direction === 'BUY' ? 'SELL' : 'BUY', size: pos.size }),
+    });
+    return res.json() as Promise<{ ok: boolean; error?: string }>;
+  }
+
+  // ── Manual close button ─────────────────────────────────────────────────────
+  async function handleClose(env: 'demo' | 'live', pos: IGPosition) {
+    setClosingId(pos.dealId);
+    const result = await closePosition(env, pos);
+    if (result.ok) {
+      log('close', `[${env.toUpperCase()}] Closed ${pos.direction} ${pos.instrumentName ?? pos.epic}`);
+      showToast(true, 'Position closed');
+      await loadPositions(env);
+    } else {
+      showToast(false, result.error ?? 'Close failed');
+    }
+    setClosingId(null);
+  }
+
+  // ── Manual open ─────────────────────────────────────────────────────────────
+  async function handleManualOpen() {
+    if (!manualEpic) { showToast(false, 'Select a market first'); return; }
+    const sess = sessions[manualEnv];
+    if (!sess) { showToast(false, `Not connected to ${manualEnv}`); return; }
+    setPlacingManual(true);
+    const result = await placeOrder(
+      manualEnv, manualEpic, manualDir, manualSize,
+      manualStop !== '' ? Number(manualStop) : undefined,
+      manualLimit !== '' ? Number(manualLimit) : undefined,
+    );
+    if (result.ok) {
+      log(manualDir === 'BUY' ? 'buy' : 'sell',
+        `[${manualEnv.toUpperCase()}] Manual ${manualDir} ${manualSize}pt/pt on ${manualInstrName || manualEpic} — ref: ${result.dealReference ?? 'n/a'}`);
+      showToast(true, `${manualDir} order placed on ${manualInstrName || manualEpic}`);
+      await loadPositions(manualEnv);
+    } else {
+      log('error', `[${manualEnv.toUpperCase()}] Manual order failed: ${result.error ?? 'unknown'}`);
+      showToast(false, result.error ?? 'Order failed');
+    }
+    setPlacingManual(false);
+  }
+
+  // ── Fetch candles + run signal ──────────────────────────────────────────────
+  const analyseStrategy = useCallback(async (strat: IGSavedStrategy, env: 'demo' | 'live'): Promise<StrategySignal | null> => {
+    const sess = sessions[env] ?? sessions['demo'] ?? sessions['live'];
+    if (!sess) return null;
     const cfg = TIMEFRAME_CONFIG[strat.timeframe];
     try {
       const res = await fetch(
         `/api/ig/prices?epic=${encodeURIComponent(strat.epic)}&resolution=${cfg.resolution}&max=${cfg.max}`,
-        { headers: makeHeaders(session, igApiKey, env) }
+        { headers: makeHeaders(sess, env) }
       );
       const data = await res.json() as { ok: boolean; candles?: Candle[]; error?: string };
       if (!data.ok) { log('error', `Price fetch failed: ${data.error ?? 'unknown'}`); return null; }
@@ -231,78 +330,89 @@ export function IGStrategyTrader() {
       log('error', `Analysis error: ${e instanceof Error ? e.message : String(e)}`);
       return null;
     }
-  }, [session, igApiKey, igEnv]);
+  }, [sessions]);
 
-  // ── Execute signal ─────────────────────────────────────────────────────────
+  // ── Execute signal with auto-close logic ────────────────────────────────────
   async function executeSignal(strat: IGSavedStrategy, sig: StrategySignal, env: 'demo' | 'live') {
-    if (sig.direction === 'HOLD') { log('signal', `HOLD — ${sig.reason}`); return; }
+    if (sig.direction === 'HOLD') { log('signal', `[${env.toUpperCase()}] HOLD — ${sig.reason}`); return; }
 
-    // Count open positions for this epic+direction
-    const existing = positions.filter(p => p.epic === strat.epic);
-    if (existing.length >= strat.maxPositions) {
-      log('info', `Max positions (${strat.maxPositions}) reached for ${strat.instrumentName}`);
+    const envPositions = positions[env];
+    const epicPositions = envPositions.filter(p => p.epic === strat.epic);
+
+    // Auto-close opposite direction positions
+    if (strat.autoTrade && (strat as IGSavedStrategy & { autoClose?: boolean }).autoClose !== false) {
+      const opposite = sig.direction === 'BUY' ? 'SELL' : 'BUY';
+      const toClose = epicPositions.filter(p => p.direction === opposite);
+      for (const pos of toClose) {
+        log('close', `[${env.toUpperCase()}] Auto-closing ${pos.direction} ${pos.instrumentName ?? pos.epic} (signal reversed)`);
+        const result = await closePosition(env, pos);
+        if (result.ok) {
+          log('close', `[${env.toUpperCase()}] ✅ Closed — ref: ${result.error ?? 'ok'}`);
+        } else {
+          log('error', `[${env.toUpperCase()}] Close failed: ${result.error ?? 'unknown'}`);
+        }
+      }
+      await loadPositions(env);
+    }
+
+    // Refresh positions after closing
+    const currentEnvPos = positions[env].filter(p => p.epic === strat.epic);
+    const alreadySameDir = currentEnvPos.some(p => p.direction === sig.direction);
+    if (alreadySameDir) { log('info', `[${env.toUpperCase()}] Already ${sig.direction} ${strat.instrumentName} — skip`); return; }
+
+    const openCount = currentEnvPos.length;
+    if (openCount >= strat.maxPositions) {
+      log('info', `[${env.toUpperCase()}] Max positions (${strat.maxPositions}) reached for ${strat.instrumentName}`);
       return;
     }
 
-    // Don't open if already in same direction
-    const sameDir = existing.some(p => p.direction === sig.direction);
-    if (sameDir) { log('info', `Already ${sig.direction} ${strat.instrumentName} — skip`); return; }
-
     log(sig.direction === 'BUY' ? 'buy' : 'sell',
-      `${sig.direction} ${strat.size} pt/pt on ${strat.instrumentName} (${env}) — ${sig.reason}`);
+      `[${env.toUpperCase()}] ${sig.direction} ${strat.size}pt on ${strat.instrumentName} — ${sig.reason}`);
 
-    const cfg = TIMEFRAME_CONFIG[strat.timeframe];
-    const res = await fetch('/api/ig/order', {
-      method: 'POST',
-      headers: { ...makeHeaders(session!, igApiKey, env), 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        epic: strat.epic,
-        direction: sig.direction,
-        size: strat.size,
-        stopDistance: sig.stopPoints,
-        profitDistance: sig.targetPoints,
-        currencyCode: 'GBP',
-      }),
-    });
-    const data = await res.json() as { ok: boolean; dealReference?: string; error?: string };
-    if (data.ok) {
-      log('buy', `✅ Order placed — ref: ${data.dealReference ?? 'n/a'}`);
-      showToast(true, `${sig.direction} order placed on ${strat.instrumentName}`);
-      await loadPositions();
+    const result = await placeOrder(env, strat.epic, sig.direction, strat.size, sig.stopPoints, sig.targetPoints);
+    if (result.ok) {
+      log('buy', `[${env.toUpperCase()}] ✅ Order placed — ref: ${result.dealReference ?? 'n/a'}`);
+      showToast(true, `[${env}] ${sig.direction} on ${strat.instrumentName}`);
+      await loadPositions(env);
     } else {
-      log('error', `Order failed: ${data.error ?? 'unknown'}`);
-      showToast(false, `Order failed: ${data.error ?? 'unknown'}`);
+      log('error', `[${env.toUpperCase()}] Order failed: ${result.error ?? 'unknown'}`);
+      showToast(false, `[${env}] Order failed: ${result.error ?? 'unknown'}`);
     }
-    void cfg;
   }
 
-  // ── Run strategy once ──────────────────────────────────────────────────────
+  // ── Run strategy once ───────────────────────────────────────────────────────
   async function runStrategy(strat: IGSavedStrategy) {
-    if (!session) return;
+    const envList = strat.accounts.filter(e => sessions[e]);
+    if (envList.length === 0) { log('error', 'No connected session for this strategy\'s accounts'); return; }
+
     setAnalyzing(true);
-    const sig = await analyseStrategy(strat);
+    // Use the first available session env to fetch prices
+    const primaryEnv = envList[0];
+    const sig = await analyseStrategy(strat, primaryEnv);
     if (!sig) { setAnalyzing(false); return; }
 
     log('signal', `Signal: ${sig.direction} (${sig.strength}%) — ${sig.reason}`);
 
     if (strat.autoTrade) {
-      for (const env of strat.accounts) {
+      for (const env of envList) {
         await executeSignal(strat, sig, env);
       }
     }
 
-    // Update lastRunAt
     const updated: IGSavedStrategy = { ...strat, lastRunAt: new Date().toISOString(), lastSignal: sig.direction };
     saveStrategy(updated);
     setStrategies(loadStrategies());
     setAnalyzing(false);
   }
 
-  // ── Auto-run loop ──────────────────────────────────────────────────────────
+  // ── Auto-run loop ───────────────────────────────────────────────────────────
   function startAutoRun(strat: IGSavedStrategy) {
     if (timerRef.current) clearInterval(timerRef.current);
     const cfg = TIMEFRAME_CONFIG[strat.timeframe];
-    log('info', `Auto-run started — checking every ${cfg.pollMs / 60_000 < 1 ? `${cfg.pollMs / 1000}s` : `${cfg.pollMs / 60_000}min`}`);
+    const intervalLabel = cfg.pollMs >= 3_600_000 ? `${cfg.pollMs / 3_600_000}hr`
+      : cfg.pollMs >= 60_000 ? `${cfg.pollMs / 60_000}min`
+      : `${cfg.pollMs / 1000}s`;
+    log('info', `Auto-run started for "${strat.name}" — polling every ${intervalLabel}`);
     setIsRunning(true);
     void runStrategy(strat);
     timerRef.current = setInterval(() => void runStrategy(strat), cfg.pollMs);
@@ -316,54 +426,62 @@ export function IGStrategyTrader() {
 
   useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
 
-  // ── Close position ─────────────────────────────────────────────────────────
-  async function handleClose(pos: IGPosition) {
-    if (!session) return;
-    setClosingId(pos.dealId);
-    const res = await fetch('/api/ig/order', {
-      method: 'DELETE',
-      headers: { ...makeHeaders(session, igApiKey, igEnv), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dealId: pos.dealId, direction: pos.direction === 'BUY' ? 'SELL' : 'BUY', size: pos.size }),
-    });
-    const data = await res.json() as { ok: boolean; error?: string };
-    if (data.ok) {
-      log('close', `Closed ${pos.direction} ${pos.instrumentName ?? pos.epic}`);
-      showToast(true, `Position closed`);
-      await loadPositions();
+  // ── Builder open/reset ──────────────────────────────────────────────────────
+  function openBuilder(existing?: IGSavedStrategy) {
+    if (existing) {
+      setEditingStratId(existing.id);
+      setBName(existing.name);
+      setBEpic(existing.epic);
+      setBInstrName(existing.instrumentName);
+      setBTimeframe(existing.timeframe);
+      setBSize(existing.size);
+      setBMaxPos(existing.maxPositions);
+      setBAccounts(existing.accounts);
+      setBAutoTrade(existing.autoTrade);
+      setBAutoClose((existing as IGSavedStrategy & { autoClose?: boolean }).autoClose !== false);
     } else {
-      showToast(false, data.error ?? 'Close failed');
+      setEditingStratId(null);
+      setBName(''); setBEpic(''); setBInstrName('');
+      setBTimeframe('daily'); setBSize(1); setBMaxPos(2);
+      setBAccounts(['demo']); setBAutoTrade(false); setBAutoClose(true);
     }
-    setClosingId(null);
+    setShowBuilder(true);
   }
 
-  // ── Save strategy ──────────────────────────────────────────────────────────
   function handleSaveStrategy() {
-    if (!builderEpic || !builderName) { showToast(false, 'Name and epic required'); return; }
-    const s: IGSavedStrategy = {
-      id: uid(),
-      name: builderName,
-      epic: builderEpic,
-      instrumentName: builderInstrName || builderEpic,
-      timeframe: builderTimeframe,
-      size: builderSize,
-      maxPositions: builderMaxPos,
-      accounts: builderAccounts,
-      autoTrade: builderAutoTrade,
+    if (!bEpic.trim() || !bName.trim()) { showToast(false, 'Strategy name and market are required'); return; }
+    if (bAccounts.length === 0) { showToast(false, 'Select at least one account'); return; }
+
+    const s: IGSavedStrategy & { autoClose: boolean } = {
+      id: editingStratId ?? uid(),
+      name: bName.trim(),
+      epic: bEpic.trim(),
+      instrumentName: bInstrName || bEpic.trim(),
+      timeframe: bTimeframe,
+      size: bSize,
+      maxPositions: bMaxPos,
+      accounts: bAccounts,
+      autoTrade: bAutoTrade,
+      autoClose: bAutoClose,
       createdAt: new Date().toISOString(),
     };
     saveStrategy(s);
     setStrategies(loadStrategies());
     setShowBuilder(false);
-    setBuilderName(''); setBuilderEpic(''); setBuilderInstrName('');
-    showToast(true, `Strategy "${s.name}" saved`);
+    showToast(true, `Strategy "${s.name}" ${editingStratId ? 'updated' : 'saved'}`);
   }
 
-  // ── Totals ─────────────────────────────────────────────────────────────────
-  const totalPnL = positions.reduce((s, p) => s + (p.upl ?? 0), 0);
-  const activeSig = signal;
+  // ── Derived ─────────────────────────────────────────────────────────────────
+  const activeStrat = strategies.find(s => s.id === activeStratId) ?? null;
+  const anyConnected = Object.values(sessions).some(Boolean);
+  const isConnecting = Object.values(connecting).some(Boolean);
+  const allPositions = [...positions.demo, ...positions.live];
+  const totalPnL = allPositions.reduce((s, p) => s + (p.upl ?? 0), 0);
+  const demoPositions = positions.demo;
+  const livePositions = positions.live;
 
-  // ── Not connected view ─────────────────────────────────────────────────────
-  if (!session && !connecting) {
+  // ── Not connected view ──────────────────────────────────────────────────────
+  if (!anyConnected && !isConnecting) {
     return (
       <div className="max-w-xl space-y-4">
         <Card>
@@ -371,50 +489,37 @@ export function IGStrategyTrader() {
             <div className="w-10 h-10 rounded-xl bg-orange-500/20 flex items-center justify-center text-2xl">🏦</div>
             <div>
               <h3 className="text-sm font-semibold text-white">IG Automated Strategy Trader</h3>
-              <p className="text-xs text-gray-500">Connect to start automated spread betting</p>
+              <p className="text-xs text-gray-500">Connect your IG account to start automated spread betting</p>
             </div>
           </div>
-          <div className="flex gap-2 mb-4">
-            {(['demo', 'live'] as const).map(e => (
-              <button key={e} onClick={() => setIgEnv(e)}
-                className={clsx('flex-1 py-2 rounded-lg text-sm font-medium transition-all',
-                  igEnv === e ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30' : 'bg-gray-800 text-gray-400 hover:text-gray-200'
-                )}>
-                {e === 'demo' ? 'Demo' : '⚠️ Live'}
-              </button>
-            ))}
-          </div>
-          {connError && (
-            <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400 mb-3">
-              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {connError}
-            </div>
-          )}
-          <p className="text-xs text-gray-400 mb-3">
-            Set up IG credentials in{' '}
-            <a href="/settings/accounts" className="text-orange-400 hover:underline">Settings → Accounts</a> first.
+          <p className="text-xs text-gray-400 mb-4">
+            Set up your IG credentials in{' '}
+            <a href="/settings/accounts" className="text-orange-400 hover:underline">Settings → Accounts</a>{' '}
+            first, then come back here to trade.
           </p>
           <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5 text-xs text-amber-400">
-            ⚠️ Spread bets and CFDs are complex instruments. 68% of retail investor accounts lose money. Only trade with money you can afford to lose. This tool does not constitute financial advice.
+            ⚠️ Spread bets and CFDs are complex instruments. 68% of retail investor accounts lose money. Only trade with money you can afford to lose.
           </div>
         </Card>
       </div>
     );
   }
 
-  if (connecting) {
+  if (isConnecting && !anyConnected) {
     return (
       <div className="flex items-center gap-3 text-gray-400 py-8">
         <RefreshCw className="h-5 w-5 animate-spin" />
-        Connecting to IG {igEnv} account…
+        Connecting to IG accounts…
       </div>
     );
   }
 
-  // ── Connected view ─────────────────────────────────────────────────────────
-  const activeStrat = strategies.find(s => s.id === activeStratId) ?? null;
+  // ── Connected view ──────────────────────────────────────────────────────────
+  const builderSession = sessions['demo'] ?? sessions['live'];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 max-w-2xl">
+
       {/* Toast */}
       {toast && (
         <div className={clsx('flex items-center gap-2 rounded-lg px-3 py-2.5 text-xs font-medium',
@@ -427,30 +532,29 @@ export function IGStrategyTrader() {
 
       {/* Header bar */}
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2">
-          <div className={clsx('flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full',
-            igEnv === 'demo' ? 'bg-blue-500/20 text-blue-400' : 'bg-emerald-500/20 text-emerald-400'
-          )}>
-            <Wifi className="h-3 w-3" />
-            IG {igEnv === 'demo' ? 'Demo' : 'Live'}
-            {session?.accountId && <span className="opacity-60 ml-1">#{session.accountId}</span>}
-          </div>
-          <div className="flex gap-1">
-            {(['demo', 'live'] as const).map(e => (
-              <button key={e} onClick={() => { stopAutoRun(); setIgEnv(e); }}
-                className={clsx('px-2.5 py-1 rounded-lg text-xs font-medium transition-all capitalize',
-                  igEnv === e ? 'bg-orange-500/20 text-orange-300' : 'text-gray-500 hover:text-gray-300'
-                )}>
-                {e}
-              </button>
-            ))}
-          </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {(['demo', 'live'] as const).map(env => (
+            <div key={env} className={clsx(
+              'flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full',
+              sessions[env]
+                ? env === 'demo' ? 'bg-blue-500/20 text-blue-400' : 'bg-emerald-500/20 text-emerald-400'
+                : 'bg-gray-800 text-gray-500'
+            )}>
+              <Wifi className="h-3 w-3" />
+              IG {env === 'demo' ? 'Demo' : 'Live'}
+              {sessions[env]?.accountId && <span className="opacity-60">#{sessions[env]!.accountId}</span>}
+              {connecting[env] && <RefreshCw className="h-2.5 w-2.5 animate-spin" />}
+            </div>
+          ))}
         </div>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={loadPositions} loading={loadingPos}>
+          <Button size="sm" variant="outline" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => void loadPositions()} loading={loadingPos}>
             Refresh
           </Button>
-          <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => setShowBuilder(v => !v)}>
+          <Button size="sm" variant="outline" icon={<ArrowUpDown className="h-3.5 w-3.5" />} onClick={() => { setShowManual(v => !v); setShowBuilder(false); }}>
+            Manual Trade
+          </Button>
+          <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => { openBuilder(); setShowManual(false); }}>
             New Strategy
           </Button>
         </div>
@@ -458,185 +562,330 @@ export function IGStrategyTrader() {
 
       {/* Risk warning */}
       <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-400">
-        ⚠️ Spread bets are complex instruments. 68% of retail investor accounts lose money. Only trade with money you can afford to lose. This tool does not constitute financial advice.
+        ⚠️ Spread bets are complex. 68% of retail accounts lose money. Use Demo first. Not financial advice.
       </div>
 
-      {/* ── Strategy builder ─────────────────────────────────────────────── */}
-      {showBuilder && (
+      {/* ── Manual Trade Panel ────────────────────────────────────────────── */}
+      {showManual && (
         <Card>
-          <CardHeader title="New Strategy" subtitle="Configure and save a trading strategy" icon={<Zap className="h-4 w-4" />}
-            action={<button onClick={() => setShowBuilder(false)}><X className="h-4 w-4 text-gray-500 hover:text-white" /></button>}
+          <CardHeader title="Manual Trade" subtitle="Open a position manually on demo or live"
+            icon={<ArrowUpDown className="h-4 w-4" />}
+            action={<button onClick={() => setShowManual(false)}><X className="h-4 w-4 text-gray-500 hover:text-white" /></button>}
           />
           <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
+            {/* Account selector */}
+            <div className="flex gap-2">
+              {(['demo', 'live'] as const).map(env => (
+                <button key={env} onClick={() => setManualEnv(env)} disabled={!sessions[env]}
+                  className={clsx('flex-1 py-2 rounded-lg text-sm font-medium border transition-all',
+                    !sessions[env] ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-600 border-gray-700' :
+                    manualEnv === env
+                      ? env === 'demo' ? 'bg-blue-500/20 text-blue-300 border-blue-500/40' : 'bg-red-500/20 text-red-300 border-red-500/40'
+                      : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200'
+                  )}>
+                  {env === 'demo' ? 'Demo' : '⚠️ Live'}
+                </button>
+              ))}
+            </div>
+
+            {/* Market search */}
+            <div>
+              <label className="text-xs text-gray-400 mb-1.5 block">Market</label>
+              {builderSession ? (
+                <MarketSearch session={builderSession} env={manualEnv}
+                  onSelect={m => { setManualEpic(m.epic); setManualInstrName(m.instrumentName); }}
+                  placeholder="Search FTSE, Gold, GBP/USD…"
+                />
+              ) : (
+                <p className="text-xs text-gray-500">No session available</p>
+              )}
+              {manualEpic && (
+                <div className="mt-2 flex items-center gap-2 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-1.5 text-xs text-orange-300">
+                  <CheckCircle2 className="h-3 w-3" />
+                  <span className="font-semibold">{manualInstrName}</span>
+                  <span className="font-mono opacity-60">{manualEpic}</span>
+                  <button onClick={() => { setManualEpic(''); setManualInstrName(''); }} className="ml-auto text-gray-500 hover:text-white">
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Direction + Size */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-1">
+                <label className="text-xs text-gray-400 mb-1.5 block">Direction</label>
+                <div className="flex gap-1">
+                  <button onClick={() => setManualDir('BUY')} className={clsx(
+                    'flex-1 py-2 rounded-lg text-sm font-bold border transition-all',
+                    manualDir === 'BUY' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-gray-800 text-gray-500 border-gray-700'
+                  )}>BUY</button>
+                  <button onClick={() => setManualDir('SELL')} className={clsx(
+                    'flex-1 py-2 rounded-lg text-sm font-bold border transition-all',
+                    manualDir === 'SELL' ? 'bg-red-500/20 text-red-300 border-red-500/40' : 'bg-gray-800 text-gray-500 border-gray-700'
+                  )}>SELL</button>
+                </div>
+              </div>
               <div>
-                <label className="text-xs text-gray-400 mb-1 block">Strategy Name</label>
-                <input value={builderName} onChange={e => setBuilderName(e.target.value)}
-                  placeholder="e.g. FTSE Swing"
+                <label className="text-xs text-gray-400 mb-1.5 block">Size (£/pt)</label>
+                <input type="number" min={0.5} step={0.5} value={manualSize} onChange={e => setManualSize(Number(e.target.value))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 mb-1.5 block">Stop (pts)</label>
+                <input type="number" min={1} value={manualStop} onChange={e => setManualStop(e.target.value === '' ? '' : Number(e.target.value))}
+                  placeholder="optional"
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
               </div>
-              <div>
-                <label className="text-xs text-gray-400 mb-1 block">Timeframe</label>
-                <select value={builderTimeframe} onChange={e => setBuilderTimeframe(e.target.value as Timeframe)}
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
-                  <option value="hourly">Hourly (Scalp) — 2:1 R:R</option>
-                  <option value="daily">Daily (Swing) — 3:1 R:R</option>
-                  <option value="longterm">Long-term — 3:1 R:R</option>
-                </select>
-              </div>
             </div>
-
-            <div className="bg-gray-800/40 rounded-lg px-3 py-2 text-xs text-gray-400">
-              {TIMEFRAME_CONFIG[builderTimeframe].description}
-            </div>
-
-            {/* Market search for epic */}
             <div>
-              <label className="text-xs text-gray-400 mb-1 block">Market / Instrument</label>
-              <div className="flex gap-2">
-                <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && void handleSearch()}
-                  placeholder="Search FTSE, Gold, GBP/USD…"
-                  className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
-                <Button size="sm" onClick={handleSearch} loading={searching} icon={<Search className="h-3.5 w-3.5" />}>Search</Button>
-              </div>
-              {searchResults.length > 0 && (
-                <div className="mt-2 space-y-1 max-h-48 overflow-y-auto">
-                  {searchResults.slice(0, 10).map(m => (
-                    <button key={m.epic} onClick={() => { setBuilderEpic(m.epic); setBuilderInstrName(m.instrumentName); setSearchResults([]); }}
-                      className={clsx('w-full flex items-center justify-between px-3 py-2 rounded-lg text-left text-xs transition-all',
-                        builderEpic === m.epic ? 'bg-orange-500/20 border border-orange-500/30' : 'bg-gray-800/60 hover:bg-gray-700/60'
-                      )}>
-                      <div>
-                        <p className="font-semibold text-white">{m.instrumentName}</p>
-                        <p className="text-gray-500 font-mono">{m.epic}</p>
-                      </div>
-                      <div className="text-right text-gray-400">
-                        <p>{m.bid} / {m.offer}</p>
-                        <p className="text-[10px] text-gray-600">{m.instrumentType}</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-              {builderEpic && (
-                <div className="mt-2 flex items-center gap-2 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-2 text-xs text-orange-300">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  Selected: <span className="font-semibold">{builderInstrName}</span>
-                  <span className="font-mono text-orange-400/70 ml-1">{builderEpic}</span>
-                </div>
-              )}
+              <label className="text-xs text-gray-400 mb-1.5 block">Limit / Take Profit (pts, optional)</label>
+              <input type="number" min={1} value={manualLimit} onChange={e => setManualLimit(e.target.value === '' ? '' : Number(e.target.value))}
+                placeholder="Leave blank for no limit order"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs text-gray-400 mb-1 block">Size (£/point)</label>
-                <input type="number" min={0.5} max={100} step={0.5} value={builderSize} onChange={e => setBuilderSize(Number(e.target.value))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400 mb-1 block">Max open positions</label>
-                <input type="number" min={1} max={10} value={builderMaxPos} onChange={e => setBuilderMaxPos(Number(e.target.value))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
-              </div>
-            </div>
-
-            <div>
-              <label className="text-xs text-gray-400 mb-2 block">Trade on accounts</label>
-              <div className="flex gap-2">
-                {(['demo', 'live'] as const).map(acc => (
-                  <button key={acc} onClick={() => setBuilderAccounts(prev =>
-                    prev.includes(acc) ? prev.filter(a => a !== acc) : [...prev, acc]
-                  )}
-                    className={clsx('flex-1 py-2 rounded-lg text-sm font-medium border transition-all',
-                      builderAccounts.includes(acc)
-                        ? acc === 'demo' ? 'bg-blue-500/20 text-blue-300 border-blue-500/40' : 'bg-red-500/20 text-red-300 border-red-500/40'
-                        : 'bg-gray-800 text-gray-500 border-gray-700 hover:text-gray-300'
-                    )}>
-                    {acc === 'demo' ? 'Demo' : '⚠️ Live (real money)'}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2.5">
-              <div>
-                <p className="text-xs font-medium text-white">Auto-trade signals</p>
-                <p className="text-[11px] text-gray-500">Automatically open positions when signal fires</p>
-              </div>
-              <button onClick={() => setBuilderAutoTrade(v => !v)}
-                className={clsx('w-11 h-6 rounded-full transition-all relative', builderAutoTrade ? 'bg-orange-500' : 'bg-gray-700')}>
-                <span className={clsx('absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all', builderAutoTrade ? 'left-5' : 'left-0.5')} />
-              </button>
-            </div>
-
-            {builderAutoTrade && (
+            {manualEnv === 'live' && (
               <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400">
-                ⚠️ Auto-trade will open real positions. Ensure you understand the risks. Use Demo first.
+                ⚠️ This will open a REAL position on your live IG account using real money.
               </div>
             )}
 
-            <Button fullWidth icon={<Save className="h-4 w-4" />} onClick={handleSaveStrategy}
-              disabled={!builderEpic || !builderName || builderAccounts.length === 0}>
-              Save Strategy
+            <Button fullWidth loading={placingManual}
+              className={manualDir === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-red-600 hover:bg-red-500 text-white'}
+              icon={manualDir === 'BUY' ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
+              onClick={handleManualOpen}
+              disabled={!manualEpic}>
+              {manualDir} {manualSize}pt/pt{manualInstrName ? ` — ${manualInstrName}` : ''} ({manualEnv})
             </Button>
           </div>
         </Card>
       )}
 
-      {/* ── Saved strategies ─────────────────────────────────────────────── */}
-      {strategies.length > 0 && (
+      {/* ── Strategy builder ──────────────────────────────────────────────── */}
+      {showBuilder && (
+        <Card>
+          <CardHeader
+            title={editingStratId ? 'Edit Strategy' : 'New Strategy'}
+            subtitle="Configure automated trading parameters"
+            icon={<Zap className="h-4 w-4" />}
+            action={<button onClick={() => setShowBuilder(false)}><X className="h-4 w-4 text-gray-500 hover:text-white" /></button>}
+          />
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-gray-400 mb-1.5 block">Strategy Name *</label>
+                <input value={bName} onChange={e => setBName(e.target.value)} placeholder="e.g. FTSE Daily Swing"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 mb-1.5 block">Timeframe</label>
+                <select value={bTimeframe} onChange={e => setBTimeframe(e.target.value as Timeframe)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                  <option value="hourly">Hourly Scalp — EMA9/21 + RSI · 2:1</option>
+                  <option value="daily">Daily Swing — EMA20/50 + MACD · 3:1</option>
+                  <option value="longterm">Long-term — Golden/Death Cross · 3:1</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="bg-gray-800/40 rounded-lg px-3 py-2 text-xs text-gray-400">
+              {TIMEFRAME_CONFIG[bTimeframe].description}
+            </div>
+
+            {/* Market */}
+            <div>
+              <label className="text-xs text-gray-400 mb-1.5 block">Market / Instrument *</label>
+              {builderSession ? (
+                <MarketSearch session={builderSession} env={bAccounts.includes('live') ? 'live' : 'demo'}
+                  onSelect={m => { setBEpic(m.epic); setBInstrName(m.instrumentName); }}
+                  placeholder="Search FTSE, Gold, GBP/USD…"
+                />
+              ) : (
+                <p className="text-xs text-gray-500">No IG session — connect in Settings → Accounts</p>
+              )}
+              {/* Also allow manual epic entry */}
+              <div className="mt-2 flex gap-2 items-center">
+                <span className="text-[10px] text-gray-600">Or enter epic directly:</span>
+                <input value={bEpic} onChange={e => { setBEpic(e.target.value); if (!bInstrName) setBInstrName(e.target.value); }}
+                  placeholder="e.g. IX.D.FTSE.CFD.IP"
+                  className="flex-1 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-orange-500 font-mono" />
+              </div>
+              {bEpic && (
+                <div className="mt-1.5 flex items-center gap-2 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-1.5 text-xs text-orange-300">
+                  <CheckCircle2 className="h-3 w-3 flex-shrink-0" />
+                  <span className="font-semibold">{bInstrName}</span>
+                  <span className="font-mono text-orange-400/60">{bEpic}</span>
+                  <button onClick={() => { setBEpic(''); setBInstrName(''); }} className="ml-auto text-gray-500 hover:text-white"><X className="h-3 w-3" /></button>
+                </div>
+              )}
+            </div>
+
+            {/* Size + max pos */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-gray-400 mb-1.5 block">Size (£/point)</label>
+                <input type="number" min={0.5} max={100} step={0.5} value={bSize} onChange={e => setBSize(Number(e.target.value))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 mb-1.5 block">Max open positions</label>
+                <input type="number" min={1} max={10} value={bMaxPos} onChange={e => setBMaxPos(Number(e.target.value))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+              </div>
+            </div>
+
+            {/* Accounts */}
+            <div>
+              <label className="text-xs text-gray-400 mb-1.5 block">Trade on accounts</label>
+              <div className="flex gap-2">
+                {(['demo', 'live'] as const).map(acc => (
+                  <button key={acc}
+                    disabled={!sessions[acc]}
+                    onClick={() => setBAccounts(prev => prev.includes(acc) ? prev.filter(a => a !== acc) : [...prev, acc])}
+                    className={clsx('flex-1 py-2 rounded-lg text-sm font-medium border transition-all',
+                      !sessions[acc] ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-600 border-gray-700' :
+                      bAccounts.includes(acc)
+                        ? acc === 'demo' ? 'bg-blue-500/20 text-blue-300 border-blue-500/40' : 'bg-red-500/20 text-red-300 border-red-500/40'
+                        : 'bg-gray-800 text-gray-500 border-gray-700 hover:text-gray-300'
+                    )}>
+                    {acc === 'demo' ? 'Demo' : '⚠️ Live (real money)'}
+                    {!sessions[acc] && <span className="text-[10px] block opacity-50">not connected</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Toggles */}
+            <div className="space-y-2">
+              {[
+                { label: 'Auto-trade signals', sub: 'Automatically open positions when signal fires', val: bAutoTrade, set: setBAutoTrade },
+                { label: 'Auto-close on reversal', sub: 'Close opposing positions when signal reverses', val: bAutoClose, set: setBAutoClose },
+              ].map(({ label, sub, val, set }) => (
+                <div key={label} className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2.5">
+                  <div>
+                    <p className="text-xs font-medium text-white">{label}</p>
+                    <p className="text-[11px] text-gray-500">{sub}</p>
+                  </div>
+                  <button onClick={() => set(v => !v)}
+                    className={clsx('w-11 h-6 rounded-full transition-all relative flex-shrink-0', val ? 'bg-orange-500' : 'bg-gray-700')}>
+                    <span className={clsx('absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all', val ? 'left-5' : 'left-0.5')} />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {bAutoTrade && bAccounts.includes('live') && (
+              <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400">
+                ⚠️ Auto-trade on LIVE will open real positions with real money. Use demo first.
+              </div>
+            )}
+
+            <Button fullWidth icon={<Save className="h-4 w-4" />} onClick={handleSaveStrategy}>
+              {editingStratId ? 'Update Strategy' : 'Save Strategy'}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {/* ── Saved strategies ──────────────────────────────────────────────── */}
+      {strategies.length === 0 && !showBuilder && !showManual ? (
+        <div className="text-center py-8 text-gray-500">
+          <Target className="h-10 w-10 mx-auto mb-3 opacity-30" />
+          <p className="text-sm">No strategies yet</p>
+          <p className="text-xs mt-1">Click "New Strategy" to create an automated strategy, or "Manual Trade" to place a quick order</p>
+        </div>
+      ) : strategies.length > 0 && (
         <Card>
           <CardHeader title="My Strategies" subtitle={`${strategies.length} saved`} icon={<Target className="h-4 w-4" />} />
           <div className="space-y-2">
             {strategies.map(strat => {
               const isActive = strat.id === activeStratId;
               const cfg = TIMEFRAME_CONFIG[strat.timeframe];
+              const s = strat as IGSavedStrategy & { autoClose?: boolean };
               return (
-                <div key={strat.id}
-                  className={clsx('rounded-xl border p-3 transition-all',
-                    isActive ? 'border-orange-500/50 bg-orange-500/5' : 'border-gray-800 bg-gray-800/30'
-                  )}>
+                <div key={strat.id} className={clsx('rounded-xl border p-3 transition-all',
+                  isActive ? 'border-orange-500/50 bg-orange-500/5' : 'border-gray-800 bg-gray-800/30'
+                )}>
                   <div className="flex items-start justify-between gap-2">
-                    <button onClick={() => setActiveStratId(isActive ? null : strat.id)} className="flex-1 text-left">
-                      <div className="flex items-center gap-2 flex-wrap">
+                    <button onClick={() => setActiveStratId(isActive ? null : strat.id)} className="flex-1 text-left min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <p className="text-sm font-semibold text-white">{strat.name}</p>
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300">{cfg.label}</span>
                         {strat.autoTrade && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400">Auto</span>}
+                        {s.autoClose && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400">AutoClose</span>}
                         {strat.accounts.map(a => (
                           <span key={a} className={clsx('text-[10px] px-1.5 py-0.5 rounded-full',
                             a === 'demo' ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
                           )}>{a}</span>
                         ))}
+                        {strat.lastSignal && (
+                          <span className={clsx('text-[10px] px-1.5 py-0.5 rounded-full font-bold',
+                            strat.lastSignal === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' :
+                            strat.lastSignal === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-gray-700 text-gray-400'
+                          )}>{strat.lastSignal}</span>
+                        )}
                       </div>
-                      <p className="text-[11px] text-gray-500 mt-0.5">
-                        {strat.instrumentName} · £{strat.size}/pt · max {strat.maxPositions} pos
-                        {strat.lastRunAt && ` · last run ${fmtTime(strat.lastRunAt)}`}
-                        {strat.lastSignal && ` · ${strat.lastSignal}`}
+                      <p className="text-[11px] text-gray-500 mt-0.5 truncate">
+                        {strat.instrumentName} · £{strat.size}/pt · max {strat.maxPositions}
+                        {strat.lastRunAt && ` · ${fmtTime(strat.lastRunAt)}`}
                       </p>
                     </button>
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <div className="flex items-center gap-1 flex-shrink-0">
                       {isActive && (
                         isRunning ? (
-                          <Button size="sm" onClick={stopAutoRun}
-                            className="bg-red-600 hover:bg-red-500 text-white"
-                            icon={<Square className="h-3.5 w-3.5" />}>Stop</Button>
+                          <Button size="sm" className="bg-red-600 hover:bg-red-500 text-white" icon={<Square className="h-3.5 w-3.5" />} onClick={stopAutoRun}>Stop</Button>
                         ) : (
                           <>
-                            <Button size="sm" variant="outline" onClick={() => void runStrategy(strat)} loading={analyzing}
-                              icon={<BarChart3 className="h-3.5 w-3.5" />}>Analyse</Button>
-                            <Button size="sm" onClick={() => startAutoRun(strat)}
-                              className="bg-orange-600 hover:bg-orange-500 text-white"
-                              icon={<Play className="h-3.5 w-3.5" />}>Run</Button>
+                            <Button size="sm" variant="outline" loading={analyzing} icon={<BarChart3 className="h-3.5 w-3.5" />}
+                              onClick={() => void runStrategy(strat)}>Analyse</Button>
+                            <Button size="sm" className="bg-orange-600 hover:bg-orange-500 text-white" icon={<Play className="h-3.5 w-3.5" />}
+                              onClick={() => startAutoRun(strat)}>Run</Button>
                           </>
                         )
                       )}
-                      <button onClick={() => { deleteStrategy(strat.id); setStrategies(loadStrategies()); if (activeStratId === strat.id) { setActiveStratId(null); stopAutoRun(); } }}
-                        className="p-1.5 text-gray-600 hover:text-red-400 transition-colors">
+                      <button onClick={() => openBuilder(strat)} className="p-1.5 text-gray-600 hover:text-orange-400 transition-colors" title="Edit">
+                        <Edit2 className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        onClick={() => { deleteStrategy(strat.id); setStrategies(loadStrategies()); if (activeStratId === strat.id) { setActiveStratId(null); stopAutoRun(); } }}
+                        className="p-1.5 text-gray-600 hover:text-red-400 transition-colors" title="Delete">
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
                   </div>
+
+                  {/* Expanded: signal panel */}
+                  {isActive && signal && (
+                    <div className="mt-3 pt-3 border-t border-gray-700/50 space-y-3">
+                      <div className="flex items-start justify-between">
+                        <SignalBadge signal={signal} />
+                        <div className="text-right text-xs text-gray-500">
+                          <p>Stop {signal.stopPoints} pts · Target {signal.targetPoints} pts</p>
+                          <p className="text-orange-400 font-semibold">R:R {signal.riskReward}</p>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-300 leading-relaxed">{signal.reason}</p>
+                      <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                        <div className={clsx('h-full rounded-full transition-all',
+                          signal.direction === 'BUY' ? 'bg-emerald-500' : signal.direction === 'SELL' ? 'bg-red-500' : 'bg-gray-600'
+                        )} style={{ width: `${signal.strength}%` }} />
+                      </div>
+                      <div className="space-y-0">
+                        {signal.indicators.map(ind => (
+                          <div key={ind.label} className="flex items-center justify-between py-1 border-b border-gray-800 last:border-0">
+                            <span className="text-xs text-gray-500">{ind.label}</span>
+                            <span className={clsx('text-xs font-mono font-semibold',
+                              ind.status === 'bullish' ? 'text-emerald-400' : ind.status === 'bearish' ? 'text-red-400' : 'text-gray-400'
+                            )}>{ind.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {candles.length > 0 && (
+                        <p className="text-[10px] text-gray-600">{candles.length} candles · close: {candles[candles.length - 1]?.close.toFixed(2)}</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -644,116 +893,59 @@ export function IGStrategyTrader() {
         </Card>
       )}
 
-      {strategies.length === 0 && !showBuilder && (
-        <div className="text-center py-8 text-gray-500">
-          <Target className="h-10 w-10 mx-auto mb-3 opacity-30" />
-          <p className="text-sm">No strategies yet</p>
-          <p className="text-xs mt-1">Click "New Strategy" to create your first automated strategy</p>
-        </div>
-      )}
-
-      {/* ── Signal panel ─────────────────────────────────────────────────── */}
-      {activeSig && activeStrat && (
-        <Card>
-          <div className="flex items-start justify-between mb-3">
-            <div>
-              <p className="text-xs text-gray-500 mb-1">{activeStrat.instrumentName} · {TIMEFRAME_CONFIG[activeStrat.timeframe].label}</p>
-              <SignalBadge signal={activeSig} />
-            </div>
-            <div className="text-right text-xs text-gray-500">
-              <p>Stop: {activeSig.stopPoints} pts</p>
-              <p>Target: {activeSig.targetPoints} pts</p>
-              <p className="text-orange-400 font-semibold">R:R {activeSig.riskReward}</p>
-            </div>
-          </div>
-
-          <p className="text-xs text-gray-300 leading-relaxed mb-3">{activeSig.reason}</p>
-
-          {/* Strength bar */}
-          <div className="mb-4">
-            <div className="flex justify-between text-xs mb-1">
-              <span className="text-gray-500">Signal strength</span>
-              <span className={clsx('font-semibold',
-                activeSig.strength >= 70 ? 'text-emerald-400' : activeSig.strength >= 45 ? 'text-amber-400' : 'text-gray-500'
-              )}>{activeSig.strength}%</span>
-            </div>
-            <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-              <div className={clsx('h-full rounded-full transition-all',
-                activeSig.direction === 'BUY' ? 'bg-emerald-500' : activeSig.direction === 'SELL' ? 'bg-red-500' : 'bg-gray-600'
-              )} style={{ width: `${activeSig.strength}%` }} />
-            </div>
-          </div>
-
-          {/* Indicators */}
-          <div className="space-y-0">
-            {activeSig.indicators.map(ind => (
-              <IndicatorRow key={ind.label} {...ind} />
-            ))}
-          </div>
-
-          {/* Candles info */}
-          {candles.length > 0 && (
-            <p className="text-[10px] text-gray-600 mt-3">{candles.length} candles · Latest close: {candles[candles.length - 1]?.close.toFixed(2)}</p>
-          )}
-        </Card>
-      )}
-
-      {/* ── Open positions ────────────────────────────────────────────────── */}
+      {/* ── Open Positions ─────────────────────────────────────────────────── */}
       <Card>
         <CardHeader
           title="Open Positions"
-          subtitle={`${positions.length} open · P&L: ${totalPnL >= 0 ? '+' : ''}£${totalPnL.toFixed(2)}`}
+          subtitle={`${allPositions.length} open · P&L: ${totalPnL >= 0 ? '+' : ''}£${totalPnL.toFixed(2)}`}
           icon={<BarChart3 className="h-4 w-4" />}
         />
-        {positions.length === 0 ? (
+
+        {allPositions.length === 0 ? (
           <p className="text-sm text-gray-500 py-3 text-center">No open positions</p>
         ) : (
-          <div className="space-y-2">
-            {positions.map(pos => (
-              <div key={pos.dealId} className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2.5 gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className={clsx('text-[10px] font-bold px-1.5 py-0.5 rounded',
-                      pos.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
-                    )}>{pos.direction}</span>
-                    <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
-                    <span className="text-[10px] text-emerald-400 font-medium">TAX FREE</span>
-                  </div>
-                  <p className="text-[10px] text-gray-500">Size: {pos.size} · Level: {pos.level} · {pos.currency}</p>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <span className={clsx('text-sm font-semibold font-mono',
-                    (pos.upl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
-                  )}>
-                    {(pos.upl ?? 0) >= 0 ? '+' : '-'}{fmt(pos.upl ?? 0)}
-                  </span>
-                  <Button size="sm" variant="outline" loading={closingId === pos.dealId}
-                    onClick={() => void handleClose(pos)}
-                    className="text-red-400 border-red-500/30 hover:bg-red-500/10">
-                    Close
-                  </Button>
+          <div className="space-y-3">
+            {/* Demo positions */}
+            {demoPositions.length > 0 && (
+              <div>
+                <p className="text-[10px] font-semibold text-blue-400 uppercase tracking-wider mb-1.5">Demo</p>
+                <div className="space-y-1.5">
+                  {demoPositions.map(pos => (
+                    <PositionRow key={pos.dealId} pos={pos} env="demo" closingId={closingId} onClose={handleClose} />
+                  ))}
                 </div>
               </div>
-            ))}
+            )}
+            {/* Live positions */}
+            {livePositions.length > 0 && (
+              <div>
+                <p className="text-[10px] font-semibold text-red-400 uppercase tracking-wider mb-1.5">Live</p>
+                <div className="space-y-1.5">
+                  {livePositions.map(pos => (
+                    <PositionRow key={pos.dealId} pos={pos} env="live" closingId={closingId} onClose={handleClose} />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </Card>
 
-      {/* ── Run log ───────────────────────────────────────────────────────── */}
+      {/* ── Run log ────────────────────────────────────────────────────────── */}
       {runLog.length > 0 && (
         <Card>
-          <CardHeader title="Strategy Log" subtitle={`${runLog.length} entries`} icon={<Clock className="h-4 w-4" />}
+          <CardHeader title="Activity Log" subtitle={`${runLog.length} entries`} icon={<Clock className="h-4 w-4" />}
             action={<button onClick={() => setRunLog([])} className="text-xs text-gray-500 hover:text-white">Clear</button>}
           />
           <div className="space-y-1 max-h-64 overflow-y-auto font-mono">
             {runLog.map(entry => (
               <div key={entry.id} className="flex gap-2 text-[11px]">
                 <span className="text-gray-600 flex-shrink-0">{fmtTime(entry.ts)}</span>
-                <span className={clsx('flex-1',
-                  entry.type === 'buy' ? 'text-emerald-400' :
-                  entry.type === 'sell' ? 'text-red-400' :
-                  entry.type === 'close' ? 'text-blue-400' :
-                  entry.type === 'error' ? 'text-red-500' :
+                <span className={clsx('flex-1 break-all',
+                  entry.type === 'buy'    ? 'text-emerald-400' :
+                  entry.type === 'sell'   ? 'text-red-400' :
+                  entry.type === 'close'  ? 'text-blue-400' :
+                  entry.type === 'error'  ? 'text-red-500' :
                   entry.type === 'signal' ? 'text-amber-400' :
                   'text-gray-400'
                 )}>{entry.msg}</span>
@@ -763,10 +955,56 @@ export function IGStrategyTrader() {
         </Card>
       )}
 
-      {/* Footer note */}
       <p className="text-[10px] text-gray-600 text-center">
         Spread betting profits are exempt from UK CGT and Income Tax · Losses cannot be offset against gains
       </p>
+    </div>
+  );
+}
+
+// ── Position row sub-component ────────────────────────────────────────────────
+
+function PositionRow({ pos, env, closingId, onClose }: {
+  pos: IGPosition;
+  env: 'demo' | 'live';
+  closingId: string | null;
+  onClose: (env: 'demo' | 'live', pos: IGPosition) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="bg-gray-800/40 rounded-lg overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2.5 gap-3">
+        <button className="flex-1 min-w-0 text-left flex items-center gap-2" onClick={() => setExpanded(v => !v)}>
+          <span className={clsx('text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0',
+            pos.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+          )}>{pos.direction}</span>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
+            <p className="text-[10px] text-gray-500">£{pos.size}/pt · entry {pos.level}</p>
+          </div>
+          {expanded ? <ChevronUp className="h-3 w-3 text-gray-600 flex-shrink-0" /> : <ChevronDown className="h-3 w-3 text-gray-600 flex-shrink-0" />}
+        </button>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className={clsx('text-sm font-semibold font-mono',
+            (pos.upl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+          )}>
+            {(pos.upl ?? 0) >= 0 ? '+' : '-'}{fmt(pos.upl ?? 0)}
+          </span>
+          <Button size="sm" variant="outline" loading={closingId === pos.dealId}
+            onClick={() => onClose(env, pos)}
+            className="text-red-400 border-red-500/30 hover:bg-red-500/10">
+            Close
+          </Button>
+        </div>
+      </div>
+      {expanded && (
+        <div className="px-3 pb-2.5 grid grid-cols-3 gap-2 text-[11px] border-t border-gray-700/40 pt-2">
+          <div><p className="text-gray-600">Bid</p><p className="text-white font-mono">{pos.bid}</p></div>
+          <div><p className="text-gray-600">Offer</p><p className="text-white font-mono">{pos.offer}</p></div>
+          <div><p className="text-gray-600">Currency</p><p className="text-white">{pos.currency} <span className="text-emerald-400 text-[9px]">TAX FREE</span></p></div>
+          <div className="col-span-3"><p className="text-gray-600">Deal ID</p><p className="text-gray-400 font-mono text-[10px] break-all">{pos.dealId}</p></div>
+        </div>
+      )}
     </div>
   );
 }
