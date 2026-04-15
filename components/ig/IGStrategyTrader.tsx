@@ -42,7 +42,6 @@ type MarketScan = {
   status: 'idle' | 'ok' | 'error';
   error?: string;
   lastScanned?: string;
-  allowanceLeft?: number;
 };
 
 type RunLog = { id: string; ts: string; type: 'info'|'buy'|'sell'|'close'|'error'|'signal'; msg: string };
@@ -165,7 +164,6 @@ export function IGStrategyTrader() {
   // ── Market scanner state ───────────────────────────────────────────────────
   const [scans, setScans] = useState<Record<string, MarketScan>>({});
   const [scanProgress, setScanProgress] = useState<string>('');
-  const [allowance, setAllowance] = useState<number|null>(null);
 
   // ── Builder ────────────────────────────────────────────────────────────────
   const [showBuilder, setShowBuilder]   = useState(false);
@@ -272,44 +270,13 @@ export function IGStrategyTrader() {
     return r.json() as Promise<{ok:boolean;error?:string}>;
   }
 
-  // ── Auto-discover correct epic via search when hardcoded one fails ───────────
-  async function discoverEpic(sess: IGSession, env: 'demo'|'live', name: string): Promise<string|null> {
+  // ── Fetch candles for one market via Finnhub (no IG historical data used) ──
+  async function fetchCandles(name: string, timeframe: Timeframe): Promise<{candles:Candle[];error?:string}|null> {
     try {
-      const r = await fetch(`/api/ig/markets?q=${encodeURIComponent(name)}`, { headers: makeHeaders(sess, env) });
-      const d = await r.json() as { ok:boolean; markets?: {epic:string;instrumentName:string;expiry:string}[] };
-      if (d.ok && d.markets && d.markets.length > 0) {
-        // Prefer DFB (rolling) instruments for spread bets
-        const dfb = d.markets.find(m => m.expiry === 'DFB' || m.epic.endsWith('.IP'));
-        return (dfb ?? d.markets[0]).epic;
-      }
-    } catch {}
-    return null;
-  }
-
-  // ── Fetch candles for one market ───────────────────────────────────────────
-  async function fetchCandles(env: 'demo'|'live', epic:string, timeframe: Timeframe): Promise<{candles:Candle[];allowanceLeft?:number;error?:string}|null> {
-    const sess = sessions[env] ?? Object.values(sessions).find(Boolean);
-    if (!sess) return null;
-    const cfg = TIMEFRAME_CONFIG[timeframe];
-    try {
-      const r = await fetch(
-        `/api/ig/prices?epic=${encodeURIComponent(epic)}&resolution=${cfg.resolution}&max=${cfg.max}`,
-        { headers: makeHeaders(sess, env) }
-      );
-      const d = await r.json() as { ok:boolean; candles?:Candle[]; allowance?:{remainingAllowance:number}; error?:string };
+      const r = await fetch(`/api/ig/candles?name=${encodeURIComponent(name)}&timeframe=${timeframe}`);
+      const d = await r.json() as { ok:boolean; candles?:Candle[]; error?:string };
       if (!d.ok) return { candles: [], error: d.error ?? `HTTP ${r.status}` };
-      if (d.allowance) {
-        const remaining = d.allowance.remainingAllowance;
-        setAllowance(remaining);
-        // Auto-stop if critically low to prevent IG blocking the account
-        if (remaining < 200 && runningRef.current) {
-          runningRef.current = false;
-          if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-          setIsRunning(false);
-          setScanProgress('');
-        }
-      }
-      return { candles: d.candles ?? [], allowanceLeft: d.allowance?.remainingAllowance };
+      return { candles: d.candles ?? [] };
     } catch (e) { return { candles: [], error: e instanceof Error ? e.message : 'Fetch failed' }; }
   }
 
@@ -317,40 +284,12 @@ export function IGStrategyTrader() {
   async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
     const envs = strat.accounts.filter(e => sessions[e]);
-    const primaryEnv = envs[0] ?? 'demo';
-    const sess = sessions[primaryEnv] ?? Object.values(sessions).find(Boolean);
 
-    let epic = market.epic;
-    let result = await fetchCandles(primaryEnv, epic, strat.timeframe);
-
-    // Auto-discover correct epic when the hardcoded one fails ──────────────────
-    if (!result || result.candles.length < 10 || result.error) {
-      const igError = result?.error;
-      log('info', `${market.name}: epic "${epic}" failed (${igError ?? 'no candles'}) — searching for correct epic…`);
-      if (sess) {
-        const discovered = await discoverEpic(sess, primaryEnv, market.name);
-        if (discovered && discovered !== epic) {
-          log('info', `${market.name}: trying discovered epic "${discovered}"`);
-          epic = discovered;
-          result = await fetchCandles(primaryEnv, epic, strat.timeframe);
-          if (result && result.candles.length >= 10 && !result.error) {
-            // Persist the corrected epic back into the strategy's watchlist
-            saveStrategy({
-              ...strat,
-              watchlist: (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).map(m =>
-                m.epic === market.epic ? { ...m, epic: discovered } : m
-              ),
-            });
-            setStrategies(loadStrategies());
-            log('info', `${market.name}: epic updated to "${discovered}" and saved`);
-          }
-        }
-      }
-    }
+    const result = await fetchCandles(market.name, strat.timeframe);
 
     if (!result || result.candles.length < 10) {
       const errMsg = result?.error ?? 'No price data returned';
-      setScans(p => ({ ...p, [market.epic]: { epic, name:market.name, signal:null, scanning:false, status:'error', error: errMsg } }));
+      setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'error', error: errMsg } }));
       log('error', `${market.name}: ${errMsg}`);
       return null;
     }
@@ -358,7 +297,7 @@ export function IGStrategyTrader() {
     const sig = getSignal(strat.timeframe, result.candles);
     setScans(p => ({
       ...p,
-      [market.epic]: { epic, name:market.name, signal:sig, scanning:false, status:'ok', lastScanned:new Date().toISOString(), allowanceLeft:result.allowanceLeft },
+      [market.epic]: { epic:market.epic, name:market.name, signal:sig, scanning:false, status:'ok', lastScanned:new Date().toISOString() },
     }));
 
     // Execute on each account if autoTrade and signal is strong enough
@@ -597,11 +536,9 @@ export function IGStrategyTrader() {
               {connecting[env] && <RefreshCw className="h-2.5 w-2.5 animate-spin" />}
             </div>
           ))}
-          {allowance !== null && (
-            <span className="text-[10px] text-gray-600 px-2 py-1 bg-gray-800/50 rounded-full">
-              API allowance: {allowance.toLocaleString()}
-            </span>
-          )}
+          <span className="text-[10px] text-gray-600 px-2 py-1 bg-gray-800/50 rounded-full">
+            Signal: Finnhub · Execution: IG
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => void loadPositions()} loading={loadingPos}>Refresh</Button>
@@ -614,28 +551,6 @@ export function IGStrategyTrader() {
       <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-400">
         ⚠️ Spread bets are complex. 68% of retail accounts lose money. Use Demo first. Not financial advice.
       </div>
-
-      {/* Allowance warning */}
-      {allowance !== null && allowance < 2000 && (
-        <div className={clsx('rounded-lg px-3 py-2.5 text-xs',
-          allowance < 500
-            ? 'bg-red-500/15 border border-red-500/30 text-red-400'
-            : 'bg-orange-500/15 border border-orange-500/30 text-orange-400'
-        )}>
-          <p className="font-semibold mb-0.5">
-            {allowance < 500 ? '🛑 Historical data allowance critical' : '⚠️ Historical data allowance low'}
-          </p>
-          <p>
-            {allowance.toLocaleString()} data points remaining this week (IG limit: ~10 000/week).
-            {allowance < 500
-              ? ' Auto-scanning has been paused to avoid an account block. Allowance resets weekly.'
-              : ' Consider disabling extra markets in the strategy watchlist to conserve allowance.'}
-          </p>
-          {allowance < 500 && isRunning && (
-            <button onClick={stopAutoRun} className="mt-2 underline font-semibold">Stop auto-scan now</button>
-          )}
-        </div>
-      )}
 
       {/* ── Manual trade panel ─────────────────────────────────────────── */}
       {showManual && (
@@ -804,8 +719,7 @@ export function IGStrategyTrader() {
               <div className="flex items-center justify-between mb-2">
                 <label className="text-xs text-gray-400">Markets to scan</label>
                 <span className="text-[10px] text-gray-600">
-                  {bWatchlist.filter(m=>m.enabled).length} enabled ·{' '}
-                  ~{(bWatchlist.filter(m=>m.enabled).length * TIMEFRAME_CONFIG[bTimeframe].max * (bTimeframe === 'hourly' ? 7*24*4 : bTimeframe === 'daily' ? 7*6 : 14)).toLocaleString()} pts/week
+                  {bWatchlist.filter(m=>m.enabled).length} enabled · signals via Finnhub
                 </span>
               </div>
               <div className="space-y-1 max-h-56 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800/50">
@@ -930,8 +844,8 @@ export function IGStrategyTrader() {
             title="Market Scanner"
             subtitle={
               scanEntries.some(s => s.status === 'ok')
-                ? `${scanEntries.filter(s=>s.status==='ok').length}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
-                : `${scanEntries.length} markets ready — click Run to start scanning`
+                ? `Signal source: Finnhub · Execution: IG · ${scanEntries.filter(s=>s.status==='ok').length}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
+                : `Signal source: Finnhub · Execution: IG · ${scanEntries.length} markets ready — click Run to start`
             }
             icon={<Settings className="h-4 w-4" />}
           />
@@ -981,7 +895,7 @@ export function IGStrategyTrader() {
           </div>
           {scanEntries.some(s => s.status === 'error') && (
             <p className="text-[11px] text-amber-400 mt-3 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-              ⚠️ Some markets failed. The bot will automatically search for correct epics on the next run. You can also edit the strategy and use the market search to fix them manually.
+              ⚠️ Some markets failed to load from Finnhub. This may be a temporary API issue or an unsupported symbol. The bot will retry on the next run.
             </p>
           )}
         </Card>
