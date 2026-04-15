@@ -104,9 +104,9 @@ async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSe
       }
     }
 
-    // Fresh auth
+    // Fresh auth — pass forceRefresh so the server also bypasses its in-memory cache
     const r = await fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ username:c.username, password:c.password, apiKey:c.apiKey, env }) });
+      body: JSON.stringify({ username:c.username, password:c.password, apiKey:c.apiKey, env, forceRefresh }) });
     const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string };
     if (d.ok && d.cst && d.securityToken) {
       const sess: IGSession = { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId??'', apiKey:c.apiKey };
@@ -515,26 +515,87 @@ export function IGStrategyTrader() {
   }, [activeStratId, strategies]);
 
   // ── Place / close ──────────────────────────────────────────────────────────
+
+  /**
+   * Returns a guaranteed-fresh session for `env`.
+   * Proactively re-auths if the cached token is ≥ 5h old.
+   * Clears stale localStorage cache before re-authing.
+   */
+  async function freshSession(env: 'demo'|'live'): Promise<IGSession|null> {
+    // Check stored timestamp
+    try {
+      const raw = localStorage.getItem(`ig_session_${env}`);
+      if (raw) {
+        const meta = JSON.parse(raw) as { authenticatedAt?: number };
+        if (meta.authenticatedAt && (Date.now() - meta.authenticatedAt) >= SESSION_TTL_MS) {
+          // Proactively expire before IG does
+          localStorage.removeItem(`ig_session_${env}`);
+          const fresh = await connectIG(env, true);
+          if (fresh) setSessions(s => ({...s,[env]:fresh}));
+          return fresh;
+        }
+      }
+    } catch {}
+    // Session still fresh — return from state (connectIG cached it on mount)
+    return sessions[env] ?? null;
+  }
+
   async function placeOrder(env: 'demo'|'live', epic:string, direction:'BUY'|'SELL', size:number, stopDist?:number, limitDist?:number) {
-    const sess = sessions[env];
+    // Proactive freshness check (spec: validate before every IG call)
+    let sess = await freshSession(env);
     if (!sess) return { ok:false as const, error:`No ${env} session`, epic, sentPayload: null, igBody: null };
-    const body = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist, currencyCode:'GBP' };
-    const r = await fetch('/api/ig/order', {
+
+    const orderBody = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist, currencyCode:'GBP' };
+    let r = await fetch('/api/ig/order', {
       method:'POST',
       headers: { ...makeHeaders(sess, env), 'Content-Type':'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(orderBody),
     });
+
+    // 401 / 403 → clear cache, re-auth, retry once
+    if (r.status === 401 || r.status === 403) {
+      localStorage.removeItem(`ig_session_${env}`);
+      const fresh = await connectIG(env, true);
+      if (fresh) {
+        sess = fresh;
+        setSessions(s => ({...s,[env]:fresh}));
+        r = await fetch('/api/ig/order', {
+          method:'POST',
+          headers: { ...makeHeaders(fresh, env), 'Content-Type':'application/json' },
+          body: JSON.stringify(orderBody),
+        });
+      }
+    }
+
     return r.json() as Promise<{ok:boolean;dealReference?:string;dealId?:string;dealStatus?:string;level?:number;reason?:string;error?:string;epic?:string;resolvedVia?:string;sentPayload?:unknown;igBody?:unknown;igStatus?:number}>;
   }
 
   async function closePos(env: 'demo'|'live', pos: IGPosition) {
-    const sess = sessions[env];
+    let sess = sessions[env];
     if (!sess) return { ok:false, error:`No ${env} session` };
-    const r = await fetch('/api/ig/order', {
+    const closeBody = { dealId:pos.dealId, direction: pos.direction==='BUY'?'SELL':'BUY', size:pos.size };
+
+    let r = await fetch('/api/ig/order', {
       method:'DELETE',
       headers: { ...makeHeaders(sess, env), 'Content-Type':'application/json' },
-      body: JSON.stringify({ dealId:pos.dealId, direction: pos.direction==='BUY'?'SELL':'BUY', size:pos.size }),
+      body: JSON.stringify(closeBody),
     });
+
+    // 401 / 403 → re-auth and retry once
+    if (r.status === 401 || r.status === 403) {
+      localStorage.removeItem(`ig_session_${env}`);
+      const fresh = await connectIG(env, true);
+      if (fresh) {
+        sess = fresh;
+        setSessions(s => ({...s,[env]:fresh}));
+        r = await fetch('/api/ig/order', {
+          method:'DELETE',
+          headers: { ...makeHeaders(fresh, env), 'Content-Type':'application/json' },
+          body: JSON.stringify(closeBody),
+        });
+      }
+    }
+
     return r.json() as Promise<{ok:boolean;error?:string}>;
   }
 

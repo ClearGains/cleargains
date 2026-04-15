@@ -9,7 +9,7 @@ const tokenCache = new Map<string, {
   expiresAt: number;
 }>();
 
-const TOKEN_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const TOKEN_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours (IG tokens last 6h; refresh before expiry)
 
 export async function POST(request: NextRequest) {
   try {
@@ -20,6 +20,7 @@ export async function POST(request: NextRequest) {
       env: 'demo' | 'live';
     };
     const { password, apiKey, env } = body;
+    const forceRefresh = (body as { forceRefresh?: boolean }).forceRefresh === true;
     // Sanitise — IG rejects identifiers that contain spaces or @ symbols
     const username = (body.username ?? '').trim().replace(/\s+/g, '');
 
@@ -33,7 +34,7 @@ export async function POST(request: NextRequest) {
 
     const cacheKey = `${env}:${username}:${apiKey}`;
     const cached = tokenCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
+    if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
       return NextResponse.json({
         ok: true,
         cst: cached.cst,
