@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, FormEvent, Suspense } from 'react';
+import { useState, useEffect, FormEvent, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   TrendingUp, Lock, AlertCircle, Eye, EyeOff,
@@ -211,15 +211,66 @@ function T212LoginForm({
   );
 }
 
+const LOCKOUT_ATTEMPTS_KEY = 'cg_login_attempts';
+const LOCKOUT_UNTIL_KEY = 'cg_login_lockout_until';
+const MAX_ATTEMPTS = 3;
+const LOCKOUT_DURATION_MS = 5 * 60 * 1000; // 5 minutes
+
+function getLockoutState(): { attempts: number; lockedUntil: number | null } {
+  if (typeof window === 'undefined') return { attempts: 0, lockedUntil: null };
+  const attempts = parseInt(localStorage.getItem(LOCKOUT_ATTEMPTS_KEY) ?? '0', 10);
+  const lockedUntilStr = localStorage.getItem(LOCKOUT_UNTIL_KEY);
+  const lockedUntil = lockedUntilStr ? parseInt(lockedUntilStr, 10) : null;
+  return { attempts, lockedUntil };
+}
+
 // ── Site password form ────────────────────────────────────────────────────────
 function SitePasswordForm({ onSuccess, onBack }: { onSuccess: () => void; onBack: () => void }) {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState<string | null>(null);
+  const [attempts, setAttempts] = useState(0);
+  const [lockedUntil, setLockedUntil] = useState<number | null>(null);
+  const [countdown, setCountdown] = useState('');
+
+  // Initialize lockout state from localStorage
+  useEffect(() => {
+    const state = getLockoutState();
+    setAttempts(state.attempts);
+    if (state.lockedUntil && state.lockedUntil > Date.now()) {
+      setLockedUntil(state.lockedUntil);
+    } else if (state.lockedUntil) {
+      // Lockout expired — clear it
+      localStorage.removeItem(LOCKOUT_ATTEMPTS_KEY);
+      localStorage.removeItem(LOCKOUT_UNTIL_KEY);
+    }
+  }, []);
+
+  // Countdown timer
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const state = getLockoutState();
+      if (state.lockedUntil && state.lockedUntil > Date.now()) {
+        const remaining = Math.ceil((state.lockedUntil - Date.now()) / 1000);
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        setCountdown(`${mins}:${secs.toString().padStart(2, '0')}`);
+        setLockedUntil(state.lockedUntil);
+      } else {
+        setLockedUntil(null);
+        setCountdown('');
+        setAttempts(0);
+      }
+    }, 500);
+    return () => clearInterval(interval);
+  }, []);
+
+  const isLocked = lockedUntil !== null && lockedUntil > Date.now();
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (isLocked) return;
     if (!password) { setError('Please enter the site password.'); return; }
     setLoading(true); setError(null);
     try {
@@ -229,8 +280,23 @@ function SitePasswordForm({ onSuccess, onBack }: { onSuccess: () => void; onBack
         body: JSON.stringify({ password }),
       });
       const data = await res.json();
-      if (data.ok) { onSuccess(); }
-      else { setError(data.error ?? 'Incorrect password.'); }
+      if (data.ok) {
+        localStorage.removeItem(LOCKOUT_ATTEMPTS_KEY);
+        localStorage.removeItem(LOCKOUT_UNTIL_KEY);
+        onSuccess();
+      } else {
+        const newAttempts = attempts + 1;
+        localStorage.setItem(LOCKOUT_ATTEMPTS_KEY, String(newAttempts));
+        setAttempts(newAttempts);
+        if (newAttempts >= MAX_ATTEMPTS) {
+          const until = Date.now() + LOCKOUT_DURATION_MS;
+          localStorage.setItem(LOCKOUT_UNTIL_KEY, String(until));
+          setLockedUntil(until);
+          setError(null);
+        } else {
+          setError(`Incorrect password. ${MAX_ATTEMPTS - newAttempts} attempt${MAX_ATTEMPTS - newAttempts !== 1 ? 's' : ''} remaining.`);
+        }
+      }
     } catch {
       setError('Request failed. Please try again.');
     } finally {
@@ -252,34 +318,49 @@ function SitePasswordForm({ onSuccess, onBack }: { onSuccess: () => void; onBack
           <p className="text-xs text-gray-500">Admin access only</p>
         </div>
       </div>
-      <form onSubmit={handleSubmit} className="space-y-3">
-        <div className="relative">
-          <input
-            type={showPassword ? 'text' : 'password'}
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            autoFocus
-            placeholder="Enter site password"
-            className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20 pr-11 transition-colors"
-          />
-          <button type="button" onClick={() => setShowPassword(v => !v)}
-            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
-            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
-        </div>
-        {error && (
-          <div className="flex items-center gap-2.5 bg-red-500/10 border border-red-500/25 rounded-xl px-4 py-3 text-xs text-red-400">
-            <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {error}
+
+      {isLocked ? (
+        <div className="flex flex-col items-center gap-3 py-6">
+          <div className="w-14 h-14 rounded-full bg-red-500/15 flex items-center justify-center">
+            <Lock className="h-7 w-7 text-red-400" />
           </div>
-        )}
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 text-sm transition-colors flex items-center justify-center gap-2"
-        >
-          {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Verifying…</> : 'Enter'}
-        </button>
-      </form>
+          <p className="text-sm text-red-400 font-semibold">Too many attempts</p>
+          <p className="text-xs text-gray-500 text-center">Try again in</p>
+          <p className="text-3xl font-mono font-bold text-white">{countdown}</p>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="relative">
+            <input
+              type={showPassword ? 'text' : 'password'}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              autoFocus
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              placeholder="Enter site password"
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20 pr-11 transition-colors"
+            />
+            <button type="button" onClick={() => setShowPassword(v => !v)}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+          {error && (
+            <div className="flex items-center gap-2.5 bg-red-500/10 border border-red-500/25 rounded-xl px-4 py-3 text-xs text-red-400">
+              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {error}
+            </div>
+          )}
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 text-sm transition-colors flex items-center justify-center gap-2"
+          >
+            {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Verifying…</> : 'Enter'}
+          </button>
+        </form>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Eye, EyeOff, CheckCircle2, AlertCircle, Wifi, WifiOff, LogOut, ExternalLink, ChevronDown, ChevronRight } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { Key } from 'lucide-react';
@@ -469,6 +469,153 @@ function PracticeAccountCard() {
   );
 }
 
+// ── IG Account Card (shared for demo + live) ──────────────────────────────────
+function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
+  const storageKey = mode === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+  const isDemo = mode === 'demo';
+
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [showPass, setShowPass] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Load saved credentials
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const creds = JSON.parse(saved) as { username: string; connected: boolean };
+        setUsername(creds.username ?? '');
+        setConnected(creds.connected ?? false);
+      }
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleTest() {
+    if (!username || !password || !apiKey) {
+      setError('All fields are required.'); return;
+    }
+    setTesting(true); setError(null);
+    try {
+      const res = await fetch('/api/ig/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, apiKey, env: mode }),
+      });
+      const data = await res.json() as { ok: boolean; accountId?: string; error?: string };
+      if (data.ok) {
+        localStorage.setItem(storageKey, JSON.stringify({
+          username, password, apiKey, connected: true, accountId: data.accountId,
+        }));
+        setConnected(true);
+        setError(null);
+      } else {
+        setError(data.error ?? 'Connection failed');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Request failed');
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  function handleDisconnect() {
+    localStorage.removeItem(storageKey);
+    setUsername(''); setPassword(''); setApiKey('');
+    setConnected(false); setError(null);
+  }
+
+  const accentColor = isDemo ? 'blue' : 'emerald';
+  const connectedBg = isDemo ? 'bg-blue-500/20 text-blue-400' : 'bg-emerald-500/20 text-emerald-400';
+  const iconBg = isDemo ? (connected ? 'bg-blue-500/20' : 'bg-gray-800') : (connected ? 'bg-emerald-500/20' : 'bg-gray-800');
+
+  return (
+    <Card>
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className={clsx('w-10 h-10 rounded-xl flex items-center justify-center text-xl', iconBg)}>
+            {isDemo ? '🧪' : '💰'}
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              IG {isDemo ? 'Demo' : 'Live'} Account
+            </h3>
+            <p className="text-xs text-gray-500">
+              {isDemo ? 'demo-api.ig.com · virtual money' : 'api.ig.com · real money'}
+            </p>
+          </div>
+        </div>
+        <div className={clsx('flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full', connected ? connectedBg : 'bg-gray-800 text-gray-500')}>
+          {connected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+          {connected ? `Connected — IG ${isDemo ? 'Demo' : 'Live'}` : 'Not connected'}
+        </div>
+      </div>
+
+      {!isDemo && (
+        <div className="mb-3 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-400">
+          ⚠️ Real money — trades use real funds
+        </div>
+      )}
+
+      {isDemo && (
+        <div className="mb-3 bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2 text-xs text-blue-400/80">
+          Use same email as live IG account. Switch to demo in IG account switcher at labs.ig.com
+        </div>
+      )}
+
+      {connected ? (
+        <div className="space-y-3">
+          <div className={clsx('border rounded-lg px-3 py-2.5 text-xs',
+            isDemo ? 'bg-blue-500/10 border-blue-500/20 text-blue-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+          )}>
+            <div className="flex items-center gap-1.5">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Connected as <span className="font-mono">{username}</span>
+            </div>
+          </div>
+          <button onClick={handleDisconnect} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
+            <LogOut className="h-3.5 w-3.5" /> Disconnect
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-gray-400 font-medium mb-1.5 block">IG Username (email)</label>
+            <input
+              type="email"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              placeholder="your@email.com"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+          <PasswordField label="IG Password" value={password} onChange={setPassword} show={showPass} onToggleShow={() => setShowPass(v => !v)} placeholder="Your IG account password" />
+          <PasswordField label="IG API Key" value={apiKey} onChange={setApiKey} show={showKey} onToggleShow={() => setShowKey(v => !v)} placeholder="API key from My IG → API" />
+          {error && (
+            <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2.5 text-xs text-red-400">
+              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" /><span>{error}</span>
+            </div>
+          )}
+          <Button
+            onClick={handleTest}
+            loading={testing}
+            fullWidth
+            className={isDemo ? 'bg-blue-600 hover:bg-blue-500' : undefined}
+            icon={<CheckCircle2 className="h-4 w-4" />}
+          >
+            {testing ? 'Testing…' : `Test Connection`}
+          </Button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // ── CFD Coming Soon Card ───────────────────────────────────────────────────────
 function CfdAccountCard() {
   return (
@@ -538,9 +685,25 @@ export default function AccountsPage() {
         <CfdAccountCard />
       </div>
 
-      <div className="mt-6 bg-blue-500/10 border border-blue-500/20 rounded-lg px-4 py-3">
+      <div className="mt-8 mb-3">
+        <h2 className="text-lg font-bold text-white">IG Spread Bet / CFD</h2>
+        <p className="text-sm text-gray-500 mt-1">Connect IG accounts for spread betting and CFD trading.</p>
+      </div>
+
+      <div className="space-y-4">
+        <IGAccountCard mode="demo" />
+        <IGAccountCard mode="live" />
+      </div>
+
+      <div className="mt-4 bg-amber-500/10 border border-amber-500/20 rounded-lg px-4 py-3">
+        <p className="text-xs text-amber-400/80">
+          ⚠️ Spread bets and CFDs are complex instruments. 68% of retail investor accounts lose money when trading these products. Only trade with money you can afford to lose.
+        </p>
+      </div>
+
+      <div className="mt-4 bg-blue-500/10 border border-blue-500/20 rounded-lg px-4 py-3">
         <p className="text-xs text-blue-400/80">
-          🔒 Credentials are stored only in your browser (localStorage) and sent directly to Trading 212. They are never logged or stored on our servers.
+          🔒 Credentials are stored only in your browser (localStorage) and never logged or stored on our servers.
         </p>
       </div>
     </div>

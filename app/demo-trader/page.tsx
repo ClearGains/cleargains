@@ -6,7 +6,7 @@ import {
   CheckCircle2, AlertCircle, ArrowRight,
   Target, BarChart3, Trophy, Copy, Info, RotateCcw, Wallet, Clock,
   Zap, Moon, Sun, Pause, TrendingUp, Download,
-  Search, Plus, Trash2, AlertTriangle,
+  Search, Plus, Trash2, AlertTriangle, Wifi,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { getMarketStatus } from '@/lib/marketHours';
@@ -859,6 +859,359 @@ function hasCorrelationConflict(
   return false;
 }
 
+// ── IG Trader Component ───────────────────────────────────────────────────────
+type IGPosition = {
+  dealId: string;
+  direction: string;
+  size: number;
+  level: number;
+  upl: number;
+  currency: string;
+  epic: string;
+  instrumentName: string;
+  bid: number;
+  offer: number;
+  instrumentType: string;
+};
+
+type IGMarket = {
+  epic: string;
+  instrumentName: string;
+  bid: number;
+  offer: number;
+  spread: number;
+  instrumentType: string;
+};
+
+function IGTrader() {
+  const [igEnv, setIgEnv] = useState<'demo' | 'live'>('demo');
+  const [session, setSession] = useState<{ cst: string; securityToken: string; accountId: string } | null>(null);
+  const [igApiKey, setIgApiKey] = useState('');
+  const [positions, setPositions] = useState<IGPosition[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<IGMarket[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [loadingPositions, setLoadingPositions] = useState(false);
+  const [closingId, setClosingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  // Load credentials from localStorage on mount
+  useEffect(() => {
+    try {
+      const storageKey = igEnv === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const creds = JSON.parse(saved) as { username: string; password: string; apiKey: string; connected?: boolean };
+        if (creds.connected && creds.username && creds.password && creds.apiKey) {
+          setIgApiKey(creds.apiKey);
+          // Auto-connect
+          fetch('/api/ig/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: igEnv }),
+          }).then(r => r.json()).then((data: { ok: boolean; cst?: string; securityToken?: string; accountId?: string }) => {
+            if (data.ok && data.cst && data.securityToken) {
+              setSession({ cst: data.cst, securityToken: data.securityToken, accountId: data.accountId ?? '' });
+              setIgApiKey(creds.apiKey);
+            }
+          }).catch(() => {});
+        }
+      }
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [igEnv]);
+
+  function igHeaders(extra?: Record<string, string>) {
+    if (!session) return {};
+    return {
+      'x-ig-cst': session.cst,
+      'x-ig-security-token': session.securityToken,
+      'x-ig-api-key': igApiKey,
+      'x-ig-env': igEnv,
+      ...extra,
+    };
+  }
+
+  async function loadPositions() {
+    if (!session) return;
+    setLoadingPositions(true);
+    try {
+      const res = await fetch('/api/ig/positions', { headers: igHeaders() });
+      const data = await res.json() as { ok: boolean; positions?: IGPosition[]; error?: string };
+      if (data.ok) setPositions(data.positions ?? []);
+      else setError(data.error ?? 'Failed to load positions');
+    } catch {
+      setError('Failed to load positions');
+    } finally {
+      setLoadingPositions(false);
+    }
+  }
+
+  useEffect(() => {
+    if (session) void loadPositions();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
+
+  async function handleSearch() {
+    if (!session || !searchQuery.trim()) return;
+    setSearching(true);
+    try {
+      const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(searchQuery)}`, {
+        headers: igHeaders(),
+      });
+      const data = await res.json() as { ok: boolean; markets?: IGMarket[]; error?: string };
+      if (data.ok) setSearchResults(data.markets ?? []);
+      else setError(data.error ?? 'Search failed');
+    } catch {
+      setError('Search failed');
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function handleClose(pos: IGPosition) {
+    if (!session) return;
+    setClosingId(pos.dealId);
+    try {
+      const res = await fetch('/api/ig/order', {
+        method: 'DELETE',
+        headers: { ...igHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dealId: pos.dealId,
+          direction: pos.direction === 'BUY' ? 'SELL' : 'BUY',
+          size: pos.size,
+        }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (data.ok) {
+        setMsg('Position closed');
+        await loadPositions();
+        setTimeout(() => setMsg(null), 3000);
+      } else {
+        setError(data.error ?? 'Failed to close position');
+      }
+    } catch {
+      setError('Failed to close position');
+    } finally {
+      setClosingId(null);
+    }
+  }
+
+  const totalPnL = positions.reduce((s, p) => s + (p.upl ?? 0), 0);
+  const wins = positions.filter(p => (p.upl ?? 0) > 0).length;
+
+  if (!session) {
+    return (
+      <div className="space-y-4 max-w-xl">
+        <Card>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl bg-orange-500/20 flex items-center justify-center text-xl">🏦</div>
+            <div>
+              <h3 className="text-sm font-semibold text-white">IG Spread Betting</h3>
+              <p className="text-xs text-gray-500">Connect your IG account to start</p>
+            </div>
+          </div>
+
+          <div className="flex gap-2 mb-4">
+            {(['demo', 'live'] as const).map(e => (
+              <button
+                key={e}
+                onClick={() => setIgEnv(e)}
+                className={clsx(
+                  'flex-1 py-2 rounded-lg text-sm font-medium transition-all capitalize',
+                  igEnv === e ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30' : 'bg-gray-800 text-gray-400 hover:text-gray-200'
+                )}
+              >
+                {e === 'demo' ? 'Demo' : '⚠️ Live'}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-xs text-gray-400 mb-4">
+            Set up your IG credentials in{' '}
+            <a href="/settings/accounts" className="text-orange-400 hover:underline">Settings → Accounts</a>{' '}
+            first. Once connected there, this tab will auto-connect.
+          </p>
+
+          {error && (
+            <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400 mb-3">
+              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {error}
+            </div>
+          )}
+
+          <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5 text-xs text-amber-400">
+            ⚠️ Spread bets and CFDs are complex instruments. 68% of retail investor accounts lose money. Only trade with money you can afford to lose. This tool does not constitute financial advice.
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={clsx('flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full',
+            igEnv === 'demo' ? 'bg-blue-500/20 text-blue-400' : 'bg-emerald-500/20 text-emerald-400'
+          )}>
+            <Wifi className="h-3 w-3" />
+            Connected — IG {igEnv === 'demo' ? 'Demo' : 'Live'}
+            {session.accountId && <span className="text-[10px] opacity-70 ml-1">#{session.accountId}</span>}
+          </div>
+          <div className="flex gap-1">
+            {(['demo', 'live'] as const).map(e => (
+              <button
+                key={e}
+                onClick={() => setIgEnv(e)}
+                className={clsx(
+                  'px-2.5 py-1 rounded-lg text-xs font-medium transition-all capitalize',
+                  igEnv === e ? 'bg-orange-500/20 text-orange-300' : 'text-gray-500 hover:text-gray-300'
+                )}
+              >
+                {e}
+              </button>
+            ))}
+          </div>
+        </div>
+        <Button size="sm" variant="outline" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={loadPositions} loading={loadingPositions}>
+          Refresh
+        </Button>
+      </div>
+
+      {msg && (
+        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2 text-xs text-emerald-400">
+          {msg}
+        </div>
+      )}
+      {error && (
+        <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400">
+          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {error}
+          <button onClick={() => setError(null)} className="ml-auto"><X className="h-3.5 w-3.5" /></button>
+        </div>
+      )}
+
+      {/* Risk warning */}
+      <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5 text-xs text-amber-400">
+        ⚠️ Spread bets and CFDs are complex instruments. 68% of retail investor accounts lose money when trading these products. Only trade with money you can afford to lose. This tool does not constitute financial advice.
+      </div>
+
+      {/* Market search */}
+      <Card>
+        <CardHeader title="Market Search" subtitle="Find IG instruments by name" icon={<Search className="h-4 w-4" />} />
+        <div className="flex gap-2">
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && void handleSearch()}
+            placeholder="Search FTSE, Gold, GBP/USD…"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
+          />
+          <Button size="sm" onClick={handleSearch} loading={searching} icon={<Search className="h-3.5 w-3.5" />}>
+            Search
+          </Button>
+        </div>
+        {searchResults.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {searchResults.slice(0, 8).map((m: IGMarket) => (
+              <div key={m.epic} className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2">
+                <div>
+                  <p className="text-xs font-semibold text-white">{m.instrumentName}</p>
+                  <p className="text-[10px] text-gray-500 font-mono">{m.epic} · {m.instrumentType}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-gray-300">B: {m.bid} / O: {m.offer}</p>
+                  {m.instrumentType === 'CURRENCIES' || m.instrumentType?.includes('INDICES') ? (
+                    <span className="text-[10px] text-emerald-400 font-semibold">TAX FREE</span>
+                  ) : (
+                    <span className="text-[10px] text-amber-400">CGT applies</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Open Positions */}
+      <Card>
+        <CardHeader
+          title="Open Positions"
+          subtitle={`${positions.length} open · P&L: ${totalPnL >= 0 ? '+' : ''}£${totalPnL.toFixed(2)}`}
+          icon={<BarChart3 className="h-4 w-4" />}
+        />
+        {positions.length === 0 ? (
+          <p className="text-sm text-gray-500 py-4 text-center">No open positions</p>
+        ) : (
+          <div className="space-y-2">
+            {positions.map(pos => (
+              <div key={pos.dealId} className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2.5 gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className={clsx('text-[10px] font-bold px-1.5 py-0.5 rounded',
+                      pos.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                    )}>{pos.direction}</span>
+                    <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
+                  </div>
+                  <p className="text-[10px] text-gray-500">
+                    Size: {pos.size} · Level: {pos.level} · {pos.currency}
+                  </p>
+                  <span className="text-[10px] text-emerald-400">TAX FREE (spread bet)</span>
+                </div>
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  <div className="text-right">
+                    <p className={clsx('text-sm font-semibold font-mono', (pos.upl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      {(pos.upl ?? 0) >= 0 ? '+' : ''}£{(pos.upl ?? 0).toFixed(2)}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    loading={closingId === pos.dealId}
+                    onClick={() => void handleClose(pos)}
+                    className="text-red-400 border-red-500/30 hover:bg-red-500/10"
+                  >
+                    Close
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Performance summary */}
+      {positions.length > 0 && (
+        <Card>
+          <CardHeader title="Performance" subtitle="Current session" icon={<Trophy className="h-4 w-4" />} />
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-gray-800/40 rounded-lg p-3 text-center">
+              <p className="text-xs text-gray-500 mb-1">Total P&L</p>
+              <p className={clsx('text-lg font-bold font-mono', totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                {totalPnL >= 0 ? '+' : ''}£{totalPnL.toFixed(2)}
+              </p>
+            </div>
+            <div className="bg-gray-800/40 rounded-lg p-3 text-center">
+              <p className="text-xs text-gray-500 mb-1">Profitable</p>
+              <p className="text-lg font-bold text-white">{wins}/{positions.length}</p>
+            </div>
+            <div className="bg-gray-800/40 rounded-lg p-3 text-center">
+              <p className="text-xs text-gray-500 mb-1">Tax</p>
+              <p className="text-sm font-bold text-emerald-400">TAX FREE</p>
+              <p className="text-[10px] text-gray-600">Spread bet</p>
+            </div>
+          </div>
+          <p className="mt-3 text-[10px] text-gray-600">
+            Spread betting profits are exempt from UK CGT and Income Tax
+          </p>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 function ForexTrader() {
   const { fxPositions, fxTrades, addFxPosition, removeFxPosition, updateFxPosition, addFxTrade, fxRates: gbpRates } = useClearGainsStore();
@@ -1562,7 +1915,7 @@ export default function DemoTraderPage() {
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
-  const [traderTab, setTraderTab] = useState<'stocks' | 'forex'>('stocks');
+  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [showExecAccountPicker, setShowExecAccountPicker] = useState(false);
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
@@ -2872,18 +3225,18 @@ export default function DemoTraderPage() {
 
       {/* Tab toggle */}
       <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
-        {(['stocks', 'forex'] as const).map(tab => (
+        {(['stocks', 'forex', 'ig'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setTraderTab(tab)}
             className={clsx(
-              'px-4 py-1.5 rounded-lg text-sm font-medium transition-all capitalize',
+              'px-4 py-1.5 rounded-lg text-sm font-medium transition-all',
               traderTab === tab
                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                 : 'text-gray-500 hover:text-gray-300'
             )}
           >
-            {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            {tab === 'ig' ? 'IG Spread Bet' : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
       </div>
@@ -2892,6 +3245,8 @@ export default function DemoTraderPage() {
         <PortfolioCompare portfolios={portfolios} />
       ) : traderTab === 'forex' ? (
         <ForexTrader />
+      ) : traderTab === 'ig' ? (
+        <IGTrader />
       ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: controls */}
