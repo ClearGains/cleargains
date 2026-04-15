@@ -52,7 +52,10 @@ export type IGSavedStrategy = {
   autoClose: boolean;
   createdAt: string;
   lastRunAt?: string;
+  lastRunEnv?: 'demo' | 'live';
   lastSignal?: SignalDirection;
+  signalScanMs?: number;   // override interval for signal scans (ms)
+  posMonitorMs?: number;   // override interval for position monitor (ms)
 };
 
 /**

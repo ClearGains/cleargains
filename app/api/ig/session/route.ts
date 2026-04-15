@@ -19,7 +19,9 @@ export async function POST(request: NextRequest) {
       apiKey: string;
       env: 'demo' | 'live';
     };
-    const { username, password, apiKey, env } = body;
+    const { password, apiKey, env } = body;
+    // Sanitise — IG rejects identifiers that contain spaces or @ symbols
+    const username = (body.username ?? '').trim().replace(/\s+/g, '');
 
     if (!username || !password || !apiKey) {
       return NextResponse.json({ ok: false, error: 'username, password, and apiKey are required' }, { status: 400 });
@@ -57,7 +59,15 @@ export async function POST(request: NextRequest) {
       let errMsg = `IG API error ${res.status}`;
       try {
         const j = JSON.parse(text) as { errorCode?: string };
-        if (j.errorCode) errMsg = `IG: ${j.errorCode}`;
+        if (j.errorCode) {
+          if (j.errorCode.includes('authenticationRequest.identifier') || j.errorCode.includes('invalid.identifier')) {
+            errMsg = 'IG rejected the username. Please use your IG username/account number — NOT your email address. Find it in the IG app → My Account → Account details.';
+          } else if (j.errorCode.includes('invalid.password') || j.errorCode.includes('authentication')) {
+            errMsg = 'IG authentication failed. Check your username and password are correct.';
+          } else {
+            errMsg = `IG: ${j.errorCode}`;
+          }
+        }
       } catch {}
       return NextResponse.json({ ok: false, error: errMsg }, { status: res.status });
     }

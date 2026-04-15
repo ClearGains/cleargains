@@ -180,8 +180,22 @@ export function IGStrategyTrader() {
   const [strategies, setStrategies]     = useState<IGSavedStrategy[]>([]);
   const [activeStratId, setActiveStratId] = useState<string|null>(null);
   const [isRunning, setIsRunning]       = useState(false);
-  const timerRef = useRef<ReturnType<typeof setInterval>|null>(null);
-  const runningRef = useRef(false);
+  const timerRef    = useRef<ReturnType<typeof setInterval>|null>(null);
+  const posTimerRef = useRef<ReturnType<typeof setInterval>|null>(null);
+  const runningRef  = useRef(false);
+
+  // ── Active demo/live mode ──────────────────────────────────────────────────
+  const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
+  const [showLiveConfirm, setShowLiveConfirm] = useState(false);
+  const [pendingRunAction, setPendingRunAction] = useState<(() => void)|null>(null);
+
+  // ── Scan frequency settings ────────────────────────────────────────────────
+  const [signalScanMs, setSignalScanMs] = useState(5 * 60_000);
+  const [posMonitorMs, setPosMonitorMs] = useState(60_000);
+  const signalStartRef = useRef<number|null>(null);
+  const posStartRef    = useRef<number|null>(null);
+  const [signalCountdown, setSignalCountdown] = useState('');
+  const [posCountdown, setPosCountdown]       = useState('');
 
   // ── Market scanner state ───────────────────────────────────────────────────
   const [scans, setScans] = useState<Record<string, MarketScan>>({});
@@ -204,16 +218,18 @@ export function IGStrategyTrader() {
   const [posTab, setPosTab] = useState<'positions'|'orders'>('positions');
 
   // ── Builder ────────────────────────────────────────────────────────────────
-  const [showBuilder, setShowBuilder]   = useState(false);
-  const [editId, setEditId]             = useState<string|null>(null);
-  const [bName, setBName]               = useState('');
-  const [bTimeframe, setBTimeframe]     = useState<Timeframe>('daily');
-  const [bSize, setBSize]               = useState(1);
-  const [bMaxPos, setBMaxPos]           = useState(3);
-  const [bMinStrength, setBMinStrength] = useState(60);
-  const [bAccounts, setBAccounts]       = useState<('demo'|'live')[]>(['demo']);
-  const [bAutoClose, setBAutoClose]     = useState(true);
-  const [bWatchlist, setBWatchlist]     = useState<WatchlistMarket[]>([...DEFAULT_WATCHLIST]);
+  const [showBuilder, setShowBuilder]       = useState(false);
+  const [editId, setEditId]                 = useState<string|null>(null);
+  const [bName, setBName]                   = useState('');
+  const [bTimeframe, setBTimeframe]         = useState<Timeframe>('daily');
+  const [bSize, setBSize]                   = useState(1);
+  const [bMaxPos, setBMaxPos]               = useState(3);
+  const [bMinStrength, setBMinStrength]     = useState(60);
+  const [bAccounts, setBAccounts]           = useState<('demo'|'live')[]>(['demo']);
+  const [bAutoClose, setBAutoClose]         = useState(true);
+  const [bWatchlist, setBWatchlist]         = useState<WatchlistMarket[]>([...DEFAULT_WATCHLIST]);
+  const [bSignalScanMs, setBSignalScanMs]   = useState(5 * 60_000);
+  const [bPosMonitorMs, setBPosMonitorMs]   = useState(60_000);
 
   // ── Manual trade ───────────────────────────────────────────────────────────
   const [showManual, setShowManual]     = useState(false);
@@ -236,9 +252,16 @@ export function IGStrategyTrader() {
     setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0,200));
   }
 
+  function setActiveMode(mode: 'demo'|'live') {
+    setActiveModeState(mode);
+    localStorage.setItem('ig_active_mode', mode);
+  }
+
   // ── Connect on mount ───────────────────────────────────────────────────────
   useEffect(() => {
     setStrategies(loadStrategies());
+    const savedMode = localStorage.getItem('ig_active_mode') as 'demo'|'live'|null;
+    if (savedMode === 'live' || savedMode === 'demo') setActiveModeState(savedMode);
     (['demo','live'] as const).forEach(env => {
       setConnecting(c => ({...c,[env]:true}));
       connectIG(env).then(sess => {
@@ -247,6 +270,26 @@ export function IGStrategyTrader() {
       });
     });
   }, []);
+
+  // ── Countdown ticker ───────────────────────────────────────────────────────
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!isRunning) { setSignalCountdown(''); setPosCountdown(''); return; }
+      const fmt = (ms: number) => {
+        const s = Math.max(0, Math.ceil(ms / 1000));
+        return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+      };
+      if (signalStartRef.current !== null) {
+        const rem = signalScanMs - (Date.now() - signalStartRef.current);
+        setSignalCountdown(fmt(rem));
+      }
+      if (posStartRef.current !== null) {
+        const rem = posMonitorMs - (Date.now() - posStartRef.current);
+        setPosCountdown(fmt(rem));
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [isRunning, signalScanMs, posMonitorMs]);
 
   // ── Load positions ─────────────────────────────────────────────────────────
   const loadPositions = useCallback(async (envFilter?: 'demo'|'live') => {
@@ -484,25 +527,34 @@ export function IGStrategyTrader() {
     return sig;
   }
 
-  // ── Full scan cycle ────────────────────────────────────────────────────────
-  const runCycle = useCallback(async (strat: IGSavedStrategy) => {
+  // ── Signal scan: scan markets + execute trades ────────────────────────────
+  const runSignalScan = useCallback(async (strat: IGSavedStrategy) => {
     if (!runningRef.current) return;
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
-    log('info', `Scanning ${markets.length} markets…`);
+    log('info', `📡 Signal scan — ${markets.length} markets…`);
 
     for (let i = 0; i < markets.length; i++) {
       if (!runningRef.current) break;
       const m = markets[i];
       setScanProgress(`${m.name} (${i+1}/${markets.length})`);
       await scanMarket(strat, m);
-      // Wait between requests to respect IG rate limits
       if (i < markets.length - 1) await sleep(800);
     }
 
     setScanProgress('');
+    const env: 'demo'|'live' = strat.accounts.includes('live') ? 'live' : 'demo';
+    const updated: IGSavedStrategy = { ...strat, lastRunAt: new Date().toISOString(), lastRunEnv: env };
+    saveStrategy(updated);
+    setStrategies(loadStrategies());
+    const scanMs = strat.signalScanMs ?? signalScanMs;
+    log('info', `Signal scan complete — next in ${Math.round(scanMs / 60_000)}min`);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, positions, signalScanMs]);
 
-    // ── Trailing stop management ──────────────────────────────────────────────
-    // After each scan cycle: adjust stops to protect profits
+  // ── Position monitor: trailing stops + SL/TP refresh ─────────────────────
+  const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
+    if (!runningRef.current) return;
+    await loadPositions();
     const envs = strat.accounts.filter(e => sessions[e]);
     for (const env of envs) {
       for (const pos of positions[env]) {
@@ -516,61 +568,77 @@ export function IGStrategyTrader() {
         let newStop: number | null = null;
         let reason = '';
 
-        // 3% profit → move SL to breakeven (entry level)
         if (pnlPct >= 3 && pnlPct < 5) {
           const breakevenStop = entryPx;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < breakevenStop : pos.stopLevel > breakevenStop)) {
             newStop = breakevenStop;
-            reason = `+${pnlPct.toFixed(1)}% profit → SL moved to breakeven ${breakevenStop}`;
+            reason = `+${pnlPct.toFixed(1)}% → SL to breakeven ${breakevenStop}`;
           }
         }
-        // 5% profit → lock in 2% profit
         if (pnlPct >= 5) {
           const lockStop = pos.direction === 'BUY' ? entryPx * 1.02 : entryPx * 0.98;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lockStop : pos.stopLevel > lockStop)) {
             newStop = Math.round(lockStop * 100) / 100;
-            reason = `+${pnlPct.toFixed(1)}% profit → SL moved to lock +2% at ${newStop}`;
+            reason = `+${pnlPct.toFixed(1)}% → SL to lock +2% at ${newStop}`;
           }
         }
 
         if (newStop !== null) {
           const r = await updatePositionSL(env, pos, newStop, pos.limitLevel ?? null);
-          if (r.ok) {
-            log('info', `[${env.toUpperCase()}] ${pos.instrumentName ?? pos.epic}: ${reason}`);
-            await loadPositions(env);
-          }
+          if (r.ok) log('info', `[${env.toUpperCase()}] ${pos.instrumentName ?? pos.epic}: ${reason}`);
         }
       }
     }
-
-    const updated: IGSavedStrategy = { ...strat, lastRunAt: new Date().toISOString() };
-    saveStrategy(updated);
-    setStrategies(loadStrategies());
-    log('info', `Cycle complete — next in ${TIMEFRAME_CONFIG[strat.timeframe].pollMs / 60_000}min`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, positions]);
 
   // ── Start / stop auto-run ──────────────────────────────────────────────────
   function startAutoRun(strat: IGSavedStrategy) {
-    if (timerRef.current) clearInterval(timerRef.current);
+    // Clear any existing intervals first
+    if (timerRef.current)    { clearInterval(timerRef.current);    timerRef.current    = null; }
+    if (posTimerRef.current) { clearInterval(posTimerRef.current); posTimerRef.current = null; }
+
     runningRef.current = true;
     setIsRunning(true);
-    const cfg = TIMEFRAME_CONFIG[strat.timeframe];
-    const label = cfg.pollMs >= 3_600_000 ? `${cfg.pollMs/3_600_000}hr` : cfg.pollMs >= 60_000 ? `${cfg.pollMs/60_000}min` : `${cfg.pollMs/1000}s`;
-    log('info', `▶ Auto-trader started — "${strat.name}" · ${strat.timeframe} · scanning every ${label}`);
-    void runCycle(strat);
-    timerRef.current = setInterval(() => void runCycle(strat), cfg.pollMs);
+
+    const sScanMs = strat.signalScanMs ?? signalScanMs;
+    const pMonMs  = strat.posMonitorMs ?? posMonitorMs;
+    const modeLabel = strat.accounts.includes('live') ? '⚠️ LIVE' : 'demo';
+
+    log('info', `▶ Auto-trader started — "${strat.name}" · ${modeLabel} · signals every ${Math.round(sScanMs/60_000)}min · positions every ${Math.round(pMonMs/1000)}s`);
+
+    // Run immediately on start
+    signalStartRef.current = Date.now();
+    void runSignalScan(strat);
+    posStartRef.current = Date.now();
+    void runPositionMonitor(strat);
+
+    timerRef.current = setInterval(() => {
+      signalStartRef.current = Date.now();
+      void runSignalScan(strat);
+    }, sScanMs);
+
+    posTimerRef.current = setInterval(() => {
+      posStartRef.current = Date.now();
+      void runPositionMonitor(strat);
+    }, pMonMs);
   }
 
   function stopAutoRun() {
     runningRef.current = false;
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (timerRef.current)    { clearInterval(timerRef.current);    timerRef.current    = null; }
+    if (posTimerRef.current) { clearInterval(posTimerRef.current); posTimerRef.current = null; }
     setIsRunning(false);
     setScanProgress('');
+    setSignalCountdown('');
+    setPosCountdown('');
     log('info', '⏹ Auto-trader stopped');
   }
 
-  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
+  useEffect(() => () => {
+    if (timerRef.current)    clearInterval(timerRef.current);
+    if (posTimerRef.current) clearInterval(posTimerRef.current);
+  }, []);
 
   // ── Manual close ───────────────────────────────────────────────────────────
   async function handleClose(env:'demo'|'live', pos: IGPosition) {
@@ -648,10 +716,14 @@ export function IGStrategyTrader() {
       setBMinStrength(existing.minStrength ?? 60);
       setBAccounts(existing.accounts); setBAutoClose(existing.autoClose ?? true);
       setBWatchlist(existing.watchlist?.length ? existing.watchlist : [...DEFAULT_WATCHLIST]);
+      setBSignalScanMs(existing.signalScanMs ?? 5 * 60_000);
+      setBPosMonitorMs(existing.posMonitorMs ?? 60_000);
     } else {
       setEditId(null); setBName(''); setBTimeframe('daily'); setBSize(1); setBMaxPos(3);
-      setBMinStrength(60); setBAccounts(['demo']); setBAutoClose(true);
+      setBMinStrength(60); setBAccounts([activeMode]); setBAutoClose(true);
       setBWatchlist([...DEFAULT_WATCHLIST]);
+      setBSignalScanMs(5 * 60_000);
+      setBPosMonitorMs(60_000);
     }
     setShowBuilder(true);
     setShowManual(false);
@@ -673,6 +745,8 @@ export function IGStrategyTrader() {
       autoTrade: true,
       autoClose: bAutoClose,
       createdAt: new Date().toISOString(),
+      signalScanMs: bSignalScanMs,
+      posMonitorMs: bPosMonitorMs,
     };
     saveStrategy(s);
     setStrategies(loadStrategies());
@@ -739,17 +813,48 @@ export function IGStrategyTrader() {
         </div>
       )}
 
+      {/* ── LIVE mode banner ─────────────────────────────────────────────── */}
+      {activeMode === 'live' && (
+        <div className="bg-amber-500/15 border border-amber-500/40 rounded-lg px-3 py-2.5 flex items-center gap-2 text-xs font-semibold text-amber-400">
+          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          LIVE MODE — Trades will use real money on your IG Live account
+        </div>
+      )}
+
       {/* ── Connection status bar ───────────────────────────────────────── */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
-          {(['demo','live'] as const).map(env => (
-            <div key={env} className={clsx('flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full',
-              sessions[env] ? (env==='demo' ? 'bg-blue-500/20 text-blue-400' : 'bg-emerald-500/20 text-emerald-400') : 'bg-gray-800 text-gray-500'
+          {/* Demo / Live mode selector */}
+          <div className="flex items-center gap-0.5 bg-gray-800/60 rounded-full p-0.5">
+            {(['demo','live'] as const).map(env => (
+              <button key={env}
+                onClick={() => {
+                  if (env === 'live') { setShowLiveConfirm(true); }
+                  else { setActiveMode('demo'); }
+                }}
+                className={clsx('flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full transition-all',
+                  activeMode === env
+                    ? env === 'demo' ? 'bg-blue-500 text-white shadow' : 'bg-amber-500 text-black shadow'
+                    : 'text-gray-500 hover:text-gray-300'
+                )}>
+                {env === 'live' && <span className="text-[9px]">⚠️</span>}
+                IG {env === 'demo' ? 'Demo' : 'Live'}
+                {sessions[env]
+                  ? <span className={clsx('w-1.5 h-1.5 rounded-full', env==='demo' ? 'bg-blue-300' : 'bg-amber-300')} />
+                  : connecting[env]
+                    ? <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                    : <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+                }
+              </button>
+            ))}
+          </div>
+          {/* Connection chips */}
+          {(['demo','live'] as const).map(env => sessions[env] && (
+            <div key={env} className={clsx('flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full',
+              env==='demo' ? 'bg-blue-500/15 text-blue-400' : 'bg-amber-500/15 text-amber-400'
             )}>
-              <Wifi className="h-3 w-3" />
-              IG {env==='demo' ? 'Demo' : 'Live'}
-              {sessions[env]?.accountId && <span className="opacity-60">#{sessions[env]!.accountId}</span>}
-              {connecting[env] && <RefreshCw className="h-2.5 w-2.5 animate-spin" />}
+              <Wifi className="h-2.5 w-2.5" />
+              #{sessions[env]!.accountId}
             </div>
           ))}
           <span className="text-[10px] text-gray-600 px-2 py-1 bg-gray-800/50 rounded-full">
@@ -762,6 +867,31 @@ export function IGStrategyTrader() {
           <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => { openBuilder(); }}>New Strategy</Button>
         </div>
       </div>
+
+      {/* ── Live mode confirmation modal ────────────────────────────────── */}
+      {showLiveConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="bg-gray-900 border border-amber-500/40 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center text-xl">⚠️</div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Switch to LIVE Trading?</h3>
+                <p className="text-xs text-amber-400">Real money will be used</p>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 mb-5">
+              You are switching to LIVE mode. Any strategies that trade on your Live IG account will open real spread-bet positions with real money. Make sure you have tested on Demo first.
+            </p>
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" onClick={() => setShowLiveConfirm(false)}>Cancel</Button>
+              <Button fullWidth className="bg-amber-500 hover:bg-amber-400 text-black font-bold"
+                onClick={() => { setActiveMode('live'); setShowLiveConfirm(false); if (pendingRunAction) { pendingRunAction(); setPendingRunAction(null); } }}>
+                Confirm — Use Live
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Risk warning */}
       <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-400">
@@ -930,12 +1060,35 @@ export function IGStrategyTrader() {
               </button>
             </div>
 
+            {/* Scan frequency */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-gray-400 mb-1.5 block">Signal scan interval</label>
+                <select value={bSignalScanMs} onChange={e => setBSignalScanMs(Number(e.target.value))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                  <option value={5 * 60_000}>5 minutes</option>
+                  <option value={10 * 60_000}>10 minutes</option>
+                  <option value={15 * 60_000}>15 minutes</option>
+                  <option value={30 * 60_000}>30 minutes</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 mb-1.5 block">Position monitor interval</label>
+                <select value={bPosMonitorMs} onChange={e => setBPosMonitorMs(Number(e.target.value))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                  <option value={30_000}>30 seconds</option>
+                  <option value={60_000}>60 seconds</option>
+                  <option value={2 * 60_000}>2 minutes</option>
+                </select>
+              </div>
+            </div>
+
             {/* Watchlist */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <label className="text-xs text-gray-400">Markets to scan</label>
                 <span className="text-[10px] text-gray-600">
-                  {bWatchlist.filter(m=>m.enabled).length} enabled · signals via Finnhub
+                  {bWatchlist.filter(m=>m.enabled).length} enabled · signals via Yahoo Finance
                 </span>
               </div>
               <div className="space-y-1 max-h-56 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800/50">
@@ -1016,7 +1169,15 @@ export function IGStrategyTrader() {
                     </div>
                     <p className="text-[11px] text-gray-500">
                       {enabledMarkets.length} markets · £{strat.size}/pt · max {strat.maxPositions} pos · min {strat.minStrength ?? 60}% signal
-                      {strat.lastRunAt && ` · last ${fmtTime(strat.lastRunAt)}`}
+                      {strat.lastRunAt && (
+                        <span> · last {fmtTime(strat.lastRunAt)}
+                          {strat.lastRunEnv && (
+                            <span className={strat.lastRunEnv === 'live' ? ' text-amber-400' : ' text-blue-400'}>
+                              {' '}on {strat.lastRunEnv === 'live' ? 'LIVE' : 'demo'}
+                            </span>
+                          )}
+                        </span>
+                      )}
                     </p>
                   </button>
 
@@ -1027,9 +1188,19 @@ export function IGStrategyTrader() {
                         Stop
                       </Button>
                     ) : (
-                      <Button size="sm" className="bg-orange-600 hover:bg-orange-500 text-white" icon={<Play className="h-3.5 w-3.5" />}
-                        onClick={() => { setActiveStratId(strat.id); startAutoRun(strat); }}>
-                        {isActive ? 'Start' : 'Run'}
+                      <Button size="sm"
+                        className={strat.accounts.includes('live') ? 'bg-amber-600 hover:bg-amber-500 text-black font-bold' : 'bg-orange-600 hover:bg-orange-500 text-white'}
+                        icon={<Play className="h-3.5 w-3.5" />}
+                        onClick={() => {
+                          const doRun = () => { setActiveStratId(strat.id); startAutoRun(strat); };
+                          if (strat.accounts.includes('live')) {
+                            setPendingRunAction(() => doRun);
+                            setShowLiveConfirm(true);
+                          } else {
+                            doRun();
+                          }
+                        }}>
+                        {strat.accounts.includes('live') ? '⚠️ Run Live' : (isActive ? 'Start' : 'Run')}
                       </Button>
                     )}
                     <button onClick={() => openBuilder(strat)} className="p-1.5 text-gray-600 hover:text-orange-400 transition-colors"><Edit2 className="h-3.5 w-3.5" /></button>
@@ -1040,11 +1211,17 @@ export function IGStrategyTrader() {
 
                 {/* Running status */}
                 {isActive && isRunning && (
-                  <div className="mt-2 flex items-center gap-2 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-2">
-                    <Activity className="h-3.5 w-3.5 text-orange-400 animate-pulse flex-shrink-0" />
-                    <span className="text-xs text-orange-300 font-medium">
-                      {scanProgress ? `Scanning: ${scanProgress}` : `Running — next scan in ${cfg.label ?? cfg.pollMs/60_000+'min'}`}
-                    </span>
+                  <div className="mt-2 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-2 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Activity className="h-3.5 w-3.5 text-orange-400 animate-pulse flex-shrink-0" />
+                      <span className="text-xs text-orange-300 font-medium">
+                        {scanProgress ? `Scanning: ${scanProgress}` : 'Running'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-4 text-[11px] text-gray-500 pl-5">
+                      {signalCountdown && <span>Next signal scan in: <span className="text-orange-400 font-mono">{signalCountdown}</span></span>}
+                      {posCountdown && <span>Position check in: <span className="text-blue-400 font-mono">{posCountdown}</span></span>}
+                    </div>
                   </div>
                 )}
               </Card>

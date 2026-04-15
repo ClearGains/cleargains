@@ -497,7 +497,8 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
   }, []);
 
   async function handleTest() {
-    if (!username || !password || !apiKey) {
+    const cleanUsername = username.trim().replace(/\s+/g, '');
+    if (!cleanUsername || !password || !apiKey) {
       setError('All fields are required.'); return;
     }
     setTesting(true); setError(null);
@@ -505,7 +506,7 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
       const res = await fetch('/api/ig/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, apiKey, env: mode }),
+        body: JSON.stringify({ username: cleanUsername, password, apiKey, env: mode }),
       });
       const data = await res.json() as { ok: boolean; accountId?: string; error?: string };
       if (data.ok) {
@@ -564,7 +565,7 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
 
       {isDemo && (
         <div className="mb-3 bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2 text-xs text-blue-400/80">
-          Use same email as live IG account. Switch to demo in IG account switcher at labs.ig.com
+          Use the same username/account number as your live IG account. Switch to demo mode in the IG app account switcher.
         </div>
       )}
 
@@ -585,14 +586,19 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
       ) : (
         <div className="space-y-3">
           <div>
-            <label className="text-xs text-gray-400 font-medium mb-1.5 block">IG Username (email)</label>
+            <label className="text-xs text-gray-400 font-medium mb-1.5 block">
+              IG Username or Account Number <span className="text-red-400 font-semibold">(NOT your email address)</span>
+            </label>
             <input
-              type="email"
+              type="text"
               value={username}
               onChange={e => setUsername(e.target.value)}
-              placeholder="your@email.com"
+              placeholder="e.g. ABC1234 or yourusername"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500"
             />
+            <p className="text-[11px] text-amber-400/80 mt-1.5">
+              ⚠️ Find this in the IG app → My Account → Account details. It is your username or account number — never your email.
+            </p>
           </div>
           <PasswordField label="IG Password" value={password} onChange={setPassword} show={showPass} onToggleShow={() => setShowPass(v => !v)} placeholder="Your IG account password" />
           <PasswordField label="IG API Key" value={apiKey} onChange={setApiKey} show={showKey} onToggleShow={() => setShowKey(v => !v)} placeholder="API key from My IG → API" />
