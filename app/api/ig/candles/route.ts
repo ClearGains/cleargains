@@ -19,25 +19,29 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const YAHOO_MAP: Record<string, string> = {
   // Indices
-  'FTSE 100':   '^FTSE',
-  'S&P 500':    '^GSPC',
-  'NASDAQ 100': '^IXIC',
-  'Germany 40': '^GDAXI',
-  'Wall Street':'^DJI',
-  'Japan 225':  '^N225',
+  'FTSE 100':      '^FTSE',
+  'S&P 500':       '^GSPC',
+  'NASDAQ 100':    '^IXIC',
+  'Germany 40':    '^GDAXI',
+  'Wall Street':   '^DJI',
+  'Japan 225':     '^N225',
+  'Australia 200': '^AXJO',
   // Commodities
-  'Gold':       'GC=F',
-  'Oil (WTI)':  'CL=F',
-  'Brent Crude':'BZ=F',
-  'Silver':     'SI=F',
+  'Gold':          'GC=F',
+  'Oil (WTI)':     'CL=F',
+  'Brent Crude':   'BZ=F',
+  'Silver':        'SI=F',
+  'Natural Gas':   'NG=F',
   // Forex
-  'GBP/USD':    'GBPUSD=X',
-  'EUR/USD':    'EURUSD=X',
-  'EUR/GBP':    'EURGBP=X',
-  'USD/JPY':    'JPY=X',
+  'GBP/USD':       'GBPUSD=X',
+  'EUR/USD':       'EURUSD=X',
+  'EUR/GBP':       'EURGBP=X',
+  'USD/JPY':       'JPY=X',
+  'AUD/USD':       'AUDUSD=X',
+  'USD/CHF':       'USDCHF=X',
   // Crypto
-  'Bitcoin':    'BTC-USD',
-  'Ethereum':   'ETH-USD',
+  'Bitcoin':       'BTC-USD',
+  'Ethereum':      'ETH-USD',
 };
 
 // ── Types ─────────────────────────────────────────────────────────────────────

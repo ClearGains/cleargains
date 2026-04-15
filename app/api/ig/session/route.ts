@@ -73,20 +73,67 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, error: errMsg }, { status: res.status });
     }
 
-    const cst = res.headers.get('CST') ?? '';
-    const securityToken = res.headers.get('X-SECURITY-TOKEN') ?? '';
+    // IG returns session tokens in RESPONSE HEADERS (not body)
+    let cst           = res.headers.get('CST') ?? '';
+    let securityToken = res.headers.get('X-SECURITY-TOKEN') ?? '';
+
+    type AccountEntry = { accountId: string; accountName: string; accountType: string; preferred: boolean; status: string };
     const data = await res.json() as {
       accountType?: string;
       accountId?: string;
-      accounts?: unknown[];
+      accounts?: AccountEntry[];
       clientId?: string;
     };
+
+    // ── Auto-switch to the SPREADBET account ─────────────────────────────────
+    // If the user has both a CFD and a Spread Bet account, IG may default to
+    // CFD on login.  Orders placed on the wrong account type are rejected with
+    // REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT (or vice-versa).  Explicitly
+    // switching before trading prevents this.
+    let activeAccountId = data.accountId ?? '';
+    const accounts = data.accounts ?? [];
+    const spreadbetAccount = accounts.find((a: AccountEntry) => a.accountType === 'SPREADBET');
+
+    if (spreadbetAccount && spreadbetAccount.accountId !== activeAccountId) {
+      try {
+        const switchRes = await fetch(`${baseUrl}/session`, {
+          method: 'PUT',
+          headers: {
+            'X-IG-API-KEY': apiKey,
+            'CST': cst,
+            'X-SECURITY-TOKEN': securityToken,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json; charset=UTF-8',
+            'Version': '1',
+          },
+          body: JSON.stringify({ accountId: spreadbetAccount.accountId, dealingEnabled: true }),
+        });
+        if (switchRes.ok) {
+          // IG issues fresh tokens after account switch
+          const newCst      = switchRes.headers.get('CST');
+          const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
+          if (newCst)      cst           = newCst;
+          if (newSecToken) securityToken = newSecToken;
+          activeAccountId = spreadbetAccount.accountId;
+          console.log(`[ig/session] Switched to SPREADBET account ${activeAccountId}`);
+        } else {
+          const errText = await switchRes.text().catch(() => '');
+          console.warn(`[ig/session] Account switch failed (${switchRes.status}):`, errText.slice(0, 200));
+        }
+      } catch (e) {
+        console.warn('[ig/session] Account switch error:', e instanceof Error ? e.message : String(e));
+      }
+    } else if (spreadbetAccount) {
+      console.log(`[ig/session] Already on SPREADBET account ${activeAccountId}`);
+    } else {
+      console.log(`[ig/session] No SPREADBET account found — using default account ${activeAccountId}`);
+    }
 
     const entry = {
       cst,
       securityToken,
-      accountId: data.accountId ?? '',
-      accounts: data.accounts ?? [],
+      accountId: activeAccountId,
+      accounts,
       expiresAt: Date.now() + TOKEN_TTL_MS,
     };
     tokenCache.set(cacheKey, entry);
@@ -95,8 +142,9 @@ export async function POST(request: NextRequest) {
       ok: true,
       cst,
       securityToken,
-      accountId: data.accountId,
-      accounts: data.accounts,
+      accountId: activeAccountId,
+      accounts,
+      spreadbetAccountId: spreadbetAccount?.accountId ?? null,
     });
   } catch (err) {
     return NextResponse.json(

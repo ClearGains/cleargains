@@ -1,22 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// ── Verified IG epic map (spread-bet rolling instruments) ─────────────────────
+// ── Verified IG spread-bet epic map (DFB / TODAY rolling instruments only) ────
+// ⚠️  Using a CFD epic on a spread-bet account returns REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT
 const VERIFIED_EPICS: Record<string, string> = {
-  'FTSE 100':    'IX.D.FTSE.DAILY.IP',
-  'S&P 500':     'IX.D.SPTRD.DAILY.IP',
-  'NASDAQ 100':  'IX.D.NASDAQ.DAILY.IP',
-  'Wall Street': 'IX.D.DOW.DAILY.IP',
-  'Germany 40':  'IX.D.DAX.DAILY.IP',
-  'Japan 225':   'IX.D.NIKKEI.DAILY.IP',
-  'GBP/USD':     'CS.D.GBPUSD.TODAY.IP',
-  'EUR/USD':     'CS.D.EURUSD.TODAY.IP',
-  'USD/JPY':     'CS.D.USDJPY.TODAY.IP',
-  'EUR/GBP':     'CS.D.EURGBP.TODAY.IP',
-  'Gold':        'CS.D.CFDGOLD.CFDGC.IP',
-  'Oil (WTI)':   'CS.D.CRUDEOIL.TODAY.IP',
-  'Silver':      'CS.D.SILVER.TODAY.IP',
-  'Bitcoin':     'CS.D.BITCOIN.TODAY.IP',
-  'Ethereum':    'CS.D.ETHUSD.TODAY.IP',
+  // Indices — Daily Funded Bets
+  'FTSE 100':      'IX.D.FTSE.DAILY.IP',
+  'S&P 500':       'IX.D.SPTRD.DAILY.IP',
+  'NASDAQ 100':    'IX.D.NASDAQ.DAILY.IP',
+  'Wall Street':   'IX.D.DOW.DAILY.IP',
+  'Germany 40':    'IX.D.DAX.DAILY.IP',
+  'Japan 225':     'IX.D.NIKKEI.DAILY.IP',
+  'Australia 200': 'IX.D.ASX.DAILY.IP',
+  // Forex — spread bet
+  'GBP/USD':       'CS.D.GBPUSD.TODAY.IP',
+  'EUR/USD':       'CS.D.EURUSD.TODAY.IP',
+  'USD/JPY':       'CS.D.USDJPY.TODAY.IP',
+  'EUR/GBP':       'CS.D.EURGBP.TODAY.IP',
+  'AUD/USD':       'CS.D.AUDUSD.TODAY.IP',
+  'USD/CHF':       'CS.D.USDCHF.TODAY.IP',
+  // Commodities — spread bet  (NOT the CFD CS.D.CFDGOLD / CS.D.CRUDEOIL variants)
+  'Gold':          'CS.D.GOLD.TODAY.IP',
+  'Silver':        'CS.D.SILVER.TODAY.IP',
+  'Oil (WTI)':     'CS.D.CRUDE.TODAY.IP',
+  'Natural Gas':   'CS.D.NATGAS.TODAY.IP',
+  // Crypto — spread bet
+  'Bitcoin':       'CS.D.BITCOIN.TODAY.IP',
+  'Ethereum':      'CS.D.ETHUSD.TODAY.IP',
 };
 
 const VERIFIED_EPIC_SET = new Set(Object.values(VERIFIED_EPICS));
@@ -107,22 +116,23 @@ export async function POST(request: NextRequest) {
       if (!body.level) {
         return NextResponse.json({ ok: false, error: 'level is required for LIMIT/STOP working orders' }, { status: 400 });
       }
-      const woPayload = {
+      const woPayload: Record<string, unknown> = {
         epic:          resolvedEpic,
-        expiry:        body.expiry ?? '-',
+        expiry:        body.expiry ?? 'DFB',
         direction:     body.direction,
         size:          body.size,
         level:         body.level,
         type:          orderType,
         guaranteedStop: body.guaranteedStop ?? false,
-        stopDistance:  body.stopDistance ?? null,
-        limitDistance: body.profitDistance ?? null,
-        stopLevel:     body.stopLevel ?? null,
-        limitLevel:    body.limitLevel ?? null,
         currencyCode:  body.currencyCode ?? 'GBP',
         timeInForce:   body.timeInForce ?? 'GOOD_TILL_CANCELLED',
         forceOpen:     body.forceOpen ?? true,
       };
+      // Only include optional fields if they have actual values
+      if (body.stopDistance)    woPayload.stopDistance  = body.stopDistance;
+      if (body.profitDistance)  woPayload.limitDistance = body.profitDistance;
+      if (body.stopLevel)       woPayload.stopLevel     = body.stopLevel;
+      if (body.limitLevel)      woPayload.limitLevel    = body.limitLevel;
       const wRes = await fetch(`${base}/workingorders/otc`, {
         method: 'POST',
         headers: igHeaders(apiKey, cst, securityToken, '2'),
@@ -137,21 +147,18 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Market position ───────────────────────────────────────────────────────
-    const payload = {
+    // IMPORTANT: do NOT include null fields — they cause silent rejections on some IG accounts.
+    // SL/TP are applied separately via PUT after the deal is confirmed ACCEPTED.
+    const payload: Record<string, unknown> = {
       epic:          resolvedEpic,
-      expiry:        body.expiry ?? '-',
+      expiry:        body.expiry ?? 'DFB',
       direction:     body.direction,
       size:          body.size,
       orderType:     'MARKET',
-      level:         null,
-      limitLevel:    body.limitLevel ?? null,
-      stopLevel:     body.stopLevel ?? null,
       guaranteedStop: body.guaranteedStop ?? false,
       trailingStop:  false,
-      stopDistance:  body.stopDistance ?? null,
-      limitDistance: body.profitDistance ?? null,
-      currencyCode:  body.currencyCode ?? 'GBP',
       forceOpen:     body.forceOpen ?? true,
+      currencyCode:  body.currencyCode ?? 'GBP',
     };
 
     console.log(`[ig/order] POST → ${env} ${resolvedEpic} (via ${resolvedVia})`, JSON.stringify(payload));
@@ -207,6 +214,39 @@ export async function POST(request: NextRequest) {
       }, { status: 422 });
     }
 
+    // ── Apply SL/TP via separate PUT after deal is confirmed ACCEPTED ─────────
+    // (Including these in the initial order causes rejections on some accounts)
+    let slTpResult: { ok: boolean; error?: string } = { ok: true };
+    if (confirm.dealId && confirm.level && (body.stopDistance || body.profitDistance)) {
+      const fillPrice = confirm.level;
+      const slTpPayload: Record<string, unknown> = { trailingStop: false };
+      if (body.stopDistance) {
+        slTpPayload.stopLevel = Math.round(
+          (body.direction === 'BUY' ? fillPrice - body.stopDistance : fillPrice + body.stopDistance) * 100,
+        ) / 100;
+      }
+      if (body.profitDistance) {
+        slTpPayload.limitLevel = Math.round(
+          (body.direction === 'BUY' ? fillPrice + body.profitDistance : fillPrice - body.profitDistance) * 100,
+        ) / 100;
+      }
+      console.log(`[ig/order] SL/TP PUT for ${confirm.dealId}:`, JSON.stringify(slTpPayload));
+      try {
+        const upd = await fetch(`${base}/positions/otc/${encodeURIComponent(confirm.dealId)}`, {
+          method: 'PUT',
+          headers: igHeaders(apiKey, cst, securityToken, '2'),
+          body: JSON.stringify(slTpPayload),
+        });
+        if (!upd.ok) {
+          const updText = await upd.text();
+          console.warn(`[ig/order] SL/TP update failed (${upd.status}):`, updText.slice(0, 200));
+          slTpResult = { ok: false, error: `SL/TP update failed: ${upd.status}` };
+        }
+      } catch (e) {
+        slTpResult = { ok: false, error: `SL/TP update error: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       dealReference: dealRef,
@@ -217,6 +257,7 @@ export async function POST(request: NextRequest) {
       epic: resolvedEpic,
       resolvedVia,
       sentPayload: payload,
+      slTpResult,
     });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
