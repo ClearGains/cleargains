@@ -261,14 +261,19 @@ export function IGStrategyTrader() {
   useEffect(() => {
     setStrategies(loadStrategies());
     const savedMode = localStorage.getItem('ig_active_mode') as 'demo'|'live'|null;
-    if (savedMode === 'live' || savedMode === 'demo') setActiveModeState(savedMode);
     (['demo','live'] as const).forEach(env => {
       setConnecting(c => ({...c,[env]:true}));
       connectIG(env).then(sess => {
-        if (sess) setSessions(s => ({...s,[env]:sess}));
+        if (sess) {
+          setSessions(s => ({...s,[env]:sess}));
+          // Only restore saved live mode once we confirm a live session actually exists
+          if (env === 'live' && savedMode === 'live') setActiveModeState('live');
+        }
         setConnecting(c => ({...c,[env]:false}));
       });
     });
+    // Always restore demo mode immediately (no credential check needed)
+    if (savedMode === 'demo') setActiveModeState('demo');
   }, []);
 
   // ── Countdown ticker ───────────────────────────────────────────────────────
@@ -720,7 +725,10 @@ export function IGStrategyTrader() {
       setBPosMonitorMs(existing.posMonitorMs ?? 60_000);
     } else {
       setEditId(null); setBName(''); setBTimeframe('daily'); setBSize(1); setBMaxPos(3);
-      setBMinStrength(60); setBAccounts([activeMode]); setBAutoClose(true);
+      setBMinStrength(60);
+      // Only default to live if we actually have a live session
+      setBAccounts([sessions[activeMode] ? activeMode : 'demo']);
+      setBAutoClose(true);
       setBWatchlist([...DEFAULT_WATCHLIST]);
       setBSignalScanMs(5 * 60_000);
       setBPosMonitorMs(60_000);
@@ -826,27 +834,34 @@ export function IGStrategyTrader() {
         <div className="flex items-center gap-2 flex-wrap">
           {/* Demo / Live mode selector */}
           <div className="flex items-center gap-0.5 bg-gray-800/60 rounded-full p-0.5">
-            {(['demo','live'] as const).map(env => (
-              <button key={env}
-                onClick={() => {
-                  if (env === 'live') { setShowLiveConfirm(true); }
-                  else { setActiveMode('demo'); }
-                }}
-                className={clsx('flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full transition-all',
-                  activeMode === env
-                    ? env === 'demo' ? 'bg-blue-500 text-white shadow' : 'bg-amber-500 text-black shadow'
-                    : 'text-gray-500 hover:text-gray-300'
-                )}>
-                {env === 'live' && <span className="text-[9px]">⚠️</span>}
-                IG {env === 'demo' ? 'Demo' : 'Live'}
-                {sessions[env]
-                  ? <span className={clsx('w-1.5 h-1.5 rounded-full', env==='demo' ? 'bg-blue-300' : 'bg-amber-300')} />
-                  : connecting[env]
-                    ? <RefreshCw className="h-2.5 w-2.5 animate-spin" />
-                    : <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
-                }
-              </button>
-            ))}
+            {(['demo','live'] as const).map(env => {
+              const hasSession = !!sessions[env];
+              const isLiveNoCredentials = env === 'live' && !hasSession && !connecting[env];
+              return (
+                <button key={env}
+                  disabled={isLiveNoCredentials}
+                  title={isLiveNoCredentials ? 'Add IG Live credentials in Settings → Accounts first' : undefined}
+                  onClick={() => {
+                    if (env === 'live') { setShowLiveConfirm(true); }
+                    else { setActiveMode('demo'); }
+                  }}
+                  className={clsx('flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full transition-all',
+                    isLiveNoCredentials ? 'opacity-30 cursor-not-allowed text-gray-600' :
+                    activeMode === env
+                      ? env === 'demo' ? 'bg-blue-500 text-white shadow' : 'bg-amber-500 text-black shadow'
+                      : 'text-gray-500 hover:text-gray-300'
+                  )}>
+                  {env === 'live' && <span className="text-[9px]">⚠️</span>}
+                  IG {env === 'demo' ? 'Demo' : 'Live'}
+                  {hasSession
+                    ? <span className={clsx('w-1.5 h-1.5 rounded-full', env==='demo' ? 'bg-blue-300' : 'bg-amber-300')} />
+                    : connecting[env]
+                      ? <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                      : <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+                  }
+                </button>
+              );
+            })}
           </div>
           {/* Connection chips */}
           {(['demo','live'] as const).map(env => sessions[env] && (
