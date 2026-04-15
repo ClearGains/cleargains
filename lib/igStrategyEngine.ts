@@ -55,16 +55,21 @@ export type IGSavedStrategy = {
   lastSignal?: SignalDirection;
 };
 
-/** Pre-defined list of major spread-bet markets (rolling DFB) */
+/**
+ * Pre-defined list of major spread-bet markets (rolling DFB).
+ * Only 3 are enabled by default to keep within IG's 10 000 data-point/week
+ * historical price allowance. Enable more markets carefully — each extra
+ * enabled market multiplies allowance usage by (candles × scans_per_week).
+ */
 export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
-  { epic: 'IX.D.FTSE.CFD.IP',    name: 'FTSE 100',     enabled: true },
-  { epic: 'IX.D.DAX.CFD.IP',     name: 'Germany 40',   enabled: true },
-  { epic: 'IX.D.SPTRD.CFD.IP',   name: 'S&P 500',      enabled: true },
-  { epic: 'IX.D.DOW.CFD.IP',     name: 'Wall Street',  enabled: true },
+  { epic: 'IX.D.FTSE.CFD.IP',    name: 'FTSE 100',     enabled: true  },
+  { epic: 'IX.D.SPTRD.CFD.IP',   name: 'S&P 500',      enabled: true  },
+  { epic: 'CS.D.CFDGOLD.CFD.IP', name: 'Gold',         enabled: true  },
+  { epic: 'IX.D.DAX.CFD.IP',     name: 'Germany 40',   enabled: false },
+  { epic: 'IX.D.DOW.CFD.IP',     name: 'Wall Street',  enabled: false },
   { epic: 'IX.D.NASDAQ.CFD.IP',  name: 'NASDAQ 100',   enabled: false },
-  { epic: 'CS.D.CFDGOLD.CFD.IP', name: 'Gold',         enabled: true },
   { epic: 'CS.D.OILB.CFD.IP',    name: 'Brent Crude',  enabled: false },
-  { epic: 'CS.D.GBPUSD.CFD.IP',  name: 'GBP/USD',      enabled: true },
+  { epic: 'CS.D.GBPUSD.CFD.IP',  name: 'GBP/USD',      enabled: false },
   { epic: 'CS.D.EURUSD.CFD.IP',  name: 'EUR/USD',      enabled: false },
   { epic: 'CS.D.BITCOIN.CFD.IP', name: 'Bitcoin',      enabled: false },
 ];
@@ -324,11 +329,29 @@ export function getSignal(timeframe: Timeframe, candles: Candle[]): StrategySign
   return longtermSignal(candles);
 }
 
-// Resolution + candle count per timeframe
+/**
+ * Candle counts are kept at the minimum the indicators need so we don't
+ * burn through IG's weekly historical-data allowance (10 000 data-points).
+ *
+ *  hourly   : EMA21 needs 21 + RSI14 needs 15 → 30 candles is safe
+ *  daily    : EMA50 needs 50 + MACD signal needs +9 → 60 candles minimum
+ *  longterm : EMA200 needs 200 → 205 candles
+ *
+ * pollMs is aligned with the server-side cache TTL so most scan cycles
+ * hit the cache rather than making a live IG API call:
+ *  hourly   : poll every 15 min, MINUTE_5 cache = 5 min  → fresh data each poll
+ *  daily    : poll every 4 hrs,  HOUR cache    = 4 hrs   → 1 API call per cycle
+ *  longterm : poll every 12 hrs, DAY cache     = 12 hrs  → 1 API call per cycle
+ *
+ * Estimated weekly data-point usage (4 markets enabled):
+ *  hourly   : 30 × 4 × (7*24*4) = 80 640  ← still high; use sparingly
+ *  daily    : 60 × 4 × (7*6)    =  10 080 ← within allowance
+ *  longterm : 205 × 4 × (7*2)   =  11 480 ← just within allowance
+ */
 export const TIMEFRAME_CONFIG: Record<Timeframe, { resolution: string; max: number; label: string; pollMs: number; description: string }> = {
-  hourly:   { resolution: 'MINUTE_5', max: 60,  label: 'Hourly (Scalp)', pollMs: 5 * 60_000,   description: '5-min candles · EMA9/21 + RSI · 2:1 R:R' },
-  daily:    { resolution: 'HOUR',     max: 100,  label: 'Daily (Swing)',  pollMs: 60 * 60_000,  description: '1-hr candles · EMA20/50 + MACD · 3:1 R:R' },
-  longterm: { resolution: 'DAY',      max: 210,  label: 'Long-term',      pollMs: 24 * 60_000 * 60, description: 'Daily candles · Golden/Death Cross EMA50/200 · 3:1 R:R' },
+  hourly:   { resolution: 'MINUTE_5', max: 30,  label: 'Hourly (Scalp)', pollMs: 15 * 60_000,        description: '5-min candles · EMA9/21 + RSI · 2:1 R:R · polls every 15 min' },
+  daily:    { resolution: 'HOUR',     max: 60,  label: 'Daily (Swing)',  pollMs:  4 * 60 * 60_000,   description: '1-hr candles · EMA20/50 + MACD · 3:1 R:R · polls every 4 hrs' },
+  longterm: { resolution: 'DAY',      max: 205, label: 'Long-term',      pollMs: 12 * 60 * 60_000,   description: 'Daily candles · Golden/Death Cross EMA50/200 · 3:1 R:R · polls every 12 hrs' },
 };
 
 // ── Storage helpers ───────────────────────────────────────────────────────────

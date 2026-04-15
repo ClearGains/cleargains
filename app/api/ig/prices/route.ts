@@ -8,12 +8,31 @@ export type IGResolution =
   | 'DAY' | 'WEEK' | 'MONTH';
 
 const priceCache = new Map<string, { data: unknown; expiresAt: number }>();
+
+/**
+ * Cache TTLs are intentionally long to protect against IG's weekly
+ * historical-data allowance (10 000 data-points / week for non-pro accounts).
+ *
+ * Rule of thumb: cache for roughly the same duration as the candle period.
+ * Sub-minute bars we keep short; daily bars we keep for 12 hours so a
+ * strategy that scans 4 markets per day uses ~200 data-points instead of
+ * ~2 000+.
+ */
 const CACHE_TTL: Record<string, number> = {
-  MINUTE: 30_000,
-  MINUTE_5: 60_000,
-  MINUTE_15: 2 * 60_000,
-  HOUR: 5 * 60_000,
-  DAY: 30 * 60_000,
+  MINUTE:    1 * 60_000,          //  1 min  (intraday scalping)
+  MINUTE_2:  2 * 60_000,
+  MINUTE_3:  3 * 60_000,
+  MINUTE_5:  5 * 60_000,          //  5 min
+  MINUTE_10: 10 * 60_000,
+  MINUTE_15: 15 * 60_000,
+  MINUTE_30: 30 * 60_000,
+  HOUR:      4 * 60 * 60_000,    //  4 hours  (was 5 min — 48× improvement)
+  HOUR_2:    6 * 60 * 60_000,
+  HOUR_3:    8 * 60 * 60_000,
+  HOUR_4:   10 * 60 * 60_000,
+  DAY:      12 * 60 * 60_000,    // 12 hours  (was 30 min — 24× improvement)
+  WEEK:     48 * 60 * 60_000,
+  MONTH:    72 * 60 * 60_000,
 };
 
 function cacheTtl(resolution: string) {

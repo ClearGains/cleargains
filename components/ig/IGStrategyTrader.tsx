@@ -298,7 +298,17 @@ export function IGStrategyTrader() {
       );
       const d = await r.json() as { ok:boolean; candles?:Candle[]; allowance?:{remainingAllowance:number}; error?:string };
       if (!d.ok) return { candles: [], error: d.error ?? `HTTP ${r.status}` };
-      if (d.allowance) setAllowance(d.allowance.remainingAllowance);
+      if (d.allowance) {
+        const remaining = d.allowance.remainingAllowance;
+        setAllowance(remaining);
+        // Auto-stop if critically low to prevent IG blocking the account
+        if (remaining < 200 && runningRef.current) {
+          runningRef.current = false;
+          if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+          setIsRunning(false);
+          setScanProgress('');
+        }
+      }
       return { candles: d.candles ?? [], allowanceLeft: d.allowance?.remainingAllowance };
     } catch (e) { return { candles: [], error: e instanceof Error ? e.message : 'Fetch failed' }; }
   }
@@ -605,6 +615,28 @@ export function IGStrategyTrader() {
         ⚠️ Spread bets are complex. 68% of retail accounts lose money. Use Demo first. Not financial advice.
       </div>
 
+      {/* Allowance warning */}
+      {allowance !== null && allowance < 2000 && (
+        <div className={clsx('rounded-lg px-3 py-2.5 text-xs',
+          allowance < 500
+            ? 'bg-red-500/15 border border-red-500/30 text-red-400'
+            : 'bg-orange-500/15 border border-orange-500/30 text-orange-400'
+        )}>
+          <p className="font-semibold mb-0.5">
+            {allowance < 500 ? '🛑 Historical data allowance critical' : '⚠️ Historical data allowance low'}
+          </p>
+          <p>
+            {allowance.toLocaleString()} data points remaining this week (IG limit: ~10 000/week).
+            {allowance < 500
+              ? ' Auto-scanning has been paused to avoid an account block. Allowance resets weekly.'
+              : ' Consider disabling extra markets in the strategy watchlist to conserve allowance.'}
+          </p>
+          {allowance < 500 && isRunning && (
+            <button onClick={stopAutoRun} className="mt-2 underline font-semibold">Stop auto-scan now</button>
+          )}
+        </div>
+      )}
+
       {/* ── Manual trade panel ─────────────────────────────────────────── */}
       {showManual && (
         <Card>
@@ -770,7 +802,10 @@ export function IGStrategyTrader() {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <label className="text-xs text-gray-400">Markets to scan</label>
-                <span className="text-[10px] text-gray-600">{bWatchlist.filter(m=>m.enabled).length} enabled</span>
+                <span className="text-[10px] text-gray-600">
+                  {bWatchlist.filter(m=>m.enabled).length} enabled ·{' '}
+                  ~{(bWatchlist.filter(m=>m.enabled).length * TIMEFRAME_CONFIG[bTimeframe].max * (bTimeframe === 'hourly' ? 7*24*4 : bTimeframe === 'daily' ? 7*6 : 14)).toLocaleString()} pts/week
+                </span>
               </div>
               <div className="space-y-1 max-h-56 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800/50">
                 {bWatchlist.map((m, i) => (
