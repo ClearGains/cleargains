@@ -39,6 +39,7 @@ type MarketScan = {
   name: string;
   signal: StrategySignal | null;
   scanning: boolean;
+  status: 'idle' | 'ok' | 'error';
   error?: string;
   lastScanned?: string;
   allowanceLeft?: number;
@@ -231,6 +232,23 @@ export function IGStrategyTrader() {
     if (Object.values(sessions).some(Boolean)) void loadPositions();
   }, [sessions, loadPositions]);
 
+  // Pre-populate scanner with idle cards when a strategy is selected/changed
+  useEffect(() => {
+    if (!activeStratId) return;
+    const strat = strategies.find(s => s.id === activeStratId);
+    if (!strat) return;
+    const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
+    setScans(prev => {
+      const next = { ...prev };
+      markets.forEach(m => {
+        if (!next[m.epic]) {
+          next[m.epic] = { epic: m.epic, name: m.name, signal: null, scanning: false, status: 'idle' };
+        }
+      });
+      return next;
+    });
+  }, [activeStratId, strategies]);
+
   // ── Place / close ──────────────────────────────────────────────────────────
   async function placeOrder(env: 'demo'|'live', epic:string, direction:'BUY'|'SELL', size:number, stopDist?:number, limitDist?:number) {
     const sess = sessions[env];
@@ -254,8 +272,22 @@ export function IGStrategyTrader() {
     return r.json() as Promise<{ok:boolean;error?:string}>;
   }
 
+  // ── Auto-discover correct epic via search when hardcoded one fails ───────────
+  async function discoverEpic(sess: IGSession, env: 'demo'|'live', name: string): Promise<string|null> {
+    try {
+      const r = await fetch(`/api/ig/markets?q=${encodeURIComponent(name)}`, { headers: makeHeaders(sess, env) });
+      const d = await r.json() as { ok:boolean; markets?: {epic:string;instrumentName:string;expiry:string}[] };
+      if (d.ok && d.markets && d.markets.length > 0) {
+        // Prefer DFB (rolling) instruments for spread bets
+        const dfb = d.markets.find(m => m.expiry === 'DFB' || m.epic.endsWith('.IP'));
+        return (dfb ?? d.markets[0]).epic;
+      }
+    } catch {}
+    return null;
+  }
+
   // ── Fetch candles for one market ───────────────────────────────────────────
-  async function fetchCandles(env: 'demo'|'live', epic:string, timeframe: Timeframe): Promise<{candles:Candle[];allowanceLeft?:number}|null> {
+  async function fetchCandles(env: 'demo'|'live', epic:string, timeframe: Timeframe): Promise<{candles:Candle[];allowanceLeft?:number;error?:string}|null> {
     const sess = sessions[env] ?? Object.values(sessions).find(Boolean);
     if (!sess) return null;
     const cfg = TIMEFRAME_CONFIG[timeframe];
@@ -265,28 +297,58 @@ export function IGStrategyTrader() {
         { headers: makeHeaders(sess, env) }
       );
       const d = await r.json() as { ok:boolean; candles?:Candle[]; allowance?:{remainingAllowance:number}; error?:string };
-      if (!d.ok) return null;
+      if (!d.ok) return { candles: [], error: d.error ?? `HTTP ${r.status}` };
       if (d.allowance) setAllowance(d.allowance.remainingAllowance);
       return { candles: d.candles ?? [], allowanceLeft: d.allowance?.remainingAllowance };
-    } catch { return null; }
+    } catch (e) { return { candles: [], error: e instanceof Error ? e.message : 'Fetch failed' }; }
   }
 
   // ── Scan one market + execute ──────────────────────────────────────────────
   async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
-    setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true } }));
+    setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
     const envs = strat.accounts.filter(e => sessions[e]);
     const primaryEnv = envs[0] ?? 'demo';
+    const sess = sessions[primaryEnv] ?? Object.values(sessions).find(Boolean);
 
-    const result = await fetchCandles(primaryEnv, market.epic, strat.timeframe);
+    let epic = market.epic;
+    let result = await fetchCandles(primaryEnv, epic, strat.timeframe);
+
+    // Auto-discover correct epic when the hardcoded one fails ──────────────────
+    if (!result || result.candles.length < 10 || result.error) {
+      const igError = result?.error;
+      log('info', `${market.name}: epic "${epic}" failed (${igError ?? 'no candles'}) — searching for correct epic…`);
+      if (sess) {
+        const discovered = await discoverEpic(sess, primaryEnv, market.name);
+        if (discovered && discovered !== epic) {
+          log('info', `${market.name}: trying discovered epic "${discovered}"`);
+          epic = discovered;
+          result = await fetchCandles(primaryEnv, epic, strat.timeframe);
+          if (result && result.candles.length >= 10 && !result.error) {
+            // Persist the corrected epic back into the strategy's watchlist
+            saveStrategy({
+              ...strat,
+              watchlist: (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).map(m =>
+                m.epic === market.epic ? { ...m, epic: discovered } : m
+              ),
+            });
+            setStrategies(loadStrategies());
+            log('info', `${market.name}: epic updated to "${discovered}" and saved`);
+          }
+        }
+      }
+    }
+
     if (!result || result.candles.length < 10) {
-      setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, error:'No data' } }));
+      const errMsg = result?.error ?? 'No price data returned';
+      setScans(p => ({ ...p, [market.epic]: { epic, name:market.name, signal:null, scanning:false, status:'error', error: errMsg } }));
+      log('error', `${market.name}: ${errMsg}`);
       return null;
     }
 
     const sig = getSignal(strat.timeframe, result.candles);
     setScans(p => ({
       ...p,
-      [market.epic]: { epic:market.epic, name:market.name, signal:sig, scanning:false, lastScanned:new Date().toISOString(), allowanceLeft:result.allowanceLeft },
+      [market.epic]: { epic, name:market.name, signal:sig, scanning:false, status:'ok', lastScanned:new Date().toISOString(), allowanceLeft:result.allowanceLeft },
     }));
 
     // Execute on each account if autoTrade and signal is strong enough
@@ -459,8 +521,15 @@ export function IGStrategyTrader() {
   const activeStrat   = strategies.find(s => s.id === activeStratId) ?? null;
   const allPositions  = [...positions.demo, ...positions.live];
   const totalPnL      = allPositions.reduce((acc, p) => acc + (p.upl ?? 0), 0);
-  const scanEntries   = Object.values(scans);
   const builderSession = sessions['demo'] ?? sessions['live'];
+
+  // Show scanner for the active strategy's markets (even before first run)
+  const activeScanMarkets = activeStrat
+    ? (activeStrat.watchlist?.length ? activeStrat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled).map(m => m.epic)
+    : [];
+  const scanEntries = activeScanMarkets.length > 0
+    ? activeScanMarkets.map(epic => scans[epic] ?? { epic, name: (activeStrat!.watchlist?.find(m=>m.epic===epic) ?? DEFAULT_WATCHLIST.find(m=>m.epic===epic))?.name ?? epic, signal:null, scanning:false, status:'idle' as const })
+    : Object.values(scans);
 
   // ── Not connected ──────────────────────────────────────────────────────────
   if (!anyConnected && !isConnecting) {
@@ -821,36 +890,64 @@ export function IGStrategyTrader() {
       {/* ── Market Scanner Grid ─────────────────────────────────────────── */}
       {scanEntries.length > 0 && (
         <Card>
-          <CardHeader title="Market Scanner" subtitle={`${scanEntries.length} markets · last run ${fmtTime(scanEntries[0]?.lastScanned ?? new Date().toISOString())}`}
+          <CardHeader
+            title="Market Scanner"
+            subtitle={
+              scanEntries.some(s => s.status === 'ok')
+                ? `${scanEntries.filter(s=>s.status==='ok').length}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
+                : `${scanEntries.length} markets ready — click Run to start scanning`
+            }
             icon={<Settings className="h-4 w-4" />}
           />
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {scanEntries.map(scan => (
               <div key={scan.epic} className={clsx('rounded-lg border p-2.5 transition-all',
-                scan.scanning ? 'border-orange-500/30 bg-orange-500/5' :
-                scan.signal?.direction === 'BUY'  ? 'border-emerald-500/30 bg-emerald-500/5' :
-                scan.signal?.direction === 'SELL' ? 'border-red-500/30 bg-red-500/5' :
+                scan.scanning                    ? 'border-orange-500/40 bg-orange-500/5 animate-pulse' :
+                scan.status === 'error'          ? 'border-red-500/30 bg-red-500/5' :
+                scan.signal?.direction === 'BUY' ? 'border-emerald-500/30 bg-emerald-500/5' :
+                scan.signal?.direction === 'SELL'? 'border-red-500/30 bg-red-500/5' :
+                scan.status === 'idle'           ? 'border-gray-700/50 bg-gray-800/10' :
                 'border-gray-800 bg-gray-800/20'
               )}>
-                <div className="flex items-start justify-between gap-1 mb-1">
+                <div className="flex items-start justify-between gap-1 mb-1.5">
                   <p className="text-xs font-semibold text-white leading-tight">{scan.name}</p>
                   {scan.scanning
                     ? <RefreshCw className="h-3 w-3 text-orange-400 animate-spin flex-shrink-0 mt-0.5" />
-                    : scan.error
-                      ? <AlertCircle className="h-3 w-3 text-red-500 flex-shrink-0 mt-0.5" />
-                      : scan.signal && <DirectionBadge dir={scan.signal.direction} size="xs" />
+                    : scan.status === 'error'
+                      ? <AlertCircle className="h-3 w-3 text-red-400 flex-shrink-0 mt-0.5" />
+                      : scan.status === 'idle'
+                        ? <Minus className="h-3 w-3 text-gray-600 flex-shrink-0 mt-0.5" />
+                        : scan.signal && <DirectionBadge dir={scan.signal.direction} size="xs" />
                   }
                 </div>
-                {scan.signal && !scan.scanning && (
+                {scan.status === 'idle' && !scan.scanning && (
+                  <p className="text-[10px] text-gray-600">Waiting for scan…</p>
+                )}
+                {scan.status === 'ok' && scan.signal && !scan.scanning && (
                   <div className="space-y-1">
                     <StrengthBar strength={scan.signal.strength} dir={scan.signal.direction} />
-                    <p className="text-[10px] text-gray-500">{scan.signal.strength}% · SL {scan.signal.stopPoints}pt</p>
+                    <p className="text-[10px] text-gray-500">{scan.signal.strength}% · SL {scan.signal.stopPoints}pt · TP {scan.signal.targetPoints}pt</p>
+                    {scan.signal.direction !== 'HOLD' && (
+                      <p className={clsx('text-[10px] font-semibold',
+                        scan.signal.direction === 'BUY' ? 'text-emerald-400' : 'text-red-400'
+                      )}>{scan.signal.reason.slice(0, 60)}{scan.signal.reason.length > 60 ? '…' : ''}</p>
+                    )}
                   </div>
                 )}
-                {scan.error && <p className="text-[10px] text-red-500 mt-0.5">{scan.error}</p>}
+                {scan.status === 'error' && (
+                  <div>
+                    <p className="text-[10px] text-red-400 mt-0.5 break-all leading-relaxed">{scan.error}</p>
+                    <p className="text-[9px] text-gray-600 mt-1">Auto-retry on next run</p>
+                  </div>
+                )}
               </div>
             ))}
           </div>
+          {scanEntries.some(s => s.status === 'error') && (
+            <p className="text-[11px] text-amber-400 mt-3 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+              ⚠️ Some markets failed. The bot will automatically search for correct epics on the next run. You can also edit the strategy and use the market search to fix them manually.
+            </p>
+          )}
         </Card>
       )}
 
