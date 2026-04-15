@@ -82,18 +82,38 @@ function makeHeaders(s: IGSession, env: 'demo'|'live', extra?: Record<string,str
   return { 'x-ig-cst': s.cst, 'x-ig-security-token': s.securityToken, 'x-ig-api-key': s.apiKey, 'x-ig-env': env, ...extra };
 }
 
-async function connectIG(env: 'demo'|'live'): Promise<IGSession|null> {
-  const key = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+const SESSION_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours — matches server-side cache
+
+async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSession|null> {
+  const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+  const sessKey = `ig_session_${env}`;
   try {
-    const raw = localStorage.getItem(key);
+    const raw = localStorage.getItem(credKey);
     if (!raw) return null;
     const c = JSON.parse(raw) as { username:string; password:string; apiKey:string; connected?:boolean };
     if (!c.connected) return null;
+
+    // Return cached session if still fresh (< 5 hours old)
+    if (!forceRefresh) {
+      const cachedRaw = localStorage.getItem(sessKey);
+      if (cachedRaw) {
+        const cached = JSON.parse(cachedRaw) as { cst:string; securityToken:string; accountId:string; apiKey:string; authenticatedAt:number };
+        if (cached.cst && cached.securityToken && (Date.now() - cached.authenticatedAt) < SESSION_TTL_MS) {
+          return { cst:cached.cst, securityToken:cached.securityToken, accountId:cached.accountId, apiKey:cached.apiKey };
+        }
+      }
+    }
+
+    // Fresh auth
     const r = await fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ username:c.username, password:c.password, apiKey:c.apiKey, env }) });
     const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string };
-    if (d.ok && d.cst && d.securityToken)
-      return { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId??'', apiKey:c.apiKey };
+    if (d.ok && d.cst && d.securityToken) {
+      const sess: IGSession = { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId??'', apiKey:c.apiKey };
+      // Cache the fresh session
+      localStorage.setItem(sessKey, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
+      return sess;
+    }
   } catch {}
   return null;
 }
@@ -243,6 +263,9 @@ export function IGStrategyTrader() {
   // ── Test-run mode (single cycle, max 1 position) ───────────────────────────
   const [testRunning, setTestRunning] = useState(false);
 
+  // ── Test Order (single £1/pt S&P 500 BUY on demo to verify end-to-end) ────
+  const [testOrderBusy, setTestOrderBusy] = useState(false);
+
   // ── Scan frequency settings ────────────────────────────────────────────────
   const [signalScanMs, setSignalScanMs] = useState(5 * 60_000);
   const [posMonitorMs, setPosMonitorMs] = useState(60_000);
@@ -370,9 +393,10 @@ export function IGStrategyTrader() {
       if (!sess) continue;
       try {
         let r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
-        // 401 → re-authenticate and retry once
+        // 401 → clear stale cache, re-authenticate fresh and retry once
         if (r.status === 401) {
-          const fresh = await connectIG(env);
+          localStorage.removeItem(`ig_session_${env}`);
+          const fresh = await connectIG(env, true);
           if (fresh) { setSessions(s => ({...s,[env]:fresh})); sess = fresh; }
           r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
         }
@@ -779,6 +803,51 @@ export function IGStrategyTrader() {
     if (posRefreshRef.current) clearInterval(posRefreshRef.current);
   }, []);
 
+  // ── Test Order: fresh auth → £1/pt BUY S&P 500 on demo ───────────────────
+  async function runTestOrder() {
+    if (testOrderBusy) return;
+    setTestOrderBusy(true);
+    log('info', '🧪 Test Order: fresh auth + £1/pt BUY S&P 500 (demo)…');
+    try {
+      // Force a fresh session (bypass cache) to test auth end-to-end
+      const freshSess = await connectIG('demo', true);
+      if (!freshSess) {
+        log('error', '🧪 Test Order failed: could not authenticate demo session. Check Settings → Accounts.');
+        showToast(false, 'No demo session — check credentials');
+        setTestOrderBusy(false);
+        return;
+      }
+      setSessions(s => ({...s, demo: freshSess}));
+      log('info', `🧪 Auth OK — CST: ${freshSess.cst.slice(0,8)}… accountId: ${freshSess.accountId}`);
+
+      // Place a £1/pt BUY on S&P 500 (verified epic)
+      const epic = 'IX.D.SPTRD.DAILY.IP';
+      const body = { epic, direction: 'BUY', size: 1, currencyCode: 'GBP' };
+      log('info', `🧪 Placing order: ${JSON.stringify(body)}`);
+      const r = await fetch('/api/ig/order', {
+        method: 'POST',
+        headers: { ...makeHeaders(freshSess, 'demo'), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json() as { ok:boolean; dealReference?:string; dealId?:string; dealStatus?:string; level?:number; error?:string; reason?:string; sentPayload?:unknown; igBody?:unknown };
+      if (d.ok) {
+        log('buy', `🧪 ✅ Test Order ACCEPTED — ref: ${d.dealReference ?? 'n/a'} · dealId: ${d.dealId ?? 'pending'} · status: ${d.dealStatus ?? 'UNKNOWN'} · filled @ ${d.level ?? '?'}`);
+        showToast(true, `Test order placed — check Positions tab`);
+        await sleep(1500);
+        await loadPositions('demo');
+      } else {
+        log('error', `🧪 ❌ Test Order FAILED: ${d.error ?? 'unknown'}${d.reason ? ` (${d.reason})` : ''}`);
+        if (d.sentPayload) log('error', `  sent: ${JSON.stringify(d.sentPayload)}`);
+        if (d.igBody)      log('error', `  ig:   ${JSON.stringify(d.igBody)}`);
+        showToast(false, d.error ?? 'Test order failed');
+      }
+    } catch (e) {
+      log('error', `🧪 Test Order exception: ${e instanceof Error ? e.message : String(e)}`);
+      showToast(false, 'Test order exception');
+    }
+    setTestOrderBusy(false);
+  }
+
   // ── Manual close ───────────────────────────────────────────────────────────
   async function handleClose(env:'demo'|'live', pos: IGPosition) {
     setClosingId(pos.dealId);
@@ -1016,6 +1085,11 @@ export function IGStrategyTrader() {
         </div>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => void loadPositions()} loading={loadingPos}>Refresh</Button>
+          <Button size="sm" variant="outline" loading={testOrderBusy} disabled={!sessions.demo}
+            title="Place a test £1/pt BUY on S&P 500 (demo) to verify order placement end-to-end"
+            onClick={() => void runTestOrder()}>
+            Test Order
+          </Button>
           <Button size="sm" variant="outline" icon={<ArrowUpDown className="h-3.5 w-3.5" />} onClick={() => { setShowManual(v => !v); setShowBuilder(false); }}>Manual</Button>
           <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => { openBuilder(); }}>New Strategy</Button>
         </div>
