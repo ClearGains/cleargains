@@ -27,7 +27,7 @@ export type StrategySignal = {
   riskReward: string;
 };
 
-export type Timeframe = 'hourly' | 'daily' | 'longterm';
+export type Timeframe = 'hourly' | 'daily' | 'longterm' | 'rsi2';
 
 export type WatchlistMarket = {
   epic: string;
@@ -56,22 +56,28 @@ export type IGSavedStrategy = {
 };
 
 /**
- * Pre-defined list of major spread-bet markets (rolling DFB).
- * Only 3 are enabled by default to keep within IG's 10 000 data-point/week
- * historical price allowance. Enable more markets carefully — each extra
- * enabled market multiplies allowance usage by (candles × scans_per_week).
+ * Pre-defined spread-bet markets using the correct DFB epics.
+ *
+ * Epics use the .DAILY.IP / .TODAY.IP suffix — these are the Daily Funded
+ * Bet (DFB/rolling) instruments for UK spread-bet accounts, sourced from
+ * a verified bot_ig.py.  The older .CFD.IP epics are for CFD accounts
+ * and will return INSTRUMENT_NOT_FOUND on spread-bet accounts.
+ *
+ * Only 3 markets enabled by default to stay within IG's 10 000
+ * data-point/week historical allowance.  With RSI(2) strategy (once/day)
+ * and 3 markets: 215 × 3 = 645 pts/day = 4 515 pts/week.
  */
 export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
-  { epic: 'IX.D.FTSE.CFD.IP',    name: 'FTSE 100',     enabled: true  },
-  { epic: 'IX.D.SPTRD.CFD.IP',   name: 'S&P 500',      enabled: true  },
-  { epic: 'CS.D.CFDGOLD.CFD.IP', name: 'Gold',         enabled: true  },
-  { epic: 'IX.D.DAX.CFD.IP',     name: 'Germany 40',   enabled: false },
-  { epic: 'IX.D.DOW.CFD.IP',     name: 'Wall Street',  enabled: false },
-  { epic: 'IX.D.NASDAQ.CFD.IP',  name: 'NASDAQ 100',   enabled: false },
-  { epic: 'CS.D.OILB.CFD.IP',    name: 'Brent Crude',  enabled: false },
-  { epic: 'CS.D.GBPUSD.CFD.IP',  name: 'GBP/USD',      enabled: false },
-  { epic: 'CS.D.EURUSD.CFD.IP',  name: 'EUR/USD',      enabled: false },
-  { epic: 'CS.D.BITCOIN.CFD.IP', name: 'Bitcoin',      enabled: false },
+  { epic: 'IX.D.FTSE.DAILY.IP',       name: 'FTSE 100',     enabled: true  },
+  { epic: 'IX.D.SPTRD.DAILY.IP',      name: 'S&P 500',      enabled: true  },
+  { epic: 'CS.D.CFDGOLD.CFDGC.IP',    name: 'Gold',         enabled: true  },
+  { epic: 'IX.D.NASDAQ.DAILY.IP',     name: 'NASDAQ 100',   enabled: false },
+  { epic: 'IX.D.DAX.DAILY.IP',        name: 'Germany 40',   enabled: false },
+  { epic: 'IX.D.DOW.DAILY.IP',        name: 'Wall Street',  enabled: false },
+  { epic: 'CS.D.CRUDEOIL.TODAY.IP',   name: 'Oil (WTI)',    enabled: false },
+  { epic: 'CS.D.GBPUSD.TODAY.IP',     name: 'GBP/USD',      enabled: false },
+  { epic: 'CS.D.EURUSD.TODAY.IP',     name: 'EUR/USD',      enabled: false },
+  { epic: 'CS.D.BITCOIN.CFD.IP',      name: 'Bitcoin',      enabled: false },
 ];
 
 // ── Technical indicators ──────────────────────────────────────────────────────
@@ -323,9 +329,113 @@ export function longtermSignal(candles: Candle[]): StrategySignal {
   };
 }
 
+// ── ATR (Average True Range) ──────────────────────────────────────────────────
+
+export function atr(candles: Candle[], period = 14): number {
+  if (candles.length < period + 1) return 0;
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const hl  = candles[i].high  - candles[i].low;
+    const hcp = Math.abs(candles[i].high  - candles[i - 1].close);
+    const lcp = Math.abs(candles[i].low   - candles[i - 1].close);
+    trs.push(Math.max(hl, hcp, lcp));
+  }
+  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
+}
+
+// ── RSI(2) ────────────────────────────────────────────────────────────────────
+
+export function rsi2(closes: number[]): number {
+  if (closes.length < 3) return 50;
+  const gains: number[] = [];
+  const losses: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    gains.push(Math.max(d, 0));
+    losses.push(Math.max(-d, 0));
+  }
+  const avgGain = (gains.slice(-2).reduce((a, b) => a + b, 0) / 2) || 0;
+  const avgLoss = (losses.slice(-2).reduce((a, b) => a + b, 0) / 2) || 0;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+/**
+ * RSI(2) Mean Reversion + EMA(200) Trend Filter — ported from bot_ig.py
+ *
+ * Logic (matches the Python bot exactly):
+ *   BUY  — price above EMA200 (uptrend) AND RSI(2) < 10 (oversold pullback)
+ *   SELL — price below EMA200 (downtrend) AND RSI(2) > 90 (overbought bounce)
+ *
+ * Stops / targets are ATR-based (2× ATR stop, 4× ATR target → 2:1 R:R).
+ * Uses daily candles — only needs to be fetched once per day, so allowance
+ * usage is minimal (205 candles × N markets × 1 fetch/day).
+ */
+export function rsi2Signal(candles: Candle[]): StrategySignal {
+  const closes = candles.map(c => c.close);
+  const ema200vals = ema(closes, 200);
+
+  if (ema200vals.length < 2 || closes.length < 210) {
+    return { direction: 'HOLD', strength: 0, reason: 'Need at least 210 daily candles for RSI(2) strategy', indicators: [], stopPoints: 0, targetPoints: 0, riskReward: '2:1' };
+  }
+
+  const curClose  = closes[closes.length - 1];
+  const curEma200 = ema200vals[ema200vals.length - 1];
+  const curRsi2   = rsi2(closes.slice(-20));
+  const curAtr    = atr(candles, 14);
+
+  const stopPts   = Math.round(curAtr * 2);
+  const targetPts = Math.round(curAtr * 4);
+  const uptrend   = curClose > curEma200;
+  const gap       = ((curClose - curEma200) / curEma200) * 100;
+
+  let direction: SignalDirection = 'HOLD';
+  let strength = 0;
+  let reason = '';
+
+  if (uptrend && curRsi2 < 10) {
+    direction = 'BUY';
+    strength  = Math.round(85 + (10 - curRsi2));   // stronger signal the lower RSI(2) goes
+    reason    = `Mean reversion BUY — price ${gap.toFixed(1)}% above EMA200 (uptrend) with RSI(2) at ${curRsi2.toFixed(1)} (extreme oversold). Classic RSI(2) pullback entry.`;
+  } else if (!uptrend && curRsi2 > 90) {
+    direction = 'SELL';
+    strength  = Math.round(85 + (curRsi2 - 90));
+    reason    = `Mean reversion SELL — price ${Math.abs(gap).toFixed(1)}% below EMA200 (downtrend) with RSI(2) at ${curRsi2.toFixed(1)} (extreme overbought). Classic RSI(2) bounce entry.`;
+  } else if (uptrend && curRsi2 < 30) {
+    direction = 'BUY';
+    strength  = 55;
+    reason    = `Uptrend intact (${gap.toFixed(1)}% above EMA200). RSI(2) ${curRsi2.toFixed(1)} — pullback but not yet at extreme. Waiting for RSI(2) < 10.`;
+  } else if (!uptrend && curRsi2 > 70) {
+    direction = 'SELL';
+    strength  = 55;
+    reason    = `Downtrend intact (${Math.abs(gap).toFixed(1)}% below EMA200). RSI(2) ${curRsi2.toFixed(1)} — bouncing but not yet extreme. Waiting for RSI(2) > 90.`;
+  } else {
+    reason = `No signal. RSI(2) ${curRsi2.toFixed(1)} — waiting for extreme oversold (<10) or overbought (>90) reading.`;
+  }
+
+  return {
+    direction,
+    strength: Math.min(strength, 99),
+    reason,
+    indicators: [
+      { label: 'RSI(2)',  value: curRsi2.toFixed(1),  status: curRsi2 < 10 ? 'bullish' : curRsi2 > 90 ? 'bearish' : 'neutral' },
+      { label: 'EMA200',  value: curEma200.toFixed(2), status: uptrend ? 'bullish' : 'bearish' },
+      { label: 'Price',   value: curClose.toFixed(2),  status: uptrend ? 'bullish' : 'bearish' },
+      { label: 'Trend',   value: uptrend ? `↑ ${gap.toFixed(1)}% above` : `↓ ${Math.abs(gap).toFixed(1)}% below`, status: uptrend ? 'bullish' : 'bearish' },
+      { label: 'ATR(14)', value: curAtr.toFixed(2),    status: 'neutral' },
+      { label: 'SL dist', value: `${stopPts}pts`,      status: 'neutral' },
+      { label: 'TP dist', value: `${targetPts}pts`,    status: 'neutral' },
+    ],
+    stopPoints:   stopPts,
+    targetPoints: targetPts,
+    riskReward:   '2:1',
+  };
+}
+
 export function getSignal(timeframe: Timeframe, candles: Candle[]): StrategySignal {
   if (timeframe === 'hourly')   return hourlySignal(candles);
   if (timeframe === 'daily')    return dailySignal(candles);
+  if (timeframe === 'rsi2')     return rsi2Signal(candles);
   return longtermSignal(candles);
 }
 
@@ -349,9 +459,10 @@ export function getSignal(timeframe: Timeframe, candles: Candle[]): StrategySign
  *  longterm : 205 × 4 × (7*2)   =  11 480 ← just within allowance
  */
 export const TIMEFRAME_CONFIG: Record<Timeframe, { resolution: string; max: number; label: string; pollMs: number; description: string }> = {
-  hourly:   { resolution: 'MINUTE_5', max: 30,  label: 'Hourly (Scalp)', pollMs: 15 * 60_000,        description: '5-min candles · EMA9/21 + RSI · 2:1 R:R · polls every 15 min' },
-  daily:    { resolution: 'HOUR',     max: 60,  label: 'Daily (Swing)',  pollMs:  4 * 60 * 60_000,   description: '1-hr candles · EMA20/50 + MACD · 3:1 R:R · polls every 4 hrs' },
-  longterm: { resolution: 'DAY',      max: 205, label: 'Long-term',      pollMs: 12 * 60 * 60_000,   description: 'Daily candles · Golden/Death Cross EMA50/200 · 3:1 R:R · polls every 12 hrs' },
+  hourly:   { resolution: 'MINUTE_5', max: 30,  label: 'Hourly (Scalp)',      pollMs: 15 * 60_000,        description: '5-min candles · EMA9/21 + RSI · 2:1 R:R · polls every 15 min' },
+  daily:    { resolution: 'HOUR',     max: 60,  label: 'Daily (Swing)',        pollMs:  4 * 60 * 60_000,   description: '1-hr candles · EMA20/50 + MACD · 3:1 R:R · polls every 4 hrs' },
+  longterm: { resolution: 'DAY',      max: 205, label: 'Long-term Trend',      pollMs: 12 * 60 * 60_000,   description: 'Daily candles · Golden/Death Cross EMA50/200 · 3:1 R:R · polls every 12 hrs' },
+  rsi2:     { resolution: 'DAY',      max: 215, label: 'RSI(2) Mean Reversion', pollMs: 24 * 60 * 60_000,  description: 'Daily candles · RSI(2) + EMA200 trend filter · ATR stops · polls once per day · lowest allowance usage' },
 };
 
 // ── Storage helpers ───────────────────────────────────────────────────────────

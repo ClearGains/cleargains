@@ -733,9 +733,10 @@ export function IGStrategyTrader() {
                 <label className="text-xs text-gray-400 mb-1.5 block">Timeframe</label>
                 <select value={bTimeframe} onChange={e => setBTimeframe(e.target.value as Timeframe)}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
-                  <option value="hourly">Hourly Scalp — EMA9/21 + RSI · scans every 5min</option>
-                  <option value="daily">Daily Swing — EMA20/50 + MACD · scans every 1hr</option>
-                  <option value="longterm">Long-term — Golden/Death Cross · scans every 24hr</option>
+                  <option value="rsi2">⭐ RSI(2) Mean Reversion — lowest API usage · scans once/day</option>
+                  <option value="daily">Daily Swing — EMA20/50 + MACD · scans every 4hr</option>
+                  <option value="longterm">Long-term — Golden/Death Cross · scans every 12hr</option>
+                  <option value="hourly">Hourly Scalp — EMA9/21 + RSI · high API usage</option>
                 </select>
               </div>
             </div>
