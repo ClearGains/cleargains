@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, FormEvent, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { TrendingUp, Lock, AlertCircle, Eye, EyeOff, Loader2, CheckCircle2 } from 'lucide-react';
 
 // ── Lockout constants ─────────────────────────────────────────────────────────
@@ -20,7 +20,6 @@ function getLockout() {
 
 // ── Login form ────────────────────────────────────────────────────────────────
 function LoginForm() {
-  const router       = useRouter();
   const searchParams = useSearchParams();
   const dest         = searchParams.get('from') ?? '/dashboard';
 
@@ -84,7 +83,7 @@ function LoginForm() {
         localStorage.removeItem(ATTEMPTS_KEY);
         localStorage.removeItem(LOCKOUT_KEY);
         setSuccess(true);
-        setTimeout(() => router.replace(dest), 600);
+        setTimeout(() => { window.location.replace(dest); }, 600);
       } else {
         const next = attempts + 1;
         localStorage.setItem(ATTEMPTS_KEY, String(next));
