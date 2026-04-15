@@ -11,9 +11,9 @@ import { clsx } from 'clsx';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import {
-  type Timeframe, type IGSavedStrategy, type StrategySignal, type Candle,
+  type Timeframe, type IGSavedStrategy, type StrategySignal,
   type WatchlistMarket,
-  getSignal, loadStrategies, saveStrategy, deleteStrategy,
+  loadStrategies, saveStrategy, deleteStrategy,
   TIMEFRAME_CONFIG, DEFAULT_WATCHLIST,
 } from '@/lib/igStrategyEngine';
 
@@ -38,6 +38,9 @@ type MarketScan = {
   epic: string;
   name: string;
   signal: StrategySignal | null;
+  price?: number;
+  changePercent?: number;
+  source?: string;
   scanning: boolean;
   status: 'idle' | 'ok' | 'error';
   error?: string;
@@ -270,14 +273,14 @@ export function IGStrategyTrader() {
     return r.json() as Promise<{ok:boolean;error?:string}>;
   }
 
-  // ── Fetch candles for one market via Finnhub (no IG historical data used) ──
-  async function fetchCandles(name: string, timeframe: Timeframe): Promise<{candles:Candle[];error?:string}|null> {
+  // ── Fetch market snapshot via Yahoo Finance (no IG historical data used) ───
+  async function fetchSnapshot(name: string): Promise<{price:number;changePercent:number;signal:'BUY'|'SELL'|'NEUTRAL';source:string;error?:string}|null> {
     try {
-      const r = await fetch(`/api/ig/candles?name=${encodeURIComponent(name)}&timeframe=${timeframe}`);
-      const d = await r.json() as { ok:boolean; candles?:Candle[]; error?:string };
-      if (!d.ok) return { candles: [], error: d.error ?? `HTTP ${r.status}` };
-      return { candles: d.candles ?? [] };
-    } catch (e) { return { candles: [], error: e instanceof Error ? e.message : 'Fetch failed' }; }
+      const r = await fetch(`/api/ig/candles?name=${encodeURIComponent(name)}`);
+      const d = await r.json() as { ok:boolean; price?:number; changePercent?:number; signal?:'BUY'|'SELL'|'NEUTRAL'; source?:string; error?:string };
+      if (!d.ok) return { price:0, changePercent:0, signal:'NEUTRAL', source:'yahoo', error: d.error ?? `HTTP ${r.status}` };
+      return { price: d.price ?? 0, changePercent: d.changePercent ?? 0, signal: d.signal ?? 'NEUTRAL', source: d.source ?? 'yahoo' };
+    } catch (e) { return { price:0, changePercent:0, signal:'NEUTRAL', source:'yahoo', error: e instanceof Error ? e.message : 'Fetch failed' }; }
   }
 
   // ── Scan one market + execute ──────────────────────────────────────────────
@@ -285,19 +288,41 @@ export function IGStrategyTrader() {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
     const envs = strat.accounts.filter(e => sessions[e]);
 
-    const result = await fetchCandles(market.name, strat.timeframe);
+    const snapshot = await fetchSnapshot(market.name);
 
-    if (!result || result.candles.length < 10) {
-      const errMsg = result?.error ?? 'No price data returned';
+    if (!snapshot || snapshot.error) {
+      const errMsg = snapshot?.error ?? 'Failed to fetch market data';
       setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'error', error: errMsg } }));
       log('error', `${market.name}: ${errMsg}`);
       return null;
     }
 
-    const sig = getSignal(strat.timeframe, result.candles);
+    // Derive StrategySignal from daily % change
+    const direction: 'BUY'|'SELL'|'HOLD' =
+      snapshot.signal === 'BUY'  ? 'BUY'  :
+      snapshot.signal === 'SELL' ? 'SELL' : 'HOLD';
+    const strength = Math.min(100, Math.round(Math.abs(snapshot.changePercent) * 20));
+    const stopPts   = Math.max(1, Math.round(snapshot.price * 0.01));
+    const targetPts = Math.max(2, Math.round(snapshot.price * 0.02));
+    const sig: StrategySignal = {
+      direction,
+      strength,
+      reason: `Daily ${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`,
+      stopPoints:   stopPts,
+      targetPoints: targetPts,
+      riskReward:   `1:${(targetPts / stopPts).toFixed(1)}`,
+      indicators: [
+        { label: 'Daily Change', value: `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`, status: direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral' },
+      ],
+    };
+
     setScans(p => ({
       ...p,
-      [market.epic]: { epic:market.epic, name:market.name, signal:sig, scanning:false, status:'ok', lastScanned:new Date().toISOString() },
+      [market.epic]: {
+        epic:market.epic, name:market.name, signal:sig,
+        price:snapshot.price, changePercent:snapshot.changePercent, source:snapshot.source,
+        scanning:false, status:'ok', lastScanned:new Date().toISOString(),
+      },
     }));
 
     // Execute on each account if autoTrade and signal is strong enough
@@ -537,7 +562,7 @@ export function IGStrategyTrader() {
             </div>
           ))}
           <span className="text-[10px] text-gray-600 px-2 py-1 bg-gray-800/50 rounded-full">
-            Signal: Finnhub · Execution: IG
+            Signal: Yahoo Finance · Execution: IG
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -844,8 +869,8 @@ export function IGStrategyTrader() {
             title="Market Scanner"
             subtitle={
               scanEntries.some(s => s.status === 'ok')
-                ? `Signal source: Finnhub · Execution: IG · ${scanEntries.filter(s=>s.status==='ok').length}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
-                : `Signal source: Finnhub · Execution: IG · ${scanEntries.length} markets ready — click Run to start`
+                ? `Yahoo Finance · ${scanEntries.filter(s=>s.status==='ok').length}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
+                : `Yahoo Finance · ${scanEntries.length} markets ready — click Run to start`
             }
             icon={<Settings className="h-4 w-4" />}
           />
@@ -859,6 +884,7 @@ export function IGStrategyTrader() {
                 scan.status === 'idle'           ? 'border-gray-700/50 bg-gray-800/10' :
                 'border-gray-800 bg-gray-800/20'
               )}>
+                {/* Header row: name + signal badge / spinner */}
                 <div className="flex items-start justify-between gap-1 mb-1.5">
                   <p className="text-xs font-semibold text-white leading-tight">{scan.name}</p>
                   {scan.scanning
@@ -870,20 +896,42 @@ export function IGStrategyTrader() {
                         : scan.signal && <DirectionBadge dir={scan.signal.direction} size="xs" />
                   }
                 </div>
+
+                {/* Idle */}
                 {scan.status === 'idle' && !scan.scanning && (
                   <p className="text-[10px] text-gray-600">Waiting for scan…</p>
                 )}
+
+                {/* OK: price + % change + source badge */}
                 {scan.status === 'ok' && scan.signal && !scan.scanning && (
                   <div className="space-y-1">
-                    <StrengthBar strength={scan.signal.strength} dir={scan.signal.direction} />
-                    <p className="text-[10px] text-gray-500">{scan.signal.strength}% · SL {scan.signal.stopPoints}pt · TP {scan.signal.targetPoints}pt</p>
-                    {scan.signal.direction !== 'HOLD' && (
-                      <p className={clsx('text-[10px] font-semibold',
-                        scan.signal.direction === 'BUY' ? 'text-emerald-400' : 'text-red-400'
-                      )}>{scan.signal.reason.slice(0, 60)}{scan.signal.reason.length > 60 ? '…' : ''}</p>
+                    {/* Price */}
+                    {scan.price !== undefined && (
+                      <p className="text-sm font-bold text-white tabular-nums">
+                        {scan.price > 100
+                          ? scan.price.toLocaleString('en-GB', { maximumFractionDigits: 1 })
+                          : scan.price.toFixed(4)}
+                      </p>
                     )}
+                    {/* Daily change */}
+                    {scan.changePercent !== undefined && (
+                      <p className={clsx('text-[11px] font-semibold flex items-center gap-0.5',
+                        scan.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400'
+                      )}>
+                        {scan.changePercent >= 0
+                          ? <TrendingUp className="h-3 w-3" />
+                          : <TrendingDown className="h-3 w-3" />}
+                        {scan.changePercent >= 0 ? '+' : ''}{scan.changePercent.toFixed(2)}%
+                      </p>
+                    )}
+                    {/* Source badge */}
+                    <span className="inline-block text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700/50">
+                      Yahoo Finance
+                    </span>
                   </div>
                 )}
+
+                {/* Error */}
                 {scan.status === 'error' && (
                   <div>
                     <p className="text-[10px] text-red-400 mt-0.5 break-all leading-relaxed">{scan.error}</p>
@@ -895,7 +943,7 @@ export function IGStrategyTrader() {
           </div>
           {scanEntries.some(s => s.status === 'error') && (
             <p className="text-[11px] text-amber-400 mt-3 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-              ⚠️ Some markets failed to load from Finnhub. This may be a temporary API issue or an unsupported symbol. The bot will retry on the next run.
+              ⚠️ Some markets failed to load from Yahoo Finance. Market may be closed or temporarily unavailable. The bot will retry on the next run.
             </p>
           )}
         </Card>
