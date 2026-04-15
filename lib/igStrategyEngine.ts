@@ -84,6 +84,20 @@ export type IGSavedStrategy = {
  * data-point/week historical allowance.  With RSI(2) strategy (once/day)
  * and 3 markets: 215 × 3 = 645 pts/day = 4 515 pts/week.
  */
+// ── PERMISSIONS granted to the strategy engine ───────────────────────────────
+// FRACTIONAL SHARE TRADING:  T212 orders use fractional quantities
+//   (positionSize / currentPrice, 4 d.p., min 0.0001 shares).
+//   IG orders use fractional £/pt sizes (min 0.1 £/pt).
+// AUTOMATIC POSITION CLOSING: The engine may close existing positions when
+//   the signal reverses (autoClose), when funds are critically low (worst
+//   loser open >24h), or when a position is stale (>48h, <0.5% P&L).
+// DYNAMIC SIZING: Position size is capped to calcDynamicSize() which limits
+//   each order to at most 5% of available funds (min 0.1 £/pt, pause <£100).
+// POSITION RECYCLING: Positions open >48h with <0.5% absolute P&L are closed
+//   automatically during position monitor cycles to free capital.
+// MINIMUM VIABLE SIZE: When available funds are between £100–£500 the engine
+//   uses the minimum size of 0.1 £/pt rather than refusing to trade.
+
 // ── Verified spread-bet epics for DEFAULT_WATCHLIST ───────────────────────────
 // All epics use .DAILY.IP (indices) or .TODAY.IP (FX/commodities/crypto) which
 // are the DFB (Daily Funded Bet) rolling instruments for UK spread-bet accounts.

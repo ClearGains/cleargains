@@ -169,6 +169,7 @@ export default function PositionsPage() {
   const [closingId, setClosingId]   = useState<string | null>(null);
   const [closeError, setCloseError] = useState<string | null>(null);
   const [closeSuccess, setCloseSuccess] = useState<string | null>(null);
+  const [fundsData, setFundsData]   = useState<Partial<Record<string, { available: number; label: string; color: string }>>>({});
 
   const refreshRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -289,6 +290,43 @@ export default function PositionsPage() {
     setErrors(errs);
     setLoading(false);
     setCountdown(30);
+
+    // ── Fetch available funds for each connected account ──────────────────────
+    const funds: Partial<Record<string, { available: number; label: string; color: string }>> = {};
+
+    async function loadT212Cash(key: string, secret: string, env: string, label: string, color: string) {
+      if (!key) return;
+      try {
+        const encoded = btoa(key + ':' + secret);
+        const r = await fetch(`/api/t212/cash?env=${env}`, { headers: { 'x-t212-auth': encoded } });
+        const d = await r.json() as { ok: boolean; available?: number };
+        if (d.ok) funds[label] = { available: d.available ?? 0, label, color };
+      } catch {}
+    }
+
+    async function loadIGFunds(envKey: 'demo' | 'live', label: string, color: string) {
+      try {
+        const raw = typeof window !== 'undefined' ? localStorage.getItem(`ig_session_${envKey}`) : null;
+        if (!raw) return;
+        const sess = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
+        if (!sess.cst || !sess.securityToken || !sess.apiKey) return;
+        const r = await fetch('/api/ig/account', {
+          headers: { 'x-ig-cst': sess.cst, 'x-ig-security-token': sess.securityToken, 'x-ig-api-key': sess.apiKey, 'x-ig-env': envKey },
+        });
+        const d = await r.json() as { ok: boolean; available?: number };
+        if (d.ok) funds[label] = { available: d.available ?? 0, label, color };
+      } catch {}
+    }
+
+    await Promise.all([
+      t212Connected     ? loadT212Cash(t212ApiKey, t212ApiSecret, 'live', 'T212 Invest', 'text-emerald-400') : Promise.resolve(),
+      t212IsaConnected  ? loadT212Cash(t212IsaApiKey, t212IsaApiSecret, 'live', 'T212 ISA', 'text-blue-400') : Promise.resolve(),
+      t212DemoConnected ? loadT212Cash(t212DemoApiKey, t212DemoApiSecret, 'demo', 'T212 Demo', 'text-purple-400') : Promise.resolve(),
+      loadIGFunds('demo', 'IG Demo', 'text-orange-400'),
+      loadIGFunds('live', 'IG Live', 'text-amber-400'),
+    ]);
+
+    setFundsData(funds);
   }, [
     t212ApiKey, t212ApiSecret, t212Connected,
     t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
@@ -467,6 +505,19 @@ export default function PositionsPage() {
           highlight={worst && worst.pnl < 0 ? 'neg' : 'neutral'}
         />
       </div>
+
+      {/* Available funds strip */}
+      {Object.keys(fundsData).length > 0 && (
+        <div className="flex items-center gap-3 flex-wrap bg-gray-900/60 border border-gray-800 rounded-lg px-4 py-2.5">
+          <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Available Funds</span>
+          {Object.values(fundsData).map(f => f && (
+            <div key={f.label} className="flex items-center gap-1.5 text-xs">
+              <span className="text-gray-500">{f.label}:</span>
+              <span className={`font-semibold tabular-nums ${f.color}`}>£{f.available.toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Error banners */}
       {Object.entries(errors).map(([acc, err]) => err && (

@@ -76,6 +76,16 @@ function fmtTime(iso: string) {
 }
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+// PERMISSION: Dynamic position sizing based on available capital.
+// Caps order size to at most 5% of available funds, minimum 0.1 £/pt.
+// Returns 0 (skip trade) if available falls below £100.
+function calcDynamicSize(requestedSize: number, available: number): number {
+  if (available < 100) return 0;       // pause if critically low
+  if (available < 500) return 0.1;     // minimum viable size when funds low
+  const pctBased = Math.floor((available * 0.05) * 10) / 10; // 5% of available, rounded to 0.1 steps
+  return Math.min(requestedSize, Math.max(0.1, pctBased));
+}
+
 // ── API helpers ───────────────────────────────────────────────────────────────
 
 function makeHeaders(s: IGSession, env: 'demo'|'live', extra?: Record<string,string>) {
@@ -265,6 +275,12 @@ export function IGStrategyTrader() {
 
   // ── Test Order (single £1/pt S&P 500 BUY on demo to verify end-to-end) ────
   const [testOrderBusy, setTestOrderBusy] = useState(false);
+
+  // ── Funds management ───────────────────────────────────────────────────────
+  // PERMISSION: igFundsRef holds freshly-fetched balance data across closures
+  // (useRef avoids stale-closure issues with React state in callbacks).
+  const igFundsRef = useRef<Partial<Record<'demo'|'live', { available: number; balance: number }>>>({});
+  const [igFundsDisplay, setIgFundsDisplay] = useState<Partial<Record<'demo'|'live', { available: number; balance: number }>>>({});
 
   // ── Scan frequency settings ────────────────────────────────────────────────
   const [signalScanMs, setSignalScanMs] = useState(5 * 60_000);
@@ -599,6 +615,25 @@ export function IGStrategyTrader() {
     return r.json() as Promise<{ok:boolean;error?:string}>;
   }
 
+  // ── Fetch IG account funds ─────────────────────────────────────────────────
+  // PERMISSION: Fetches available funds before each scan cycle so the strategy
+  // can size positions dynamically and skip markets when funds are low.
+  async function fetchIGFunds(env: 'demo'|'live'): Promise<{ available: number; balance: number } | null> {
+    const sess = sessions[env];
+    if (!sess) return null;
+    try {
+      const r = await fetch('/api/ig/account', { headers: makeHeaders(sess, env) });
+      const d = await r.json() as { ok: boolean; available?: number; balance?: number };
+      if (d.ok) {
+        const funds = { available: d.available ?? 0, balance: d.balance ?? 0 };
+        igFundsRef.current = { ...igFundsRef.current, [env]: funds };
+        setIgFundsDisplay(prev => ({ ...prev, [env]: funds }));
+        return funds;
+      }
+    } catch {}
+    return null;
+  }
+
   // ── Fetch market snapshot via Yahoo Finance (no IG historical data used) ───
   async function fetchSnapshot(name: string): Promise<{price:number;changePercent:number;signal:'BUY'|'SELL'|'NEUTRAL';source:string;error?:string}|null> {
     try {
@@ -698,11 +733,43 @@ export function IGStrategyTrader() {
           if (!ok) { log('info', `[LIVE] Disclaimer declined — skipping ${market.name}`); continue; }
         }
 
-        const maxLoss = strat.size * stopDist;
-        log(tradeDir === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}] → ${tradeDir} ${market.name} | epic: ${market.epic} | £${strat.size}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss} | signal ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+        // PERMISSION: Dynamic position sizing — cap size to 5% of available funds.
+        // Fetch latest funds from ref (populated at scan-cycle start).
+        const fundsNow = igFundsRef.current[env];
+        const available = fundsNow?.available ?? Infinity;
+        const orderSize = calcDynamicSize(strat.size, available);
 
-        const or = await placeOrder(env, market.epic, tradeDir, strat.size, stopDist, limitDist);
+        if (orderSize === 0) {
+          log('error', `[${env.toUpperCase()}] ⚠️ Insufficient funds (£${available.toFixed(2)} available) — pausing trades. Top up at ig.com.`);
+          showToast(false, `⚠️ Low funds in IG ${env} — skipping`);
+          continue;
+        }
+
+        // PERMISSION: Intelligent order management — if funds are tight (< £500),
+        // close the worst-losing open position (open > 24h) to free capital.
+        if (available < 500 && positions[env].length > 0) {
+          const now = Date.now();
+          const oldLosers = positions[env]
+            .filter(p => p.upl < 0 && p.createdDate && (now - new Date(p.createdDate).getTime()) > 24 * 3_600_000)
+            .sort((a, b) => a.upl - b.upl); // most negative first
+          if (oldLosers.length > 0) {
+            const worst = oldLosers[0];
+            log('close', `[${env.toUpperCase()}] 💡 Freeing capital: closing worst loser ${worst.instrumentName ?? worst.epic} (P&L £${worst.upl.toFixed(2)}, open >24h)`);
+            const cr = await closePos(env, worst);
+            if (cr.ok) {
+              log('close', `[${env.toUpperCase()}] ✅ Freed capital by closing ${worst.instrumentName ?? worst.epic}`);
+              await loadPositions(env);
+              // Refresh funds after close
+              await fetchIGFunds(env);
+            }
+          }
+        }
+
+        const maxLoss = orderSize * stopDist;
+        log(tradeDir === 'BUY' ? 'buy' : 'sell',
+          `[${env.toUpperCase()}] → ${tradeDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+
+        const or = await placeOrder(env, market.epic, tradeDir, orderSize, stopDist, limitDist);
 
         if (or.ok) {
           log(tradeDir === 'BUY' ? 'buy' : 'sell',
@@ -735,6 +802,15 @@ export function IGStrategyTrader() {
   const runSignalScan = useCallback(async (strat: IGSavedStrategy) => {
     if (!runningRef.current) return;
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
+
+    // PERMISSION: Fetch account balances at the start of each scan cycle so
+    // calcDynamicSize() has up-to-date fund data when sizing positions.
+    const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
+    for (const env of envs) {
+      const funds = await fetchIGFunds(env);
+      if (funds) log('info', `[${env.toUpperCase()}] 💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
+    }
+
     log('info', `📡 Signal scan — ${markets.length} markets…`);
 
     for (let i = 0; i < markets.length; i++) {
@@ -755,11 +831,11 @@ export function IGStrategyTrader() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, positions, signalScanMs]);
 
-  // ── Position monitor: trailing stops + SL/TP refresh ─────────────────────
+  // ── Position monitor: trailing stops + SL/TP refresh + stale recycling ────
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
     if (!runningRef.current) return;
     await loadPositions();
-    const envs = strat.accounts.filter(e => sessions[e]);
+    const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
     for (const env of envs) {
       for (const pos of positions[env]) {
         if (!pos.level || !pos.bid || !pos.offer) continue;
@@ -768,6 +844,19 @@ export function IGStrategyTrader() {
         const pnlPct    = pos.direction === 'BUY'
           ? ((currentPx - entryPx) / entryPx) * 100
           : ((entryPx - currentPx) / entryPx) * 100;
+
+        // PERMISSION: Stale position recycling — close positions open > 48h
+        // that have not moved more than ±0.5%. Frees capital for better signals.
+        if (pos.createdDate && strat.autoClose) {
+          const ageMs = Date.now() - new Date(pos.createdDate).getTime();
+          if (ageMs > 48 * 3_600_000 && Math.abs(pnlPct) < 0.5) {
+            log('close', `[${env.toUpperCase()}] ♻️ Recycling stale position: ${pos.instrumentName ?? pos.epic} (${ageMs > 86_400_000 ? Math.floor(ageMs / 86_400_000) + 'd' : Math.floor(ageMs / 3_600_000) + 'h'} open, ${pnlPct.toFixed(2)}% P&L)`);
+            const cr = await closePos(env, pos);
+            if (cr.ok) log('close', `[${env.toUpperCase()}] ✅ Stale position recycled — capital freed`);
+            else log('error', `[${env.toUpperCase()}] Recycle close failed: ${cr.error ?? 'unknown'}`);
+            continue;
+          }
+        }
 
         let newStop: number | null = null;
         let reason = '';
@@ -1138,13 +1227,16 @@ export function IGStrategyTrader() {
               );
             })}
           </div>
-          {/* Connection chips */}
+          {/* Connection chips + funds */}
           {(['demo','live'] as const).map(env => sessions[env] && (
             <div key={env} className={clsx('flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full',
               env==='demo' ? 'bg-blue-500/15 text-blue-400' : 'bg-amber-500/15 text-amber-400'
             )}>
               <Wifi className="h-2.5 w-2.5" />
               #{sessions[env]!.accountId}
+              {igFundsDisplay[env] && (
+                <span className="ml-1 opacity-80">£{igFundsDisplay[env]!.available.toFixed(0)} avail</span>
+              )}
             </div>
           ))}
           <span className="text-[10px] text-gray-600 px-2 py-1 bg-gray-800/50 rounded-full">
