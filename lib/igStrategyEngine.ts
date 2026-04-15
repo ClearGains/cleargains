@@ -29,11 +29,21 @@ export type StrategySignal = {
 
 export type Timeframe = 'hourly' | 'daily' | 'longterm';
 
+export type WatchlistMarket = {
+  epic: string;
+  name: string;
+  enabled: boolean;
+};
+
 export type IGSavedStrategy = {
   id: string;
   name: string;
+  // legacy single-market fields (kept for back-compat)
   epic: string;
   instrumentName: string;
+  // auto-scan config
+  watchlist: WatchlistMarket[];   // markets to scan; empty = use DEFAULT_WATCHLIST
+  minStrength: number;            // min signal strength to open (0-100), default 60
   timeframe: Timeframe;
   size: number;
   maxPositions: number;
@@ -44,6 +54,20 @@ export type IGSavedStrategy = {
   lastRunAt?: string;
   lastSignal?: SignalDirection;
 };
+
+/** Pre-defined list of major spread-bet markets (rolling DFB) */
+export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
+  { epic: 'IX.D.FTSE.CFD.IP',    name: 'FTSE 100',     enabled: true },
+  { epic: 'IX.D.DAX.CFD.IP',     name: 'Germany 40',   enabled: true },
+  { epic: 'IX.D.SPTRD.CFD.IP',   name: 'S&P 500',      enabled: true },
+  { epic: 'IX.D.DOW.CFD.IP',     name: 'Wall Street',  enabled: true },
+  { epic: 'IX.D.NASDAQ.CFD.IP',  name: 'NASDAQ 100',   enabled: false },
+  { epic: 'CS.D.CFDGOLD.CFD.IP', name: 'Gold',         enabled: true },
+  { epic: 'CS.D.OILB.CFD.IP',    name: 'Brent Crude',  enabled: false },
+  { epic: 'CS.D.GBPUSD.CFD.IP',  name: 'GBP/USD',      enabled: true },
+  { epic: 'CS.D.EURUSD.CFD.IP',  name: 'EUR/USD',      enabled: false },
+  { epic: 'CS.D.BITCOIN.CFD.IP', name: 'Bitcoin',      enabled: false },
+];
 
 // ── Technical indicators ──────────────────────────────────────────────────────
 
