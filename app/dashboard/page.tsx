@@ -17,6 +17,7 @@ import {
   FlaskConical,
   Key,
   LogOut,
+  BarChart3,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { buildSection104Pools } from '@/lib/cgt';
@@ -519,6 +520,26 @@ export default function DashboardPage() {
           </div>
         </Card>
       )}
+
+      {/* Open Positions widget */}
+      <Card className="mt-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <BarChart3 className="h-4 w-4 text-orange-400" />
+            <div>
+              <h3 className="text-sm font-semibold text-gray-200">Open Positions</h3>
+              <p className="text-xs text-gray-500">All accounts · real-time</p>
+            </div>
+          </div>
+          <Link href="/positions"
+            className="flex items-center gap-1 text-xs text-orange-400 hover:text-orange-300 transition-colors">
+            View all <ArrowRight className="h-3 w-3" />
+          </Link>
+        </div>
+        <div className="mt-3 flex items-center gap-6 text-xs text-gray-400">
+          <span>Go to <Link href="/positions" className="text-orange-400 hover:underline font-medium">Live Positions</Link> to see T212 &amp; IG positions in one unified view with P&amp;L, stop/TP levels and close buttons.</span>
+        </div>
+      </Card>
 
       {/* Tax Year Tracker */}
       <div className="mt-4">

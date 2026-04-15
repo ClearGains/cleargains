@@ -18,13 +18,15 @@ import {
   FlaskConical,
   Bookmark,
   Newspaper,
+  BarChart3,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
 
 const navLinks = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/scanner', label: 'AI Scanner', icon: Search },
+  { href: '/dashboard',  label: 'Dashboard',      icon: LayoutDashboard },
+  { href: '/positions',  label: 'Live Positions',  icon: BarChart3 },
+  { href: '/scanner',    label: 'AI Scanner',      icon: Search },
   { href: '/watchlist', label: 'Watchlist', icon: Bookmark },
   { href: '/world-affairs', label: 'World Affairs', icon: Newspaper },
   { href: '/trading-guide', label: 'Trading Guide', icon: BookOpen },

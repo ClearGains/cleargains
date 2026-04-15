@@ -111,8 +111,8 @@ export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
   { epic: 'CS.D.AUDUSD.TODAY.IP',  name: 'AUD/USD',       enabled: false, marketType: 'FOREX'     },
   { epic: 'CS.D.USDCHF.TODAY.IP',  name: 'USD/CHF',       enabled: false, marketType: 'FOREX'     },
   // ── Crypto ──────────────────────────────────────────────────────────────────
+  // Note: Ethereum spread-bet epic is unreliable on some IG accounts — only Bitcoin used
   { epic: 'CS.D.BITCOIN.TODAY.IP', name: 'Bitcoin',       enabled: false, marketType: 'CRYPTO'    },
-  { epic: 'CS.D.ETHUSD.TODAY.IP',  name: 'Ethereum',      enabled: false, marketType: 'CRYPTO'    },
 ];
 
 // ── Technical indicators ──────────────────────────────────────────────────────

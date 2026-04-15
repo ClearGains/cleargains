@@ -713,6 +713,13 @@ export function IGStrategyTrader() {
           await loadPositions(env);
           await loadWorkingOrders(env);
         } else {
+          // ── Special-case: insufficient funds ──────────────────────────────
+          const errStr = (or.error ?? '').toLowerCase();
+          if (errStr.includes('insufficient_funds') || errStr.includes('insufficient funds') || errStr.includes('insufficient fund')) {
+            log('error', `[${env.toUpperCase()}] ⚠️ IG ${env === 'demo' ? 'Demo' : 'Live'} has insufficient funds. Go to ig.com → ${env === 'demo' ? 'Demo account →' : ''} My Account → Add virtual funds`);
+            showToast(false, `⚠️ Insufficient funds in IG ${env} — skipping`);
+            continue; // skip this market, continue scanning others
+          }
           log('error', `[${env.toUpperCase()}] ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}`);
           log('error', `  epic: ${or.epic ?? market.epic}${or.reason ? ` | reason: ${or.reason}` : ''}`);
           if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
@@ -993,7 +1000,7 @@ export function IGStrategyTrader() {
       setBPosMonitorMs(existing.posMonitorMs ?? 60_000);
     } else {
       setEditId(null); setBName(''); setBTimeframe('daily'); setBSize(1); setBMaxPos(3);
-      setBMinStrength(60);
+      setBMinStrength(55);
       // Only default to live if we actually have a live session
       setBAccounts([sessions[activeMode] ? activeMode : 'demo']);
       setBAutoClose(true);
