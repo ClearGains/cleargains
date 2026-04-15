@@ -22,16 +22,35 @@ import {
 type IGSession = { cst: string; securityToken: string; accountId: string; apiKey: string };
 
 type IGPosition = {
-  dealId: string;
-  direction: string;
-  size: number;
-  level: number;
-  upl: number;
-  currency: string;
-  epic: string;
+  dealId:         string;
+  direction:      string;
+  size:           number;
+  level:          number;
+  upl:            number;
+  currency:       string;
+  epic:           string;
   instrumentName: string;
-  bid: number;
-  offer: number;
+  bid:            number;
+  offer:          number;
+  stopLevel?:     number;
+  limitLevel?:    number;
+  contractSize?:  number;
+  createdDate?:   string;
+};
+
+type IGWorkingOrder = {
+  dealId:         string;
+  epic:           string;
+  instrumentName: string;
+  direction:      string;
+  size:           number;
+  orderType:      string;
+  level:          number;
+  stopLevel?:     number;
+  limitLevel?:    number;
+  currency:       string;
+  createdAt?:     string;
+  timeInForce?:   string;
 };
 
 type MarketScan = {
@@ -168,6 +187,22 @@ export function IGStrategyTrader() {
   const [scans, setScans] = useState<Record<string, MarketScan>>({});
   const [scanProgress, setScanProgress] = useState<string>('');
 
+  // ── Working orders ─────────────────────────────────────────────────────────
+  const [workingOrders, setWorkingOrders] = useState<Record<'demo'|'live', IGWorkingOrder[]>>({ demo:[], live:[] });
+  const [cancellingOrder, setCancellingOrder] = useState<string|null>(null);
+
+  // ── Position management modals ─────────────────────────────────────────────
+  type SlTpModal = { env: 'demo'|'live'; pos: IGPosition };
+  const [slModal, setSlModal] = useState<SlTpModal|null>(null);
+  const [tpModal, setTpModal] = useState<SlTpModal|null>(null);
+  const [slInput, setSlInput] = useState('');
+  const [tpInput, setTpInput] = useState('');
+  const [updatingPos, setUpdatingPos] = useState<string|null>(null);
+  const [reversingPos, setReversingPos] = useState<string|null>(null);
+
+  // ── Tab (positions vs working orders) ─────────────────────────────────────
+  const [posTab, setPosTab] = useState<'positions'|'orders'>('positions');
+
   // ── Builder ────────────────────────────────────────────────────────────────
   const [showBuilder, setShowBuilder]   = useState(false);
   const [editId, setEditId]             = useState<string|null>(null);
@@ -230,8 +265,82 @@ export function IGStrategyTrader() {
   }, [sessions]);
 
   useEffect(() => {
-    if (Object.values(sessions).some(Boolean)) void loadPositions();
+    if (Object.values(sessions).some(Boolean)) {
+      void loadPositions();
+      void loadWorkingOrders();
+    }
   }, [sessions, loadPositions]);
+
+  // ── Load working orders ────────────────────────────────────────────────────
+  const loadWorkingOrders = useCallback(async (envFilter?: 'demo'|'live') => {
+    const envs: ('demo'|'live')[] = envFilter ? [envFilter] : ['demo','live'];
+    for (const env of envs) {
+      const sess = sessions[env];
+      if (!sess) continue;
+      try {
+        const r = await fetch('/api/ig/workingorders', { headers: makeHeaders(sess, env) });
+        const d = await r.json() as { ok:boolean; workingOrders?: IGWorkingOrder[] };
+        if (d.ok) setWorkingOrders(p => ({...p, [env]: d.workingOrders ?? []}));
+      } catch {}
+    }
+  }, [sessions]);
+
+  // ── Update stop/limit levels on open position ──────────────────────────────
+  async function updatePositionSL(env: 'demo'|'live', pos: IGPosition, stopLevel: number|null, limitLevel: number|null) {
+    const sess = sessions[env];
+    if (!sess) return { ok: false, error: `No ${env} session` };
+    const r = await fetch('/api/ig/order', {
+      method: 'PATCH',
+      headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dealId: pos.dealId, stopLevel, limitLevel }),
+    });
+    return r.json() as Promise<{ok:boolean;error?:string}>;
+  }
+
+  // ── Cancel working order ───────────────────────────────────────────────────
+  async function cancelWorkingOrder(env: 'demo'|'live', dealId: string) {
+    setCancellingOrder(dealId);
+    const sess = sessions[env];
+    if (!sess) { setCancellingOrder(null); return; }
+    try {
+      const r = await fetch('/api/ig/workingorders', {
+        method: 'DELETE',
+        headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dealId }),
+      });
+      const d = await r.json() as { ok:boolean; error?:string };
+      if (d.ok) {
+        log('info', `[${env.toUpperCase()}] Working order ${dealId} cancelled`);
+        showToast(true, 'Order cancelled');
+        await loadWorkingOrders(env);
+      } else {
+        showToast(false, d.error ?? 'Cancel failed');
+      }
+    } catch { showToast(false, 'Cancel failed'); }
+    setCancellingOrder(null);
+  }
+
+  // ── Reverse position (close + open opposite) ───────────────────────────────
+  async function reversePosition(env: 'demo'|'live', pos: IGPosition) {
+    setReversingPos(pos.dealId);
+    const closeDir = pos.direction === 'BUY' ? 'SELL' : 'BUY';
+    // Step 1: close current position
+    const cr = await closePos(env, pos);
+    if (!cr.ok) { showToast(false, `Close failed: ${cr.error ?? 'unknown'}`); setReversingPos(null); return; }
+    log('close', `[${env.toUpperCase()}] Reversed: closed ${pos.direction} ${pos.instrumentName ?? pos.epic}`);
+    await loadPositions(env);
+    // Step 2: open opposite direction
+    const or = await placeOrder(env, pos.epic, closeDir, pos.size);
+    if (or.ok) {
+      log(closeDir === 'BUY' ? 'buy' : 'sell', `[${env.toUpperCase()}] Reversed → opened ${closeDir} ${pos.instrumentName ?? pos.epic}`);
+      showToast(true, `Reversed to ${closeDir}`);
+      await loadPositions(env);
+    } else {
+      log('error', `[${env.toUpperCase()}] Reverse open failed: ${or.error ?? 'unknown'}`);
+      showToast(false, `Close succeeded but open failed: ${or.error ?? 'unknown'}`);
+    }
+    setReversingPos(null);
+  }
 
   // Pre-populate scanner with idle cards when a strategy is selected/changed
   useEffect(() => {
@@ -354,12 +463,14 @@ export function IGStrategyTrader() {
         const alreadyOpen = positions[env].some(p => p.epic === market.epic && p.direction === sig.direction);
         if (alreadyOpen) continue;
 
-        // Open position with stop + take profit
+        // Open position with inline stop-loss and take-profit
+        const slPts = sig.stopPoints;
+        const tpPts = sig.targetPoints;
         log(sig.direction === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}] ${sig.direction} £${strat.size}/pt ${market.name} — SL ${sig.stopPoints}pt / TP ${sig.targetPoints}pt (${sig.strength}%)`);
-        const or = await placeOrder(env, market.epic, sig.direction, strat.size, sig.stopPoints, sig.targetPoints);
+          `[${env.toUpperCase()}] → ${sig.direction} £${strat.size}/pt ${market.name} + SL stop ${slPts}pt + TP limit ${tpPts}pt (strength ${sig.strength}%)`);
+        const or = await placeOrder(env, market.epic, sig.direction, strat.size, slPts, tpPts);
         if (or.ok) {
-          log('buy', `[${env.toUpperCase()}] ✅ Filled — ref ${or.dealReference ?? 'n/a'}`);
+          log(sig.direction === 'BUY' ? 'buy' : 'sell', `[${env.toUpperCase()}] ✅ Filled — ref ${or.dealReference ?? 'n/a'}`);
           showToast(true, `[${env}] ${sig.direction} ${market.name}`);
           await loadPositions(env);
         } else {
@@ -389,6 +500,49 @@ export function IGStrategyTrader() {
     }
 
     setScanProgress('');
+
+    // ── Trailing stop management ──────────────────────────────────────────────
+    // After each scan cycle: adjust stops to protect profits
+    const envs = strat.accounts.filter(e => sessions[e]);
+    for (const env of envs) {
+      for (const pos of positions[env]) {
+        if (!pos.level || !pos.bid || !pos.offer) continue;
+        const currentPx = pos.direction === 'BUY' ? pos.bid : pos.offer;
+        const entryPx   = pos.level;
+        const pnlPct    = pos.direction === 'BUY'
+          ? ((currentPx - entryPx) / entryPx) * 100
+          : ((entryPx - currentPx) / entryPx) * 100;
+
+        let newStop: number | null = null;
+        let reason = '';
+
+        // 3% profit → move SL to breakeven (entry level)
+        if (pnlPct >= 3 && pnlPct < 5) {
+          const breakevenStop = entryPx;
+          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < breakevenStop : pos.stopLevel > breakevenStop)) {
+            newStop = breakevenStop;
+            reason = `+${pnlPct.toFixed(1)}% profit → SL moved to breakeven ${breakevenStop}`;
+          }
+        }
+        // 5% profit → lock in 2% profit
+        if (pnlPct >= 5) {
+          const lockStop = pos.direction === 'BUY' ? entryPx * 1.02 : entryPx * 0.98;
+          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lockStop : pos.stopLevel > lockStop)) {
+            newStop = Math.round(lockStop * 100) / 100;
+            reason = `+${pnlPct.toFixed(1)}% profit → SL moved to lock +2% at ${newStop}`;
+          }
+        }
+
+        if (newStop !== null) {
+          const r = await updatePositionSL(env, pos, newStop, pos.limitLevel ?? null);
+          if (r.ok) {
+            log('info', `[${env.toUpperCase()}] ${pos.instrumentName ?? pos.epic}: ${reason}`);
+            await loadPositions(env);
+          }
+        }
+      }
+    }
+
     const updated: IGSavedStrategy = { ...strat, lastRunAt: new Date().toISOString() };
     saveStrategy(updated);
     setStrategies(loadStrategies());
@@ -426,8 +580,45 @@ export function IGStrategyTrader() {
       log('close', `[${env.toUpperCase()}] Closed ${pos.direction} ${pos.instrumentName ?? pos.epic}`);
       showToast(true, 'Position closed');
       await loadPositions(env);
+      await loadWorkingOrders(env);
     } else showToast(false, r.error ?? 'Close failed');
     setClosingId(null);
+  }
+
+  // ── Update SL from modal ───────────────────────────────────────────────────
+  async function handleUpdateSL() {
+    if (!slModal) return;
+    const val = parseFloat(slInput);
+    if (isNaN(val) || val <= 0) { showToast(false, 'Enter a valid stop-loss price'); return; }
+    setUpdatingPos(slModal.pos.dealId);
+    const r = await updatePositionSL(slModal.env, slModal.pos, val, slModal.pos.limitLevel ?? null);
+    if (r.ok) {
+      log('info', `[${slModal.env.toUpperCase()}] Stop-loss updated to ${val} on ${slModal.pos.instrumentName ?? slModal.pos.epic}`);
+      showToast(true, `Stop-loss moved to ${val}`);
+      await loadPositions(slModal.env);
+      setSlModal(null); setSlInput('');
+    } else {
+      showToast(false, r.error ?? 'Update failed');
+    }
+    setUpdatingPos(null);
+  }
+
+  // ── Update TP from modal ───────────────────────────────────────────────────
+  async function handleUpdateTP() {
+    if (!tpModal) return;
+    const val = parseFloat(tpInput);
+    if (isNaN(val) || val <= 0) { showToast(false, 'Enter a valid take-profit price'); return; }
+    setUpdatingPos(tpModal.pos.dealId);
+    const r = await updatePositionSL(tpModal.env, tpModal.pos, tpModal.pos.stopLevel ?? null, val);
+    if (r.ok) {
+      log('info', `[${tpModal.env.toUpperCase()}] Take-profit updated to ${val} on ${tpModal.pos.instrumentName ?? tpModal.pos.epic}`);
+      showToast(true, `Take-profit moved to ${val}`);
+      await loadPositions(tpModal.env);
+      setTpModal(null); setTpInput('');
+    } else {
+      showToast(false, r.error ?? 'Update failed');
+    }
+    setUpdatingPos(null);
   }
 
   // ── Manual open ────────────────────────────────────────────────────────────
@@ -949,27 +1140,139 @@ export function IGStrategyTrader() {
         </Card>
       )}
 
-      {/* ── Open Positions ──────────────────────────────────────────────── */}
-      <Card>
-        <CardHeader
-          title="Open Positions"
-          subtitle={`${allPositions.length} open · P&L: ${totalPnL>=0?'+':''}£${totalPnL.toFixed(2)}`}
-          icon={<BarChart3 className="h-4 w-4" />}
-        />
-        {allPositions.length === 0 ? (
-          <p className="text-sm text-gray-500 py-3 text-center">No open positions</p>
-        ) : (
-          <div className="space-y-3">
-            {(['demo','live'] as const).map(env => positions[env].length > 0 && (
-              <div key={env}>
-                <p className={clsx('text-[10px] font-bold uppercase tracking-wider mb-1.5',
-                  env==='demo' ? 'text-blue-400' : 'text-red-400')}>{env}</p>
-                <div className="space-y-1.5">
-                  {positions[env].map(pos => <PositionCard key={pos.dealId} pos={pos} env={env} closingId={closingId} onClose={handleClose} />)}
-                </div>
-              </div>
-            ))}
+      {/* ── SL Modal ──────────────────────────────────────────────────── */}
+      {slModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+            <h3 className="text-sm font-bold text-white mb-1">Move Stop-Loss</h3>
+            <p className="text-xs text-gray-500 mb-4">{slModal.pos.instrumentName ?? slModal.pos.epic} · current SL: {slModal.pos.stopLevel ?? 'none'}</p>
+            <input type="number" value={slInput} onChange={e => setSlInput(e.target.value)}
+              placeholder="New stop-loss price" autoFocus
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500 mb-3" />
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" onClick={() => { setSlModal(null); setSlInput(''); }}>Cancel</Button>
+              <Button fullWidth loading={updatingPos === slModal.pos.dealId} onClick={handleUpdateSL}
+                className="bg-orange-600 hover:bg-orange-500 text-white">Update SL</Button>
+            </div>
           </div>
+        </div>
+      )}
+
+      {/* ── TP Modal ──────────────────────────────────────────────────── */}
+      {tpModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+            <h3 className="text-sm font-bold text-white mb-1">Move Take-Profit</h3>
+            <p className="text-xs text-gray-500 mb-4">{tpModal.pos.instrumentName ?? tpModal.pos.epic} · current TP: {tpModal.pos.limitLevel ?? 'none'}</p>
+            <input type="number" value={tpInput} onChange={e => setTpInput(e.target.value)}
+              placeholder="New take-profit price" autoFocus
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500 mb-3" />
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" onClick={() => { setTpModal(null); setTpInput(''); }}>Cancel</Button>
+              <Button fullWidth loading={updatingPos === tpModal.pos.dealId} onClick={handleUpdateTP}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white">Update TP</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Positions + Working Orders ─────────────────────────────────── */}
+      <Card>
+        {/* Tab bar */}
+        <div className="flex items-center gap-0.5 mb-4 bg-gray-800/50 rounded-lg p-1 w-fit">
+          {(['positions','orders'] as const).map(tab => {
+            const count = tab === 'positions' ? allPositions.length : [...workingOrders.demo, ...workingOrders.live].length;
+            return (
+              <button key={tab} onClick={() => setPosTab(tab)}
+                className={clsx('px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5',
+                  posTab === tab ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
+                )}>
+                {tab === 'positions' ? <BarChart3 className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
+                {tab === 'positions' ? 'Positions' : 'Working Orders'}
+                {count > 0 && <span className={clsx('text-[9px] px-1 rounded-full', posTab===tab ? 'bg-orange-500/30 text-orange-300' : 'bg-gray-700 text-gray-500')}>{count}</span>}
+              </button>
+            );
+          })}
+          <button onClick={() => { void loadPositions(); void loadWorkingOrders(); }}
+            className="ml-1 p-1.5 text-gray-600 hover:text-white transition-colors" title="Refresh">
+            <RefreshCw className={clsx('h-3 w-3', loadingPos && 'animate-spin')} />
+          </button>
+        </div>
+
+        {/* Positions tab */}
+        {posTab === 'positions' && (
+          <>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs text-gray-500">{allPositions.length} open · P&L: <span className={clsx('font-semibold', totalPnL>=0?'text-emerald-400':'text-red-400')}>{totalPnL>=0?'+':''}{fmt(totalPnL)}</span></p>
+            </div>
+            {allPositions.length === 0 ? (
+              <p className="text-sm text-gray-500 py-3 text-center">No open positions</p>
+            ) : (
+              <div className="space-y-4">
+                {(['demo','live'] as const).map(env => positions[env].length > 0 && (
+                  <div key={env}>
+                    <p className={clsx('text-[10px] font-bold uppercase tracking-wider mb-2',
+                      env==='demo' ? 'text-blue-400' : 'text-red-400')}>{env}</p>
+                    <div className="space-y-2">
+                      {positions[env].map(pos => (
+                        <PositionCard key={pos.dealId} pos={pos} env={env}
+                          closingId={closingId} reversingId={reversingPos}
+                          onClose={handleClose}
+                          onMoveSL={p => { setSlModal({env,pos:p}); setSlInput(p.stopLevel?.toString()??''); }}
+                          onMoveTP={p => { setTpModal({env,pos:p}); setTpInput(p.limitLevel?.toString()??''); }}
+                          onReverse={reversePosition}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Working Orders tab */}
+        {posTab === 'orders' && (
+          <>
+            <p className="text-xs text-gray-500 mb-3">Pending LIMIT and STOP orders waiting to be triggered</p>
+            {[...workingOrders.demo.map(o=>({...o,env:'demo' as const})), ...workingOrders.live.map(o=>({...o,env:'live' as const}))].length === 0 ? (
+              <p className="text-sm text-gray-500 py-3 text-center">No pending working orders</p>
+            ) : (
+              <div className="space-y-3">
+                {(['demo','live'] as const).map(env => workingOrders[env].length > 0 && (
+                  <div key={env}>
+                    <p className={clsx('text-[10px] font-bold uppercase tracking-wider mb-2',
+                      env==='demo' ? 'text-blue-400' : 'text-red-400')}>{env}</p>
+                    <div className="space-y-1.5">
+                      {workingOrders[env].map(wo => (
+                        <div key={wo.dealId} className="bg-gray-800/40 rounded-lg px-3 py-2.5 flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0',
+                              wo.orderType === 'LIMIT' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
+                            )}>{wo.orderType}</span>
+                            <DirectionBadge dir={wo.direction} size="xs" />
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold text-white truncate">{wo.instrumentName || wo.epic}</p>
+                              <p className="text-[10px] text-gray-500">
+                                £{wo.size}/pt · trigger @ {wo.level}
+                                {wo.stopLevel ? ` · SL ${wo.stopLevel}` : ''}
+                                {wo.limitLevel ? ` · TP ${wo.limitLevel}` : ''}
+                              </p>
+                            </div>
+                          </div>
+                          <button onClick={() => void cancelWorkingOrder(env, wo.dealId)}
+                            disabled={cancellingOrder === wo.dealId}
+                            className="text-xs text-red-400 border border-red-500/30 px-2 py-1 rounded-lg hover:bg-red-500/10 transition-colors shrink-0 disabled:opacity-50">
+                            {cancellingOrder === wo.dealId ? '…' : 'Cancel'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </Card>
 
@@ -1005,37 +1308,85 @@ export function IGStrategyTrader() {
 
 // ── Position card ─────────────────────────────────────────────────────────────
 
-function PositionCard({ pos, env, closingId, onClose }: {
-  pos: IGPosition; env: 'demo'|'live'; closingId: string|null;
-  onClose: (env:'demo'|'live', pos:IGPosition) => void;
+function PositionCard({ pos, env, closingId, reversingId, onClose, onMoveSL, onMoveTP, onReverse }: {
+  pos:        IGPosition;
+  env:        'demo'|'live';
+  closingId:  string|null;
+  reversingId:string|null;
+  onClose:    (env:'demo'|'live', pos:IGPosition) => void;
+  onMoveSL:   (pos:IGPosition) => void;
+  onMoveTP:   (pos:IGPosition) => void;
+  onReverse:  (env:'demo'|'live', pos:IGPosition) => void;
 }) {
   const [exp, setExp] = useState(false);
+  const currentPx = pos.direction === 'BUY' ? (pos.bid ?? pos.level) : (pos.offer ?? pos.level);
+  const entryPx   = pos.level ?? 0;
+  const pnlPct    = entryPx > 0
+    ? pos.direction === 'BUY'
+      ? ((currentPx - entryPx) / entryPx) * 100
+      : ((entryPx - currentPx) / entryPx) * 100
+    : 0;
+
   return (
     <div className="bg-gray-800/40 rounded-lg overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2.5 gap-3">
-        <button className="flex-1 min-w-0 text-left flex items-center gap-2" onClick={() => setExp(v=>!v)}>
+      {/* Main row */}
+      <div className="flex items-start justify-between px-3 py-2.5 gap-3">
+        <button className="flex-1 min-w-0 text-left flex items-start gap-2" onClick={() => setExp(v=>!v)}>
           <DirectionBadge dir={pos.direction} />
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
-            <p className="text-[10px] text-gray-500">£{pos.size}/pt · entry {pos.level}</p>
+            <div className="flex items-center gap-3 flex-wrap mt-0.5">
+              <span className="text-[10px] text-gray-500">£{pos.size}/pt</span>
+              <span className="text-[10px] text-gray-500">Entry: <span className="text-white font-mono">{entryPx}</span></span>
+              <span className="text-[10px] text-gray-500">Now: <span className="font-mono text-white">{currentPx}</span></span>
+              {pos.stopLevel  && <span className="text-[10px] text-red-400">SL: {pos.stopLevel}</span>}
+              {pos.limitLevel && <span className="text-[10px] text-emerald-400">TP: {pos.limitLevel}</span>}
+            </div>
           </div>
-          {exp ? <ChevronUp className="h-3 w-3 text-gray-600 flex-shrink-0" /> : <ChevronDown className="h-3 w-3 text-gray-600 flex-shrink-0" />}
+          {exp ? <ChevronUp className="h-3 w-3 text-gray-600 flex-shrink-0 mt-1" /> : <ChevronDown className="h-3 w-3 text-gray-600 flex-shrink-0 mt-1" />}
         </button>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <span className={clsx('text-sm font-bold font-mono', (pos.upl??0)>=0 ? 'text-emerald-400' : 'text-red-400')}>
-            {(pos.upl??0)>=0?'+':'-'}{'£'+Math.abs(pos.upl??0).toFixed(2)}
-          </span>
-          <Button size="sm" variant="outline" loading={closingId===pos.dealId}
-            onClick={() => onClose(env, pos)} className="text-red-400 border-red-500/30 hover:bg-red-500/10">
-            Close
-          </Button>
+        <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+          {/* P&L */}
+          <div className="text-right">
+            <p className={clsx('text-sm font-bold font-mono', (pos.upl??0)>=0 ? 'text-emerald-400' : 'text-red-400')}>
+              {(pos.upl??0)>=0?'+':''}{fmt(pos.upl??0)}
+            </p>
+            <p className={clsx('text-[10px]', pnlPct>=0?'text-emerald-400/70':'text-red-400/70')}>
+              {pnlPct>=0?'+':''}{pnlPct.toFixed(2)}%
+            </p>
+          </div>
         </div>
       </div>
+
+      {/* Action buttons */}
+      <div className="px-3 pb-2.5 flex items-center gap-1.5 flex-wrap">
+        <Button size="sm" variant="outline" loading={closingId===pos.dealId}
+          onClick={() => onClose(env, pos)} className="text-red-400 border-red-500/30 hover:bg-red-500/10 text-[11px]">
+          Close
+        </Button>
+        <button onClick={() => onMoveSL(pos)}
+          className="text-[11px] px-2 py-1 rounded-lg border border-gray-700 text-gray-400 hover:text-orange-400 hover:border-orange-500/30 transition-colors">
+          Move SL
+        </button>
+        <button onClick={() => onMoveTP(pos)}
+          className="text-[11px] px-2 py-1 rounded-lg border border-gray-700 text-gray-400 hover:text-emerald-400 hover:border-emerald-500/30 transition-colors">
+          Move TP
+        </button>
+        <button onClick={() => onReverse(env, pos)} disabled={reversingId === pos.dealId}
+          className="text-[11px] px-2 py-1 rounded-lg border border-gray-700 text-gray-400 hover:text-purple-400 hover:border-purple-500/30 transition-colors disabled:opacity-50">
+          {reversingId === pos.dealId ? '…' : 'Reverse'}
+        </button>
+      </div>
+
+      {/* Expanded details */}
       {exp && (
         <div className="px-3 pb-2.5 pt-2 grid grid-cols-3 gap-2 text-[11px] border-t border-gray-700/30">
           <div><p className="text-gray-600">Bid</p><p className="text-white font-mono">{pos.bid}</p></div>
           <div><p className="text-gray-600">Offer</p><p className="text-white font-mono">{pos.offer}</p></div>
           <div><p className="text-gray-600">Currency</p><p className="text-white">{pos.currency} <span className="text-emerald-400 text-[9px]">TAX FREE</span></p></div>
+          <div><p className="text-gray-600">Stop</p><p className={clsx('font-mono', pos.stopLevel ? 'text-red-400' : 'text-gray-600')}>{pos.stopLevel ?? '—'}</p></div>
+          <div><p className="text-gray-600">Limit</p><p className={clsx('font-mono', pos.limitLevel ? 'text-emerald-400' : 'text-gray-600')}>{pos.limitLevel ?? '—'}</p></div>
+          <div><p className="text-gray-600">Risk:Reward</p><p className="text-white">{pos.stopLevel && pos.limitLevel && pos.level ? `1:${((Math.abs(pos.limitLevel-pos.level))/(Math.abs(pos.stopLevel-pos.level))).toFixed(1)}` : '—'}</p></div>
           <div className="col-span-3"><p className="text-gray-600">Deal ID</p><p className="text-gray-400 font-mono text-[10px] break-all">{pos.dealId}</p></div>
         </div>
       )}

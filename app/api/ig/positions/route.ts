@@ -38,6 +38,10 @@ export async function GET(request: NextRequest) {
           level?: number;
           currency?: string;
           upl?: number;
+          stopLevel?: number;
+          limitLevel?: number;
+          contractSize?: number;
+          createdDate?: string;
         };
         market?: {
           epic?: string;
@@ -50,16 +54,20 @@ export async function GET(request: NextRequest) {
     };
 
     const positions = (data.positions ?? []).map(p => ({
-      dealId: p.position?.dealId,
-      direction: p.position?.direction,
-      size: p.position?.size,
-      level: p.position?.level,
-      upl: p.position?.upl,
-      currency: p.position?.currency,
-      epic: p.market?.epic,
+      dealId:         p.position?.dealId,
+      direction:      p.position?.direction,
+      size:           p.position?.size,
+      level:          p.position?.level,
+      upl:            p.position?.upl,
+      currency:       p.position?.currency,
+      stopLevel:      p.position?.stopLevel,
+      limitLevel:     p.position?.limitLevel,
+      contractSize:   p.position?.contractSize,
+      createdDate:    p.position?.createdDate,
+      epic:           p.market?.epic,
       instrumentName: p.market?.instrumentName,
-      bid: p.market?.bid,
-      offer: p.market?.offer,
+      bid:            p.market?.bid,
+      offer:          p.market?.offer,
       instrumentType: p.market?.instrumentType,
     }));
 

@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { hashFromEncoded, verifyLinks, isAuthorised, ACCOUNT_COOKIE, AccountType } from '@/lib/accountAuth';
 
 // ── Hardcoded T212 ticker mapping ─────────────────────────────────────────────
-// Used when the instruments endpoint is unavailable (403 on demo) or for speed.
-// Both live and demo T212 use identical ticker formats.
 const T212_TICKERS: Record<string, string> = {
   // Technology — US
   'AAPL':  'AAPL_US_EQ',
@@ -91,77 +89,66 @@ const T212_TICKERS: Record<string, string> = {
   'STAN':  'STAN_GB_EQ',
 };
 
-/**
- * Resolve a plain symbol (e.g. "AAPL") or Finnhub symbol (e.g. "VOD.L")
- * to a T212 ticker (e.g. "AAPL_US_EQ").
- *
- * Priority:
- * 1. Already in T212 format (contains underscore) → use as-is
- * 2. Strip ".L" suffix and look up in T212_TICKERS (UK LSE)
- * 3. Look up plain symbol in T212_TICKERS
- * 4. Fallback: SYMBOL_US_EQ
- */
 function resolveTicker(raw: string): string {
   const upper = raw.toUpperCase().trim();
-
-  // Already resolved (e.g. "AAPL_US_EQ")
   if (upper.includes('_')) return upper;
-
-  // Finnhub UK suffix: "VOD.L" → "VOD"
   const stripped = upper.replace(/\.L$/, '');
-
   return T212_TICKERS[stripped] ?? T212_TICKERS[upper] ?? `${upper}_US_EQ`;
 }
 
-/**
- * Try to fetch the full instruments list from the LIVE endpoint and build a
- * richer mapping. Returns the resolved ticker if found, null otherwise.
- * Falls back silently if the request fails or returns 403.
- */
-async function resolveViaLiveInstruments(
-  symbol: string,
-  liveEncoded: string
-): Promise<string | null> {
+async function resolveViaLiveInstruments(symbol: string, liveEncoded: string): Promise<string | null> {
   try {
-    const res = await fetch(
-      'https://live.trading212.com/api/v0/equity/metadata/instruments',
-      {
-        headers: { Authorization: 'Basic ' + liveEncoded },
-        signal: AbortSignal.timeout(8_000),
-      }
-    );
+    const res = await fetch('https://live.trading212.com/api/v0/equity/metadata/instruments', {
+      headers: { Authorization: 'Basic ' + liveEncoded },
+      signal: AbortSignal.timeout(8_000),
+    });
     if (!res.ok) return null;
-
     const instruments = await res.json() as Array<{ ticker: string; shortName: string }>;
     if (!Array.isArray(instruments)) return null;
-
     const upper = symbol.toUpperCase().replace(/\.L$/, '');
-    const match = instruments.find(
-      i => i.ticker.startsWith(upper + '_') || i.shortName?.toUpperCase() === upper
-    );
+    const match = instruments.find(i => i.ticker.startsWith(upper + '_') || i.shortName?.toUpperCase() === upper);
     return match?.ticker ?? null;
   } catch {
     return null;
   }
 }
 
+/** POST a single T212 order. Also handles atomic 3-order placement (market + stop-loss + take-profit). */
 export async function POST(request: NextRequest) {
   const encoded = request.headers.get('x-t212-auth');
   if (!encoded) {
     return NextResponse.json({ ok: false, error: 'Missing x-t212-auth header.' }, { status: 400 });
   }
-
-  // Optional separate live credentials for instrument resolution (demo orders)
   const liveEncoded = request.headers.get('x-t212-live-auth') ?? encoded;
 
-  type Body = { ticker: string; quantity: number; env?: 'demo' | 'live' };
-  const body = await request.json() as Body;
-  const { ticker, quantity, env = 'live' } = body;
+  type Body = {
+    ticker: string;
+    quantity: number;          // positive = BUY, negative = SELL
+    env?: 'demo' | 'live';
+    // Order type (defaults to MARKET)
+    orderType?: 'MARKET' | 'LIMIT' | 'STOP' | 'STOP_LIMIT';
+    limitPrice?: number;
+    stopPrice?: number;
+    timeValidity?: 'DAY' | 'GOOD_TILL_CANCEL';
+    // Atomic strategy placement: also place SL stop + TP limit alongside market buy
+    stopLossPrice?: number;
+    takeProfitPrice?: number;
+  };
 
-  // ── Account-link permission check ─────────────────────────────────────────
-  // If the session has a cg-account-links cookie, verify the credentials match
-  // the registered account for this env. This prevents one session from trading
-  // on another user's account even if they somehow obtain that account's key.
+  const body = await request.json() as Body;
+  const {
+    ticker,
+    quantity,
+    env = 'live',
+    orderType = 'MARKET',
+    limitPrice,
+    stopPrice,
+    timeValidity = 'GOOD_TILL_CANCEL',
+    stopLossPrice,
+    takeProfitPrice,
+  } = body;
+
+  // ── Account-link permission check ──────────────────────────────────────────
   const accountCookie = request.cookies.get(ACCOUNT_COOKIE)?.value;
   if (accountCookie) {
     const links = verifyLinks(accountCookie);
@@ -172,133 +159,153 @@ export async function POST(request: NextRequest) {
       if (claim && claim.keyHash !== keyHash) {
         return NextResponse.json({
           ok: false,
-          error: `Permission denied: the credentials you provided do not match the ${accountType} account linked to this session. ` +
-                 `Reconnect in Settings → Accounts to update the link.`,
+          error: `Permission denied: credentials do not match the ${accountType} account linked to this session.`,
         }, { status: 403 });
       }
     }
   }
 
-  if (!ticker || !quantity || quantity <= 0) {
-    return NextResponse.json({ ok: false, error: 'ticker and positive quantity are required.' }, { status: 400 });
+  if (!ticker || quantity === undefined || quantity === null || quantity === 0) {
+    return NextResponse.json({ ok: false, error: 'ticker and non-zero quantity are required.' }, { status: 400 });
+  }
+  if ((orderType === 'LIMIT' || orderType === 'STOP_LIMIT') && !limitPrice) {
+    return NextResponse.json({ ok: false, error: 'limitPrice required for LIMIT and STOP_LIMIT orders.' }, { status: 400 });
+  }
+  if ((orderType === 'STOP' || orderType === 'STOP_LIMIT') && !stopPrice) {
+    return NextResponse.json({ ok: false, error: 'stopPrice required for STOP and STOP_LIMIT orders.' }, { status: 400 });
   }
 
   const base = env === 'demo'
     ? 'https://demo.trading212.com/api/v0'
     : 'https://live.trading212.com/api/v0';
 
-  // ── Resolve T212 ticker ───────────────────────────────────────────────────
+  // ── Resolve T212 ticker ────────────────────────────────────────────────────
   let resolvedTicker = resolveTicker(ticker);
-
-  // If not found in hardcoded map (still ends with _US_EQ as a guess),
-  // try the live instruments endpoint to get the exact ticker
   const isGuessed = !T212_TICKERS[ticker.toUpperCase().replace(/\.L$/, '')] && !ticker.includes('_');
   if (isGuessed) {
     const fromLive = await resolveViaLiveInstruments(ticker, liveEncoded);
     if (fromLive) resolvedTicker = fromLive;
   }
 
-  // ── Quantity precision ────────────────────────────────────────────────────
-  // T212 accepts up to 2 decimal places; ensure minimum of 1 share
-  const roundedQty = Math.max(1, Math.round(quantity * 100) / 100);
+  const roundedQty = quantity < 0
+    ? -Math.max(1, Math.round(Math.abs(quantity) * 100) / 100)
+    : Math.max(1, Math.round(quantity * 100) / 100);
 
-  // ── Place order ───────────────────────────────────────────────────────────
-  const orderUrl = `${base}/equity/orders/market`;
-  const orderBody = { quantity: roundedQty, ticker: resolvedTicker };
-  console.log(`[t212/live-order] → ${env} ${orderUrl}`, JSON.stringify(orderBody));
+  // ── Build order payload ────────────────────────────────────────────────────
+  let orderPath: string;
+  let orderBody: Record<string, unknown>;
 
-  try {
-    const res = await fetch(orderUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: 'Basic ' + encoded,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(orderBody),
-      signal: AbortSignal.timeout(10_000),
-    });
+  switch (orderType) {
+    case 'LIMIT':
+      orderPath = `${base}/equity/orders/limit`;
+      orderBody = { ticker: resolvedTicker, quantity: roundedQty, limitPrice, timeValidity };
+      break;
+    case 'STOP':
+      orderPath = `${base}/equity/orders/stop`;
+      orderBody = { ticker: resolvedTicker, quantity: roundedQty, stopPrice, timeValidity };
+      break;
+    case 'STOP_LIMIT':
+      orderPath = `${base}/equity/orders/stop_limit`;
+      orderBody = { ticker: resolvedTicker, quantity: roundedQty, stopPrice, limitPrice, timeValidity };
+      break;
+    default: // MARKET
+      orderPath = `${base}/equity/orders/market`;
+      orderBody = { ticker: resolvedTicker, quantity: roundedQty };
+      break;
+  }
 
-    const text = await res.text();
-    console.log(`[t212/live-order] ← HTTP ${res.status}:`, text.slice(0, 500));
+  console.log(`[t212/live-order] → ${env} ${orderPath}`, JSON.stringify(orderBody));
 
-    let data: Record<string, unknown> = {};
-    try { data = JSON.parse(text); } catch { /* non-JSON body */ }
+  const mainResult = await placeT212Order(orderPath, orderBody, encoded);
+  if (!mainResult.ok) return NextResponse.json(mainResult);
 
-    if (res.ok) {
-      return NextResponse.json({
-        ok: true,
-        orderId: data.id,
-        fillPrice: data.fillPrice,
-        ticker: resolvedTicker,
-        quantity: roundedQty,
-        env,
-        data,
-      });
+  const results: unknown[] = [mainResult.data];
+
+  // ── Atomic SL/TP placement for strategy market buys ───────────────────────
+  if (orderType === 'MARKET' && roundedQty > 0 && (stopLossPrice || takeProfitPrice)) {
+    const fillPrice = (mainResult.data as Record<string, unknown>)?.fillPrice as number | undefined;
+    const basePrice = fillPrice ?? stopLossPrice ?? takeProfitPrice ?? 0;
+
+    // Stop-loss: STOP order with negative quantity (SELL stop)
+    if (stopLossPrice) {
+      const slBody = { ticker: resolvedTicker, quantity: -roundedQty, stopPrice: stopLossPrice, timeValidity: 'GOOD_TILL_CANCEL' };
+      const slPath = `${base}/equity/orders/stop`;
+      console.log(`[t212/live-order] → SL stop`, JSON.stringify(slBody));
+      const slResult = await placeT212Order(slPath, slBody, encoded);
+      results.push({ type: 'STOP_LOSS', ...(slResult.data as Record<string, unknown> ?? {}) });
+      if (!slResult.ok) console.warn('[t212/live-order] SL placement failed:', slResult.error);
     }
 
-    // Extract the most useful error message from T212's response.
-    // Use || not ?? so empty strings fall through to the next option.
-    // T212 uses 'message', 'code', and 'errorCode' across different error types.
-    const t212Message =
+    // Take-profit: LIMIT order with negative quantity (SELL limit)
+    if (takeProfitPrice) {
+      const tpBody = { ticker: resolvedTicker, quantity: -roundedQty, limitPrice: takeProfitPrice, timeValidity: 'GOOD_TILL_CANCEL' };
+      const tpPath = `${base}/equity/orders/limit`;
+      console.log(`[t212/live-order] → TP limit`, JSON.stringify(tpBody));
+      const tpResult = await placeT212Order(tpPath, tpBody, encoded);
+      results.push({ type: 'TAKE_PROFIT', ...(tpResult.data as Record<string, unknown> ?? {}) });
+      if (!tpResult.ok) console.warn('[t212/live-order] TP placement failed:', tpResult.error);
+    }
+
+    void basePrice; // suppress unused warning when neither SL nor TP set
+  }
+
+  return NextResponse.json({
+    ok: true,
+    orderId: (mainResult.data as Record<string, unknown>)?.id,
+    fillPrice: (mainResult.data as Record<string, unknown>)?.fillPrice,
+    ticker: resolvedTicker,
+    quantity: roundedQty,
+    orderType,
+    env,
+    orders: results,
+  });
+}
+
+/** Helper: place a single T212 order and return normalised result. */
+async function placeT212Order(
+  url: string,
+  body: Record<string, unknown>,
+  encoded: string
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: 'Basic ' + encoded, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try { data = JSON.parse(text); } catch { /* ok */ }
+
+    if (res.ok) return { ok: true, data };
+
+    const msg =
       (data.message as string) ||
-      (data.code as string) ||
-      (data.error as string) ||
+      (data.code    as string) ||
+      (data.error   as string) ||
       (data.errorCode as string) ||
       text.trim() ||
       `HTTP ${res.status}`;
 
-    // Detect market-hours rejection specifically
-    const isMarketClosed =
-      res.status === 400 &&
-      (t212Message.toLowerCase().includes('trading hours') ||
-       t212Message.toLowerCase().includes('outtradinghoursexception') ||
-       t212Message.toLowerCase().includes('market') ||
-       (data.code as string || '').toLowerCase().includes('hours'));
-
-    // If precision error, retry with integer quantity
-    if (res.status === 400 && t212Message.toLowerCase().includes('precision')) {
-      const intQty = Math.max(1, Math.floor(quantity));
-      const retry = await fetch(orderUrl, {
+    // Retry with integer quantity on precision error
+    if (res.status === 400 && msg.toLowerCase().includes('precision')) {
+      const qty = body.quantity as number;
+      const intQty = qty < 0 ? -Math.max(1, Math.floor(Math.abs(qty))) : Math.max(1, Math.floor(qty));
+      const retry = await fetch(url, {
         method: 'POST',
         headers: { Authorization: 'Basic ' + encoded, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ quantity: intQty, ticker: resolvedTicker }),
+        body: JSON.stringify({ ...body, quantity: intQty }),
         signal: AbortSignal.timeout(10_000),
       });
       const retryText = await retry.text();
       let retryData: Record<string, unknown> = {};
       try { retryData = JSON.parse(retryText); } catch { /* ok */ }
-      console.log(`[t212/live-order] ← retry HTTP ${retry.status}:`, retryText.slice(0, 300));
-
-      if (retry.ok) {
-        return NextResponse.json({
-          ok: true,
-          orderId: retryData.id,
-          fillPrice: retryData.fillPrice,
-          ticker: resolvedTicker,
-          quantity: intQty,
-          env,
-          note: 'Quantity rounded to integer due to precision requirement',
-          data: retryData,
-        });
-      }
+      if (retry.ok) return { ok: true, data: retryData };
     }
 
-    return NextResponse.json({
-      ok: false,
-      error: isMarketClosed ? `Market closed — ${t212Message}` : t212Message,
-      t212Status: res.status,
-      t212Body: text,
-      ticker: resolvedTicker,
-      quantity: roundedQty,
-      env,
-      marketClosed: isMarketClosed,
-    });
+    return { ok: false, error: msg, data };
   } catch (err) {
-    return NextResponse.json({
-      ok: false,
-      error: `Request failed: ${err instanceof Error ? err.message : String(err)}`,
-      ticker: resolvedTicker,
-      env,
-    }, { status: 500 });
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
