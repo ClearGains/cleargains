@@ -182,6 +182,10 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify(payload),
     });
 
+    // Capture fresh tokens — IG rotates CST/X-SECURITY-TOKEN on every API call
+    const freshCst      = res.headers.get('CST') ?? null;
+    const freshSecToken = res.headers.get('X-SECURITY-TOKEN') ?? null;
+
     const resText = await res.text();
     let data: { dealReference?: string; errorCode?: string } = {};
     try { data = JSON.parse(resText) as typeof data; } catch {}
@@ -271,6 +275,8 @@ export async function POST(request: NextRequest) {
       resolvedVia,
       sentPayload: payload,
       slTpResult,
+      freshCst,
+      freshSecurityToken: freshSecToken,
     });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });

@@ -19,7 +19,7 @@ import {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type IGSession = { cst: string; securityToken: string; accountId: string; apiKey: string };
+type IGSession = { cst: string; securityToken: string; accountId: string; apiKey: string; accountType?: string };
 
 type IGSubAccount = {
   accountId:   string;
@@ -331,6 +331,13 @@ export function IGStrategyTrader() {
    */
   const tradeLockRef = useRef(false);
 
+  /**
+   * Re-auth cooldown — tracks when we last forced a full re-login per env.
+   * We never re-auth more than once per 30 seconds; 403 (rate limit) never
+   * triggers a re-auth at all.
+   */
+  const lastReauthRef = useRef<Partial<Record<'demo'|'live', number>>>({});
+
   // ── Sub-accounts ───────────────────────────────────────────────────────────
   const [subAccounts, setSubAccounts]         = useState<Partial<Record<'demo'|'live', IGSubAccount[]>>>({});
   const [selectedSubAccount, setSelectedSubAccount] = useState<Partial<Record<'demo'|'live', string>>>({});
@@ -441,6 +448,15 @@ export function IGStrategyTrader() {
     setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0,200));
   }
 
+  /** Returns [SB] / [CFD] / [SHARES] label for log messages based on current active account type. */
+  function acctTypeLabel(env: 'demo'|'live'): string {
+    const t = sessionsRef.current[env]?.accountType;
+    if (!t) return '';
+    if (t === 'SPREADBET') return ' [SB]';
+    if (t === 'CFD')       return ' [CFD]';
+    return ` [${t}]`;
+  }
+
   /** Atomically write a fresh session to ref + React state + localStorage. */
   function storeSession(env: 'demo'|'live', sess: IGSession) {
     sessionsRef.current  = { ...sessionsRef.current, [env]: sess };
@@ -525,23 +541,80 @@ export function IGStrategyTrader() {
     currentSess: IGSession,
     accountId: string,
   ): Promise<IGSession> {
-    try {
-      const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
-      const rawCred = localStorage.getItem(credKey);
-      const apiKey  = rawCred ? (JSON.parse(rawCred) as { apiKey?: string }).apiKey ?? currentSess.apiKey : currentSess.apiKey;
-      const swRes = await fetch('/api/ig/switch-account', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cst: currentSess.cst, securityToken: currentSess.securityToken, apiKey, env, accountId }),
-      });
-      const swData = await swRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string };
-      if (swData.ok && swData.cst && swData.securityToken) {
-        const switched: IGSession = { cst: swData.cst, securityToken: swData.securityToken, accountId: swData.accountId ?? accountId, apiKey: currentSess.apiKey };
-        storeSession(env, switched); // keep ref + state + localStorage in sync
-        return switched;
+    const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+    const rawCred = localStorage.getItem(credKey);
+    const apiKey  = rawCred ? (JSON.parse(rawCred) as { apiKey?: string }).apiKey ?? currentSess.apiKey : currentSess.apiKey;
+
+    // Look up account type from stored sub-accounts list
+    const acctType = (subAccounts[env] ?? []).find(a => a.accountId === accountId)?.accountType;
+
+    async function doSwitch(sess: IGSession): Promise<{ ok: boolean; sess: IGSession; error?: string }> {
+      try {
+        const swRes = await fetch('/api/ig/switch-account', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cst: sess.cst, securityToken: sess.securityToken, apiKey, env, accountId }),
+        });
+        const swData = await swRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; error?: string };
+        if (swData.ok && swData.cst && swData.securityToken) {
+          const switched: IGSession = {
+            cst: swData.cst,
+            securityToken: swData.securityToken,
+            accountId: swData.accountId ?? accountId,
+            apiKey: sess.apiKey,
+            accountType: acctType,
+          };
+          storeSession(env, switched);
+          return { ok: true, sess: switched };
+        }
+        return { ok: false, sess, error: swData.error ?? `Switch returned ok:false (HTTP ${swRes.status})` };
+      } catch (e) {
+        return { ok: false, sess, error: e instanceof Error ? e.message : String(e) };
       }
-    } catch {}
-    return currentSess; // return unchanged if switch fails
+    }
+
+    // First attempt
+    const first = await doSwitch(currentSess);
+    if (first.ok) return first.sess;
+
+    // 403 = rate limited — re-authing won't help and will make the quota worse.
+    // Just log and return; the caller will get the current (wrong) accountId and bail.
+    if (first.error?.includes('403') || first.error?.includes('exceeded-api-key-allowance')) {
+      log('error', `[${env.toUpperCase()}] ⛔ Rate limited (403) switching to ${accountId} — aborting, not retrying`);
+      return currentSess;
+    }
+
+    // Re-auth cooldown: never re-auth more than once per 30 seconds
+    const lastReauth = lastReauthRef.current[env] ?? 0;
+    if (Date.now() - lastReauth < 30_000) {
+      log('error', `[${env.toUpperCase()}] Switch to ${accountId} failed (${first.error ?? 'unknown'}) — re-auth cooldown active, skipping retry`);
+      return currentSess;
+    }
+
+    // Switch failed — log actual error then re-authenticate before retrying once
+    log('error', `[${env.toUpperCase()}] ⚠️ Switch to ${accountId} failed: ${first.error ?? 'unknown'} — re-authenticating…`);
+    try {
+      lastReauthRef.current[env] = Date.now();
+      localStorage.removeItem(`ig_session_${env}`);
+      const reauthed = await connectIG(env, true);
+      if (!reauthed) {
+        log('error', `[${env.toUpperCase()}] Re-auth failed — cannot switch to ${accountId}`);
+        return currentSess;
+      }
+      storeSession(env, reauthed);
+
+      const retry = await doSwitch(reauthed);
+      if (retry.ok) {
+        log('info', `[${env.toUpperCase()}] ✅ Switched to ${accountId} (${acctType ?? 'unknown type'}) after re-auth`);
+        return retry.sess;
+      }
+      log('error', `[${env.toUpperCase()}] ❌ Still failed to switch to ${accountId} after re-auth: ${retry.error ?? 'unknown'}`);
+      // Return the freshly re-authed session even if switch failed — caller checks accountId
+      return reauthed;
+    } catch (e) {
+      log('error', `[${env.toUpperCase()}] Re-auth exception: ${e instanceof Error ? e.message : String(e)}`);
+      return currentSess;
+    }
   }
 
   // ── Load positions — iterates ALL sub-accounts so both SB and CFD show ───
@@ -554,48 +627,43 @@ export function IGStrategyTrader() {
       if (!sess) continue;
       const accs = subAccounts[env] ?? [];
 
-      if (accs.length > 1) {
-        // Iterate every sub-account: switch → fetch → tag with sub-account info
-        const allEnvPositions: IGPosition[] = [];
-        for (const acct of accs) {
-          sess = await switchSessionTo(env, sess, acct.accountId);
-          try {
-            const r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
-            const d = await r.json() as { ok: boolean; positions?: IGPosition[] };
-            if (d.ok) {
-              allEnvPositions.push(
-                ...(d.positions ?? []).map(p => ({ ...p, subAccountId: acct.accountId, subAccountType: acct.accountType })),
-              );
-            }
-          } catch {}
+      // Fetch positions from the currently active sub-account only.
+      // Iterating all sub-accounts (switching between them) caused rate-limit 403s
+      // because each switch + fetch costs 2 IG API calls, multiplied by every timer tick.
+      // Positions are tagged with the current session's accountId/accountType so
+      // closePos() knows which account to switch to when closing.
+      try {
+        let r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+        // 403 = rate limited — don't retry, don't re-auth
+        if (r.status === 403) {
+          setPosError(`[${env.toUpperCase()}] Rate limited by IG — will retry next cycle`);
+          continue;
         }
-        setPositions(p => ({ ...p, [env]: allEnvPositions }));
-        // Switch back to the user's selected default after iterating
-        const defaultId = selectedSubAccount[env] ?? accs.find(a => a.accountType === 'SPREADBET')?.accountId;
-        if (defaultId && sess.accountId !== defaultId) {
-          sess = await switchSessionTo(env, sess, defaultId);
-        }
-      } else {
-        // Single sub-account (or no sub-account data yet) — use session as-is
-        try {
-          let r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
-          // 401 → clear stale cache, re-authenticate fresh and retry once
-          if (r.status === 401) {
+        // 401 = genuine auth expiry → re-auth once, respecting cooldown
+        if (r.status === 401) {
+          const lastReauth = lastReauthRef.current[env] ?? 0;
+          if (Date.now() - lastReauth >= 30_000) {
+            lastReauthRef.current[env] = Date.now();
             localStorage.removeItem(`ig_session_${env}`);
             const fresh = await connectIG(env, true);
             if (fresh) { storeSession(env, fresh); sess = fresh; }
             r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
           }
-          const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
-          if (d.ok) {
-            setPositions(p => ({...p, [env]: d.positions ?? []}));
-          } else {
-            const msg = `[${env.toUpperCase()}] Positions error: ${d.error ?? 'unknown'}${d.detail ? ` — ${d.detail}` : ''}`;
-            setPosError(msg);
-          }
-        } catch (e) {
-          setPosError(`[${env.toUpperCase()}] Failed to fetch positions: ${e instanceof Error ? e.message : String(e)}`);
         }
+        const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
+        if (d.ok) {
+          const acctType = sess.accountType ?? accs.find(a => a.accountId === sess!.accountId)?.accountType;
+          setPositions(p => ({...p, [env]: (d.positions ?? []).map(pos => ({
+            ...pos,
+            subAccountId:   sess!.accountId,
+            subAccountType: acctType,
+          }))}));
+        } else {
+          const msg = `[${env.toUpperCase()}] Positions error: ${d.error ?? 'unknown'}${d.detail ? ` — ${d.detail}` : ''}`;
+          setPosError(msg);
+        }
+      } catch (e) {
+        setPosError(`[${env.toUpperCase()}] Failed to fetch positions: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     setLoadingPos(false);
@@ -606,9 +674,9 @@ export function IGStrategyTrader() {
     if (Object.values(sessions).some(Boolean)) {
       void loadPositions();
       void loadWorkingOrders();
-      // Auto-refresh positions every 30 seconds
+      // Auto-refresh positions every 60 seconds (30s was too frequent — caused rate-limit 403s)
       if (posRefreshRef.current) clearInterval(posRefreshRef.current);
-      posRefreshRef.current = setInterval(() => { void loadPositions(); }, 30_000);
+      posRefreshRef.current = setInterval(() => { void loadPositions(); }, 60_000);
     }
     return () => { if (posRefreshRef.current) clearInterval(posRefreshRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -728,7 +796,7 @@ export function IGStrategyTrader() {
     return sessionsRef.current[env] ?? null;
   }
 
-  type OrderResult = { ok: boolean; dealReference?: string; dealId?: string; dealStatus?: string; level?: number; reason?: string; error?: string; epic?: string; resolvedVia?: string; sentPayload?: unknown; igBody?: unknown; igStatus?: number };
+  type OrderResult = { ok: boolean; dealReference?: string; dealId?: string; dealStatus?: string; level?: number; reason?: string; error?: string; epic?: string; resolvedVia?: string; sentPayload?: unknown; igBody?: unknown; igStatus?: number; freshCst?: string; freshSecurityToken?: string };
 
   async function placeOrder(
     env: 'demo'|'live', epic: string, direction: 'BUY'|'SELL', size: number,
@@ -776,16 +844,28 @@ export function IGStrategyTrader() {
       body: JSON.stringify(orderBody),
     });
 
-    // ── 4. Token-invalid detection ────────────────────────────────────────────
-    // IG signals stale tokens as HTTP 401/403 or (occasionally) 200 with
-    // errorCode: 'error.security.account-token-invalid' in the body.
-    const isTokenErr = (status: number, body?: string) =>
-      status === 401 || status === 403 ||
+    // ── 4. Error detection ────────────────────────────────────────────────────
+    // 401 / account-token-invalid → genuine auth expiry → re-auth + retry
+    // 403 → rate limit (exceeded-api-key-allowance)  → ABORT, do NOT re-auth
+    const isAuthErr = (status: number, body?: string) =>
+      status === 401 ||
       (body?.includes('account-token-invalid') ?? false) ||
       (body?.includes('INVALID_TOKEN') ?? false);
 
     const rawText = await r.text();
-    if (isTokenErr(r.status, rawText)) {
+
+    // Rate-limit: don't re-auth (it burns more quota), just surface the error
+    if (r.status === 403 || rawText.includes('exceeded-api-key-allowance')) {
+      return { ok: false, error: `IG rate limit (403) — wait before retrying`, epic };
+    }
+
+    if (isAuthErr(r.status, rawText)) {
+      // Re-auth cooldown — never re-auth more than once per 30s
+      const lastReauth = lastReauthRef.current[env] ?? 0;
+      if (Date.now() - lastReauth < 30_000) {
+        return { ok: false, error: `Auth error but re-auth cooldown active — aborting`, epic };
+      }
+      lastReauthRef.current[env] = Date.now();
       // Re-authenticate from scratch
       localStorage.removeItem(`ig_session_${env}`);
       const fresh = await connectIG(env, true);
@@ -808,10 +888,24 @@ export function IGStrategyTrader() {
         body: JSON.stringify(orderBody),
       });
       const retryText = await r.text();
-      try { return JSON.parse(retryText) as OrderResult; } catch { return { ok: false, error: retryText.slice(0, 200), epic }; }
+      let retryResult: OrderResult;
+      try { retryResult = JSON.parse(retryText) as OrderResult; } catch { return { ok: false, error: retryText.slice(0, 200), epic }; }
+      if (retryResult.ok && retryResult.freshCst && retryResult.freshSecurityToken) {
+        storeSession(env, { ...sess, cst: retryResult.freshCst, securityToken: retryResult.freshSecurityToken });
+      }
+      return retryResult;
     }
 
-    try { return JSON.parse(rawText) as OrderResult; } catch { return { ok: false, error: rawText.slice(0, 200), epic }; }
+    let result: OrderResult;
+    try { result = JSON.parse(rawText) as OrderResult; } catch { return { ok: false, error: rawText.slice(0, 200), epic }; }
+
+    // Capture token rotation — IG issues fresh CST/X-SECURITY-TOKEN after every call.
+    // Storing them now prevents "account-token-invalid" on the next switch/order.
+    if (result.ok && result.freshCst && result.freshSecurityToken) {
+      storeSession(env, { ...sess, cst: result.freshCst, securityToken: result.freshSecurityToken });
+    }
+
+    return result;
   }
 
   async function closePos(env: 'demo'|'live', pos: IGPosition) {
@@ -834,18 +928,25 @@ export function IGStrategyTrader() {
 
     let r = await doClose(sess);
 
-    // 401 / 403 / token-invalid → re-auth and retry once
-    if (r.status === 401 || r.status === 403) {
-      localStorage.removeItem(`ig_session_${env}`);
-      const fresh = await connectIG(env, true);
-      if (fresh) {
-        storeSession(env, fresh);
-        sess = fresh;
-        // Re-switch to position's sub-account after re-auth
-        if (pos.subAccountId && pos.subAccountId !== sess.accountId) {
-          sess = await switchSessionTo(env, sess, pos.subAccountId);
+    // 403 = rate limit — do NOT re-auth (burns more quota), just return error
+    if (r.status === 403) {
+      return { ok: false, error: `IG rate limit (403) — wait before closing` };
+    }
+    // 401 = genuine auth expiry → re-auth once (respecting cooldown)
+    if (r.status === 401) {
+      const lastReauth = lastReauthRef.current[env] ?? 0;
+      if (Date.now() - lastReauth >= 30_000) {
+        lastReauthRef.current[env] = Date.now();
+        localStorage.removeItem(`ig_session_${env}`);
+        const fresh = await connectIG(env, true);
+        if (fresh) {
+          storeSession(env, fresh);
+          sess = fresh;
+          if (pos.subAccountId && pos.subAccountId !== sess.accountId) {
+            sess = await switchSessionTo(env, sess, pos.subAccountId);
+          }
+          r = await doClose(sess);
         }
-        r = await doClose(sess);
       }
     }
 
@@ -1012,13 +1113,13 @@ export function IGStrategyTrader() {
         const maxLoss = orderSize * stopDist;
         const acctSuffix = strat.accountId ? ` | acct ${strat.accountId}` : '';
         log(tradeDir === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}] → ${tradeDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${acctSuffix}${forceOpen ? ' (FORCE)' : ''}`);
+          `[${env.toUpperCase()}]${acctTypeLabel(env)} → ${tradeDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${acctSuffix}${forceOpen ? ' (FORCE)' : ''}`);
 
         const or = await placeOrder(env, market.epic, tradeDir, orderSize, stopDist, limitDist, strat.accountId);
 
         if (or.ok) {
           log(tradeDir === 'BUY' ? 'buy' : 'sell',
-            `[${env.toUpperCase()}] ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · filled @ ${or.level ?? '?'} · epic: ${or.epic ?? market.epic}`);
+            `[${env.toUpperCase()}]${acctTypeLabel(env)} ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · filled @ ${or.level ?? '?'} · epic: ${or.epic ?? market.epic}`);
           showToast(true, `[${env}] ${tradeDir} ${market.name}`);
           // Record open trade in history
           setTradeHistory(prev => recordTradeOpen(prev, {
@@ -1040,7 +1141,7 @@ export function IGStrategyTrader() {
             showToast(false, `⚠️ Insufficient funds in IG ${env} — skipping`);
             continue; // skip this market, continue scanning others
           }
-          log('error', `[${env.toUpperCase()}] ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}`);
+          log('error', `[${env.toUpperCase()}]${acctTypeLabel(env)} ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}`);
           log('error', `  epic: ${or.epic ?? market.epic}${or.reason ? ` | reason: ${or.reason}` : ''}`);
           if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
           if (or.igBody)      log('error', `  ig:   ${JSON.stringify(or.igBody)}`);
@@ -1079,7 +1180,7 @@ export function IGStrategyTrader() {
       const m = markets[i];
       setScanProgress(`${m.name} (${i+1}/${markets.length})`);
       await scanMarket(strat, m);
-      if (i < markets.length - 1) await sleep(800);
+      if (i < markets.length - 1) await sleep(1500); // 1.5s between markets — respects IG rate limits
     }
 
     setScanProgress('');
