@@ -1396,53 +1396,51 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       log('info', `✅ Market healthy — S&P ${conditions.spChange.toFixed(1)}% FTSE ${conditions.ftseChange.toFixed(1)}% VIX ${conditions.vix.toFixed(0)}`);
     }
 
-    // ── Step 2: Build market list (full scan for CFD if nav loaded) ────────
-    const baseWatchlist = strat.watchlist?.length ? strat.watchlist : defaultWatchlist;
-    let markets = (accountType === 'CFD' && navLoaded && navCategories.length > 0)
-      ? buildFullScanList(baseWatchlist)
-      : baseWatchlist.filter(m => m.enabled);
+    // ── Step 2: Build market list ─────────────────────────────────────────────
+    // CFD: let Finnhub tell us what's moving today — no hardcoded list.
+    // SPREADBET: use the watchlist as before.
+    let markets: WatchlistMarket[] = [];
+    type OppResult = { symbol: string; igEpic: string; changePercent: number; opportunityScore: number; direction: 'BUY'|'SELL' };
 
-    // Inject pinned Finnhub instruments — always scanned regardless of sector rotation
-    const pinnedAsMarkets: WatchlistMarket[] = pinnedInstruments
-      .filter(p => p.igEpic)
-      .map(p => ({
-        epic: p.igEpic!, name: p.symbol.replace(/^[^:]+:/, ''), enabled: true,
-        marketType: p.category === 'FOREX' ? 'FOREX' as const
-          : p.category === 'CRYPTO' ? 'CRYPTO' as const : 'STOCK' as const,
-      }));
-    const pinnedEpics = new Set(pinnedAsMarkets.map(m => m.epic));
-    markets = [...pinnedAsMarkets, ...markets.filter(m => !pinnedEpics.has(m.epic))];
-
-    // Discovery expansion: add 10 random Finnhub instruments not seen recently (CFD only)
-    if (accountType === 'CFD' && markets.length < 80) {
+    if (accountType === 'CFD') {
+      log('info', '🔭 CFD mode — screening full market via Finnhub…');
       try {
-        const cats: FinnhubCategory[] = ['US_STOCK', 'UK_STOCK', 'FOREX', 'CRYPTO'];
-        const randCat = cats[Math.floor(Math.random() * cats.length)];
-        const ur = await fetch(`/api/finnhub/universe?category=${randCat}`);
-        const ud = await ur.json() as { ok: boolean; symbols?: Array<{ symbol: string; igEpic: string | null; yahooSymbol: string | null }> };
-        if (ud.ok && ud.symbols) {
-          const unseen = ud.symbols.filter(s =>
-            s.igEpic &&
-            !recentlyScannedRef.current.has(s.symbol) &&
-            !markets.some(m => m.epic === s.igEpic)
-          );
-          // Shuffle and take 10
-          const shuffled = unseen.sort(() => Math.random() - 0.5).slice(0, 10);
-          const mktType = randCat === 'FOREX' ? 'FOREX' as const : randCat === 'CRYPTO' ? 'CRYPTO' as const : 'STOCK' as const;
-          const extras: WatchlistMarket[] = shuffled.map(s => ({
-            epic: s.igEpic!, name: s.symbol.replace(/^[^:]+:/, ''), enabled: true, marketType: mktType,
+        const minMove = conditions.marketStressed ? 1.0 : 0.5; // raise bar when market is stressed
+        const oppRes = await fetch(`/api/finnhub/opportunities?limit=10&minMove=${minMove}`);
+        const oppData = await oppRes.json() as {
+          ok: boolean; opportunities?: OppResult[]; screened?: number; note?: string;
+        };
+        if (oppData.ok && oppData.opportunities && oppData.opportunities.length > 0) {
+          log('info', `  Screened ${oppData.screened ?? '?'} instruments — ${oppData.opportunities.length} opportunities found`);
+          markets = oppData.opportunities.map(o => ({
+            epic: o.igEpic, name: o.symbol, enabled: true, marketType: 'STOCK' as const,
           }));
-          if (extras.length > 0) {
-            markets = [...markets, ...extras];
-            log('info', `🔭 Discovery: +${extras.length} random ${randCat} instruments added to scan`);
-          }
+        } else {
+          log('info', `  No opportunities above threshold (${oppData.note ?? 'quiet market'}) — falling back to pinned`);
         }
-      } catch { /* non-fatal */ }
+      } catch (e) {
+        log('error', `  Opportunities fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      // Always prepend pinned instruments (user-chosen, always scanned)
+      const pinnedAsMarkets: WatchlistMarket[] = pinnedInstruments
+        .filter(p => p.igEpic)
+        .map(p => ({ epic: p.igEpic!, name: p.symbol.replace(/^[^:]+:/, ''), enabled: true, marketType: 'STOCK' as const }));
+      const pinnedEpics = new Set(pinnedAsMarkets.map(m => m.epic));
+      markets = [...pinnedAsMarkets, ...markets.filter(m => !pinnedEpics.has(m.epic))];
+
+      if (markets.length === 0) {
+        log('info', '  No markets to scan this cycle.');
+      }
+    } else {
+      // SPREADBET: watchlist-based (unchanged)
+      const baseWatchlist = strat.watchlist?.length ? strat.watchlist : defaultWatchlist;
+      markets = baseWatchlist.filter(m => m.enabled);
     }
 
     const funds = await fetchIGFunds();
     if (funds) log('info', `💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
-    log('info', `📡 Scanning ${markets.length} markets (${pinnedAsMarkets.length} pinned)…`);
+    log('info', `📡 Scanning ${markets.length} markets…`);
 
     // ── Step 3: Scan each market with sector rotation tracking ─────────────
     const sectorBull: Record<string, number> = {};
@@ -1454,15 +1452,13 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       const market = markets[i];
       setScanProgress(`${market.name} (${i + 1}/${markets.length})`);
 
-      // Sector rotation: boost confidence if ≥2 signals in this sector already
       const sector = getSector(market.epic);
-      const sBull = sectorBull[sector] ?? 0;
-      const sBear = sectorBear[sector] ?? 0;
-      // 2+ same-direction signals in sector → confirm sector trend → +5
-      scanParamsRef.current.sectorAdjust = sBull >= 2 ? 5 : sBear >= 2 ? 5 : 0;
+      scanParamsRef.current.sectorAdjust =
+        (sectorBull[sector] ?? 0) >= 2 ? 5 :
+        (sectorBear[sector] ?? 0) >= 2 ? 5 : 0;
 
       const sig = await scanMarket(strat, market);
-      recentlyScannedRef.current.add(market.name); // track for discovery dedup
+      recentlyScannedRef.current.add(market.name);
       scanned++;
       if (sig && sig.direction !== 'HOLD') {
         signalsFound++;
@@ -2119,9 +2115,31 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
 
             {/* Watchlist */}
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs text-gray-400">Markets to scan</label>
-                <span className="text-[10px] text-gray-600">{bWatchlist.filter(m=>m.enabled).length} enabled</span>
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center gap-2">
+                  {/* Header toggle-all checkbox */}
+                  <button
+                    onClick={() => {
+                      const allOn = bWatchlist.every(m => m.enabled);
+                      setBWatchlist(p => p.map(x => ({ ...x, enabled: !allOn })));
+                    }}
+                    className={clsx('w-4 h-4 rounded flex items-center justify-center flex-shrink-0 transition-all',
+                      bWatchlist.length > 0 && bWatchlist.every(m => m.enabled) ? 'bg-orange-500' :
+                      bWatchlist.some(m => m.enabled) ? 'bg-orange-500/50' : 'bg-gray-700 border border-gray-600'
+                    )}
+                    title="Toggle all">
+                    {bWatchlist.some(m => m.enabled) && <span className="text-white text-[8px] font-bold">✓</span>}
+                  </button>
+                  <label className="text-xs text-gray-400">Markets to scan</label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setBWatchlist(p => p.map(x => ({ ...x, enabled: true })))}
+                    className="text-[10px] text-orange-400 hover:text-orange-300 transition-colors">Select all</button>
+                  <span className="text-gray-700">·</span>
+                  <button onClick={() => setBWatchlist(p => p.map(x => ({ ...x, enabled: false })))}
+                    className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">Deselect all</button>
+                  <span className="text-[10px] text-gray-600 ml-1">{bWatchlist.filter(m=>m.enabled).length}/{bWatchlist.length} enabled</span>
+                </div>
               </div>
               <div className="space-y-1 max-h-56 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800/50">
                 {bWatchlist.map((m, i) => (
