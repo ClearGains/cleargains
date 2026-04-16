@@ -9,7 +9,7 @@ const INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Headless component — mounts once in the layout tree.
- * When auto-save is enabled it uploads the full backup to npoint.io every 10 minutes.
+ * When auto-save is enabled it uploads the full backup to Vercel Blob every 10 minutes.
  */
 export function AutoSaveService() {
   const { autoSaveEnabled, setSyncStatus, setSyncLastSaved } = useClearGainsStore();
@@ -28,7 +28,7 @@ export function AutoSaveService() {
       setSyncStatus('saving');
       try {
         const backup = exportData();
-        const res = await fetch('/api/sync/upload', {
+        const res = await fetch('/api/sync/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ backup, accountId }),

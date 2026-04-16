@@ -186,7 +186,7 @@ export default function SettingsPage() {
     setSyncStatus('saving');
     try {
       const backup = exportData();
-      const res = await fetch('/api/sync/upload', {
+      const res = await fetch('/api/sync/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ backup, accountId: accountId ?? undefined }),
@@ -225,7 +225,7 @@ export default function SettingsPage() {
     setCloudLoadLoading(true);
     setCloudMsg(null);
     try {
-      const res = await fetch('/api/sync/download?url=' + encodeURIComponent(url));
+      const res = await fetch('/api/sync/load?url=' + encodeURIComponent(url));
       const data = await res.json() as { ok: boolean; backup?: BackupFile; error?: string };
       if (data.ok && data.backup) {
         setImportPreview(data.backup);
@@ -246,7 +246,7 @@ export default function SettingsPage() {
     if (!accountId) return;
     setCloudLoadLoading(true);
     try {
-      const res = await fetch('/api/sync/download?accountId=' + accountId);
+      const res = await fetch('/api/sync/load?accountId=' + accountId);
       const data = await res.json() as { ok: boolean; backup?: BackupFile; error?: string };
       if (data.ok && data.backup) {
         setImportPreview(data.backup);
@@ -255,7 +255,7 @@ export default function SettingsPage() {
         setShowWelcomeBanner(false);
       } else if (syncUrl) {
         // Fall back to stored URL
-        const res2 = await fetch('/api/sync/download?url=' + encodeURIComponent(syncUrl));
+        const res2 = await fetch('/api/sync/load?url=' + encodeURIComponent(syncUrl));
         const data2 = await res2.json() as { ok: boolean; backup?: BackupFile; error?: string };
         if (data2.ok && data2.backup) {
           setImportPreview(data2.backup);
@@ -505,10 +505,12 @@ export default function SettingsPage() {
         />
 
         {/* Concept explanation */}
-        <div className="mb-4 px-3 py-3 bg-gray-800/50 border border-gray-700 rounded-lg">
+        <div className="mb-4 px-3 py-3 bg-gray-800/50 border border-gray-700 rounded-lg space-y-1.5">
           <p className="text-xs text-gray-300 leading-relaxed">
-            Your strategies are saved to your <span className="text-white font-medium">Account ID</span> — a unique code generated from your API key.
-            Enter the same API key on any device to instantly load all your strategies and portfolios.
+            Save your strategies to cloud using the button below. You will get a <span className="text-white font-medium">sync URL</span>. On any other device, paste this URL to instantly load all your strategies.
+          </p>
+          <p className="text-xs text-gray-500 leading-relaxed">
+            Your API credentials are never included — you will need to reconnect accounts on each device. Backups are stored on Vercel (the same infrastructure this app runs on).
           </p>
         </div>
 
@@ -634,7 +636,7 @@ export default function SettingsPage() {
               type="text"
               value={cloudLoadInput}
               onChange={e => setCloudLoadInput(e.target.value)}
-              placeholder="https://api.npoint.io/…"
+              placeholder="Paste your sync URL here…"
               className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500"
             />
             <Button

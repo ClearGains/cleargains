@@ -42,7 +42,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
     setRestoreLoading(true);
     setRestoreMsg(null);
     try {
-      const res = await fetch('/api/sync/download?url=' + encodeURIComponent(url));
+      const res = await fetch('/api/sync/load?url=' + encodeURIComponent(url));
       const data = await res.json() as { ok: boolean; backup?: BackupFile; error?: string };
       if (data.ok && data.backup) {
         importData(data.backup, 'replace');
@@ -62,7 +62,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
     setRestoreLoading(true);
     setRestoreMsg(null);
     try {
-      const res = await fetch('/api/sync/download?accountId=' + accountId);
+      const res = await fetch('/api/sync/load?accountId=' + accountId);
       const data = await res.json() as { ok: boolean; backup?: BackupFile; error?: string };
       if (data.ok && data.backup) {
         importData(data.backup, 'replace');
@@ -414,7 +414,7 @@ export function ConnectModal({ onClose, onConnected }: ConnectModalProps) {
                   type="text"
                   value={restoreUrl}
                   onChange={e => setRestoreUrl(e.target.value)}
-                  placeholder="https://api.npoint.io/…"
+                  placeholder="Paste your sync URL here…"
                   className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
                 />
                 <div className="flex gap-2">

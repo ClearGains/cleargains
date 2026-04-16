@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
+    "@vercel/blob": "^2.3.3",
     "axios": "^1.14.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
