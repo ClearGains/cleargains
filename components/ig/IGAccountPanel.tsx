@@ -131,6 +131,14 @@ function calcRiskBasedSize(
   return Math.max(0.1, Math.round(size * 10) / 10);
 }
 
+/** CFD position size in units, based on instrument price tier. */
+function calcCfdUnits(price: number, mType?: MarketType): number {
+  if (mType === 'INDEX' || mType === 'COMMODITY' || mType === 'FOREX') return 1;
+  if (price <= 50)  return 5;
+  if (price <= 200) return 2;
+  return 1;
+}
+
 function calibrateSignal(
   changePercent: number,
   rawSignal: 'BUY'|'SELL'|'NEUTRAL',
@@ -1431,21 +1439,28 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   async function placeOrder(
     epic: string, direction: 'BUY'|'SELL', size: number,
     stopDist?: number, limitDist?: number,
+    stopLevel?: number, limitLevel?: number,
   ): Promise<OrderResult> {
     for (let i = 0; i < 150 && tradeLockRef.current; i++) await sleep(100);
     tradeLockRef.current = true;
-    try { return await _placeOrderInner(epic, direction, size, stopDist, limitDist); }
+    try { return await _placeOrderInner(epic, direction, size, stopDist, limitDist, stopLevel, limitLevel); }
     finally { await sleep(500); tradeLockRef.current = false; }
   }
 
   async function _placeOrderInner(
     epic: string, direction: 'BUY'|'SELL', size: number,
     stopDist?: number, limitDist?: number,
+    stopLevel?: number, limitLevel?: number,
   ): Promise<OrderResult> {
     let sess = await freshSession();
     if (!sess) return { ok:false, error:`No ${env} session`, epic };
 
-    const orderBody = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist };
+    // CFD uses absolute price levels; spread-bet uses point distances
+    const orderBody: Record<string, unknown> = { epic, direction, size };
+    if (stopLevel  !== undefined) orderBody.stopLevel    = stopLevel;
+    if (limitLevel !== undefined) orderBody.limitLevel   = limitLevel;
+    if (stopDist   !== undefined) orderBody.stopDistance  = stopDist;
+    if (limitDist  !== undefined) orderBody.profitDistance = limitDist;
     let activeSess: IGSession = sess;
     let r = await igQueue.enqueue(() => fetch('/api/ig/order', {
       method:'POST',
@@ -1522,6 +1537,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     direction: 'BUY'|'SELL'|'HOLD';
     strength: number;
     atrHighVolatility?: boolean; // Part 2: ATR > 2% → halve position size
+    currentPrice?: number;       // current market price for level-based CFD SL/TP
+    atr14?: number;              // raw ATR(14) for computing price levels
   };
 
   // ── Phase 1: Fetch indicators + compute signal — NO trade placement ────────
@@ -1665,7 +1682,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       log('info', `${market.name} → HOLD (no clear direction)`);
 
     if (direction === 'HOLD' || strength < effectiveMinStrength) return null;
-    return { market, sig, resolvedEpic, stopDist, limitDist, scanChange, direction, strength, atrHighVolatility };
+    return { market, sig, resolvedEpic, stopDist, limitDist, scanChange, direction, strength, atrHighVolatility,
+             currentPrice: ind?.price, atr14: ind?.atr14 };
   }
 
   // ── Phase 2: Execute one trade for a pre-computed signal (sequential) ─────
@@ -1837,12 +1855,54 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       }
     }
 
-    const sizeLabel = accountType === 'CFD' ? `${orderSize} unit(s)` : `£${orderSize}/pt`;
-    log(tradeDir === 'BUY' ? 'buy' : 'sell',
-      `${acctTag} → ${tradeDir} ${market.name} | ${actualEpic} | ${sizeLabel} | SL ${stopDist}pt TP ${limitDist}pt | ${strength}% confidence`);
-    log('info', `${acctTag} Order payload: { epic:"${actualEpic}", dir:"${tradeDir}", size:${orderSize}, stop:${stopDist}, limit:${limitDist} }`);
+    // ── CFD: fetch live price and compute absolute SL/TP price levels ─────────
+    let finalSize   = orderSize;
+    let cfdStopLvl: number | undefined;
+    let cfdLimitLvl: number | undefined;
 
-    const or = await placeOrder(actualEpic, tradeDir, orderSize, stopDist, limitDist);
+    if (accountType === 'CFD') {
+      // 1. Get current price: use stored price, or fetch live bid/offer from IG
+      let currentPx = data.currentPrice ?? 0;
+      if (!currentPx && sessionRef.current) {
+        try {
+          const mktR = await fetch(`/api/ig/markets/${encodeURIComponent(actualEpic)}`, {
+            headers: makeHeaders(sessionRef.current, env),
+          });
+          const mktD = await mktR.json() as { ok: boolean; snapshot?: { bid?: number; offer?: number } };
+          if (mktD.ok && mktD.snapshot) {
+            currentPx = tradeDir === 'BUY'
+              ? (mktD.snapshot.offer ?? mktD.snapshot.bid ?? 0)
+              : (mktD.snapshot.bid  ?? mktD.snapshot.offer ?? 0);
+          }
+        } catch { /* use fallback */ }
+      }
+      log('info', `${acctTag} Current price: ${currentPx > 0 ? currentPx.toFixed(4) : 'unknown'}`);
+
+      // 2. ATR-based stop/limit as absolute price levels
+      const atr = data.atr14 ?? (stopDist / 1.5);  // derive ATR from distance if not stored
+      if (currentPx > 0 && atr > 0) {
+        const sl = tradeDir === 'BUY' ? currentPx - atr * 1.5 : currentPx + atr * 1.5;
+        const tp = tradeDir === 'BUY' ? currentPx + atr * 3.0 : currentPx - atr * 3.0;
+        cfdStopLvl  = Math.round(sl * 100) / 100;
+        cfdLimitLvl = Math.round(tp * 100) / 100;
+        log('info', `${acctTag} SL/TP levels: stop=${cfdStopLvl} limit=${cfdLimitLvl} (ATR=${atr.toFixed(4)})`);
+      }
+
+      // 3. Unit-based sizing
+      finalSize = calcCfdUnits(currentPx > 0 ? currentPx : 100, data.market.marketType);
+    }
+
+    const sizeLabel = accountType === 'CFD' ? `${finalSize} unit(s)` : `£${orderSize}/pt`;
+    const slTpLabel = accountType === 'CFD' && cfdStopLvl !== undefined
+      ? `SL @ ${cfdStopLvl} TP @ ${cfdLimitLvl}`
+      : `SL ${stopDist}pt TP ${limitDist}pt`;
+    log(tradeDir === 'BUY' ? 'buy' : 'sell',
+      `${acctTag} → ${tradeDir} ${market.name} | ${actualEpic} | ${sizeLabel} | ${slTpLabel} | ${strength}% confidence`);
+    log('info', `${acctTag} Order payload: { epic:"${actualEpic}", dir:"${tradeDir}", size:${finalSize}${accountType==='CFD' ? `, stopLevel:${cfdStopLvl ?? 'n/a'}, limitLevel:${cfdLimitLvl ?? 'n/a'}` : `, stopDist:${stopDist}, limitDist:${limitDist}`} }`);
+
+    const or = accountType === 'CFD'
+      ? await placeOrder(actualEpic, tradeDir, finalSize, undefined, undefined, cfdStopLvl, cfdLimitLvl)
+      : await placeOrder(actualEpic, tradeDir, orderSize, stopDist, limitDist);
     log('info', `${acctTag} IG response: ok=${or.ok} status=${or.dealStatus ?? '-'} reason=${or.reason ?? '-'} ref=${or.dealReference ?? '-'}`);
 
     if (or.ok) {
@@ -1852,7 +1912,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       showToast(true, `[${accountType}] ${tradeDir} ${market.name}`);
       setTradeHistory(prev => recordTradeOpen(prev, {
         portfolioName:strat.name, market:market.name, epic:resolvedEpic,
-        direction:tradeDir, size:orderSize, entryLevel:or.level ?? 0,
+        direction:tradeDir, size:finalSize, entryLevel:or.level ?? 0,
         exitLevel:null, openedAt:new Date().toISOString(), closedAt:null,
         status:'OPEN', dealReference:or.dealReference ?? '', dealId:or.dealId ?? '',
         pnl:null, closeReason:null, accountType:env,
@@ -1880,7 +1940,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       if (or.igBody)      log('error', `  ig: ${JSON.stringify(or.igBody)}`);
       setTradeHistory(prev => recordTradeOpen(prev, {
         portfolioName:strat.name, market:market.name, epic:market.epic,
-        direction:tradeDir, size:orderSize, entryLevel:0,
+        direction:tradeDir, size:finalSize, entryLevel:0,
         exitLevel:null, openedAt:new Date().toISOString(), closedAt:new Date().toISOString(),
         status:'REJECTED', dealReference:'', dealId:'',
         pnl:null, closeReason:null, accountType:env,

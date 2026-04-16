@@ -80,10 +80,10 @@ export async function POST(request: NextRequest) {
       orderType?: 'MARKET' | 'LIMIT' | 'STOP';
       level?: number;          // required for LIMIT/STOP working orders
       guaranteedStop?: boolean;
-      stopDistance?: number;   // points below/above entry for auto stop-loss
-      profitDistance?: number; // points above/below entry for auto take-profit
-      stopLevel?: number;      // absolute stop level (alternative to stopDistance)
-      limitLevel?: number;     // absolute limit level (alternative to profitDistance)
+      stopDistance?: number;   // spread-bet style: points below/above entry
+      profitDistance?: number; // spread-bet style: points above/below entry
+      stopLevel?: number;      // CFD style: absolute stop price level
+      limitLevel?: number;     // CFD style: absolute limit price level
       currencyCode?: string;
       forceOpen?: boolean;
       timeInForce?: 'GOOD_TILL_CANCELLED' | 'GOOD_TILL_DATE';
@@ -208,16 +208,25 @@ export async function POST(request: NextRequest) {
 
     // ── Apply SL/TP via separate PUT after deal is confirmed ACCEPTED ─────────
     // (Including these in the initial order causes rejections on some accounts)
+    // CFD: use absolute price levels directly. Spread-bet: convert point distances to levels.
     let slTpResult: { ok: boolean; error?: string } = { ok: true };
-    if (confirm.dealId && confirm.level && (body.stopDistance || body.profitDistance)) {
-      const fillPrice = confirm.level;
+    const hasSl = body.stopLevel  !== undefined || body.stopDistance  !== undefined;
+    const hasTp = body.limitLevel !== undefined || body.profitDistance !== undefined;
+    if (confirm.dealId && (hasSl || hasTp)) {
+      const fillPrice = confirm.level ?? 0;
       const slTpPayload: Record<string, unknown> = { trailingStop: false };
-      if (body.stopDistance) {
+      // Stop loss — prefer absolute level; fall back to distance conversion
+      if (body.stopLevel !== undefined) {
+        slTpPayload.stopLevel = body.stopLevel;
+      } else if (body.stopDistance && fillPrice) {
         slTpPayload.stopLevel = Math.round(
           (body.direction === 'BUY' ? fillPrice - body.stopDistance : fillPrice + body.stopDistance) * 100,
         ) / 100;
       }
-      if (body.profitDistance) {
+      // Take profit — prefer absolute level; fall back to distance conversion
+      if (body.limitLevel !== undefined) {
+        slTpPayload.limitLevel = body.limitLevel;
+      } else if (body.profitDistance && fillPrice) {
         slTpPayload.limitLevel = Math.round(
           (body.direction === 'BUY' ? fillPrice + body.profitDistance : fillPrice - body.profitDistance) * 100,
         ) / 100;
