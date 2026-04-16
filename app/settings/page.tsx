@@ -156,6 +156,7 @@ export default function SettingsPage() {
         setT212Credentials(cleanKey, cleanSecret);
         setT212AccountInfo({ id: data.accountId, currency: data.currency });
         setT212Connected(true);
+        localStorage.setItem('t212_invest_credentials', JSON.stringify({ key: cleanKey, secret: cleanSecret }));
         setResult({ ok: true, message: `Connected — account ${data.accountId} (${data.currency})` });
         const fp = await generateAccountId(cleanKey);
         setStoredAccountId(fp);
@@ -174,6 +175,7 @@ export default function SettingsPage() {
 
   function handleDisconnect() {
     clearT212Credentials();
+    localStorage.removeItem('t212_invest_credentials');
     setApiKey('');
     setApiSecret('');
     setResult(null);

@@ -7,8 +7,14 @@ import { NextRequest, NextResponse } from 'next/server';
  * Fetches T212 positions + cash + account summary in one shot.
  */
 export async function POST(request: NextRequest) {
-  const body = await request.json() as { encoded?: string; env?: string };
-  const { encoded, env = 'live' } = body;
+  const body = await request.json() as { encoded?: string; key?: string; secret?: string; env?: string };
+  const { env = 'live' } = body;
+
+  // Accept either pre-encoded Basic auth or raw key+secret
+  let encoded = body.encoded;
+  if (!encoded && body.key && body.secret) {
+    encoded = Buffer.from(`${body.key}:${body.secret}`).toString('base64');
+  }
 
   if (!encoded) {
     return NextResponse.json({ ok: false, error: 'Missing credentials' }, { status: 400 });

@@ -89,6 +89,7 @@ function InvestAccountCard() {
         setT212Credentials(cleanKey, cleanSecret);
         setT212AccountInfo({ id: data.accountId, currency: data.currency });
         setT212Connected(true);
+        localStorage.setItem('t212_invest_credentials', JSON.stringify({ key: cleanKey, secret: cleanSecret }));
         setKey(''); setSecret('');
         // Register account-link server-side (sets signed HTTP-only cookie)
         const linkRes = await fetch('/api/auth/account-link', {
@@ -111,6 +112,7 @@ function InvestAccountCard() {
   async function handleDisconnect() {
     clearT212Credentials();
     clearLinkedAccountId('live');
+    localStorage.removeItem('t212_invest_credentials');
     await fetch('/api/auth/account-link', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
@@ -211,6 +213,7 @@ function IsaAccountCard() {
         setT212IsaCredentials(cleanKey, cleanSecret);
         setT212IsaAccountInfo({ id: data.accountId, currency: data.currency });
         setT212IsaConnected(true);
+        localStorage.setItem('t212_isa_credentials', JSON.stringify({ key: cleanKey, secret: cleanSecret }));
         setKey(''); setSecret('');
         // Register account-link server-side
         const linkRes = await fetch('/api/auth/account-link', {
@@ -233,6 +236,7 @@ function IsaAccountCard() {
   async function handleDisconnect() {
     clearT212IsaCredentials();
     clearLinkedAccountId('isa');
+    localStorage.removeItem('t212_isa_credentials');
     await fetch('/api/auth/account-link', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
@@ -366,6 +370,7 @@ function PracticeAccountCard() {
         setT212DemoCredentials(cleanKey, cleanSecret);
         setT212DemoAccountInfo({ id: data.accountId, currency: data.currency });
         setT212DemoConnected(true);
+        localStorage.setItem('t212_demo_credentials', JSON.stringify({ key: cleanKey, secret: cleanSecret }));
         setKey(''); setSecret('');
         // Register account-link server-side (signs an HTTP-only cookie granting
         // this session permission to execute demo trades on this account)
@@ -389,6 +394,7 @@ function PracticeAccountCard() {
   async function handleDisconnect() {
     clearT212DemoCredentials();
     clearLinkedAccountId('demo');
+    localStorage.removeItem('t212_demo_credentials');
     await fetch('/api/auth/account-link', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
