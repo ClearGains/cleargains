@@ -14,20 +14,27 @@ const TOKEN_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours (IG tokens last 6h; refresh 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json() as {
-      username: string;
-      password: string;
-      apiKey: string;
-      env: 'demo' | 'live';
-      targetAccountId?: string;  // switch to this sub-account after login
+      username?: string;
+      password?: string;
+      apiKey?: string;
+      env?: 'demo' | 'live';
+      targetAccountId?: string;   // switch to this sub-account after login
+      useEnvCredentials?: boolean; // use IG_* env vars instead of body credentials
     };
-    const { password, apiKey, env } = body;
     const forceRefresh = (body as { forceRefresh?: boolean }).forceRefresh === true;
     const targetAccountId = body.targetAccountId ?? null;
-    // Sanitise — IG rejects identifiers that contain spaces or @ symbols
-    const username = (body.username ?? '').trim().replace(/\s+/g, '');
+
+    // Resolve credentials: body fields take priority; fall back to server env vars.
+    // This lets the client auto-connect without storing credentials in localStorage.
+    const username = ((body.username ?? '').trim().replace(/\s+/g, ''))
+      || (process.env.IG_USERNAME ?? '');
+    const password = body.password || (process.env.IG_PASSWORD ?? '');
+    const apiKey   = body.apiKey   || (process.env.IG_API_KEY  ?? '');
+    const env: 'demo' | 'live' = body.env
+      ?? (process.env.IG_DEMO === 'true' ? 'demo' : 'live');
 
     if (!username || !password || !apiKey) {
-      return NextResponse.json({ ok: false, error: 'username, password, and apiKey are required' }, { status: 400 });
+      return NextResponse.json({ ok: false, error: 'username, password, and apiKey are required (provide in body or set IG_USERNAME / IG_PASSWORD / IG_API_KEY env vars)' }, { status: 400 });
     }
 
     const baseUrl = env === 'demo'

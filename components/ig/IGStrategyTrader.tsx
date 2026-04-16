@@ -16,6 +16,14 @@ import {
   loadStrategies, saveStrategy, deleteStrategy,
   TIMEFRAME_CONFIG, DEFAULT_WATCHLIST, CFD_WATCHLIST, getMarketType,
 } from '@/lib/igStrategyEngine';
+import {
+  IG_ACCOUNT_CFD, IG_ACCOUNT_SPREADBET,
+  type AccountType,
+  accountLabel, accountTypeOf,
+  EPIC_TABLE, epicForAccount, toCfdEpic, toSpreadbetEpic,
+  getStopDistances, MIN_STRENGTH,
+} from '@/lib/igConfig';
+import { igQueue } from '@/lib/igApiQueue';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -108,9 +116,6 @@ async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSe
   const sessKey = `ig_session_${env}`;
   try {
     const raw = localStorage.getItem(credKey);
-    if (!raw) return null;
-    const c = JSON.parse(raw) as { username:string; password:string; apiKey:string; connected?:boolean };
-    if (!c.connected) return null;
 
     // Return cached session if still fresh (< 5 hours old)
     if (!forceRefresh) {
@@ -123,13 +128,26 @@ async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSe
       }
     }
 
-    // Fresh auth — pass forceRefresh so the server also bypasses its in-memory cache
-    const r = await fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ username:c.username, password:c.password, apiKey:c.apiKey, env, forceRefresh }) });
-    const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string };
+    // Build auth body: use stored credentials if available, otherwise let the
+    // server fall back to its IG_USERNAME / IG_PASSWORD / IG_API_KEY env vars.
+    let authBody: Record<string, unknown>;
+    if (raw) {
+      const c = JSON.parse(raw) as { username:string; password:string; apiKey:string; connected?:boolean };
+      if (!c.connected) return null;
+      authBody = { username: c.username, password: c.password, apiKey: c.apiKey, env, forceRefresh };
+    } else {
+      // No stored credentials — use server env vars (IG_USERNAME / IG_PASSWORD / IG_API_KEY)
+      authBody = { env, forceRefresh, useEnvCredentials: true };
+    }
+
+    const r = await igQueue.enqueue(() =>
+      fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(authBody) }),
+    );
+    const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string; accounts?: unknown[] };
     if (d.ok && d.cst && d.securityToken) {
-      const sess: IGSession = { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId??'', apiKey:c.apiKey };
-      // Cache the fresh session
+      const apiKey = raw ? (JSON.parse(raw) as { apiKey: string }).apiKey : '';
+      const sess: IGSession = { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId??'', apiKey };
       localStorage.setItem(sessKey, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
       return sess;
     }
@@ -441,6 +459,10 @@ export function IGStrategyTrader() {
   // ── Log ────────────────────────────────────────────────────────────────────
   const [runLog, setRunLog] = useState<RunLog[]>([]);
 
+  // ── API call counter (igQueue telemetry) ────────────────────────────────────
+  const [apiCallCount, setApiCallCount]     = useState(0);
+  const [rateLimitPause, setRateLimitPause] = useState(0);
+
   // ── Toast ──────────────────────────────────────────────────────────────────
   const [toast, setToast] = useState<{ok:boolean;msg:string}|null>(null);
   function showToast(ok:boolean, msg:string) { setToast({ok,msg}); setTimeout(() => setToast(null), 4000); }
@@ -448,13 +470,11 @@ export function IGStrategyTrader() {
     setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0,200));
   }
 
-  /** Returns [SB] / [CFD] / [SHARES] label for log messages based on current active account type. */
+  /** "[CFD | Z6AFSH]" or "[SPREADBET | Z6AFSI]" for activity log prefixes. */
   function acctTypeLabel(env: 'demo'|'live'): string {
-    const t = sessionsRef.current[env]?.accountType;
-    if (!t) return '';
-    if (t === 'SPREADBET') return ' [SB]';
-    if (t === 'CFD')       return ' [CFD]';
-    return ` [${t}]`;
+    const id = sessionsRef.current[env]?.accountId;
+    if (!id) return '';
+    return ` [${accountLabel(id)}]`;
   }
 
   /** Atomically write a fresh session to ref + React state + localStorage. */
@@ -515,6 +535,20 @@ export function IGStrategyTrader() {
     if (savedMode === 'demo') setActiveModeState('demo');
   }, []);
 
+  // ── igQueue telemetry — update API call counter every second ──────────────
+  useEffect(() => {
+    const unsub = igQueue.subscribe?.(() => {
+      setApiCallCount(igQueue.recentCalls ?? 0);
+      setRateLimitPause(igQueue.pauseRemaining ?? 0);
+    });
+    // Also tick every second so the pause countdown stays live
+    const ticker = setInterval(() => {
+      setApiCallCount(igQueue.recentCalls ?? 0);
+      setRateLimitPause(igQueue.pauseRemaining ?? 0);
+    }, 1_000);
+    return () => { unsub?.(); clearInterval(ticker); };
+  }, []);
+
   // ── Countdown ticker ───────────────────────────────────────────────────────
   useEffect(() => {
     const t = setInterval(() => {
@@ -550,11 +584,11 @@ export function IGStrategyTrader() {
 
     async function doSwitch(sess: IGSession): Promise<{ ok: boolean; sess: IGSession; error?: string }> {
       try {
-        const swRes = await fetch('/api/ig/switch-account', {
+        const swRes = await igQueue.enqueue(() => fetch('/api/ig/switch-account', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cst: sess.cst, securityToken: sess.securityToken, apiKey, env, accountId }),
-        });
+        }));
         const swData = await swRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; error?: string };
         if (swData.ok && swData.cst && swData.securityToken) {
           const switched: IGSession = {
@@ -633,8 +667,9 @@ export function IGStrategyTrader() {
       // Positions are tagged with the current session's accountId/accountType so
       // closePos() knows which account to switch to when closing.
       try {
-        let r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
-        // 403 = rate limited — don't retry, don't re-auth
+        const sessCurrent = sess;
+        let r = await igQueue.enqueue(() => fetch('/api/ig/positions', { headers: makeHeaders(sessCurrent, env) }));
+        // 403 = rate limited — igQueue already pauses 60s; just skip display
         if (r.status === 403) {
           setPosError(`[${env.toUpperCase()}] Rate limited by IG — will retry next cycle`);
           continue;
@@ -644,21 +679,18 @@ export function IGStrategyTrader() {
         if (r.status === 401) {
           const lastReauth = lastReauthRef.current[env] ?? 0;
           if (Date.now() - lastReauth < 30_000) {
-            // Cooldown active — skip silently, will retry next 60s cycle
             continue;
           }
           lastReauthRef.current[env] = Date.now();
           localStorage.removeItem(`ig_session_${env}`);
           const fresh = await connectIG(env, true);
           if (!fresh) {
-            // Re-auth failed — show error and stop until next cycle
             setPosError(`[${env.toUpperCase()}] Session expired — reconnect in Settings → Accounts`);
             continue;
           }
           storeSession(env, fresh);
           sess = fresh;
-          // Retry with fresh tokens
-          r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+          r = await igQueue.enqueue(() => fetch('/api/ig/positions', { headers: makeHeaders(sess!, env) }));
         }
         const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
         if (d.ok) {
@@ -699,7 +731,7 @@ export function IGStrategyTrader() {
       const sess = sessions[env];
       if (!sess) continue;
       try {
-        const r = await fetch('/api/ig/workingorders', { headers: makeHeaders(sess, env) });
+        const r = await igQueue.enqueue(() => fetch('/api/ig/workingorders', { headers: makeHeaders(sess, env) }));
         const d = await r.json() as { ok:boolean; workingOrders?: IGWorkingOrder[] };
         if (d.ok) setWorkingOrders(p => ({...p, [env]: d.workingOrders ?? []}));
       } catch {}
@@ -710,11 +742,11 @@ export function IGStrategyTrader() {
   async function updatePositionSL(env: 'demo'|'live', pos: IGPosition, stopLevel: number|null, limitLevel: number|null) {
     const sess = sessions[env];
     if (!sess) return { ok: false, error: `No ${env} session` };
-    const r = await fetch('/api/ig/order', {
+    const r = await igQueue.enqueue(() => fetch('/api/ig/order', {
       method: 'PATCH',
       headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
       body: JSON.stringify({ dealId: pos.dealId, stopLevel, limitLevel }),
-    });
+    }));
     return r.json() as Promise<{ok:boolean;error?:string}>;
   }
 
@@ -724,11 +756,11 @@ export function IGStrategyTrader() {
     const sess = sessions[env];
     if (!sess) { setCancellingOrder(null); return; }
     try {
-      const r = await fetch('/api/ig/workingorders', {
+      const r = await igQueue.enqueue(() => fetch('/api/ig/workingorders', {
         method: 'DELETE',
         headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
         body: JSON.stringify({ dealId }),
-      });
+      }));
       const d = await r.json() as { ok:boolean; error?:string };
       if (d.ok) {
         log('info', `[${env.toUpperCase()}] Working order ${dealId} cancelled`);
@@ -847,12 +879,15 @@ export function IGStrategyTrader() {
     }
 
     // ── 3. Place order ────────────────────────────────────────────────────────
-    const orderBody = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist, currencyCode: 'GBP' };
-    let r = await fetch('/api/ig/order', {
+    // currencyCode is omitted here — order/route.ts adds it only for SB epics.
+    const orderBody = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist };
+    // Use non-null assertion: sess is guaranteed non-null here (checked on line 868 + any switch)
+    let activeSess: IGSession = sess;
+    let r = await igQueue.enqueue(() => fetch('/api/ig/order', {
       method: 'POST',
-      headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
+      headers: { ...makeHeaders(activeSess, env), 'Content-Type': 'application/json' },
       body: JSON.stringify(orderBody),
-    });
+    }));
 
     // ── 4. Error detection ────────────────────────────────────────────────────
     // 401 / account-token-invalid → genuine auth expiry → re-auth + retry
@@ -892,11 +927,12 @@ export function IGStrategyTrader() {
       }
 
       // Retry the order once with fresh tokens
-      r = await fetch('/api/ig/order', {
+      activeSess = sess;
+      r = await igQueue.enqueue(() => fetch('/api/ig/order', {
         method: 'POST',
-        headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
+        headers: { ...makeHeaders(activeSess, env), 'Content-Type': 'application/json' },
         body: JSON.stringify(orderBody),
-      });
+      }));
       const retryText = await r.text();
       let retryResult: OrderResult;
       try { retryResult = JSON.parse(retryText) as OrderResult; } catch { return { ok: false, error: retryText.slice(0, 200), epic }; }
@@ -930,11 +966,11 @@ export function IGStrategyTrader() {
 
     const closeBody = { dealId: pos.dealId, direction: pos.direction === 'BUY' ? 'SELL' : 'BUY', size: pos.size };
 
-    const doClose = (s: IGSession) => fetch('/api/ig/order', {
+    const doClose = (s: IGSession) => igQueue.enqueue(() => fetch('/api/ig/order', {
       method: 'DELETE',
       headers: { ...makeHeaders(s, env), 'Content-Type': 'application/json' },
       body: JSON.stringify(closeBody),
-    });
+    }));
 
     let r = await doClose(sess);
 
@@ -970,7 +1006,7 @@ export function IGStrategyTrader() {
     const sess = sessions[env];
     if (!sess) return null;
     try {
-      const r = await fetch('/api/ig/account', { headers: makeHeaders(sess, env) });
+      const r = await igQueue.enqueue(() => fetch('/api/ig/account', { headers: makeHeaders(sess, env) }));
       const d = await r.json() as { ok: boolean; available?: number; balance?: number };
       if (d.ok) {
         const funds = { available: d.available ?? 0, balance: d.balance ?? 0 };
@@ -1006,9 +1042,11 @@ export function IGStrategyTrader() {
       return null;
     }
 
-    // ── Calibrated signal scoring by market type ──────────────────────────────
+    // ── Calibrated signal scoring by market type + account type ──────────────
     const mType = market.marketType ?? getMarketType(market.epic);
-    const { stopDist, limitDist } = getStopLimitDist(mType);
+    // Determine account type from strategy's target account ID
+    const acctType: AccountType = strat.accountId ? accountTypeOf(strat.accountId) : 'SPREADBET';
+    const { stopDist, limitDist } = getStopDistances(mType, acctType);
     const { direction, strength } = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
     const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
 
@@ -1038,17 +1076,19 @@ export function IGStrategyTrader() {
     }));
 
     // ── Decide whether to trade ───────────────────────────────────────────────
-    // forceOpen = trade regardless of signal strength; always use snapshot direction
+    // Use the higher of: strategy's configured minStrength vs account-type floor.
+    // CFD floor = 75%, SPREADBET floor = 65%
+    const effectiveMinStrength = Math.max(strat.minStrength, MIN_STRENGTH[acctType]);
     const forceOpen = market.forceOpen === true;
     const tradeDir: 'BUY' | 'SELL' | null =
       forceOpen
         ? (direction !== 'HOLD' ? direction : snapshot.changePercent >= 0 ? 'BUY' : 'SELL')
-        : direction !== 'HOLD' && strength >= strat.minStrength ? direction
+        : direction !== 'HOLD' && strength >= effectiveMinStrength ? direction
         : null;
 
     if (!strat.autoTrade || !tradeDir) {
       if (direction !== 'HOLD' && !forceOpen)
-        log('signal', `${market.name} (${market.epic}) → ${direction} ${strength}% ${forceOpen ? '' : `(min ${strat.minStrength}% — no trade)`}`);
+        log('signal', `${market.name} (${market.epic}) → ${direction} ${strength}% ${forceOpen ? '' : `(need ${effectiveMinStrength}% [${acctType}] — no trade)`}`);
     } else {
       for (const env of envs) {
         const envPos = positions[env];
@@ -1120,20 +1160,26 @@ export function IGStrategyTrader() {
           }
         }
 
-        const maxLoss = orderSize * stopDist;
-        const acctSuffix = strat.accountId ? ` | acct ${strat.accountId}` : '';
-        log(tradeDir === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}]${acctTypeLabel(env)} → ${tradeDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${acctSuffix}${forceOpen ? ' (FORCE)' : ''}`);
+        // Resolve correct epic for this account type from central table
+        const resolvedEpic = epicForAccount(market.name, acctType) ?? market.epic;
+        if (resolvedEpic !== market.epic) {
+          log('info', `  ↳ Epic resolved: ${market.epic} → ${resolvedEpic} for [${acctType}]`);
+        }
 
-        const or = await placeOrder(env, market.epic, tradeDir, orderSize, stopDist, limitDist, strat.accountId);
+        const maxLoss = orderSize * stopDist;
+        const acctTag = strat.accountId ? ` [${accountLabel(strat.accountId)}]` : acctTypeLabel(env);
+        log(tradeDir === 'BUY' ? 'buy' : 'sell',
+          `[${env.toUpperCase()}]${acctTag} → ${tradeDir} ${market.name} | epic: ${resolvedEpic} | ${acctType === 'CFD' ? `${orderSize} unit(s)` : `£${orderSize}/pt`} | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+
+        const or = await placeOrder(env, resolvedEpic, tradeDir, orderSize, stopDist, limitDist, strat.accountId);
 
         if (or.ok) {
           log(tradeDir === 'BUY' ? 'buy' : 'sell',
-            `[${env.toUpperCase()}]${acctTypeLabel(env)} ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · filled @ ${or.level ?? '?'} · epic: ${or.epic ?? market.epic}`);
+            `[${env.toUpperCase()}]${acctTag} ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · filled @ ${or.level ?? '?'} · epic: ${or.epic ?? resolvedEpic}`);
           showToast(true, `[${env}] ${tradeDir} ${market.name}`);
           // Record open trade in history
           setTradeHistory(prev => recordTradeOpen(prev, {
-            portfolioName: strat.name, market: market.name, epic: market.epic,
+            portfolioName: strat.name, market: market.name, epic: resolvedEpic,
             direction: tradeDir, size: orderSize, entryLevel: or.level ?? 0,
             exitLevel: null, openedAt: new Date().toISOString(), closedAt: null,
             status: 'OPEN', dealReference: or.dealReference ?? '', dealId: or.dealId ?? '',
@@ -1151,8 +1197,20 @@ export function IGStrategyTrader() {
             showToast(false, `⚠️ Insufficient funds in IG ${env} — skipping`);
             continue; // skip this market, continue scanning others
           }
-          log('error', `[${env.toUpperCase()}]${acctTypeLabel(env)} ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}`);
-          log('error', `  epic: ${or.epic ?? market.epic}${or.reason ? ` | reason: ${or.reason}` : ''}`);
+          // ── Epic mismatch — show actionable explanation ────────────────────
+          if ((or.reason ?? '').toUpperCase() === 'UNKNOWN' || errStr.includes('instrument_not_found') || errStr.includes('epic')) {
+            const sbEpic = market.epic;
+            const cfdEpic = toCfdEpic(sbEpic);
+            const sbFromCfd = toSpreadbetEpic(sbEpic);
+            const hint = cfdEpic
+              ? `Epic mismatch: "${sbEpic}" is a SPREADBET epic — for CFD use "${cfdEpic}"`
+              : sbFromCfd
+              ? `Epic mismatch: "${sbEpic}" is a CFD epic — for SPREADBET use "${sbFromCfd}"`
+              : `Epic "${sbEpic}" was rejected — check it exists on your ${acctType} account`;
+            log('error', `[${env.toUpperCase()}]${acctTag} ⚠️ ${hint}`);
+          }
+          log('error', `[${env.toUpperCase()}]${acctTag} ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}`);
+          log('error', `  epic: ${or.epic ?? resolvedEpic}${or.reason ? ` | reason: ${or.reason}` : ''}`);
           if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
           if (or.igBody)      log('error', `  ig:   ${JSON.stringify(or.igBody)}`);
           // Record rejected trade
@@ -1380,11 +1438,11 @@ export function IGStrategyTrader() {
     let cst = '';
     let secToken = '';
     try {
-      const loginRes = await fetch('/api/ig/session', {
+      const loginRes = await igQueue.enqueue(() => fetch('/api/ig/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh: true }),
-      });
+      }));
       const loginData = await loginRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; spreadbetAccountId?: string; accounts?: { accountId: string; accountName: string; accountType: string }[]; error?: string };
       diag(`  ← HTTP ${loginRes.status}`);
       if (!loginData.ok || !loginData.cst) {
@@ -1446,14 +1504,14 @@ export function IGStrategyTrader() {
       sess = { cst, securityToken: secToken, accountId: '', apiKey: creds.apiKey };
     }
     try {
-      const posRes = await fetch('/api/ig/positions', {
+      const posRes = await igQueue.enqueue(() => fetch('/api/ig/positions', {
         headers: {
           'x-ig-cst':            cst,
           'x-ig-security-token': secToken,
           'x-ig-api-key':        creds.apiKey,
           'x-ig-env':            'demo',
         },
-      });
+      }));
       diag(`  ← HTTP ${posRes.status}`);
       const posData = await posRes.json() as { ok: boolean; positions?: { dealId: string; direction: string; instrumentName: string; size: number; level: number; upl: number }[]; error?: string };
       if (posData.ok) {
@@ -1479,11 +1537,11 @@ export function IGStrategyTrader() {
     try {
       const freshSess: IGSession = { cst, securityToken: secToken, accountId: accountsList[0]?.accountId ?? '', apiKey: creds.apiKey };
       setSessions(s => ({ ...s, demo: freshSess }));
-      const orderRes = await fetch('/api/ig/order', {
+      const orderRes = await igQueue.enqueue(() => fetch('/api/ig/order', {
         method: 'POST',
         headers: { ...makeHeaders(freshSess, 'demo'), 'Content-Type': 'application/json' },
         body: JSON.stringify(orderBody),
-      });
+      }));
       const orderData = await orderRes.json() as { ok: boolean; dealReference?: string; dealId?: string; dealStatus?: string; level?: number; error?: string; reason?: string; sentPayload?: unknown; igBody?: unknown };
       diag(`  ← HTTP ${orderRes.status}`);
       if (orderData.ok) {
@@ -2613,7 +2671,23 @@ export function IGStrategyTrader() {
       {runLog.length > 0 && (
         <Card>
           <CardHeader title="Activity Log" subtitle={`${runLog.length} entries`} icon={<Clock className="h-4 w-4" />}
-            action={<button onClick={() => setRunLog([])} className="text-xs text-gray-500 hover:text-white">Clear</button>}
+            action={
+              <div className="flex items-center gap-3">
+                {/* IG API rate-limit counter */}
+                <span className={clsx('text-[10px] font-mono px-1.5 py-0.5 rounded',
+                  rateLimitPause > 0
+                    ? 'bg-red-500/20 text-red-400'
+                    : apiCallCount >= 15
+                    ? 'bg-yellow-500/20 text-yellow-400'
+                    : 'bg-gray-800 text-gray-500',
+                )}>
+                  {rateLimitPause > 0
+                    ? `⛔ rate-limit ${Math.ceil(rateLimitPause / 1000)}s`
+                    : `${apiCallCount}/20 calls/min`}
+                </span>
+                <button onClick={() => setRunLog([])} className="text-xs text-gray-500 hover:text-white">Clear</button>
+              </div>
+            }
           />
           <div className="space-y-0.5 max-h-64 overflow-y-auto font-mono">
             {runLog.map(e => (

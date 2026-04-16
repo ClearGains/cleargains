@@ -1,42 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { ALL_KNOWN_EPICS, isCfdEpic } from '@/lib/igConfig';
 
-// ── Verified IG spread-bet epic map (DFB / TODAY rolling instruments only) ────
-// ⚠️  Using a CFD epic on a spread-bet account returns REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT
-const VERIFIED_EPICS: Record<string, string> = {
-  // Indices — Daily Funded Bets
-  'FTSE 100':      'IX.D.FTSE.DAILY.IP',
-  'S&P 500':       'IX.D.SPTRD.DAILY.IP',
-  'NASDAQ 100':    'IX.D.NASDAQ.DAILY.IP',
-  'Wall Street':   'IX.D.DOW.DAILY.IP',
-  'Germany 40':    'IX.D.DAX.DAILY.IP',
-  'Japan 225':     'IX.D.NIKKEI.DAILY.IP',
-  'Australia 200': 'IX.D.ASX.DAILY.IP',
-  // Forex — spread bet
-  'GBP/USD':       'CS.D.GBPUSD.TODAY.IP',
-  'EUR/USD':       'CS.D.EURUSD.TODAY.IP',
-  'USD/JPY':       'CS.D.USDJPY.TODAY.IP',
-  'EUR/GBP':       'CS.D.EURGBP.TODAY.IP',
-  'AUD/USD':       'CS.D.AUDUSD.TODAY.IP',
-  'USD/CHF':       'CS.D.USDCHF.TODAY.IP',
-  // Commodities — spread bet  (NOT the CFD CS.D.CFDGOLD / CS.D.CRUDEOIL variants)
-  'Gold':          'CS.D.GOLD.TODAY.IP',
-  'Silver':        'CS.D.SILVER.TODAY.IP',
-  'Oil (WTI)':     'CS.D.CRUDE.TODAY.IP',
-  'Natural Gas':   'CS.D.NATGAS.TODAY.IP',
-  // Crypto — spread bet
-  'Bitcoin':       'CS.D.BITCOIN.TODAY.IP',
-  'Ethereum':      'CS.D.ETHUSD.TODAY.IP',
-};
-
-const VERIFIED_EPIC_SET = new Set(Object.values(VERIFIED_EPICS));
-
-/** If the epic isn't in our verified set, search IG and return the best match. */
+/** If the epic isn't in the central table, search IG and return the best match. */
 async function resolveEpic(
   epic: string,
   apiKey: string, cst: string, securityToken: string,
   base: string,
 ): Promise<{ epic: string; resolvedVia: string }> {
-  if (VERIFIED_EPIC_SET.has(epic)) return { epic, resolvedVia: 'verified' };
+  if (ALL_KNOWN_EPICS.has(epic)) return { epic, resolvedVia: 'table' };
   // Try searching by epic string itself
   try {
     const r = await fetch(`${base}/markets?searchTerm=${encodeURIComponent(epic)}&pageSize=5`, {
@@ -129,6 +100,7 @@ export async function POST(request: NextRequest) {
       if (!body.level) {
         return NextResponse.json({ ok: false, error: 'level is required for LIMIT/STOP working orders' }, { status: 400 });
       }
+      const woIsCfd = isCfdEpic(resolvedEpic);
       const woPayload: Record<string, unknown> = {
         epic:          resolvedEpic,
         expiry:        resolveExpiry(resolvedEpic, body.expiry),
@@ -137,10 +109,12 @@ export async function POST(request: NextRequest) {
         level:         body.level,
         type:          orderType,
         guaranteedStop: body.guaranteedStop ?? false,
-        currencyCode:  body.currencyCode ?? 'GBP',
         timeInForce:   body.timeInForce ?? 'GOOD_TILL_CANCELLED',
         forceOpen:     body.forceOpen ?? true,
       };
+      if (!woIsCfd) {
+        woPayload.currencyCode = body.currencyCode ?? 'GBP';
+      }
       // Only include optional fields if they have actual values
       if (body.stopDistance)    woPayload.stopDistance  = body.stopDistance;
       if (body.profitDistance)  woPayload.limitDistance = body.profitDistance;
@@ -162,6 +136,8 @@ export async function POST(request: NextRequest) {
     // ── Market position ───────────────────────────────────────────────────────
     // IMPORTANT: do NOT include null fields — they cause silent rejections on some IG accounts.
     // SL/TP are applied separately via PUT after the deal is confirmed ACCEPTED.
+    // CFD orders use margin — do NOT include currencyCode (IG rejects it on CFD accounts).
+    const isCfd = isCfdEpic(resolvedEpic);
     const payload: Record<string, unknown> = {
       epic:          resolvedEpic,
       expiry:        resolveExpiry(resolvedEpic, body.expiry),
@@ -171,8 +147,11 @@ export async function POST(request: NextRequest) {
       guaranteedStop: body.guaranteedStop ?? false,
       trailingStop:  false,
       forceOpen:     body.forceOpen ?? true,
-      currencyCode:  body.currencyCode ?? 'GBP',
     };
+    // Spread-bet accounts require currencyCode (£/point); CFD accounts must NOT have it
+    if (!isCfd) {
+      payload.currencyCode = body.currencyCode ?? 'GBP';
+    }
 
     console.log(`[ig/order] POST → ${env} ${resolvedEpic} (via ${resolvedVia})`, JSON.stringify(payload));
 
