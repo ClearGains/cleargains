@@ -405,6 +405,28 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const [updatingPos, setUpdatingPos]   = useState<string|null>(null);
   const [reversingPos, setReversingPos] = useState<string|null>(null);
 
+  // ── Inline SL/TP editing ───────────────────────────────────────────────────
+  const [inlineSLEdit, setInlineSLEdit] = useState<Record<string, string>>({});
+  const [inlineTPEdit, setInlineTPEdit] = useState<Record<string, string>>({});
+
+  // ── Trailing stops ─────────────────────────────────────────────────────────
+  const [trailingStops, setTrailingStops] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('ig_trailing_stops') ?? '[]') as string[]); } catch { return new Set(); }
+  });
+  const trailingBestPriceRef = useRef<Record<string, number>>({});
+
+  // ── Position health ────────────────────────────────────────────────────────
+  type PositionHealth = 'green' | 'amber' | 'red';
+  const [positionHealth, setPositionHealth] = useState<Record<string, PositionHealth>>({});
+
+  // ── Close all ─────────────────────────────────────────────────────────────
+  const [showCloseAllConfirm, setShowCloseAllConfirm] = useState(false);
+  const [closingAll, setClosingAll] = useState(false);
+
+  // ── Portfolio management ───────────────────────────────────────────────────
+  const peakPortfolioRef   = useRef<number>(0);  // highest portfolio value seen
+  const portfolioAdjRef    = useRef({ sizeMultiplier: 1.0, extraMinStrength: 0 });
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   function showToast(ok: boolean, msg: string) {
@@ -417,6 +439,58 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   }
 
   const acctTag = ` [${accountType} | ${accountId}]`;
+
+  // ── Position health scorer ─────────────────────────────────────────────────
+  function computePositionHealth(
+    pos: IGPosition,
+    ind: IndicatorResult | null,
+    pnlPct: number,
+  ): PositionHealth {
+    if (!ind) return pnlPct > 0.5 ? 'green' : pnlPct < -1 ? 'red' : 'amber';
+    const dirAligned =
+      (pos.direction === 'BUY'  && ind.direction !== 'SELL') ||
+      (pos.direction === 'SELL' && ind.direction !== 'BUY');
+    const rsiCritical =
+      (pos.direction === 'BUY'  && ind.rsi14 > 70) ||
+      (pos.direction === 'SELL' && ind.rsi14 < 30);
+    const rsiWeak =
+      (pos.direction === 'BUY'  && ind.rsi14 > 60) ||
+      (pos.direction === 'SELL' && ind.rsi14 < 40);
+    const macdAgainst =
+      (pos.direction === 'BUY'  && ind.macdCross === 'bearish') ||
+      (pos.direction === 'SELL' && ind.macdCross === 'bullish');
+    if (!dirAligned && rsiCritical) return 'red';
+    if (!dirAligned || (rsiWeak && macdAgainst)) return 'amber';
+    if (pnlPct < -2) return 'red';
+    if (pnlPct < 0 && rsiWeak) return 'amber';
+    return 'green';
+  }
+
+  // ── Score a position (0=weakest, 100=strongest) for capital-freeing decisions ─
+  function scorePositionStrength(
+    pos: IGPosition,
+    ind: IndicatorResult | null,
+    pnlPct: number,
+  ): number {
+    let score = 50;
+    // Profitability
+    if (pnlPct > 2) score += 20; else if (pnlPct > 0) score += 10;
+    else if (pnlPct < -1) score -= 20; else if (pnlPct < 0) score -= 10;
+    // Age penalty
+    const ageHrs = pos.createdDate ? (Date.now() - new Date(pos.createdDate).getTime()) / 3_600_000 : 0;
+    if (ageHrs > 48) score -= 20; else if (ageHrs > 24) score -= 10;
+    // Momentum
+    if (ind) {
+      const aligned = (pos.direction === 'BUY' && ind.direction !== 'SELL') ||
+                      (pos.direction === 'SELL' && ind.direction !== 'BUY');
+      score += aligned ? 15 : -15;
+      const rsiWeak = (pos.direction === 'BUY' && ind.rsi14 > 60) || (pos.direction === 'SELL' && ind.rsi14 < 40);
+      if (rsiWeak) score -= 10;
+      const macdAgainst = (pos.direction === 'BUY' && ind.macdCross === 'bearish') || (pos.direction === 'SELL' && ind.macdCross === 'bullish');
+      if (macdAgainst) score -= 10;
+    }
+    return Math.max(0, Math.min(100, score));
+  }
 
   function storeSession(sess: IGSession) {
     sessionRef.current = sess;
@@ -1359,6 +1433,64 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     const orderSize = calcRiskBasedSize(available, stopDist, accountType, strat.size, scanParamsRef.current.sizeMultiplier, riskPct, totalBal);
 
     if (orderSize === 0) {
+      // Part 2: if signal is very strong (≥85%), try to free capital by closing weakest position
+      if (strength >= 85 && positionsRef.current.length > 0) {
+        log('info', `${acctTag} 🎯 Strong signal (${strength}%) but low funds — evaluating positions for redeployment`);
+        const scoredPositions = await Promise.all(
+          positionsRef.current.map(async p => {
+            const pInd = await fetchIndicators(p.instrumentName ?? p.epic, p.epic).catch(() => null);
+            const pPx = p.direction === 'BUY' ? p.bid : p.offer;
+            const pPnlPct = p.level ? (p.direction === 'BUY' ? ((pPx - p.level) / p.level) * 100 : ((p.level - pPx) / p.level) * 100) : 0;
+            return { pos: p, score: scorePositionStrength(p, pInd, pPnlPct), upl: p.upl ?? 0 };
+          }),
+        );
+        const weakest = scoredPositions.sort((a, b) => a.score - b.score)[0];
+        if (weakest && weakest.score < 45) {
+          const wName = weakest.pos.instrumentName ?? weakest.pos.epic;
+          const wUpl  = weakest.upl;
+          log('close', `${acctTag} 🔄 Closing ${wName} (${wUpl >= 0 ? '+' : ''}£${Math.abs(wUpl).toFixed(2)}, score ${weakest.score}) to fund ${market.name} (${strength}% confidence)`);
+          const cr = await closePos(weakest.pos);
+          if (cr.ok) {
+            const exitPx = weakest.pos.direction === 'BUY' ? (weakest.pos.bid ?? weakest.pos.level) : (weakest.pos.offer ?? weakest.pos.level);
+            setTradeHistory(prev => recordTradeClose(prev, weakest.pos.dealId, exitPx, wUpl, 'STRATEGY', new Date().toISOString()));
+            await loadPositions();
+            await fetchIGFunds();
+            // Re-compute size with freed capital
+            const newFunds = igFundsRef.current;
+            const newAvail = newFunds?.available ?? 0;
+            const newRiskPct = startBal > 0 && newAvail < startBal * 0.50 ? 0.01 : 0.02;
+            const newSize = calcRiskBasedSize(newAvail, stopDist, accountType, strat.size, scanParamsRef.current.sizeMultiplier, newRiskPct, newFunds?.balance ?? 0);
+            if (newSize > 0) {
+              // Fall through to trade with freed capital (re-assign available for subsequent checks)
+              // eslint-disable-next-line no-param-reassign
+              const updatedFunds = igFundsRef.current;
+              const updatedAvail = updatedFunds?.available ?? 0;
+              const finalSize = calcRiskBasedSize(updatedAvail, stopDist, accountType, strat.size, scanParamsRef.current.sizeMultiplier, newRiskPct, updatedFunds?.balance ?? 0);
+              if (finalSize > 0) {
+                const epicOkAfter = await validateEpic(resolvedEpic);
+                if (epicOkAfter) {
+                  log(tradeDir === 'BUY' ? 'buy' : 'sell', `${acctTag} → ${tradeDir} ${market.name} | ${resolvedEpic} | ${finalSize} | ${strength}% (redeployed capital)`);
+                  const or2 = await placeOrder(resolvedEpic, tradeDir, finalSize, stopDist, limitDist);
+                  if (or2.ok) {
+                    scanCountersRef.current.traded++;
+                    log(tradeDir === 'BUY' ? 'buy' : 'sell', `${acctTag} ✅ Redeployed → ${or2.dealStatus ?? 'ACCEPTED'} ref ${or2.dealReference ?? 'n/a'}`);
+                    showToast(true, `[${accountType}] Redeployed: ${tradeDir} ${market.name}`);
+                    setTradeHistory(prev => recordTradeOpen(prev, {
+                      portfolioName:strat.name, market:market.name, epic:resolvedEpic,
+                      direction:tradeDir, size:finalSize, entryLevel:or2.level ?? 0,
+                      exitLevel:null, openedAt:new Date().toISOString(), closedAt:null,
+                      status:'OPEN', dealReference:or2.dealReference ?? '', dealId:or2.dealId ?? '',
+                      pnl:null, closeReason:null, accountType:env,
+                    }));
+                    await loadPositions();
+                    return 'ok';
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
       log('error', `${acctTag} ⚠️ Insufficient funds (£${available.toFixed(2)}) — skipping ${market.name}`);
       showToast(false, `⚠️ Low funds — skipping`);
       return 'funds_low';
@@ -1461,7 +1593,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       return;
     }
     // Reset per-scan params
-    scanParamsRef.current = { sizeMultiplier: 1.0, confidenceBoost: 0, sectorAdjust: 0 };
+    // Apply portfolio-level adjustments from position monitor (Part 4)
+    scanParamsRef.current = {
+      sizeMultiplier:  portfolioAdjRef.current.sizeMultiplier,
+      confidenceBoost: portfolioAdjRef.current.extraMinStrength,
+      sectorAdjust:    0,
+    };
     scanCountersRef.current = { traded: 0, skippedVolatile: 0, skippedConditions: 0 };
 
     if (conditions.marketStressed) {
@@ -1571,7 +1708,48 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
     if (!runningRef.current) return;
     await loadPositions();
+    const allPos = positionsRef.current;
 
+    // ── Part 4: Portfolio-level checks ────────────────────────────────────────
+    const totalUpl = allPos.reduce((s, p) => s + (p.upl ?? 0), 0);
+    const totalBal = igFundsRef.current?.balance ?? 0;
+    const portfolioValue = totalBal + totalUpl;
+
+    if (portfolioValue > peakPortfolioRef.current) peakPortfolioRef.current = portfolioValue;
+    const drawdownPct = peakPortfolioRef.current > 0
+      ? ((peakPortfolioRef.current - portfolioValue) / peakPortfolioRef.current) * 100 : 0;
+    if (drawdownPct > 3) {
+      portfolioAdjRef.current.sizeMultiplier = 0.5;
+      portfolioAdjRef.current.extraMinStrength = 0;
+      log('info', `${acctTag} ⚠️ Portfolio down ${drawdownPct.toFixed(1)}% from peak — next cycle size ×0.5`);
+    } else if (startingBalanceRef.current > 0 && totalUpl > startingBalanceRef.current * 0.05) {
+      portfolioAdjRef.current.extraMinStrength = 10; // raise bar when doing well
+      portfolioAdjRef.current.sizeMultiplier   = 1.0;
+      log('info', `${acctTag} 🎯 Portfolio up >5% — raising confidence threshold +10% to protect gains`);
+    } else {
+      portfolioAdjRef.current = { sizeMultiplier: 1.0, extraMinStrength: 0 };
+    }
+
+    // Sector concentration: > 3 positions in one sector → close weakest
+    const sectorMap: Record<string, IGPosition[]> = {};
+    for (const p of allPos) {
+      const sec = getSector(p.epic);
+      (sectorMap[sec] ??= []).push(p);
+    }
+    for (const [sec, posInSec] of Object.entries(sectorMap)) {
+      if (posInSec.length > 3) {
+        const weakest = [...posInSec].sort((a, b) => (a.upl ?? 0) - (b.upl ?? 0))[0];
+        log('close', `${acctTag} ♻️ Sector ${sec} has ${posInSec.length} positions — diversifying, closing weakest: ${weakest.instrumentName ?? weakest.epic}`);
+        const cr = await closePos(weakest);
+        if (cr.ok) {
+          const exitPx = weakest.direction === 'BUY' ? (weakest.bid ?? weakest.level) : (weakest.offer ?? weakest.level);
+          setTradeHistory(prev => recordTradeClose(prev, weakest.dealId, exitPx, weakest.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+        }
+        break; // one per cycle to avoid over-closing
+      }
+    }
+
+    // ── Per-position management ────────────────────────────────────────────────
     for (const pos of positionsRef.current) {
       if (!pos.level || !pos.bid || !pos.offer) continue;
       const currentPx = pos.direction === 'BUY' ? pos.bid : pos.offer;
@@ -1580,63 +1758,92 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         ? ((currentPx - entryPx) / entryPx) * 100
         : ((entryPx - currentPx) / entryPx) * 100;
 
-      // Stale position recycling (48h, < 0.5% P&L)
+      // Stale recycling — 24h with < 0.5% profit (Part 3)
       if (pos.createdDate && strat.autoClose) {
         const ageMs = Date.now() - new Date(pos.createdDate).getTime();
-        if (ageMs > 48 * 3_600_000 && Math.abs(pnlPct) < 0.5) {
-          log('close', `${acctTag} ♻️ Recycling stale: ${pos.instrumentName ?? pos.epic} (${pnlPct.toFixed(2)}% P&L)`);
+        if (ageMs > 24 * 3_600_000 && pnlPct < 0.5) {
+          log('close', `${acctTag} ♻️ Stale 24h+: ${pos.instrumentName ?? pos.epic} (${pnlPct.toFixed(2)}% P&L) — freeing capital`);
           const cr = await closePos(pos);
           if (cr.ok) {
             const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
             setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STALE', new Date().toISOString()));
-          } else log('error', `${acctTag} Recycle failed: ${cr.error ?? 'unknown'}`);
+          } else log('error', `${acctTag} Stale close failed: ${cr.error ?? 'unknown'}`);
           continue;
         }
       }
 
-      // RSI reversal early exit — fetch indicators (cached 30 min, low cost)
-      if (strat.autoClose) {
-        const ind = await fetchIndicators(pos.instrumentName ?? pos.epic, pos.epic).catch(() => null);
-        if (ind) {
-          const rsiReversal =
-            (pos.direction === 'BUY'  && ind.rsi14 > 72) ||
-            (pos.direction === 'SELL' && ind.rsi14 < 28);
-          if (rsiReversal) {
-            log('close', `${acctTag} 📉 RSI reversal (${ind.rsi14.toFixed(0)}) on ${pos.instrumentName ?? pos.epic} — closing ${pos.direction}`);
-            const cr = await closePos(pos);
-            if (cr.ok) {
-              const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
-              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
-            }
-            continue;
+      // Fetch indicators (cached 30 min — near-zero cost)
+      const ind = await fetchIndicators(pos.instrumentName ?? pos.epic, pos.epic).catch(() => null);
+
+      // Compute and cache health score
+      const health = computePositionHealth(pos, ind, pnlPct);
+      setPositionHealth(prev => ({ ...prev, [pos.dealId]: health }));
+
+      // RSI reversal exit — Part 3: >60 on long, <40 on short
+      if (strat.autoClose && ind) {
+        const rsiReversed =
+          (pos.direction === 'BUY'  && ind.rsi14 > 60) ||
+          (pos.direction === 'SELL' && ind.rsi14 < 40);
+        if (rsiReversed && health === 'red') {
+          log('close', `${acctTag} 📉 RSI reversal (${ind.rsi14.toFixed(0)}) — ${pos.instrumentName ?? pos.epic} health RED → closing`);
+          const cr = await closePos(pos);
+          if (cr.ok) {
+            const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+            setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
           }
+          continue;
         }
       }
 
-      // SL management — breakeven when 50% toward take profit; lock +2% at 5% P&L
-      let newStop: number|null = null, reason = '';
+      // Trailing stop management (Part 1)
+      if (trailingStops.has(pos.dealId)) {
+        const bestPrev = trailingBestPriceRef.current[pos.dealId] ?? currentPx;
+        const bestNow  = pos.direction === 'BUY' ? Math.max(bestPrev, currentPx) : Math.min(bestPrev, currentPx);
+        trailingBestPriceRef.current[pos.dealId] = bestNow;
+        const trailDist = bestNow * 0.015; // 1.5% trailing distance
+        const trailStop = pos.direction === 'BUY'
+          ? Math.round((bestNow - trailDist) * 100) / 100
+          : Math.round((bestNow + trailDist) * 100) / 100;
+        if (!pos.stopLevel || (pos.direction === 'BUY' ? trailStop > pos.stopLevel : trailStop < pos.stopLevel)) {
+          const tr = await updatePositionSL(pos, trailStop, pos.limitLevel ?? null);
+          if (tr.ok) log('info', `${acctTag} 🎯 Trail stop → ${trailStop} (${pos.instrumentName ?? pos.epic})`);
+        }
+      }
 
-      // Breakeven at 50% toward TP (if we have the TP level)
+      // SL management — profit protection rules (Part 3)
+      let newStop: number | null = null, reason = '';
+
       if (pos.limitLevel && entryPx) {
-        const tpDist   = Math.abs(pos.limitLevel - entryPx);
-        const curDist  = pos.direction === 'BUY' ? currentPx - entryPx : entryPx - currentPx;
-        const pctToTp  = tpDist > 0 ? curDist / tpDist : 0;
-        const be       = entryPx;
-        if (pctToTp >= 0.5) {
+        const tpDist  = Math.abs(pos.limitLevel - entryPx);
+        const curDist = pos.direction === 'BUY' ? currentPx - entryPx : entryPx - currentPx;
+        const pctToTp = tpDist > 0 ? curDist / tpDist : 0;
+
+        if (pctToTp >= 0.75) {
+          // 75% toward TP — lock in 50% of profit distance
+          const lockLevel = pos.direction === 'BUY'
+            ? entryPx + tpDist * 0.50
+            : entryPx - tpDist * 0.50;
+          const lockRounded = Math.round(lockLevel * 100) / 100;
+          if (!pos.stopLevel || (pos.direction === 'BUY' ? lockRounded > pos.stopLevel : lockRounded < pos.stopLevel)) {
+            newStop = lockRounded;
+            reason  = `${(pctToTp * 100).toFixed(0)}% to TP → SL locks 50% profit`;
+          }
+        } else if (pctToTp >= 0.5) {
+          // 50% toward TP — move to breakeven
+          const be = entryPx;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < be : pos.stopLevel > be)) {
             newStop = be;
             reason  = `${(pctToTp * 100).toFixed(0)}% to TP → SL to breakeven`;
           }
         }
       } else {
-        // No TP set: use P&L % thresholds
-        if (pnlPct >= 3 && pnlPct < 5) {
-          const be = entryPx;
-          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < be : pos.stopLevel > be)) { newStop = be; reason = `+${pnlPct.toFixed(1)}% → SL to breakeven`; }
-        }
+        // No TP: P&L % thresholds
         if (pnlPct >= 5) {
           const lock = pos.direction === 'BUY' ? entryPx * 1.02 : entryPx * 0.98;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lock : pos.stopLevel > lock)) { newStop = Math.round(lock * 100) / 100; reason = `+${pnlPct.toFixed(1)}% → SL lock +2%`; }
+        } else if (pnlPct >= 3) {
+          const be = entryPx;
+          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < be : pos.stopLevel > be)) { newStop = be; reason = `+${pnlPct.toFixed(1)}% → SL to breakeven`; }
         }
       }
 
@@ -1646,7 +1853,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, positions]);
+  }, [session, positions, trailingStops]);
 
   // ── Start / stop ───────────────────────────────────────────────────────────
   function startAutoRun(strat: IGSavedStrategy) {
@@ -1759,6 +1966,63 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     if (r.ok) { showToast(true, `Take-profit moved to ${val}`); await loadPositions(); setTpModal(null); setTpInput(''); }
     else showToast(false, r.error ?? 'Update failed');
     setUpdatingPos(null);
+  }
+
+  // ── Inline SL/TP handlers ─────────────────────────────────────────────────
+  async function handleInlineSL(pos: IGPosition) {
+    const raw = inlineSLEdit[pos.dealId];
+    if (raw === undefined) return;
+    const val = parseFloat(raw);
+    setInlineSLEdit(p => { const n = { ...p }; delete n[pos.dealId]; return n; });
+    if (isNaN(val) || val <= 0) return;
+    setUpdatingPos(pos.dealId);
+    const r = await updatePositionSL(pos, val, pos.limitLevel ?? null);
+    if (r.ok) { showToast(true, `SL → ${val}`); await loadPositions(); }
+    else showToast(false, r.error ?? 'SL update failed');
+    setUpdatingPos(null);
+  }
+
+  async function handleInlineTP(pos: IGPosition) {
+    const raw = inlineTPEdit[pos.dealId];
+    if (raw === undefined) return;
+    const val = parseFloat(raw);
+    setInlineTPEdit(p => { const n = { ...p }; delete n[pos.dealId]; return n; });
+    if (isNaN(val) || val <= 0) return;
+    setUpdatingPos(pos.dealId);
+    const r = await updatePositionSL(pos, pos.stopLevel ?? null, val);
+    if (r.ok) { showToast(true, `TP → ${val}`); await loadPositions(); }
+    else showToast(false, r.error ?? 'TP update failed');
+    setUpdatingPos(null);
+  }
+
+  // ── Trailing stop toggle ───────────────────────────────────────────────────
+  function toggleTrailingStop(dealId: string) {
+    setTrailingStops(prev => {
+      const next = new Set(prev);
+      if (next.has(dealId)) next.delete(dealId); else next.add(dealId);
+      try { localStorage.setItem('ig_trailing_stops', JSON.stringify([...next])); } catch {}
+      return next;
+    });
+  }
+
+  // ── Close all positions ────────────────────────────────────────────────────
+  async function handleCloseAll() {
+    setClosingAll(true);
+    const toClose = [...positionsRef.current];
+    for (const pos of toClose) {
+      const r = await closePos(pos);
+      if (r.ok) {
+        const exitPx = pos.direction === 'BUY' ? (pos.bid ?? pos.level) : (pos.offer ?? pos.level);
+        setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'MANUAL', new Date().toISOString()));
+        log('close', `${acctTag} ✅ Closed ${pos.instrumentName ?? pos.epic} — Manual close-all`);
+      } else {
+        log('error', `${acctTag} Close-all: ${pos.instrumentName ?? pos.epic} failed — ${r.error ?? 'unknown'}`);
+      }
+    }
+    await loadPositions();
+    setClosingAll(false);
+    setShowCloseAllConfirm(false);
+    showToast(true, `Closed ${toClose.length} position(s)`);
   }
 
   // ── Builder ────────────────────────────────────────────────────────────────
@@ -1979,6 +2243,28 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
             <div className="flex-1 overflow-y-auto p-4 font-mono text-[11px] text-gray-300 space-y-0.5">
               {diagLines.map((l, i) => <p key={i} className={clsx(l.includes('✓')?'text-emerald-400':l.includes('✗')||l.includes('⚠️')?'text-red-400':'')}>{l}</p>)}
               {testOrderBusy && <p className="text-yellow-400 animate-pulse">Running…</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Close All confirmation modal */}
+      {showCloseAllConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl p-5 w-full max-w-sm shadow-2xl">
+            <h3 className="text-sm font-semibold text-white mb-1">Close All Positions</h3>
+            <p className="text-xs text-gray-400 mb-3">This will immediately close all {positions.length} open position(s) at market price.</p>
+            <div className={clsx('rounded-lg px-3 py-2 mb-4 text-sm font-mono font-bold text-center',
+              totalPnL >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400')}>
+              Current P&L: {totalPnL >= 0 ? '+' : ''}{fmt(totalPnL)}
+            </div>
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" onClick={() => setShowCloseAllConfirm(false)}>Cancel</Button>
+              <Button fullWidth loading={closingAll}
+                className="bg-red-600/20 text-red-400 border border-red-600/40 hover:bg-red-600/30"
+                onClick={() => void handleCloseAll()}>
+                Close All Now
+              </Button>
             </div>
           </div>
         </div>
@@ -2700,8 +2986,15 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
             ))}
           </div>
           {positions.length > 0 && (
-            <div className={clsx('text-xs font-medium px-2 py-1 rounded', totalPnL >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-red-400 bg-red-500/10')}>
-              P&L {totalPnL >= 0 ? '+' : ''}{fmt(totalPnL)}
+            <div className="flex items-center gap-2">
+              <div className={clsx('text-xs font-medium px-2 py-1 rounded', totalPnL >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-red-400 bg-red-500/10')}>
+                P&L {totalPnL >= 0 ? '+' : ''}{fmt(totalPnL)}
+              </div>
+              <button
+                onClick={() => setShowCloseAllConfirm(true)}
+                className="text-[10px] px-2 py-1 rounded border border-red-600/40 text-red-400 bg-red-600/10 hover:bg-red-600/20 transition-colors font-medium">
+                Close All
+              </button>
             </div>
           )}
         </div>
@@ -2712,40 +3005,132 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
           positions.length === 0
             ? <p className="text-center py-6 text-gray-600 text-sm">No open positions on {accountType} account</p>
             : <div className="space-y-2">
-                {positions.map(pos => (
-                  <div key={pos.dealId} className="border border-gray-800 rounded-xl p-3 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
-                        <DirectionBadge dir={pos.direction} />
-                        <div className="min-w-0">
-                          <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
-                          <p className="text-[10px] text-gray-500 font-mono">{pos.epic} · {pos.size}{sizeUnit}</p>
+                {positions.map(pos => {
+                  const currentPx = pos.direction === 'BUY' ? pos.bid : pos.offer;
+                  const pnlPct    = pos.level && currentPx
+                    ? (pos.direction === 'BUY' ? ((currentPx - pos.level) / pos.level) * 100 : ((pos.level - currentPx) / pos.level) * 100)
+                    : 0;
+                  const health    = positionHealth[pos.dealId];
+                  const isTrailing = trailingStops.has(pos.dealId);
+                  return (
+                    <div key={pos.dealId} className={clsx('border rounded-xl p-3 space-y-2',
+                      health === 'red' ? 'border-red-500/40 bg-red-500/5' :
+                      health === 'amber' ? 'border-amber-500/30 bg-amber-500/5' :
+                      'border-gray-800')}>
+                      {/* Row 1: name + health + P&L */}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          {health && (
+                            <span className={clsx('w-2 h-2 rounded-full flex-shrink-0',
+                              health === 'green' ? 'bg-emerald-500' :
+                              health === 'amber' ? 'bg-amber-400' : 'bg-red-500'
+                            )} title={`Health: ${health}`} />
+                          )}
+                          <DirectionBadge dir={pos.direction} />
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
+                            <p className="text-[10px] text-gray-500 font-mono">{pos.epic} · {pos.size}{sizeUnit}</p>
+                          </div>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <p className={clsx('text-xs font-mono font-bold', pos.upl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                            {pos.upl >= 0 ? '+' : ''}{fmt(pos.upl)}
+                          </p>
+                          <p className={clsx('text-[10px] font-mono', pnlPct >= 0 ? 'text-emerald-400/70' : 'text-red-400/70')}>
+                            {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                          </p>
                         </div>
                       </div>
-                      <div className={clsx('text-xs font-mono font-bold', pos.upl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {pos.upl >= 0 ? '+' : ''}{fmt(pos.upl)}
+
+                      {/* Row 2: entry + age + health label */}
+                      <div className="flex items-center gap-2 text-[10px] text-gray-500 flex-wrap">
+                        <span>Entry {pos.level}</span>
+                        <span>Bid {pos.bid} / Ask {pos.offer}</span>
+                        {pos.createdDate && <span><Clock className="inline h-2.5 w-2.5 mr-0.5" />{fmtTime(pos.createdDate)}</span>}
+                        {health && (
+                          <span className={clsx('font-medium',
+                            health === 'green' ? 'text-emerald-400' :
+                            health === 'amber' ? 'text-amber-400' : 'text-red-400'
+                          )}>● {health === 'green' ? 'Signal valid' : health === 'amber' ? 'Signal weakening' : 'Signal reversed'}</span>
+                        )}
+                      </div>
+
+                      {/* Row 3: inline SL/TP edit */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {/* Stop Loss */}
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px] text-red-400/70 font-medium">SL</span>
+                          {inlineSLEdit[pos.dealId] !== undefined ? (
+                            <input
+                              type="number" step="any"
+                              value={inlineSLEdit[pos.dealId]}
+                              onChange={e => setInlineSLEdit(p => ({ ...p, [pos.dealId]: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') void handleInlineSL(pos); if (e.key === 'Escape') setInlineSLEdit(p => { const n={...p}; delete n[pos.dealId]; return n; }); }}
+                              onBlur={() => void handleInlineSL(pos)}
+                              autoFocus
+                              className="w-20 bg-gray-800 border border-red-500/50 rounded px-1.5 py-0.5 text-[10px] text-red-400 focus:outline-none"
+                            />
+                          ) : (
+                            <button
+                              onClick={() => setInlineSLEdit(p => ({ ...p, [pos.dealId]: pos.stopLevel?.toString() ?? '' }))}
+                              className={clsx('text-[10px] px-1.5 py-0.5 rounded border transition-colors',
+                                pos.stopLevel ? 'border-red-600/30 text-red-400/70 hover:border-red-500 hover:text-red-400' :
+                                'border-gray-700 text-gray-600 hover:border-gray-500 hover:text-gray-400'
+                              )}>
+                              {pos.stopLevel ?? '—'}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Take Profit */}
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px] text-emerald-400/70 font-medium">TP</span>
+                          {inlineTPEdit[pos.dealId] !== undefined ? (
+                            <input
+                              type="number" step="any"
+                              value={inlineTPEdit[pos.dealId]}
+                              onChange={e => setInlineTPEdit(p => ({ ...p, [pos.dealId]: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') void handleInlineTP(pos); if (e.key === 'Escape') setInlineTPEdit(p => { const n={...p}; delete n[pos.dealId]; return n; }); }}
+                              onBlur={() => void handleInlineTP(pos)}
+                              autoFocus
+                              className="w-20 bg-gray-800 border border-emerald-500/50 rounded px-1.5 py-0.5 text-[10px] text-emerald-400 focus:outline-none"
+                            />
+                          ) : (
+                            <button
+                              onClick={() => setInlineTPEdit(p => ({ ...p, [pos.dealId]: pos.limitLevel?.toString() ?? '' }))}
+                              className={clsx('text-[10px] px-1.5 py-0.5 rounded border transition-colors',
+                                pos.limitLevel ? 'border-emerald-600/30 text-emerald-400/70 hover:border-emerald-500 hover:text-emerald-400' :
+                                'border-gray-700 text-gray-600 hover:border-gray-500 hover:text-gray-400'
+                              )}>
+                              {pos.limitLevel ?? '—'}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Trailing stop toggle */}
+                        <button
+                          onClick={() => toggleTrailingStop(pos.dealId)}
+                          title="Toggle trailing stop (1.5%)"
+                          className={clsx('text-[10px] px-1.5 py-0.5 rounded border flex items-center gap-1 transition-colors',
+                            isTrailing ? 'border-orange-500/60 text-orange-400 bg-orange-500/10' :
+                            'border-gray-700 text-gray-600 hover:border-gray-500 hover:text-gray-400'
+                          )}>
+                          <TrendingUp className="h-2.5 w-2.5" />Trail
+                        </button>
+                      </div>
+
+                      {/* Row 4: action buttons */}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <Button size="sm" variant="outline" loading={reversingPos === pos.dealId}
+                          onClick={() => void reversePosition(pos)}
+                          className="text-[10px] px-2 py-1 h-auto">Reverse</Button>
+                        <Button size="sm" loading={closingId === pos.dealId}
+                          className="text-[10px] px-2 py-1 h-auto bg-red-600/20 text-red-400 border border-red-600/30 hover:bg-red-600/30"
+                          onClick={() => void handleClose(pos)}>Close Now</Button>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 text-[10px] text-gray-500 flex-wrap">
-                      <span>Entry {pos.level}</span>
-                      {pos.stopLevel  && <span className="text-red-400/70">SL {pos.stopLevel}</span>}
-                      {pos.limitLevel && <span className="text-emerald-400/70">TP {pos.limitLevel}</span>}
-                      {pos.createdDate && <span><Clock className="inline h-2.5 w-2.5 mr-0.5" />{fmtTime(pos.createdDate)}</span>}
-                    </div>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <Button size="sm" variant="outline" onClick={() => { setSlModal({pos}); setSlInput(pos.stopLevel?.toString()??''); }}
-                        className="text-[10px] px-2 py-1 h-auto">SL</Button>
-                      <Button size="sm" variant="outline" onClick={() => { setTpModal({pos}); setTpInput(pos.limitLevel?.toString()??''); }}
-                        className="text-[10px] px-2 py-1 h-auto">TP</Button>
-                      <Button size="sm" variant="outline" loading={reversingPos === pos.dealId}
-                        onClick={() => void reversePosition(pos)}
-                        className="text-[10px] px-2 py-1 h-auto">Reverse</Button>
-                      <Button size="sm" loading={closingId === pos.dealId}
-                        className="text-[10px] px-2 py-1 h-auto bg-red-600/20 text-red-400 border border-red-600/30 hover:bg-red-600/30"
-                        onClick={() => void handleClose(pos)}>Close</Button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
         )}
 
