@@ -109,7 +109,9 @@ export type IGSavedStrategy = {
 export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
   // ── Indices (Daily Funded Bets) ─────────────────────────────────────────────
   { epic: 'IX.D.FTSE.DAILY.IP',    name: 'FTSE 100',      enabled: true,  marketType: 'INDEX'     },
-  { epic: 'IX.D.SPTRD.DAILY.IP',   name: 'S&P 500',       enabled: true,  marketType: 'INDEX'     },
+  // IX.D.SPTRD.DAILY.IP is spread-bet only — rejected (UNKNOWN) on CFD demo accounts.
+  // Use IX.D.SPTRD.CFD.IP from CFD_WATCHLIST for CFD accounts instead.
+  { epic: 'IX.D.SPTRD.DAILY.IP',   name: 'S&P 500',       enabled: false, marketType: 'INDEX'     },
   { epic: 'IX.D.NASDAQ.DAILY.IP',  name: 'NASDAQ 100',    enabled: false, marketType: 'INDEX'     },
   { epic: 'IX.D.DOW.DAILY.IP',     name: 'Wall Street',   enabled: false, marketType: 'INDEX'     },
   { epic: 'IX.D.DAX.DAILY.IP',     name: 'Germany 40',    enabled: false, marketType: 'INDEX'     },

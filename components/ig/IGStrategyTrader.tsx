@@ -639,16 +639,26 @@ export function IGStrategyTrader() {
           setPosError(`[${env.toUpperCase()}] Rate limited by IG — will retry next cycle`);
           continue;
         }
-        // 401 = genuine auth expiry → re-auth once, respecting cooldown
+        // 401 = genuine auth expiry → silently re-auth once and retry.
+        // If cooldown is active, skip this cycle without showing an error.
         if (r.status === 401) {
           const lastReauth = lastReauthRef.current[env] ?? 0;
-          if (Date.now() - lastReauth >= 30_000) {
-            lastReauthRef.current[env] = Date.now();
-            localStorage.removeItem(`ig_session_${env}`);
-            const fresh = await connectIG(env, true);
-            if (fresh) { storeSession(env, fresh); sess = fresh; }
-            r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+          if (Date.now() - lastReauth < 30_000) {
+            // Cooldown active — skip silently, will retry next 60s cycle
+            continue;
           }
+          lastReauthRef.current[env] = Date.now();
+          localStorage.removeItem(`ig_session_${env}`);
+          const fresh = await connectIG(env, true);
+          if (!fresh) {
+            // Re-auth failed — show error and stop until next cycle
+            setPosError(`[${env.toUpperCase()}] Session expired — reconnect in Settings → Accounts`);
+            continue;
+          }
+          storeSession(env, fresh);
+          sess = fresh;
+          // Retry with fresh tokens
+          r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
         }
         const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
         if (d.ok) {
