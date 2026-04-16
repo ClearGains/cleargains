@@ -25,6 +25,11 @@ export async function GET(request: NextRequest) {
       },
     });
 
+    // 404 = no positions on account (not a real error)
+    if (res.status === 404) {
+      return NextResponse.json({ ok: true, positions: [] });
+    }
+
     if (!res.ok) {
       const errText = await res.text();
       console.error(`[ig/positions] IG ${res.status}:`, errText.slice(0, 300));

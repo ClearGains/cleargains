@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -18,6 +18,7 @@ import {
   Key,
   LogOut,
   BarChart3,
+  X,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
 import { buildSection104Pools } from '@/lib/cgt';
@@ -33,6 +34,225 @@ import Link from 'next/link';
 
 function formatGBP(value: number) {
   return value.toLocaleString('en-GB', { style: 'currency', currency: 'GBP' });
+}
+
+// ── Unified position type (mirrors positions page) ────────────────────────────
+type UPos = {
+  id: string; account: string; name: string; ticker: string;
+  direction: 'BUY' | 'SELL'; quantity: number; entryPrice: number;
+  currentPrice: number; pnl: number; pnlPct: number;
+  currency: string; dealId?: string; t212Ticker?: string;
+};
+
+const ACCT_LABELS: Record<string, string> = {
+  T212_INVEST: 'T212', T212_ISA: 'ISA', T212_DEMO: 'Demo',
+  IG_DEMO: 'IG Demo', IG_LIVE: 'IG Live',
+};
+
+// ── Live Positions Widget ─────────────────────────────────────────────────────
+function LivePositionsWidget() {
+  const {
+    t212ApiKey, t212ApiSecret, t212Connected,
+    t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
+    t212DemoApiKey, t212DemoApiSecret, t212DemoConnected,
+  } = useClearGainsStore();
+
+  const [positions, setPositions] = useState<UPos[]>([]);
+  const [loading, setLoading]     = useState(false);
+  const [closingId, setClosingId] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchPositions = useCallback(async () => {
+    setLoading(true);
+    const all: UPos[] = [];
+
+    async function fetchT212(key: string, secret: string, accountKey: string, env: string) {
+      if (!key) return;
+      try {
+        const r = await fetch(`/api/t212/positions?env=${env}`, {
+          headers: { 'x-t212-auth': btoa(key + ':' + secret) },
+        });
+        const raw = await r.json() as unknown;
+        const items: Record<string, unknown>[] = Array.isArray(raw)
+          ? (raw as Record<string, unknown>[])
+          : ((raw as Record<string, unknown[]>).items ?? []) as Record<string, unknown>[];
+        items.forEach(p => {
+          const qty   = Number(p.quantity ?? 0);
+          const entry = Number(p.averagePrice ?? 0);
+          const curr  = Number(p.currentPrice ?? 0);
+          const pnl   = Number(p.ppl ?? ((curr - entry) * qty));
+          all.push({
+            id: `${accountKey}_${p.ticker}`, account: accountKey,
+            name: String(p.ticker ?? '').replace(/_[A-Z]{2}_[A-Z]{2}$/, ''),
+            ticker: String(p.ticker ?? ''), direction: 'BUY',
+            quantity: qty, entryPrice: entry, currentPrice: curr,
+            pnl: Math.round(pnl * 100) / 100,
+            pnlPct: entry > 0 ? Math.round(((curr - entry) / entry) * 10000) / 100 : 0,
+            currency: 'GBP', t212Ticker: String(p.ticker ?? ''),
+          });
+        });
+      } catch {}
+    }
+
+    async function fetchIG(envKey: 'demo' | 'live', accountKey: string) {
+      try {
+        const raw = localStorage.getItem(`ig_session_${envKey}`);
+        if (!raw) return;
+        const sess = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
+        if (!sess.cst || !sess.securityToken || !sess.apiKey) return;
+        const r = await fetch('/api/ig/positions', {
+          headers: { 'x-ig-cst': sess.cst, 'x-ig-security-token': sess.securityToken, 'x-ig-api-key': sess.apiKey, 'x-ig-env': envKey },
+        });
+        const d = await r.json() as { ok: boolean; positions?: Array<{ dealId: string; direction: string; size: number; level: number; upl: number; currency: string; epic: string; instrumentName: string; bid: number; offer: number }> };
+        (d.positions ?? []).forEach(p => {
+          const curr = p.direction === 'BUY' ? p.bid : p.offer;
+          all.push({
+            id: `${accountKey}_${p.dealId}`, account: accountKey,
+            name: p.instrumentName || p.epic, ticker: p.epic,
+            direction: p.direction as 'BUY' | 'SELL', quantity: p.size,
+            entryPrice: p.level, currentPrice: curr, pnl: p.upl,
+            pnlPct: p.level > 0 ? Math.round((p.upl / (p.level * p.size)) * 10000) / 100 : 0,
+            currency: p.currency || 'GBP', dealId: p.dealId,
+          });
+        });
+      } catch {}
+    }
+
+    await Promise.all([
+      t212Connected     ? fetchT212(t212ApiKey,    t212ApiSecret,    'T212_INVEST', 'live') : Promise.resolve(),
+      t212IsaConnected  ? fetchT212(t212IsaApiKey, t212IsaApiSecret, 'T212_ISA',    'live') : Promise.resolve(),
+      t212DemoConnected ? fetchT212(t212DemoApiKey, t212DemoApiSecret, 'T212_DEMO', 'demo') : Promise.resolve(),
+      fetchIG('demo', 'IG_DEMO'),
+      fetchIG('live', 'IG_LIVE'),
+    ]);
+
+    all.sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
+    setPositions(all);
+    setLastUpdated(new Date());
+    setLoading(false);
+  }, [t212ApiKey, t212ApiSecret, t212Connected, t212IsaApiKey, t212IsaApiSecret, t212IsaConnected, t212DemoApiKey, t212DemoApiSecret, t212DemoConnected]);
+
+  useEffect(() => {
+    void fetchPositions();
+    timerRef.current = setInterval(() => { void fetchPositions(); }, 60_000);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [fetchPositions]);
+
+  async function closePos(pos: UPos) {
+    setClosingId(pos.id);
+    try {
+      if (pos.account.startsWith('IG_')) {
+        const envKey = pos.account === 'IG_DEMO' ? 'demo' : 'live';
+        const raw = localStorage.getItem(`ig_session_${envKey}`);
+        if (!raw) { setClosingId(null); return; }
+        const sess = JSON.parse(raw) as { cst: string; securityToken: string; apiKey: string };
+        await fetch('/api/ig/order', {
+          method: 'DELETE',
+          headers: { 'x-ig-cst': sess.cst, 'x-ig-security-token': sess.securityToken, 'x-ig-api-key': sess.apiKey, 'x-ig-env': envKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dealId: pos.dealId, direction: pos.direction === 'BUY' ? 'SELL' : 'BUY', size: pos.quantity }),
+        });
+      } else {
+        const isDemo = pos.account === 'T212_DEMO';
+        const isIsa  = pos.account === 'T212_ISA';
+        const key    = isDemo ? t212DemoApiKey : isIsa ? t212IsaApiKey : t212ApiKey;
+        const secret = isDemo ? t212DemoApiSecret : isIsa ? t212IsaApiSecret : t212ApiSecret;
+        const env    = isDemo ? 'demo' : 'live';
+        await fetch('/api/t212/sell', {
+          method: 'POST',
+          headers: { 'x-t212-auth': btoa(key + ':' + secret), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticker: pos.t212Ticker, quantity: pos.quantity, env }),
+        });
+      }
+    } catch {}
+    setClosingId(null);
+    setTimeout(() => { void fetchPositions(); }, 1_500);
+  }
+
+  const totalPnL = positions.reduce((s, p) => s + p.pnl, 0);
+  const top5     = positions.slice(0, 5);
+
+  return (
+    <Card className="mt-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <BarChart3 className="h-4 w-4 text-orange-400" />
+          <div>
+            <h3 className="text-sm font-semibold text-gray-200">Live Positions</h3>
+            <p className="text-[10px] text-gray-500">
+              {positions.length} open · Total P&L:{' '}
+              <span className={totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                {totalPnL >= 0 ? '+' : ''}£{Math.abs(totalPnL).toFixed(2)}
+              </span>
+              {lastUpdated && ` · updated ${lastUpdated.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => void fetchPositions()} disabled={loading}
+            className="text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40">
+            <RefreshCw className={clsx('h-3.5 w-3.5', loading && 'animate-spin')} />
+          </button>
+          <Link href="/positions" className="flex items-center gap-1 text-xs text-orange-400 hover:text-orange-300 transition-colors">
+            View all <ArrowRight className="h-3 w-3" />
+          </Link>
+        </div>
+      </div>
+
+      {loading && positions.length === 0 ? (
+        <div className="flex items-center gap-2 py-4 text-xs text-gray-500">
+          <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Loading positions…
+        </div>
+      ) : positions.length === 0 ? (
+        <div className="py-4 text-center text-xs text-gray-500">
+          No open positions · <Link href="/positions" className="text-orange-400 hover:underline">Connect accounts</Link>
+        </div>
+      ) : (
+        <div className="space-y-0">
+          {top5.map(pos => (
+            <div key={pos.id} className="flex items-center justify-between py-2 border-b border-gray-800/60 last:border-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold bg-gray-800 text-gray-400 flex-shrink-0">
+                  {ACCT_LABELS[pos.account] ?? pos.account}
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-white truncate">{pos.name}</p>
+                  <div className="flex items-center gap-1">
+                    <span className={clsx('text-[8px] font-bold px-1 rounded',
+                      pos.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                    )}>{pos.direction}</span>
+                    <span className="text-[10px] text-gray-500">{pos.quantity.toFixed(4)}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 flex-shrink-0">
+                <div className="text-right">
+                  <p className={clsx('text-xs font-semibold tabular-nums', pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    {pos.pnl >= 0 ? '+' : ''}£{Math.abs(pos.pnl).toFixed(2)}
+                  </p>
+                  <p className={clsx('text-[10px] tabular-nums', pos.pnlPct >= 0 ? 'text-emerald-500' : 'text-red-500')}>
+                    {pos.pnlPct >= 0 ? '+' : ''}{pos.pnlPct.toFixed(2)}%
+                  </p>
+                </div>
+                <button onClick={() => void closePos(pos)} disabled={closingId === pos.id}
+                  className="text-gray-600 hover:text-red-400 transition-colors disabled:opacity-40 p-1"
+                  title="Close position">
+                  {closingId === pos.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
+                </button>
+              </div>
+            </div>
+          ))}
+          {positions.length > 5 && (
+            <div className="pt-2 text-center">
+              <Link href="/positions" className="text-[10px] text-gray-500 hover:text-orange-400 transition-colors">
+                +{positions.length - 5} more positions → View all
+              </Link>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
 }
 
 function StatCard({
@@ -521,25 +741,8 @@ export default function DashboardPage() {
         </Card>
       )}
 
-      {/* Open Positions widget */}
-      <Card className="mt-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <BarChart3 className="h-4 w-4 text-orange-400" />
-            <div>
-              <h3 className="text-sm font-semibold text-gray-200">Open Positions</h3>
-              <p className="text-xs text-gray-500">All accounts · real-time</p>
-            </div>
-          </div>
-          <Link href="/positions"
-            className="flex items-center gap-1 text-xs text-orange-400 hover:text-orange-300 transition-colors">
-            View all <ArrowRight className="h-3 w-3" />
-          </Link>
-        </div>
-        <div className="mt-3 flex items-center gap-6 text-xs text-gray-400">
-          <span>Go to <Link href="/positions" className="text-orange-400 hover:underline font-medium">Live Positions</Link> to see T212 &amp; IG positions in one unified view with P&amp;L, stop/TP levels and close buttons.</span>
-        </div>
-      </Card>
+      {/* Live Positions widget */}
+      <LivePositionsWidget />
 
       {/* Tax Year Tracker */}
       <div className="mt-4">
