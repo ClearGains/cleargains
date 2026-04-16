@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { RefreshCw, CheckCircle2, X, AlertCircle, WifiOff, BarChart3 } from 'lucide-react';
+import { RefreshCw, CheckCircle2, X, AlertCircle, WifiOff, BarChart3, ChevronDown, ChevronUp } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Button } from '@/components/ui/Button';
 import { useClearGainsStore } from '@/lib/store';
@@ -58,12 +58,13 @@ export type PortfolioData = {
 type AccountStatus = 'pending' | 'loading' | 'done' | 'error' | 'skipped';
 
 interface AccountState {
-  key:     string;
-  label:   string;
-  status:  AccountStatus;
-  count:   number;
-  error?:  string;
-  debug?:  string;
+  key:      string;
+  label:    string;
+  status:   AccountStatus;
+  count:    number;
+  error?:   string;
+  debug?:   string;
+  steps?:   string[];  // diagnostic steps from API
 }
 
 // ── Hook: load portfolio ──────────────────────────────────────────────────────
@@ -175,10 +176,17 @@ export function useLoadPortfolio() {
           body: JSON.stringify({ apiKey: creds.apiKey, cst: sessD.cst, securityToken: sessD.securityToken, env: envKey }),
         });
         const d = await r.json() as IGPortfolioResult & {
-          ok: boolean; error?: string;
+          ok: boolean; error?: string; steps?: string[];
           accounts?: { accountId: string; accountName: string; accountType: string; preferred: boolean; balance: { balance: number; available: number; deposit: number; profitLoss: number }; currency: string }[];
         };
-        if (!d.ok) throw new Error(d.error ?? 'Fetch failed');
+
+        // Always capture steps for diagnostics, even on error
+        const apiSteps = d.steps ?? [];
+
+        if (!d.ok) {
+          setStatus(accountKey, { status: 'error', error: d.error ?? 'Fetch failed', debug: undefined, steps: apiSteps });
+          return;
+        }
 
         // Build per-sub-account position counts
         const subAccountMap = new Map<string, { accountId: string; accountName: string; accountType: string; positionCount: number }>();
@@ -203,7 +211,7 @@ export function useLoadPortfolio() {
           summary:       d.summary,
         };
         igResults.push(result);
-        setStatus(accountKey, { status: 'done', count: d.summary.positionCount, debug: undefined });
+        setStatus(accountKey, { status: 'done', count: d.summary.positionCount, debug: undefined, steps: apiSteps });
       } catch (e) {
         setStatus(accountKey, { status: 'error', error: e instanceof Error ? e.message : String(e), debug: undefined });
       }
@@ -290,6 +298,14 @@ function AccountTypeBadge({ type }: { type?: string }) {
 }
 
 export function LoadPortfolioModal({ open, onClose, loading, done, accounts, data, totalPositions, connectedCount, onReload }: Props) {
+  const [expandedDebug, setExpandedDebug] = useState<Set<string>>(new Set());
+  const toggleDebug = (key: string) =>
+    setExpandedDebug(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+
   if (!open) return null;
 
   const panel = (
@@ -367,6 +383,27 @@ export function LoadPortfolioModal({ open, onClose, loading, done, accounts, dat
                     </div>
                   );
                 })()}
+                {/* Collapsible debug steps for IG accounts */}
+                {(a.key === 'IG_DEMO' || a.key === 'IG_LIVE') && (a.steps?.length ?? 0) > 0 && (
+                  <div className="mt-1">
+                    <button
+                      onClick={() => toggleDebug(a.key)}
+                      className="flex items-center gap-1 text-[9px] text-gray-500 hover:text-gray-300 transition-colors"
+                    >
+                      {expandedDebug.has(a.key)
+                        ? <ChevronUp className="h-2.5 w-2.5" />
+                        : <ChevronDown className="h-2.5 w-2.5" />}
+                      Debug info ({a.steps!.length} steps)
+                    </button>
+                    {expandedDebug.has(a.key) && (
+                      <div className="mt-1 bg-gray-950/80 border border-gray-800 rounded p-1.5 space-y-0.5 max-h-40 overflow-y-auto">
+                        {a.steps!.map((step, i) => (
+                          <p key={i} className="text-[9px] font-mono text-gray-400 leading-relaxed whitespace-pre-wrap break-all">{step}</p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <span className={clsx('text-[10px] flex-shrink-0 mt-0.5',
                 a.status === 'done'    ? 'text-emerald-400' :
