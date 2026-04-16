@@ -111,19 +111,33 @@ function makeHeaders(s: IGSession, env: 'demo'|'live', extra?: Record<string,str
 
 const SESSION_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours — matches server-side cache
 
-async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSession|null> {
+/**
+ * Authenticate with IG and optionally switch to a specific sub-account in the
+ * same server request.  Passing `targetAccountId` avoids a separate switch call
+ * (the session route does login + PUT /session atomically on the server).
+ *
+ * Returns the session with `accountType` populated from IG's own response.
+ * `onAccounts` fires with the full sub-account list so callers can populate
+ * the subAccounts state and get reliable account type lookups.
+ */
+async function connectIG(
+  env: 'demo'|'live',
+  forceRefresh = false,
+  targetAccountId?: string,
+  onAccounts?: (env: 'demo'|'live', accs: Array<{ accountId:string; accountName:string; accountType:string; balance?:{ balance:number; available:number } }>) => void,
+): Promise<IGSession|null> {
   const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
   const sessKey = `ig_session_${env}`;
   try {
     const raw = localStorage.getItem(credKey);
 
-    // Return cached session if still fresh (< 5 hours old)
-    if (!forceRefresh) {
+    // Return cached session if still fresh (< 5 hours old) and no specific account requested
+    if (!forceRefresh && !targetAccountId) {
       const cachedRaw = localStorage.getItem(sessKey);
       if (cachedRaw) {
-        const cached = JSON.parse(cachedRaw) as { cst:string; securityToken:string; accountId:string; apiKey:string; authenticatedAt:number };
+        const cached = JSON.parse(cachedRaw) as { cst:string; securityToken:string; accountId:string; apiKey:string; accountType?:string; authenticatedAt:number };
         if (cached.cst && cached.securityToken && (Date.now() - cached.authenticatedAt) < SESSION_TTL_MS) {
-          return { cst:cached.cst, securityToken:cached.securityToken, accountId:cached.accountId, apiKey:cached.apiKey };
+          return { cst:cached.cst, securityToken:cached.securityToken, accountId:cached.accountId, apiKey:cached.apiKey, accountType:cached.accountType };
         }
       }
     }
@@ -134,21 +148,33 @@ async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSe
     if (raw) {
       const c = JSON.parse(raw) as { username:string; password:string; apiKey:string; connected?:boolean };
       if (!c.connected) return null;
-      authBody = { username: c.username, password: c.password, apiKey: c.apiKey, env, forceRefresh };
+      authBody = { username: c.username, password: c.password, apiKey: c.apiKey, env, forceRefresh, targetAccountId };
     } else {
       // No stored credentials — use server env vars (IG_USERNAME / IG_PASSWORD / IG_API_KEY)
-      authBody = { env, forceRefresh, useEnvCredentials: true };
+      authBody = { env, forceRefresh, useEnvCredentials: true, targetAccountId };
     }
 
     const r = await igQueue.enqueue(() =>
       fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(authBody) }),
     );
-    const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string; accounts?: unknown[] };
+    // Capture accountType directly from IG's response — ground truth, no env var comparison needed
+    type RawAccount = { accountId:string; accountName:string; accountType:string; preferred?:boolean; status?:string; balance?:{ balance:number; available:number } };
+    const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string; accountType?:string; accounts?: RawAccount[] };
     if (d.ok && d.cst && d.securityToken) {
       const apiKey = raw ? (JSON.parse(raw) as { apiKey: string }).apiKey : '';
-      const sess: IGSession = { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId??'', apiKey };
+      const sess: IGSession = {
+        cst: d.cst,
+        securityToken: d.securityToken,
+        accountId: d.accountId ?? '',
+        apiKey,
+        accountType: d.accountType ?? undefined,
+      };
       localStorage.setItem(sessKey, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
+      // Fire accounts callback so the component can populate subAccounts state
+      if (onAccounts && d.accounts?.length) {
+        onAccounts(env, d.accounts);
+      }
       return sess;
     }
   } catch {}
@@ -472,9 +498,11 @@ export function IGStrategyTrader() {
 
   /** "[CFD | Z6AFSH]" or "[SPREADBET | Z6AFSI]" for activity log prefixes. */
   function acctTypeLabel(env: 'demo'|'live'): string {
-    const id = sessionsRef.current[env]?.accountId;
-    if (!id) return '';
-    return ` [${accountLabel(id)}]`;
+    const sess = sessionsRef.current[env];
+    if (!sess?.accountId) return '';
+    // Prefer accountType from IG's own response (stored on session) — avoids env var comparison
+    const type = sess.accountType ?? accountTypeOf(sess.accountId);
+    return ` [${type} | ${sess.accountId}]`;
   }
 
   /** Atomically write a fresh session to ref + React state + localStorage. */
@@ -522,7 +550,11 @@ export function IGStrategyTrader() {
 
     (['demo','live'] as const).forEach(env => {
       setConnecting(c => ({...c,[env]:true}));
-      connectIG(env).then(sess => {
+      connectIG(env, false, undefined, (e, accs) => {
+        // Populate sub-accounts from IG's response so accountType lookups are reliable
+        setSubAccounts(s => ({ ...s, [e]: accs as IGSubAccount[] }));
+        localStorage.setItem(`ig_${e}_accounts`, JSON.stringify(accs));
+      }).then(sess => {
         if (sess) {
           storeSession(env, sess);
           // Only restore saved live mode once we confirm a live session actually exists
@@ -625,25 +657,33 @@ export function IGStrategyTrader() {
       return currentSess;
     }
 
-    // Switch failed — log actual error then re-authenticate before retrying once
-    log('error', `[${env.toUpperCase()}] ⚠️ Switch to ${accountId} failed: ${first.error ?? 'unknown'} — re-authenticating…`);
+    // Switch failed — re-authenticate with targetAccountId so that login + account
+    // switch happen in a SINGLE server request (avoids the token-expiry window
+    // between a bare login and a subsequent separate PUT /session switch).
+    log('error', `[${env.toUpperCase()}] ⚠️ Switch to ${accountId} failed: ${first.error ?? 'unknown'} — re-authenticating with atomic switch…`);
     try {
       lastReauthRef.current[env] = Date.now();
       localStorage.removeItem(`ig_session_${env}`);
-      const reauthed = await connectIG(env, true);
+      // Pass accountId so /api/ig/session does login + switch in one round-trip
+      const reauthed = await connectIG(env, true, accountId);
       if (!reauthed) {
         log('error', `[${env.toUpperCase()}] Re-auth failed — cannot switch to ${accountId}`);
         return currentSess;
       }
       storeSession(env, reauthed);
 
+      if (reauthed.accountId === accountId) {
+        log('info', `[${env.toUpperCase()}] ✅ Switched to ${accountId} (${reauthed.accountType ?? acctType ?? 'unknown type'}) via atomic re-auth`);
+        return reauthed;
+      }
+
+      // Server didn't switch (e.g. account not found) — try explicit switch once more
       const retry = await doSwitch(reauthed);
       if (retry.ok) {
         log('info', `[${env.toUpperCase()}] ✅ Switched to ${accountId} (${acctType ?? 'unknown type'}) after re-auth`);
         return retry.sess;
       }
       log('error', `[${env.toUpperCase()}] ❌ Still failed to switch to ${accountId} after re-auth: ${retry.error ?? 'unknown'}`);
-      // Return the freshly re-authed session even if switch failed — caller checks accountId
       return reauthed;
     } catch (e) {
       log('error', `[${env.toUpperCase()}] Re-auth exception: ${e instanceof Error ? e.message : String(e)}`);
@@ -682,14 +722,25 @@ export function IGStrategyTrader() {
             continue;
           }
           lastReauthRef.current[env] = Date.now();
+          // Remember which account we were on so we re-switch after re-auth.
+          // connectIG without targetAccountId lands on SPREADBET by default —
+          // we need to get back to the same account so the positions are correct.
+          const prevAccountId = sess.accountId;
           localStorage.removeItem(`ig_session_${env}`);
-          const fresh = await connectIG(env, true);
+          // Atomic login + switch to the same account in one server round-trip
+          const fresh = await connectIG(env, true, prevAccountId);
           if (!fresh) {
             setPosError(`[${env.toUpperCase()}] Session expired — reconnect in Settings → Accounts`);
             continue;
           }
+          // storeSession updates sessionsRef, React state, AND localStorage globally
+          // so all other parts of the app (placeOrder, closePos, etc.) pick up fresh tokens
           storeSession(env, fresh);
           sess = fresh;
+          // If the server landed on the wrong account, do an explicit switch
+          if (fresh.accountId !== prevAccountId) {
+            sess = await switchSessionTo(env, fresh, prevAccountId);
+          }
           r = await igQueue.enqueue(() => fetch('/api/ig/positions', { headers: makeHeaders(sess!, env) }));
         }
         const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
@@ -911,15 +962,16 @@ export function IGStrategyTrader() {
         return { ok: false, error: `Auth error but re-auth cooldown active — aborting`, epic };
       }
       lastReauthRef.current[env] = Date.now();
-      // Re-authenticate from scratch
+      // Re-authenticate with the target account so login + switch happen atomically
+      // in a single server round-trip (avoids 401 between bare login and PUT /session).
       localStorage.removeItem(`ig_session_${env}`);
-      const fresh = await connectIG(env, true);
+      const fresh = await connectIG(env, true, targetAccountId);
       if (!fresh) return { ok: false, error: `Re-auth failed after token expiry`, epic };
       storeSession(env, fresh);
       sess = fresh;
 
-      // Re-switch to the target sub-account after re-auth (login lands on SPREADBET)
-      if (targetAccountId) {
+      // If the server didn't land on the target account, try an explicit switch
+      if (targetAccountId && sess.accountId !== targetAccountId) {
         sess = await switchSessionTo(env, sess, targetAccountId);
         if (sess.accountId !== targetAccountId) {
           return { ok: false, error: `Re-auth succeeded but re-switch to ${targetAccountId} failed`, epic };
@@ -1044,8 +1096,21 @@ export function IGStrategyTrader() {
 
     // ── Calibrated signal scoring by market type + account type ──────────────
     const mType = market.marketType ?? getMarketType(market.epic);
-    // Determine account type from strategy's target account ID
-    const acctType: AccountType = strat.accountId ? accountTypeOf(strat.accountId) : 'SPREADBET';
+    // Determine account type — prefer IG's own accountType stored on the session,
+    // which is set directly from the login/switch response and doesn't rely on
+    // env var string comparison (which can fail if vars have trailing whitespace).
+    const acctType: AccountType = (() => {
+      if (!strat.accountId) return 'SPREADBET';
+      // Check if any active session is already on this account (has authoritative type)
+      for (const e of ['demo', 'live'] as const) {
+        const s = sessionsRef.current[e];
+        if (s?.accountId === strat.accountId && s.accountType) {
+          return s.accountType as AccountType;
+        }
+      }
+      // Fall back to env var comparison (igConfig)
+      return accountTypeOf(strat.accountId);
+    })();
     const { stopDist, limitDist } = getStopDistances(mType, acctType);
     const { direction, strength } = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
     const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;

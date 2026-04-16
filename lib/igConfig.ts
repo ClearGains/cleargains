@@ -5,20 +5,18 @@
  */
 
 // ── Account IDs ───────────────────────────────────────────────────────────────
-// NEXT_PUBLIC_ prefix makes them available in browser bundles.
-// Server-side routes can read the non-prefixed versions from process.env.
+// NEXT_PUBLIC_ prefix is required for browser bundles (webpack inlines at build).
+// Server routes also have access to the non-prefixed variants via process.env.
+// .trim() guards against trailing newlines that can appear when env vars are set
+// via `echo "..." | vercel env add` piping.
 
 export type AccountType = 'SPREADBET' | 'CFD';
 
 export const IG_ACCOUNT_CFD: string =
-  (typeof process !== 'undefined'
-    ? (process.env.NEXT_PUBLIC_IG_ACCOUNT_CFD ?? process.env.IG_ACCOUNT_CFD)
-    : undefined) ?? 'Z6AFSH';
+  (process.env.NEXT_PUBLIC_IG_ACCOUNT_CFD ?? process.env.IG_ACCOUNT_CFD ?? 'Z6AFSH').trim();
 
 export const IG_ACCOUNT_SPREADBET: string =
-  (typeof process !== 'undefined'
-    ? (process.env.NEXT_PUBLIC_IG_ACCOUNT_SPREADBET ?? process.env.IG_ACCOUNT_SPREADBET)
-    : undefined) ?? 'Z6AFSI';
+  (process.env.NEXT_PUBLIC_IG_ACCOUNT_SPREADBET ?? process.env.IG_ACCOUNT_SPREADBET ?? 'Z6AFSI').trim();
 
 /** Derive account type from account ID */
 export function accountTypeOf(accountId: string): AccountType {
