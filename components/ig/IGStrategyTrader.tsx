@@ -317,6 +317,20 @@ export function IGStrategyTrader() {
   const [sessions, setSessions]     = useState<Partial<Record<'demo'|'live', IGSession>>>({});
   const [connecting, setConnecting] = useState<Partial<Record<'demo'|'live', boolean>>>({});
 
+  /**
+   * Mutable ref mirror of `sessions` — always holds the latest tokens.
+   * React state updates are async so stale closures inside setInterval/useCallback
+   * would otherwise read old CST/securityToken values.  Every write to sessions
+   * must go through `storeSession()` which keeps ref + state + localStorage in sync.
+   */
+  const sessionsRef  = useRef<Partial<Record<'demo'|'live', IGSession>>>({});
+
+  /**
+   * Trade lock — ensures IG orders are placed sequentially.
+   * IG rejects concurrent requests on the same session.
+   */
+  const tradeLockRef = useRef(false);
+
   // ── Sub-accounts ───────────────────────────────────────────────────────────
   const [subAccounts, setSubAccounts]         = useState<Partial<Record<'demo'|'live', IGSubAccount[]>>>({});
   const [selectedSubAccount, setSelectedSubAccount] = useState<Partial<Record<'demo'|'live', string>>>({});
@@ -427,6 +441,13 @@ export function IGStrategyTrader() {
     setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0,200));
   }
 
+  /** Atomically write a fresh session to ref + React state + localStorage. */
+  function storeSession(env: 'demo'|'live', sess: IGSession) {
+    sessionsRef.current  = { ...sessionsRef.current, [env]: sess };
+    setSessions(s        => ({ ...s, [env]: sess }));
+    localStorage.setItem(`ig_session_${env}`, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
+  }
+
   function setActiveMode(mode: 'demo'|'live') {
     setActiveModeState(mode);
     localStorage.setItem('ig_active_mode', mode);
@@ -467,7 +488,7 @@ export function IGStrategyTrader() {
       setConnecting(c => ({...c,[env]:true}));
       connectIG(env).then(sess => {
         if (sess) {
-          setSessions(s => ({...s,[env]:sess}));
+          storeSession(env, sess);
           // Only restore saved live mode once we confirm a live session actually exists
           if (env === 'live' && savedMode === 'live') setActiveModeState('live');
         }
@@ -504,7 +525,6 @@ export function IGStrategyTrader() {
     currentSess: IGSession,
     accountId: string,
   ): Promise<IGSession> {
-    if (currentSess.accountId === accountId) return currentSess;
     try {
       const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
       const rawCred = localStorage.getItem(credKey);
@@ -517,8 +537,7 @@ export function IGStrategyTrader() {
       const swData = await swRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string };
       if (swData.ok && swData.cst && swData.securityToken) {
         const switched: IGSession = { cst: swData.cst, securityToken: swData.securityToken, accountId: swData.accountId ?? accountId, apiKey: currentSess.apiKey };
-        setSessions(s => ({ ...s, [env]: switched }));
-        localStorage.setItem(`ig_session_${env}`, JSON.stringify({ ...switched, authenticatedAt: Date.now() }));
+        storeSession(env, switched); // keep ref + state + localStorage in sync
         return switched;
       }
     } catch {}
@@ -564,7 +583,7 @@ export function IGStrategyTrader() {
           if (r.status === 401) {
             localStorage.removeItem(`ig_session_${env}`);
             const fresh = await connectIG(env, true);
-            if (fresh) { setSessions(s => ({...s,[env]:fresh})); sess = fresh; }
+            if (fresh) { storeSession(env, fresh); sess = fresh; }
             r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
           }
           const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
@@ -691,105 +710,146 @@ export function IGStrategyTrader() {
    * Clears stale localStorage cache before re-authing.
    */
   async function freshSession(env: 'demo'|'live'): Promise<IGSession|null> {
-    // Check stored timestamp
+    // Check stored timestamp — proactively expire before IG's 6h window closes
     try {
       const raw = localStorage.getItem(`ig_session_${env}`);
       if (raw) {
         const meta = JSON.parse(raw) as { authenticatedAt?: number };
         if (meta.authenticatedAt && (Date.now() - meta.authenticatedAt) >= SESSION_TTL_MS) {
-          // Proactively expire before IG does
           localStorage.removeItem(`ig_session_${env}`);
           const fresh = await connectIG(env, true);
-          if (fresh) setSessions(s => ({...s,[env]:fresh}));
+          if (fresh) storeSession(env, fresh);
           return fresh;
         }
       }
     } catch {}
-    // Session still fresh — return from state (connectIG cached it on mount)
-    return sessions[env] ?? null;
+    // Read from ref (not React state) — always holds the latest tokens even inside
+    // stale setInterval closures where `sessions` state would lag behind.
+    return sessionsRef.current[env] ?? null;
   }
 
-  async function placeOrder(env: 'demo'|'live', epic:string, direction:'BUY'|'SELL', size:number, stopDist?:number, limitDist?:number, targetAccountId?:string) {
-    // Proactive freshness check (spec: validate before every IG call)
-    let sess = await freshSession(env);
-    if (!sess) return { ok:false as const, error:`No ${env} session`, epic, sentPayload: null, igBody: null };
+  type OrderResult = { ok: boolean; dealReference?: string; dealId?: string; dealStatus?: string; level?: number; reason?: string; error?: string; epic?: string; resolvedVia?: string; sentPayload?: unknown; igBody?: unknown; igStatus?: number };
 
-    // Switch to target sub-account if specified and different from current
-    if (targetAccountId && targetAccountId !== sess.accountId) {
-      try {
-        const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
-        const rawCred = localStorage.getItem(credKey);
-        const apiKey  = rawCred ? (JSON.parse(rawCred) as { apiKey?: string }).apiKey ?? sess.apiKey : sess.apiKey;
-        const swRes = await fetch('/api/ig/switch-account', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cst: sess.cst, securityToken: sess.securityToken, apiKey, env, accountId: targetAccountId }),
-        });
-        const swData = await swRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; error?: string };
-        if (swData.ok && swData.cst && swData.securityToken) {
-          sess = { cst: swData.cst, securityToken: swData.securityToken, accountId: swData.accountId ?? targetAccountId, apiKey: sess.apiKey };
-          setSessions(s => ({ ...s, [env]: sess! }));
-          localStorage.setItem(`ig_session_${env}`, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
-        } else {
-          return { ok: false as const, error: `Account switch failed: ${swData.error ?? 'unknown'}`, epic, sentPayload: null, igBody: null };
-        }
-      } catch (e) {
-        return { ok: false as const, error: `Account switch error: ${e instanceof Error ? e.message : String(e)}`, epic, sentPayload: null, igBody: null };
+  async function placeOrder(
+    env: 'demo'|'live', epic: string, direction: 'BUY'|'SELL', size: number,
+    stopDist?: number, limitDist?: number, targetAccountId?: string,
+  ): Promise<OrderResult> {
+
+    // ── Serialize: IG rejects concurrent requests on the same session ─────────
+    // Spin-wait max 15 s (150 × 100 ms) for any in-flight trade to finish.
+    for (let i = 0; i < 150 && tradeLockRef.current; i++) await sleep(100);
+    tradeLockRef.current = true;
+
+    try {
+      return await _placeOrderInner(env, epic, direction, size, stopDist, limitDist, targetAccountId);
+    } finally {
+      // 500 ms cooldown after every order so IG's rate limiter doesn't trip
+      await sleep(500);
+      tradeLockRef.current = false;
+    }
+  }
+
+  async function _placeOrderInner(
+    env: 'demo'|'live', epic: string, direction: 'BUY'|'SELL', size: number,
+    stopDist?: number, limitDist?: number, targetAccountId?: string,
+  ): Promise<OrderResult> {
+
+    // ── 1. Get a fresh session ────────────────────────────────────────────────
+    let sess = await freshSession(env);
+    if (!sess) return { ok: false, error: `No ${env} session`, epic };
+
+    // ── 2. ALWAYS switch to targetAccountId before every order ───────────────
+    // IG may reset the active sub-account between API calls — never trust
+    // `sess.accountId` to still be the right one.
+    if (targetAccountId) {
+      sess = await switchSessionTo(env, sess, targetAccountId);
+      if (sess.accountId !== targetAccountId) {
+        return { ok: false, error: `Failed to switch to account ${targetAccountId}`, epic };
       }
     }
 
-    const orderBody = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist, currencyCode:'GBP' };
+    // ── 3. Place order ────────────────────────────────────────────────────────
+    const orderBody = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist, currencyCode: 'GBP' };
     let r = await fetch('/api/ig/order', {
-      method:'POST',
-      headers: { ...makeHeaders(sess, env), 'Content-Type':'application/json' },
+      method: 'POST',
+      headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
       body: JSON.stringify(orderBody),
     });
 
-    // 401 / 403 → clear cache, re-auth, retry once
-    if (r.status === 401 || r.status === 403) {
+    // ── 4. Token-invalid detection ────────────────────────────────────────────
+    // IG signals stale tokens as HTTP 401/403 or (occasionally) 200 with
+    // errorCode: 'error.security.account-token-invalid' in the body.
+    const isTokenErr = (status: number, body?: string) =>
+      status === 401 || status === 403 ||
+      (body?.includes('account-token-invalid') ?? false) ||
+      (body?.includes('INVALID_TOKEN') ?? false);
+
+    const rawText = await r.text();
+    if (isTokenErr(r.status, rawText)) {
+      // Re-authenticate from scratch
       localStorage.removeItem(`ig_session_${env}`);
       const fresh = await connectIG(env, true);
-      if (fresh) {
-        sess = fresh;
-        setSessions(s => ({...s,[env]:fresh}));
-        r = await fetch('/api/ig/order', {
-          method:'POST',
-          headers: { ...makeHeaders(fresh, env), 'Content-Type':'application/json' },
-          body: JSON.stringify(orderBody),
-        });
+      if (!fresh) return { ok: false, error: `Re-auth failed after token expiry`, epic };
+      storeSession(env, fresh);
+      sess = fresh;
+
+      // Re-switch to the target sub-account after re-auth (login lands on SPREADBET)
+      if (targetAccountId) {
+        sess = await switchSessionTo(env, sess, targetAccountId);
+        if (sess.accountId !== targetAccountId) {
+          return { ok: false, error: `Re-auth succeeded but re-switch to ${targetAccountId} failed`, epic };
+        }
       }
+
+      // Retry the order once with fresh tokens
+      r = await fetch('/api/ig/order', {
+        method: 'POST',
+        headers: { ...makeHeaders(sess, env), 'Content-Type': 'application/json' },
+        body: JSON.stringify(orderBody),
+      });
+      const retryText = await r.text();
+      try { return JSON.parse(retryText) as OrderResult; } catch { return { ok: false, error: retryText.slice(0, 200), epic }; }
     }
 
-    return r.json() as Promise<{ok:boolean;dealReference?:string;dealId?:string;dealStatus?:string;level?:number;reason?:string;error?:string;epic?:string;resolvedVia?:string;sentPayload?:unknown;igBody?:unknown;igStatus?:number}>;
+    try { return JSON.parse(rawText) as OrderResult; } catch { return { ok: false, error: rawText.slice(0, 200), epic }; }
   }
 
   async function closePos(env: 'demo'|'live', pos: IGPosition) {
-    let sess = sessions[env];
-    if (!sess) return { ok:false, error:`No ${env} session` };
-    const closeBody = { dealId:pos.dealId, direction: pos.direction==='BUY'?'SELL':'BUY', size:pos.size };
+    // Read from ref — avoids stale closure issue in setInterval callbacks
+    let sess = sessionsRef.current[env];
+    if (!sess) return { ok: false, error: `No ${env} session` };
 
-    let r = await fetch('/api/ig/order', {
-      method:'DELETE',
-      headers: { ...makeHeaders(sess, env), 'Content-Type':'application/json' },
+    // Switch to the sub-account that owns this position before closing
+    if (pos.subAccountId && pos.subAccountId !== sess.accountId) {
+      sess = await switchSessionTo(env, sess, pos.subAccountId);
+    }
+
+    const closeBody = { dealId: pos.dealId, direction: pos.direction === 'BUY' ? 'SELL' : 'BUY', size: pos.size };
+
+    const doClose = (s: IGSession) => fetch('/api/ig/order', {
+      method: 'DELETE',
+      headers: { ...makeHeaders(s, env), 'Content-Type': 'application/json' },
       body: JSON.stringify(closeBody),
     });
 
-    // 401 / 403 → re-auth and retry once
+    let r = await doClose(sess);
+
+    // 401 / 403 / token-invalid → re-auth and retry once
     if (r.status === 401 || r.status === 403) {
       localStorage.removeItem(`ig_session_${env}`);
       const fresh = await connectIG(env, true);
       if (fresh) {
+        storeSession(env, fresh);
         sess = fresh;
-        setSessions(s => ({...s,[env]:fresh}));
-        r = await fetch('/api/ig/order', {
-          method:'DELETE',
-          headers: { ...makeHeaders(fresh, env), 'Content-Type':'application/json' },
-          body: JSON.stringify(closeBody),
-        });
+        // Re-switch to position's sub-account after re-auth
+        if (pos.subAccountId && pos.subAccountId !== sess.accountId) {
+          sess = await switchSessionTo(env, sess, pos.subAccountId);
+        }
+        r = await doClose(sess);
       }
     }
 
-    return r.json() as Promise<{ok:boolean;error?:string}>;
+    return r.json() as Promise<{ ok: boolean; error?: string }>;
   }
 
   // ── Fetch IG account funds ─────────────────────────────────────────────────
@@ -883,7 +943,7 @@ export function IGStrategyTrader() {
         const envPos = positions[env];
         const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
 
-        // Auto-close opposing positions
+        // Auto-close opposing positions — wait for each to settle before continuing
         if (strat.autoClose) {
           for (const opp of envPos.filter(p => p.epic === market.epic && p.direction === opposite)) {
             log('close', `[${env.toUpperCase()}] Auto-closing ${opp.direction} ${market.name} — signal reversed`);
@@ -892,6 +952,8 @@ export function IGStrategyTrader() {
               log('close', `[${env.toUpperCase()}] ✅ Closed ${market.name}`);
               const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
               setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, opp.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+              // Give IG time to settle the close before we open a new position on the same account
+              await sleep(1000);
             } else log('error', `[${env.toUpperCase()}] Close failed: ${cr.error ?? 'unknown'}`);
           }
           await loadPositions(env);
