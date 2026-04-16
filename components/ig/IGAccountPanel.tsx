@@ -304,6 +304,15 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const [bSignalScanMs, setBSignalScanMs] = useState(5 * 60_000);
   const [bPosMonitorMs, setBPosMonitorMs] = useState(60_000);
 
+  // ── Dynamic market navigator (CFD) ────────────────────────────────────────
+  type IGNavNode    = { id: string; name: string };
+  type IGNavMarket  = { epic: string; instrumentName: string; instrumentType: string };
+  type IGNavCategory = { node: IGNavNode; markets: IGNavMarket[]; subNodes: IGNavNode[]; expanded: boolean };
+  const [navCategories, setNavCategories]       = useState<IGNavCategory[]>([]);
+  const [navLoading, setNavLoading]             = useState(false);
+  const [navLoaded, setNavLoaded]               = useState(false);
+  const [navSelectedEpics, setNavSelectedEpics] = useState<Set<string>>(new Set());
+
   // ── Manual trade ───────────────────────────────────────────────────────────
   const [showManual, setShowManual]       = useState(false);
   const [manualEpic, setManualEpic]       = useState('');
@@ -625,10 +634,70 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     }
   }
 
-  // ── Fetch market snapshot ──────────────────────────────────────────────────
-  async function fetchSnapshot(name: string) {
+  // ── Load available markets from IG market navigation ──────────────────────
+  async function loadIGMarkets() {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    setNavLoading(true);
     try {
-      const r = await fetch(`/api/ig/candles?name=${encodeURIComponent(name)}`);
+      type NavResp = { ok:boolean; nodes?:{id:string;name:string}[]; markets?:{epic:string;instrumentName:string;instrumentType:string}[]; error?:string };
+      // Fetch top-level nodes
+      const topRes = await fetch('/api/ig/marketnavigation', { headers: makeHeaders(sess, env) });
+      const topData = await topRes.json() as NavResp;
+      if (!topData.ok) { log('error', `Market nav failed: ${topData.error ?? 'unknown'}`); setNavLoading(false); return; }
+
+      const topNodes = topData.nodes ?? [];
+
+      // Filter to the categories most relevant for CFD trading
+      const RELEVANT = ['indices', 'currenc', 'commodit', 'shares', 'crypto', 'bitcoin', 'forex', 'popular'];
+      const relevantNodes = topNodes.filter(n => RELEVANT.some(k => n.name.toLowerCase().includes(k)));
+      const useNodes = relevantNodes.length > 0 ? relevantNodes : topNodes.slice(0, 8);
+
+      // Fetch one level deep for each relevant top-level node (up to 8)
+      const categories: IGNavCategory[] = [];
+      for (const node of useNodes.slice(0, 8)) {
+        const nodeRes = await fetch(`/api/ig/marketnavigation?nodeId=${encodeURIComponent(node.id)}`, { headers: makeHeaders(sess, env) });
+        const nodeData = await nodeRes.json() as NavResp;
+        if (!nodeData.ok) continue;
+
+        const markets = (nodeData.markets ?? []);
+        const subNodes = (nodeData.nodes ?? []);
+
+        // If this node has sub-nodes but no direct markets, fetch the first few sub-nodes
+        if (markets.length === 0 && subNodes.length > 0) {
+          for (const sub of subNodes.slice(0, 4)) {
+            const subRes = await fetch(`/api/ig/marketnavigation?nodeId=${encodeURIComponent(sub.id)}`, { headers: makeHeaders(sess, env) });
+            const subData = await subRes.json() as NavResp;
+            if (!subData.ok) continue;
+            const subMarkets = subData.markets ?? [];
+            if (subMarkets.length > 0) {
+              categories.push({
+                node: { id: sub.id, name: `${node.name} › ${sub.name}` },
+                markets: subMarkets.slice(0, 30),
+                subNodes: [],
+                expanded: false,
+              });
+            }
+          }
+        } else if (markets.length > 0) {
+          categories.push({ node, markets: markets.slice(0, 50), subNodes, expanded: false });
+        }
+      }
+
+      setNavCategories(categories);
+      setNavLoaded(true);
+    } catch (e) {
+      log('error', `Market nav error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setNavLoading(false);
+  }
+
+  // ── Fetch market snapshot ──────────────────────────────────────────────────
+  async function fetchSnapshot(name: string, epic?: string) {
+    try {
+      const params = new URLSearchParams({ name });
+      if (epic) params.set('epic', epic);
+      const r = await fetch(`/api/ig/candles?${params.toString()}`);
       const d = await r.json() as { ok:boolean; price?:number; changePercent?:number; signal?:'BUY'|'SELL'|'NEUTRAL'; source?:string; error?:string };
       if (!d.ok) return { price:0, changePercent:0, signal:'NEUTRAL' as const, source:'yahoo', error: d.error ?? `HTTP ${r.status}` };
       return { price:d.price ?? 0, changePercent:d.changePercent ?? 0, signal:d.signal ?? 'NEUTRAL' as const, source:d.source ?? 'yahoo' };
@@ -723,7 +792,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
 
-    const snapshot = await fetchSnapshot(market.name);
+    const resolvedEpicForSnap = epicForAccount(market.name, accountType) ?? market.epic;
+    const snapshot = await fetchSnapshot(market.name, resolvedEpicForSnap);
     if (!snapshot || snapshot.error) {
       const errMsg = snapshot?.error ?? 'Failed to fetch market data';
       setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'error', error:errMsg } }));
@@ -1515,6 +1585,14 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                   className="text-[10px] px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 hover:text-white transition-colors">
                   Reset to defaults
                 </button>
+                {session && isCFD && (
+                  <button
+                    onClick={() => { if (!navLoaded) void loadIGMarkets(); setNavLoaded(p => { if (!p) void loadIGMarkets(); return p; }); }}
+                    disabled={navLoading}
+                    className="text-[10px] px-2.5 py-1.5 bg-blue-900/40 border border-blue-700/40 rounded-lg text-blue-400 hover:text-blue-200 transition-colors disabled:opacity-50">
+                    {navLoading ? '⌛ Loading from IG…' : navLoaded ? '🔄 Reload IG markets' : '🌐 Browse all IG markets'}
+                  </button>
+                )}
                 {session && (
                   <div className="w-full mt-1">
                     <p className="text-[10px] text-gray-500 mb-1.5">Add any market:</p>
@@ -1522,6 +1600,109 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                   </div>
                 )}
               </div>
+
+              {/* ── Dynamic IG market browser ──────────────────────────────── */}
+              {navLoaded && navCategories.length > 0 && (
+                <div className="mt-3 border border-gray-700 rounded-xl overflow-hidden">
+                  <div className="bg-gray-800/60 px-3 py-2 flex items-center justify-between">
+                    <p className="text-[11px] font-semibold text-gray-300">IG Markets — select to add to watchlist</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-gray-500">{navSelectedEpics.size} selected</span>
+                      {navSelectedEpics.size > 0 && (
+                        <button
+                          onClick={() => {
+                            setBWatchlist(prev => {
+                              const ex = new Set(prev.map(x => x.epic));
+                              const toAdd: WatchlistMarket[] = [];
+                              navCategories.forEach(cat => {
+                                cat.markets.forEach(m => {
+                                  if (navSelectedEpics.has(m.epic) && !ex.has(m.epic)) {
+                                    const mType = m.instrumentType.includes('SHARE') || m.instrumentType.includes('STOCK') ? 'STOCK' as const
+                                      : m.instrumentType.includes('INDIC') ? 'INDEX' as const
+                                      : m.instrumentType.includes('CURRENC') ? 'FOREX' as const
+                                      : m.instrumentType.includes('COMMODI') ? 'COMMODITY' as const
+                                      : m.instrumentType.includes('CRYPTO') || m.instrumentType.includes('BITC') ? 'CRYPTO' as const
+                                      : 'COMMODITY' as const;
+                                    toAdd.push({ epic: m.epic, name: m.instrumentName, enabled: true, marketType: mType });
+                                  }
+                                });
+                              });
+                              return [...prev, ...toAdd];
+                            });
+                            setNavSelectedEpics(new Set());
+                          }}
+                          className="text-[10px] px-2.5 py-1 bg-orange-500/20 border border-orange-500/30 rounded-lg text-orange-400 hover:bg-orange-500/30 font-semibold transition-colors">
+                          + Add {navSelectedEpics.size} to watchlist
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto divide-y divide-gray-800/50">
+                    {navCategories.map((cat, ci) => (
+                      <div key={cat.node.id}>
+                        {/* Category header */}
+                        <div className="flex items-center gap-2 px-3 py-2 bg-gray-800/30 sticky top-0 z-10">
+                          <button
+                            onClick={() => setNavCategories(p => p.map((c,i) => i===ci ? {...c, expanded:!c.expanded} : c))}
+                            className="flex items-center gap-1.5 flex-1 text-left">
+                            <ChevronDown className={clsx('h-3 w-3 text-gray-500 transition-transform', cat.expanded && 'rotate-180')} />
+                            <span className="text-[11px] font-semibold text-gray-300">{cat.node.name}</span>
+                            <span className="text-[10px] text-gray-600">({cat.markets.length})</span>
+                          </button>
+                          <button
+                            onClick={() => {
+                              const epics = cat.markets.map(m => m.epic);
+                              const allSelected = epics.every(e => navSelectedEpics.has(e));
+                              setNavSelectedEpics(prev => {
+                                const next = new Set(prev);
+                                if (allSelected) { epics.forEach(e => next.delete(e)); }
+                                else { epics.forEach(e => next.add(e)); }
+                                return next;
+                              });
+                            }}
+                            className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">
+                            {cat.markets.every(m => navSelectedEpics.has(m.epic)) ? 'deselect all' : 'select all'}
+                          </button>
+                        </div>
+                        {/* Markets within category */}
+                        {cat.expanded && (
+                          <div className="divide-y divide-gray-800/30">
+                            {cat.markets.map(m => {
+                              const sel = navSelectedEpics.has(m.epic);
+                              const already = bWatchlist.some(w => w.epic === m.epic);
+                              return (
+                                <div key={m.epic}
+                                  onClick={() => {
+                                    if (already) return;
+                                    setNavSelectedEpics(prev => {
+                                      const next = new Set(prev);
+                                      if (sel) next.delete(m.epic); else next.add(m.epic);
+                                      return next;
+                                    });
+                                  }}
+                                  className={clsx('flex items-center gap-2 px-4 py-1.5 text-xs cursor-pointer transition-colors',
+                                    already ? 'opacity-40 cursor-default' : sel ? 'bg-orange-500/10' : 'hover:bg-gray-800/40')}>
+                                  <div className={clsx('w-3.5 h-3.5 rounded flex-shrink-0 flex items-center justify-center',
+                                    already ? 'bg-emerald-600/30 border border-emerald-600/40' : sel ? 'bg-orange-500' : 'bg-gray-700 border border-gray-600')}>
+                                    {(sel || already) && <span className="text-white text-[8px] font-bold">✓</span>}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <span className={clsx('truncate', sel ? 'text-orange-300' : already ? 'text-emerald-400' : 'text-gray-300')}>
+                                      {m.instrumentName}
+                                    </span>
+                                    {already && <span className="ml-1 text-[9px] text-emerald-600">in watchlist</span>}
+                                  </div>
+                                  <span className="text-[9px] text-gray-600 font-mono truncate max-w-[90px]">{m.epic}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {env === 'live' && <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400">⚠️ Auto-trading on LIVE will open real positions with real money.</div>}

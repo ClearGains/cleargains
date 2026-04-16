@@ -93,6 +93,7 @@ export async function POST(request: NextRequest) {
     const data = await res.json() as {
       accountType?: string;
       accountId?: string;
+      currentAccountId?: string;  // IG API Version 2 field name
       accounts?: AccountEntry[];
       clientId?: string;
     };
@@ -100,7 +101,8 @@ export async function POST(request: NextRequest) {
     // ── Optionally switch to a specific sub-account ──────────────────────────
     // If targetAccountId is given: switch to that account.
     // Otherwise: switch to the SPREADBET account if one exists (backward compat).
-    let activeAccountId = data.accountId ?? '';
+    // IG Version 2 POST /session uses "currentAccountId", not "accountId" — check both.
+    let activeAccountId = ((data.currentAccountId ?? data.accountId) ?? '') as string;
     const accounts = data.accounts ?? [];
     const spreadbetAccount = accounts.find((a: AccountEntry) => a.accountType === 'SPREADBET');
     const switchTarget = targetAccountId
@@ -122,18 +124,15 @@ export async function POST(request: NextRequest) {
           body: JSON.stringify({ accountId: switchTarget.accountId, dealingEnabled: true }),
         });
         if (switchRes.ok) {
+          // HTTP 200 = switch accepted. Read updated tokens from response headers.
+          // Do NOT rely on response body — IG v1 PUT /session body has no accountId field.
           const newCst      = switchRes.headers.get('CST');
           const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
           if (newCst)      cst           = newCst;
           if (newSecToken) securityToken = newSecToken;
-          // Try to read the confirmed active account from the PUT response body
-          try {
-            const switchBody = await switchRes.json() as Record<string, unknown>;
-            const confirmedId = (switchBody.currentAccountId ?? switchBody.accountId ?? '') as string;
-            activeAccountId = confirmedId || switchTarget.accountId;
-          } catch {
-            activeAccountId = switchTarget.accountId;
-          }
+          activeAccountId = switchTarget.accountId;
+          // Consume body to avoid leak
+          await switchRes.text().catch(() => '');
           console.log(`[ig/session] Switched to ${switchTarget.accountType} account ${activeAccountId}`);
         } else {
           const errText = await switchRes.text().catch(() => '');
