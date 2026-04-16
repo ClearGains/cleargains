@@ -1485,12 +1485,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     stopLevel?: number, limitLevel?: number,
     currencyCode?: string,
   ): Promise<OrderResult> {
-    // Always re-confirm the session is on the correct account before placing an
-    // order.  Since _placeOrderInner runs inside withTradeLock, this switch is
-    // serialised — no other panel can interleave between the switch and the order.
-    // serverForceRefresh=false: reuse the server's shared session + quick-switch;
-    // only do a full re-login if the server cache is empty/expired.
-    let sess = await connectForAccount(true, false);
+    let sess = await freshSession();
     if (!sess) return { ok:false, error:`No ${env} session`, epic };
 
     // CFD uses absolute price levels (stopLevel/limitLevel) — never distance fields
