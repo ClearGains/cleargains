@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { RefreshCw, CheckCircle2, X, AlertCircle, WifiOff, BarChart3 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Button } from '@/components/ui/Button';
@@ -32,16 +33,19 @@ export type IGPortfolioResult = {
     dealId: string; direction: string; size: number; level: number;
     currency: string; stopLevel?: number; limitLevel?: number; createdDate?: string;
     epic: string; instrumentName: string; currentPrice: number; upl: number; uplPct: number;
+    accountId?: string; accountType?: string; accountName?: string;
   }[];
   workingOrders: {
     dealId: string; direction: string; size: number; orderLevel: number;
     orderType: string; epic: string; instrumentName: string; createdDate?: string;
     goodTillDate?: string | null;
+    accountId?: string; accountType?: string;
   }[];
   activeAccount: {
     balance: number; available: number; deposit: number; profitLoss: number;
     currency: string; accountType: string;
   } | null;
+  subAccounts?: { accountId: string; accountName: string; accountType: string; positionCount: number }[];
   summary: { positionCount: number; workingOrders: number; totalUpl: number };
 };
 
@@ -86,9 +90,8 @@ export function useLoadPortfolio() {
     setDone(false);
     setData(null);
 
-    // Read T212 credentials from localStorage directly (don't rely on store connected flags)
+    // Read T212 credentials from store (persisted) or localStorage fallback
     function getT212Creds(storeKey: string, storeSecret: string, lsKey: string) {
-      // Prefer store values; fall back to localStorage
       if (storeKey && storeSecret) return { key: storeKey, secret: storeSecret };
       try {
         const raw = typeof window !== 'undefined' ? localStorage.getItem(lsKey) : null;
@@ -150,7 +153,7 @@ export function useLoadPortfolio() {
       }
     }
 
-    // IG fetch helper — always does fresh auth to avoid stale token issues
+    // IG fetch helper — fresh auth every time, fetches all sub-accounts
     async function fetchIG(envKey: 'demo' | 'live', accountKey: string, label: string, color: string, creds: { username: string; password: string; apiKey: string }) {
       try {
         setStatus(accountKey, { status: 'loading', debug: `Authenticating with ${label}…` });
@@ -165,15 +168,40 @@ export function useLoadPortfolio() {
           return;
         }
 
-        setStatus(accountKey, { status: 'loading', debug: `Fetching positions from ${label}…` });
+        setStatus(accountKey, { status: 'loading', debug: `Fetching all sub-accounts from ${label}…` });
         const r = await fetch('/api/portfolio/ig', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ apiKey: creds.apiKey, cst: sessD.cst, securityToken: sessD.securityToken, env: envKey }),
         });
-        const d = await r.json() as IGPortfolioResult & { ok: boolean; error?: string };
+        const d = await r.json() as IGPortfolioResult & {
+          ok: boolean; error?: string;
+          accounts?: { accountId: string; accountName: string; accountType: string; preferred: boolean; balance: { balance: number; available: number; deposit: number; profitLoss: number }; currency: string }[];
+        };
         if (!d.ok) throw new Error(d.error ?? 'Fetch failed');
-        const result: IGPortfolioResult = { account: accountKey, label, color, positions: d.positions, workingOrders: d.workingOrders, activeAccount: d.activeAccount, summary: d.summary };
+
+        // Build per-sub-account position counts
+        const subAccountMap = new Map<string, { accountId: string; accountName: string; accountType: string; positionCount: number }>();
+        (d.accounts ?? []).forEach(acc => {
+          subAccountMap.set(acc.accountId, { accountId: acc.accountId, accountName: acc.accountName, accountType: acc.accountType, positionCount: 0 });
+        });
+        (d.positions ?? []).forEach(pos => {
+          if (pos.accountId) {
+            const entry = subAccountMap.get(pos.accountId);
+            if (entry) entry.positionCount++;
+          }
+        });
+
+        const result: IGPortfolioResult = {
+          account: accountKey,
+          label,
+          color,
+          positions:     d.positions,
+          workingOrders: d.workingOrders,
+          activeAccount: d.activeAccount,
+          subAccounts:   Array.from(subAccountMap.values()),
+          summary:       d.summary,
+        };
         igResults.push(result);
         setStatus(accountKey, { status: 'done', count: d.summary.positionCount, debug: undefined });
       } catch (e) {
@@ -196,7 +224,6 @@ export function useLoadPortfolio() {
     };
     setData(portfolioData);
 
-    // Save snapshot
     try {
       localStorage.setItem(PORTFOLIO_SNAPSHOT_KEY, JSON.stringify(portfolioData));
     } catch {}
@@ -218,18 +245,27 @@ export function useLoadPortfolio() {
   return { open, openModal, closeModal, loading, done, accounts, data, totalPositions, connectedCount, reload: load };
 }
 
+// ── Portal wrapper (SSR-safe) ─────────────────────────────────────────────────
+
+function ModalPortal({ children }: { children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+  if (!mounted) return null;
+  return createPortal(children, document.body);
+}
+
 // ── Modal component ───────────────────────────────────────────────────────────
 
 interface Props {
-  open:         boolean;
-  onClose:      () => void;
-  loading:      boolean;
-  done:         boolean;
-  accounts:     AccountState[];
-  data:         PortfolioData | null;
+  open:           boolean;
+  onClose:        () => void;
+  loading:        boolean;
+  done:           boolean;
+  accounts:       AccountState[];
+  data:           PortfolioData | null;
   totalPositions: number;
   connectedCount: number;
-  onReload:     () => void;
+  onReload:       () => void;
 }
 
 function StatusIcon({ status }: { status: AccountStatus }) {
@@ -240,16 +276,35 @@ function StatusIcon({ status }: { status: AccountStatus }) {
   return <span className="h-3.5 w-3.5 rounded-full border border-gray-700 inline-block" />;
 }
 
+function AccountTypeBadge({ type }: { type?: string }) {
+  if (!type) return null;
+  const label = type === 'SPREADBET' ? 'Spread Bet' : type === 'CFD' ? 'CFD' : type === 'SHARES' ? 'Shares' : type;
+  const cls   = type === 'SPREADBET'
+    ? 'bg-purple-500/15 text-purple-400 border-purple-500/25'
+    : type === 'CFD'
+    ? 'bg-blue-500/15 text-blue-400 border-blue-500/25'
+    : 'bg-gray-700 text-gray-400 border-gray-600';
+  return (
+    <span className={clsx('text-[8px] px-1.5 py-0.5 rounded border font-medium', cls)}>{label}</span>
+  );
+}
+
 export function LoadPortfolioModal({ open, onClose, loading, done, accounts, data, totalPositions, connectedCount, onReload }: Props) {
   if (!open) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
-      <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+  const panel = (
+    <div
+      className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/75 px-4 overflow-y-auto"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-md shadow-2xl mt-[80px] mb-8"
+        style={{ maxHeight: 'calc(100vh - 120px)', overflowY: 'auto' }}
+      >
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-orange-500/20 flex items-center justify-center">
+            <div className="w-8 h-8 rounded-lg bg-orange-500/20 flex items-center justify-center flex-shrink-0">
               <BarChart3 className="h-4 w-4 text-orange-400" />
             </div>
             <div>
@@ -259,7 +314,10 @@ export function LoadPortfolioModal({ open, onClose, loading, done, accounts, dat
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors">
+          <button
+            onClick={onClose}
+            className="ml-4 flex-shrink-0 text-gray-500 hover:text-white transition-colors p-1 rounded-lg hover:bg-gray-800"
+          >
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -268,14 +326,16 @@ export function LoadPortfolioModal({ open, onClose, loading, done, accounts, dat
         <div className="space-y-2 mb-4">
           {accounts.map(a => (
             <div key={a.key} className={clsx(
-              'flex items-center gap-3 px-3 py-2 rounded-lg border text-xs',
+              'flex items-start gap-3 px-3 py-2 rounded-lg border text-xs',
               a.status === 'done'    ? 'bg-emerald-500/5 border-emerald-500/15' :
               a.status === 'loading' ? 'bg-blue-500/5 border-blue-500/20' :
               a.status === 'error'   ? 'bg-red-500/5 border-red-500/15' :
               a.status === 'skipped' ? 'bg-gray-800/30 border-gray-800' :
               'bg-gray-800/20 border-gray-800'
             )}>
-              <StatusIcon status={a.status} />
+              <div className="mt-0.5 flex-shrink-0">
+                <StatusIcon status={a.status} />
+              </div>
               <div className="flex-1 min-w-0">
                 <span className={clsx('font-medium',
                   a.status === 'done'    ? 'text-emerald-400' :
@@ -284,13 +344,31 @@ export function LoadPortfolioModal({ open, onClose, loading, done, accounts, dat
                   a.status === 'skipped' ? 'text-gray-600' : 'text-gray-500'
                 )}>{a.label}</span>
                 {a.status === 'loading' && a.debug && (
-                  <p className="text-[10px] text-blue-400/70 truncate">{a.debug}</p>
+                  <p className="text-[10px] text-blue-400/70 truncate mt-0.5">{a.debug}</p>
                 )}
                 {a.status === 'error' && a.error && (
-                  <p className="text-[10px] text-red-400/70 truncate">{a.error}</p>
+                  <p className="text-[10px] text-red-400/70 truncate mt-0.5">{a.error}</p>
                 )}
+                {/* Show IG sub-account breakdown when done */}
+                {a.status === 'done' && (a.key === 'IG_DEMO' || a.key === 'IG_LIVE') && data && (() => {
+                  const igResult = data.ig.find(r => r.account === a.key);
+                  if (!igResult?.subAccounts?.length) return null;
+                  const withPositions = igResult.subAccounts.filter(s => s.positionCount > 0);
+                  if (!withPositions.length) return null;
+                  return (
+                    <div className="mt-1 space-y-0.5">
+                      {withPositions.map(sub => (
+                        <div key={sub.accountId} className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                          <AccountTypeBadge type={sub.accountType} />
+                          <span className="truncate">{sub.accountName}</span>
+                          <span className="text-emerald-400 flex-shrink-0">{sub.positionCount} pos</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
-              <span className={clsx('text-[10px] flex-shrink-0',
+              <span className={clsx('text-[10px] flex-shrink-0 mt-0.5',
                 a.status === 'done'    ? 'text-emerald-400' :
                 a.status === 'skipped' ? 'text-gray-600' : 'text-gray-500'
               )}>
@@ -341,6 +419,8 @@ export function LoadPortfolioModal({ open, onClose, loading, done, accounts, dat
       </div>
     </div>
   );
+
+  return <ModalPortal>{panel}</ModalPortal>;
 }
 
 // ── Trigger button ────────────────────────────────────────────────────────────

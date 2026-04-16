@@ -273,8 +273,10 @@ export function IGStrategyTrader() {
   // ── Test-run mode (single cycle, max 1 position) ───────────────────────────
   const [testRunning, setTestRunning] = useState(false);
 
-  // ── Test Order (single £1/pt S&P 500 BUY on demo to verify end-to-end) ────
+  // ── Test Order / Diagnostic ───────────────────────────────────────────────
   const [testOrderBusy, setTestOrderBusy] = useState(false);
+  const [diagModal, setDiagModal]         = useState(false);
+  const [diagLines, setDiagLines]         = useState<string[]>([]);
 
   // ── Funds management ───────────────────────────────────────────────────────
   // PERMISSION: igFundsRef holds freshly-fetched balance data across closures
@@ -960,48 +962,181 @@ export function IGStrategyTrader() {
     if (posRefreshRef.current) clearInterval(posRefreshRef.current);
   }, []);
 
-  // ── Test Order: fresh auth → £1/pt BUY S&P 500 on demo ───────────────────
+  // ── Test Order: 5-step full diagnostic ────────────────────────────────────
   async function runTestOrder() {
     if (testOrderBusy) return;
     setTestOrderBusy(true);
-    log('info', '🧪 Test Order: fresh auth + £1/pt BUY S&P 500 (demo)…');
+    const lines: string[] = [];
+    function diag(line: string) {
+      lines.push(line);
+      setDiagLines([...lines]);
+      log('info', line);
+    }
+    setDiagLines([]);
+    setDiagModal(true);
+
+    diag('══════════════════════════════════════════');
+    diag('🧪 IG DIAGNOSTIC — ' + new Date().toLocaleTimeString('en-GB'));
+    diag('══════════════════════════════════════════');
+
+    // ── STEP 1: Read stored credentials ──────────────────────────────────
+    diag('');
+    diag('STEP 1 — Read stored credentials');
+    let creds: { username: string; password: string; apiKey: string } | null = null;
     try {
-      // Force a fresh session (bypass cache) to test auth end-to-end
-      const freshSess = await connectIG('demo', true);
-      if (!freshSess) {
-        log('error', '🧪 Test Order failed: could not authenticate demo session. Check Settings → Accounts.');
-        showToast(false, 'No demo session — check credentials');
+      const raw = typeof window !== 'undefined' ? localStorage.getItem('ig_demo_credentials') : null;
+      if (!raw) {
+        diag('  ✗ No credentials found in localStorage (key: ig_demo_credentials)');
+        diag('    → Go to Settings → Accounts → IG Demo and connect first');
         setTestOrderBusy(false);
         return;
       }
-      setSessions(s => ({...s, demo: freshSess}));
-      log('info', `🧪 Auth OK — CST: ${freshSess.cst.slice(0,8)}… accountId: ${freshSess.accountId}`);
+      creds = JSON.parse(raw) as { username: string; password: string; apiKey: string };
+      diag(`  ✓ Found: username="${creds.username}", apiKey="${creds.apiKey.slice(0, 8)}…"`);
+    } catch (e) {
+      diag(`  ✗ Failed to read credentials: ${e instanceof Error ? e.message : String(e)}`);
+      setTestOrderBusy(false);
+      return;
+    }
 
-      // Place a £1/pt BUY on S&P 500 (verified epic)
-      const epic = 'IX.D.SPTRD.DAILY.IP';
-      const body = { epic, direction: 'BUY', size: 1, currencyCode: 'GBP' };
-      log('info', `🧪 Placing order: ${JSON.stringify(body)}`);
-      const r = await fetch('/api/ig/order', {
+    // ── STEP 2: Fresh login ───────────────────────────────────────────────
+    diag('');
+    diag('STEP 2 — Fresh login');
+    diag(`  → POST https://demo-api.ig.com/gateway/deal/session`);
+    diag(`     identifier: "${creds.username}", apiKey: "${creds.apiKey.slice(0, 8)}…"`);
+    let cst = '';
+    let secToken = '';
+    try {
+      const loginRes = await fetch('/api/ig/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh: true }),
+      });
+      const loginData = await loginRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; spreadbetAccountId?: string; accounts?: { accountId: string; accountName: string; accountType: string }[]; error?: string };
+      diag(`  ← HTTP ${loginRes.status}`);
+      if (!loginData.ok || !loginData.cst) {
+        diag(`  ✗ Login FAILED: ${loginData.error ?? 'unknown error'}`);
+        setTestOrderBusy(false);
+        return;
+      }
+      cst      = loginData.cst;
+      secToken = loginData.securityToken ?? '';
+      diag(`  ✓ CST: "${cst.slice(0, 10)}…"`);
+      diag(`  ✓ X-SECURITY-TOKEN: "${secToken.slice(0, 10)}…"`);
+      diag(`  ✓ accountId: ${loginData.accountId ?? 'n/a'}`);
+      if (loginData.spreadbetAccountId) diag(`  ✓ Switched to SPREADBET: ${loginData.spreadbetAccountId}`);
+      if (loginData.accounts?.length) {
+        diag(`  ✓ All accounts: ${loginData.accounts.map(a => `${a.accountId}(${a.accountType})`).join(', ')}`);
+      }
+    } catch (e) {
+      diag(`  ✗ Login exception: ${e instanceof Error ? e.message : String(e)}`);
+      setTestOrderBusy(false);
+      return;
+    }
+
+    // ── STEP 3: Fetch accounts list ───────────────────────────────────────
+    diag('');
+    diag('STEP 3 — Fetch all accounts');
+    diag(`  → GET https://demo-api.ig.com/gateway/deal/accounts`);
+    type AccEntry = { accountId: string; accountName: string; accountType: string; preferred: boolean; balance: { balance: number; available: number } };
+    let accountsList: AccEntry[] = [];
+    try {
+      const accRes = await fetch('/api/portfolio/ig', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: creds.apiKey, cst, securityToken: secToken, env: 'demo' }),
+      });
+      const accData = await accRes.json() as { ok: boolean; accounts?: AccEntry[]; positions?: unknown[]; summary?: { positionCount: number } };
+      diag(`  ← HTTP ${accRes.status}`);
+      if (accData.accounts?.length) {
+        accountsList = accData.accounts;
+        accData.accounts.forEach(a => {
+          diag(`  · ${a.accountId} | ${a.accountType.padEnd(12)} | ${a.accountName} | balance: £${a.balance?.balance?.toFixed(2) ?? 'n/a'} | avail: £${a.balance?.available?.toFixed(2) ?? 'n/a'}${a.preferred ? ' ★ preferred' : ''}`);
+        });
+      } else {
+        diag('  (no accounts returned)');
+      }
+      if (accData.summary) {
+        diag(`  → Total positions across all accounts: ${accData.summary.positionCount}`);
+      }
+    } catch (e) {
+      diag(`  ✗ Accounts fetch exception: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // ── STEP 4: Positions on current account (no switching) ───────────────
+    diag('');
+    diag('STEP 4 — Fetch positions (direct, no account switching)');
+    diag(`  → GET https://demo-api.ig.com/gateway/deal/positions/otc`);
+    let sess = sessions.demo;
+    if (!sess) {
+      // Build a fresh session object from the tokens we just got
+      sess = { cst, securityToken: secToken, accountId: '', apiKey: creds.apiKey };
+    }
+    try {
+      const posRes = await fetch('/api/ig/positions', {
+        headers: {
+          'x-ig-cst':            cst,
+          'x-ig-security-token': secToken,
+          'x-ig-api-key':        creds.apiKey,
+          'x-ig-env':            'demo',
+        },
+      });
+      diag(`  ← HTTP ${posRes.status}`);
+      const posData = await posRes.json() as { ok: boolean; positions?: { dealId: string; direction: string; instrumentName: string; size: number; level: number; upl: number }[]; error?: string };
+      if (posData.ok) {
+        diag(`  ✓ ${posData.positions?.length ?? 0} position(s) found`);
+        (posData.positions ?? []).slice(0, 5).forEach(p => {
+          diag(`  · ${p.dealId} | ${p.direction} ${p.size} | ${p.instrumentName} | entry ${p.level} | UPL ${p.upl >= 0 ? '+' : ''}${p.upl.toFixed(2)}`);
+        });
+        if ((posData.positions?.length ?? 0) > 5) diag(`  … and ${(posData.positions?.length ?? 0) - 5} more`);
+      } else {
+        diag(`  ✗ Error: ${posData.error ?? 'unknown'}`);
+      }
+    } catch (e) {
+      diag(`  ✗ Positions fetch exception: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // ── STEP 5: Test order ────────────────────────────────────────────────
+    diag('');
+    diag('STEP 5 — Test order: BUY 1 unit S&P 500 (IX.D.SPTRD.DAILY.IP)');
+    const epic   = 'IX.D.SPTRD.DAILY.IP';
+    const orderBody = { epic, direction: 'BUY', size: 1, currencyCode: 'GBP' };
+    diag(`  → POST /api/ig/order`);
+    diag(`     body: ${JSON.stringify(orderBody)}`);
+    try {
+      const freshSess: IGSession = { cst, securityToken: secToken, accountId: accountsList[0]?.accountId ?? '', apiKey: creds.apiKey };
+      setSessions(s => ({ ...s, demo: freshSess }));
+      const orderRes = await fetch('/api/ig/order', {
         method: 'POST',
         headers: { ...makeHeaders(freshSess, 'demo'), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(orderBody),
       });
-      const d = await r.json() as { ok:boolean; dealReference?:string; dealId?:string; dealStatus?:string; level?:number; error?:string; reason?:string; sentPayload?:unknown; igBody?:unknown };
-      if (d.ok) {
-        log('buy', `🧪 ✅ Test Order ACCEPTED — ref: ${d.dealReference ?? 'n/a'} · dealId: ${d.dealId ?? 'pending'} · status: ${d.dealStatus ?? 'UNKNOWN'} · filled @ ${d.level ?? '?'}`);
-        showToast(true, `Test order placed — check Positions tab`);
+      const orderData = await orderRes.json() as { ok: boolean; dealReference?: string; dealId?: string; dealStatus?: string; level?: number; error?: string; reason?: string; sentPayload?: unknown; igBody?: unknown };
+      diag(`  ← HTTP ${orderRes.status}`);
+      if (orderData.ok) {
+        diag(`  ✓ ACCEPTED`);
+        diag(`    dealReference: ${orderData.dealReference ?? 'n/a'}`);
+        diag(`    dealId:        ${orderData.dealId ?? 'pending'}`);
+        diag(`    dealStatus:    ${orderData.dealStatus ?? 'UNKNOWN'}`);
+        diag(`    filled @:      ${orderData.level ?? '?'}`);
+        showToast(true, 'Test order placed — check Positions tab');
         await sleep(1500);
         await loadPositions('demo');
       } else {
-        log('error', `🧪 ❌ Test Order FAILED: ${d.error ?? 'unknown'}${d.reason ? ` (${d.reason})` : ''}`);
-        if (d.sentPayload) log('error', `  sent: ${JSON.stringify(d.sentPayload)}`);
-        if (d.igBody)      log('error', `  ig:   ${JSON.stringify(d.igBody)}`);
-        showToast(false, d.error ?? 'Test order failed');
+        diag(`  ✗ REJECTED: ${orderData.error ?? 'unknown'}${orderData.reason ? ` (${orderData.reason})` : ''}`);
+        if (orderData.sentPayload) diag(`    sent:   ${JSON.stringify(orderData.sentPayload)}`);
+        if (orderData.igBody)      diag(`    ig resp: ${JSON.stringify(orderData.igBody)}`);
+        showToast(false, orderData.error ?? 'Test order rejected');
       }
     } catch (e) {
-      log('error', `🧪 Test Order exception: ${e instanceof Error ? e.message : String(e)}`);
+      diag(`  ✗ Order exception: ${e instanceof Error ? e.message : String(e)}`);
       showToast(false, 'Test order exception');
     }
+
+    diag('');
+    diag('══════════════════════════════════════════');
+    diag('🧪 Diagnostic complete');
+    diag('══════════════════════════════════════════');
     setTestOrderBusy(false);
   }
 
@@ -1245,11 +1380,14 @@ export function IGStrategyTrader() {
         </div>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => void loadPositions()} loading={loadingPos}>Refresh</Button>
-          <Button size="sm" variant="outline" loading={testOrderBusy} disabled={!sessions.demo}
-            title="Place a test £1/pt BUY on S&P 500 (demo) to verify order placement end-to-end"
+          <Button size="sm" variant="outline" loading={testOrderBusy}
+            title="Run full 5-step diagnostic: credentials → auth → accounts → positions → test order"
             onClick={() => void runTestOrder()}>
-            Test Order
+            🧪 Diagnose
           </Button>
+          {diagLines.length > 0 && !diagModal && (
+            <button onClick={() => setDiagModal(true)} className="text-[10px] text-blue-400 hover:underline">View last diagnostic</button>
+          )}
           <Button size="sm" variant="outline" icon={<ArrowUpDown className="h-3.5 w-3.5" />} onClick={() => { setShowManual(v => !v); setShowBuilder(false); }}>Manual</Button>
           <Button size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => { openBuilder(); }}>New Strategy</Button>
         </div>
@@ -1928,6 +2066,36 @@ export function IGStrategyTrader() {
       <p className="text-[10px] text-gray-600 text-center">
         Spread betting profits are exempt from UK CGT and Income Tax · Losses cannot be offset against gains
       </p>
+
+      {/* ── Diagnostic modal ─────────────────────────────────────────────── */}
+      {diagModal && (
+        <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/80 px-4 overflow-y-auto" onClick={e => { if (e.target === e.currentTarget) setDiagModal(false); }}>
+          <div className="bg-gray-950 border border-gray-700 rounded-2xl w-full max-w-2xl mt-[80px] mb-8 shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-bold text-white">🧪 IG Diagnostic</span>
+                {testOrderBusy && <span className="text-[10px] text-blue-400 animate-pulse">Running…</span>}
+              </div>
+              <button onClick={() => setDiagModal(false)} className="text-gray-500 hover:text-white p-1 rounded-lg hover:bg-gray-800 transition-colors">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <pre className="p-4 text-[11px] font-mono text-gray-300 whitespace-pre-wrap break-all leading-relaxed max-h-[60vh] overflow-y-auto bg-gray-950">
+              {diagLines.length ? diagLines.join('\n') : 'Starting diagnostic…'}
+            </pre>
+            {!testOrderBusy && (
+              <div className="px-4 py-3 border-t border-gray-800 flex gap-2">
+                <button onClick={() => void runTestOrder()} className="text-xs px-3 py-1.5 rounded-lg bg-blue-600/20 border border-blue-500/30 text-blue-300 hover:bg-blue-600/30 transition-colors">
+                  Run Again
+                </button>
+                <button onClick={() => setDiagModal(false)} className="text-xs px-3 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-white transition-colors">
+                  Close
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
