@@ -131,6 +131,35 @@ function calcRiskBasedSize(
   return Math.max(0.1, Math.round(size * 10) / 10);
 }
 
+/**
+ * Determine the correct currency for an IG order.
+ * US stocks (no exchange suffix) → USD. UK stocks (.L) → GBP.
+ * US indices / Gold / Oil → USD. FTSE → GBP.
+ */
+function orderCurrency(symbol: string, epic: string): string {
+  // US stock CFD epic: UA.D.AAPL.CASH.IP
+  if (epic.startsWith('UA.D.')) {
+    // Extract the ticker and check for known UK patterns
+    const ticker = epic.match(/^UA\.D\.([^.]+)\./)?.[1] ?? '';
+    if (ticker.endsWith('L') && ticker.length > 2) return 'GBP'; // e.g. BARCL
+    return 'USD';
+  }
+  // Spread-bet / CFD index epics
+  if (epic.includes('FTSE') || epic.includes('UKX')) return 'GBP';
+  if (epic.includes('GSPC') || epic.includes('NDX') || epic.includes('DJI') ||
+      epic.includes('SPX')  || epic.includes('NAS') || epic.includes('DOW')) return 'USD';
+  // Symbol-based heuristic (Finnhub symbol passed as market.name)
+  const sym = symbol.toUpperCase();
+  if (sym.endsWith('.L'))  return 'GBP';
+  if (sym.endsWith('.DE') || sym.endsWith('.PA') || sym.endsWith('.AMS')) return 'EUR';
+  // Plain ticker (AAPL, TSLA, INTC etc.) = US stock = USD
+  if (/^[A-Z]{1,5}$/.test(sym)) return 'USD';
+  // Gold, Oil, commodities trade in USD
+  if (epic.includes('GOLD') || epic.includes('CRUDE') || epic.includes('OIL') ||
+      epic.includes('SILVER') || epic.includes('NATGAS')) return 'USD';
+  return 'GBP'; // safe fallback
+}
+
 /** CFD position size in units, based on instrument price tier. */
 function calcCfdUnits(price: number, mType?: MarketType): number {
   if (mType === 'INDEX' || mType === 'COMMODITY' || mType === 'FOREX') return 1;
@@ -991,15 +1020,14 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       if (r.ok) {
         const d = await r.json() as { ok: boolean; markets?: { epic: string; instrumentName: string }[] };
         if (d.ok && d.markets && d.markets.length > 0) {
-          // Pick the best match: prefer exact symbol match in epic, then first result
-          const sym = symbol.toUpperCase();
-          const best =
-            d.markets.find(m => m.epic.includes(`.${sym}.`)) ??
-            d.markets.find(m => m.instrumentName.toUpperCase().includes(sym)) ??
-            d.markets[0];
-          log('info', `🔍 Epic resolved: ${symbol} → ${best.epic} (${best.instrumentName})`);
-          saveEpicCache(symbol, best.epic);
-          return best.epic;
+          // IG search confirms this symbol is tradeable on this account.
+          // Always construct UA.D.{SYMBOL}.CASH.IP — the canonical US stock CFD format.
+          // Do NOT use the search result epic directly: IG can return SA.D.*, UB.D.* etc.
+          // depending on the account region. UA.D.* is the correct prefix for all US stocks.
+          const canonical = `UA.D.${symbol.toUpperCase()}.CASH.IP`;
+          log('info', `🔍 Epic confirmed for ${symbol} → using ${canonical} (IG search returned: ${d.markets[0].epic})`);
+          saveEpicCache(symbol, canonical);
+          return canonical;
         }
       }
     } catch (e) {
@@ -1440,10 +1468,11 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     epic: string, direction: 'BUY'|'SELL', size: number,
     stopDist?: number, limitDist?: number,
     stopLevel?: number, limitLevel?: number,
+    currencyCode?: string,
   ): Promise<OrderResult> {
     for (let i = 0; i < 150 && tradeLockRef.current; i++) await sleep(100);
     tradeLockRef.current = true;
-    try { return await _placeOrderInner(epic, direction, size, stopDist, limitDist, stopLevel, limitLevel); }
+    try { return await _placeOrderInner(epic, direction, size, stopDist, limitDist, stopLevel, limitLevel, currencyCode); }
     finally { await sleep(500); tradeLockRef.current = false; }
   }
 
@@ -1451,16 +1480,18 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     epic: string, direction: 'BUY'|'SELL', size: number,
     stopDist?: number, limitDist?: number,
     stopLevel?: number, limitLevel?: number,
+    currencyCode?: string,
   ): Promise<OrderResult> {
     let sess = await freshSession();
     if (!sess) return { ok:false, error:`No ${env} session`, epic };
 
     // CFD uses absolute price levels; spread-bet uses point distances
     const orderBody: Record<string, unknown> = { epic, direction, size };
-    if (stopLevel  !== undefined) orderBody.stopLevel    = stopLevel;
-    if (limitLevel !== undefined) orderBody.limitLevel   = limitLevel;
-    if (stopDist   !== undefined) orderBody.stopDistance  = stopDist;
-    if (limitDist  !== undefined) orderBody.profitDistance = limitDist;
+    if (currencyCode)              orderBody.currencyCode  = currencyCode;
+    if (stopLevel  !== undefined)  orderBody.stopLevel    = stopLevel;
+    if (limitLevel !== undefined)  orderBody.limitLevel   = limitLevel;
+    if (stopDist   !== undefined)  orderBody.stopDistance  = stopDist;
+    if (limitDist  !== undefined)  orderBody.profitDistance = limitDist;
     let activeSess: IGSession = sess;
     let r = await igQueue.enqueue(() => fetch('/api/ig/order', {
       method:'POST',
@@ -1912,20 +1943,23 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       log('info', `[EXEC] CFD units: ${finalSize} (price=${currentPx.toFixed(2)})`);
     }
 
+    // Determine correct currency for this instrument
+    const ccy = orderCurrency(market.name, actualEpic);
+
     const sizeLabel = accountType === 'CFD' ? `${finalSize} unit(s)` : `£${orderSize}/pt`;
     const slTpLabel = accountType === 'CFD' && cfdStopLvl !== undefined
       ? `SL @ ${cfdStopLvl} TP @ ${cfdLimitLvl}`
       : `SL ${stopDist}pt TP ${limitDist}pt`;
     log(tradeDir === 'BUY' ? 'buy' : 'sell',
-      `[EXEC] Placing order: ${tradeDir} ${market.name} | ${actualEpic} | ${sizeLabel} | ${slTpLabel} | ${strength}%`);
+      `[EXEC] Placing order: ${tradeDir} ${market.name} | ${actualEpic} | ${sizeLabel} | ${slTpLabel} | ${ccy} | ${strength}%`);
     const orderPayloadStr = accountType === 'CFD'
-      ? `{ epic:"${actualEpic}", dir:"${tradeDir}", size:${finalSize}, stopLevel:${cfdStopLvl ?? 'none'}, limitLevel:${cfdLimitLvl ?? 'none'} }`
-      : `{ epic:"${actualEpic}", dir:"${tradeDir}", size:${orderSize}, stopDist:${stopDist}, limitDist:${limitDist} }`;
+      ? `{ epic:"${actualEpic}", dir:"${tradeDir}", size:${finalSize}, stopLevel:${cfdStopLvl ?? 'none'}, limitLevel:${cfdLimitLvl ?? 'none'}, currency:"${ccy}" }`
+      : `{ epic:"${actualEpic}", dir:"${tradeDir}", size:${orderSize}, stopDist:${stopDist}, limitDist:${limitDist}, currency:"${ccy}" }`;
     log('info', `[EXEC] Order payload: ${orderPayloadStr}`);
 
     const or = accountType === 'CFD'
-      ? await placeOrder(actualEpic, tradeDir, finalSize, undefined, undefined, cfdStopLvl, cfdLimitLvl)
-      : await placeOrder(actualEpic, tradeDir, orderSize, stopDist, limitDist);
+      ? await placeOrder(actualEpic, tradeDir, finalSize, undefined, undefined, cfdStopLvl, cfdLimitLvl, ccy)
+      : await placeOrder(actualEpic, tradeDir, orderSize, stopDist, limitDist, undefined, undefined, ccy);
     log('info', `[EXEC] IG response: ok=${or.ok} | status=${or.dealStatus ?? '-'} | reason=${or.reason ?? '-'} | ref=${or.dealReference ?? '-'} | err=${or.error ?? 'none'}`);
 
     if (or.ok) {
