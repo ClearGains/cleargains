@@ -150,58 +150,72 @@ export async function POST(request: NextRequest) {
     if (targetAccountId && activeAccountId !== targetAccountId) {
       console.log(`[ig/session] Need to switch from ${activeAccountId || '(unknown)'} → ${targetAccountId}`);
 
-      // Find the target account entry to log its type
+      // Helper: PUT /session to switch to an account, update cst/securityToken from headers
+      const doPutSwitch = async (toAccountId: string): Promise<{ ok: boolean; status: number; body: string }> => {
+        const body = JSON.stringify({ accountId: toAccountId });
+        console.log(`[ig/session] PUT /session { accountId: ${toAccountId} }`);
+        const res = await fetch(`${baseUrl}/session`, {
+          method: 'PUT',
+          headers: {
+            'X-IG-API-KEY':     apiKey,
+            'CST':              cst,
+            'X-SECURITY-TOKEN': securityToken,
+            'Content-Type':     'application/json',
+            'Accept':           'application/json; charset=UTF-8',
+            'Version':          '1',
+          },
+          body,
+          signal: AbortSignal.timeout(10_000),
+        });
+        const text = await res.text().catch(() => '');
+        console.log(`[ig/session] PUT → ${res.status} | body=${text.slice(0, 200)}`);
+        if (res.ok) {
+          const nc = res.headers.get('CST');
+          const ns = res.headers.get('X-SECURITY-TOKEN');
+          if (nc) cst = nc;
+          if (ns) securityToken = ns;
+          console.log(`[ig/session] Tokens after switch to ${toAccountId}: cst=${nc ? 'new' : 'unchanged'} sec=${ns ? 'new' : 'unchanged'}`);
+        }
+        return { ok: res.ok, status: res.status, body: text };
+      };
+
+      // Find the target account type
       const targetEntry = accounts.find(a => a.accountId === targetAccountId);
-      if (!targetEntry) {
-        const known = accounts.map(a => a.accountId).join(', ') || 'none';
-        console.warn(`[ig/session] Target account ${targetAccountId} not found in accounts list [${known}]`);
-        // Proceed with the switch anyway — IG may accept it even if not in the list
+      const targetType  = targetEntry?.accountType ?? 'UNKNOWN';
+      const sbAccount   = accounts.find(a => a.accountType === 'SPREADBET');
+      console.log(`[ig/session] Target type=${targetType}; spreadbetAccount=${sbAccount?.accountId ?? 'none'}`);
+
+      // Two-step switch: if switching to a non-SPREADBET account, land on SPREADBET first.
+      // IG sessions always default to the SPREADBET account — switching directly to CFD
+      // fails with 401/502.  Landing on SPREADBET first establishes a clean token state.
+      if (targetType !== 'SPREADBET' && sbAccount && activeAccountId !== sbAccount.accountId) {
+        console.log(`[ig/session] Step A: landing on SPREADBET ${sbAccount.accountId} first…`);
+        const stepA = await doPutSwitch(sbAccount.accountId);
+        if (stepA.ok) {
+          console.log(`[ig/session] Step A OK — now on ${sbAccount.accountId}`);
+          await new Promise(r => setTimeout(r, 400)); // brief pause before step B
+        } else {
+          console.warn(`[ig/session] Step A failed (${stepA.status}) — attempting direct switch anyway`);
+        }
       }
 
-      // IG PUT /session only accepts { accountId } — dealingEnabled is not valid
-      const putBody_req = JSON.stringify({ accountId: targetAccountId });
-      console.log(`[ig/session] PUT /session body=${putBody_req}`);
+      // Step B (or only step): switch to the actual target
+      console.log(`[ig/session] Step B: switching to ${targetAccountId} (${targetType})`);
+      let putRes = await doPutSwitch(targetAccountId);
 
-      const doPut = () => fetch(`${baseUrl}/session`, {
-        method: 'PUT',
-        headers: {
-          'X-IG-API-KEY':     apiKey,
-          'CST':              cst,
-          'X-SECURITY-TOKEN': securityToken,
-          'Content-Type':     'application/json',
-          'Accept':           'application/json; charset=UTF-8',
-          'Version':          '1',
-        },
-        body: putBody_req,
-        signal: AbortSignal.timeout(10_000),
-      });
-
-      let putRes = await doPut();
-      let putBody = await putRes.text().catch(() => '');
-      console.log(`[ig/session] PUT /session → ${putRes.status} | body=${putBody.slice(0, 200)}`);
-
-      // Retry once on transient failures (5xx / network)
+      // Retry once on transient 5xx
       if (putRes.status >= 500) {
         await new Promise(r => setTimeout(r, 800));
-        putRes  = await doPut();
-        putBody = await putRes.text().catch(() => '');
-        console.log(`[ig/session] PUT /session retry → ${putRes.status} | body=${putBody.slice(0, 200)}`);
+        console.log(`[ig/session] Step B retry…`);
+        putRes = await doPutSwitch(targetAccountId);
       }
 
       if (!putRes.ok) {
         return NextResponse.json({
           ok:    false,
-          error: `Account switch to ${targetAccountId} failed — IG returned ${putRes.status}: ${putBody.slice(0, 200)}`,
+          error: `Account switch to ${targetAccountId} failed — IG returned ${putRes.status}: ${putRes.body.slice(0, 200)}`,
         }, { status: 502 });
       }
-
-      // Read updated tokens from PUT response HEADERS — body has none
-      const putCst      = putRes.headers.get('CST');
-      const putSecToken = putRes.headers.get('X-SECURITY-TOKEN');
-      if (putCst)      cst           = putCst;
-      if (putSecToken) securityToken = putSecToken;
-
-      console.log(`[ig/session] PUT tokens updated: cst=${putCst ? 'new' : 'unchanged'} secToken=${putSecToken ? 'new' : 'unchanged'}`);
 
       // ── STEP 4: GET /session to confirm the active account ────────────────
       let confirmedId = '';

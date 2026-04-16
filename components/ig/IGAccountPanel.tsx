@@ -357,6 +357,14 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const [finnhubRows, setFinnhubRows]           = useState<FinnhubRow[]>([]);
   const [finnhubLoading, setFinnhubLoading]     = useState(false);
   const [finnhubLastScan, setFinnhubLastScan]   = useState<string>('');
+  const [finnhubSearch, setFinnhubSearch]       = useState<string>('');
+  const [finnhubSearchBusy, setFinnhubSearchBusy] = useState(false);
+  // Pinned instruments — persisted across sessions, always scanned
+  const [pinnedInstruments, setPinnedInstruments] = useState<FinnhubRow[]>(() => {
+    try { return JSON.parse(typeof window !== 'undefined' ? (localStorage.getItem('ig_cfd_pinned') ?? '[]') : '[]') as FinnhubRow[]; } catch { return []; }
+  });
+  // Track recently scanned Finnhub symbols (for discovery expansion)
+  const recentlyScannedRef = useRef<Set<string>>(new Set());
 
   // ── Manual trade ───────────────────────────────────────────────────────────
   const [showManual, setShowManual]       = useState(false);
@@ -662,7 +670,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     return null;
   }
 
-  // ── Validate epic on this account — only called for SPREADBET ────────────────
+  // ── Validate epic on this account (SPREADBET and CFD) ───────────────────────
   async function validateEpic(epic: string): Promise<boolean> {
     if (epicValidRef.current[epic] !== undefined) return epicValidRef.current[epic];
     const sess = sessionRef.current;
@@ -679,6 +687,38 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       return true; // network error — allow the attempt
     }
   }
+
+  // ── Resolve and validate a Finnhub instrument epic for the current account ─
+  // Returns the valid epic string or null if not available on IG.
+  async function resolveFinnhubEpic(row: FinnhubRow): Promise<string | null> {
+    const candidate = row.igEpic;
+    if (!candidate) return null;
+    // Check cache first
+    if (epicValidRef.current[candidate] !== undefined)
+      return epicValidRef.current[candidate] ? candidate : null;
+    const valid = await validateEpic(candidate);
+    if (valid) return candidate;
+    log('info', `  ⚠️ ${row.symbol} epic ${candidate} not found on IG — skipping`);
+    return null;
+  }
+
+  // ── Pinned instruments helpers ─────────────────────────────────────────────
+  function pinInstrument(row: FinnhubRow) {
+    setPinnedInstruments(prev => {
+      if (prev.some(p => p.symbol === row.symbol)) return prev;
+      const next = [...prev, row];
+      try { localStorage.setItem('ig_cfd_pinned', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }
+  function unpinInstrument(symbol: string) {
+    setPinnedInstruments(prev => {
+      const next = prev.filter(p => p.symbol !== symbol);
+      try { localStorage.setItem('ig_cfd_pinned', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }
+  const isPinned = (symbol: string) => pinnedInstruments.some(p => p.symbol === symbol);
 
   // ── Load available markets from IG market navigation (with search fallback) ─
   async function loadIGMarkets() {
@@ -911,6 +951,70 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       console.error('Finnhub screener error:', err);
     }
     setFinnhubLoading(false);
+  }
+
+  // ── Search Finnhub universe for any symbol/name and enrich with indicators ──
+  async function searchFinnhubSymbol(query: string) {
+    if (!query.trim()) return;
+    setFinnhubSearchBusy(true);
+    try {
+      // Determine likely category from query
+      const q = query.toUpperCase().trim();
+      const cat: FinnhubCategory =
+        q.endsWith('.L') ? 'UK_STOCK' :
+        q.includes(':') && q.includes('USD') ? 'FOREX' :
+        q.includes('BTC') || q.includes('ETH') ? 'CRYPTO' : 'US_STOCK';
+
+      // Build a candidate Finnhub row
+      const { toIgEpic: tig, toYahooSymbol: tyaho } = await import('@/lib/finnhubConfig');
+      const igEpic     = tig(q, cat);
+      const yahooSymbol = tyaho(q, cat);
+      const baseRow: FinnhubRow = {
+        symbol: q, description: q, category: cat,
+        price: 0, changePercent: 0,
+        igEpic, yahooSymbol, loading: true,
+      };
+
+      // Add to current rows (or update if already present)
+      setFinnhubRows(prev => {
+        const exists = prev.findIndex(r => r.symbol === q);
+        if (exists >= 0) {
+          const next = [...prev]; next[exists] = baseRow; return next;
+        }
+        return [baseRow, ...prev];
+      });
+
+      // Fetch indicators if we have a Yahoo symbol
+      if (yahooSymbol) {
+        const params = new URLSearchParams({ symbol: yahooSymbol });
+        const ir = await fetch(`/api/ig/indicators?${params.toString()}`);
+        const id = await ir.json() as {
+          ok: boolean; price?: number; changePercent?: number;
+          rsi14?: number; emaCross?: string; macdHistogram?: number;
+          bullScore?: number; bearScore?: number; confidenceScore?: number;
+          direction?: 'BUY' | 'SELL' | 'NEUTRAL';
+        };
+        const enriched: FinnhubRow = {
+          ...baseRow,
+          price: id.price ?? 0, changePercent: id.changePercent ?? 0,
+          rsi14: id.rsi14, emaCross: id.emaCross, macdHistogram: id.macdHistogram,
+          bullScore: id.bullScore, bearScore: id.bearScore,
+          confidenceScore: id.confidenceScore, direction: id.direction,
+          loading: false,
+        };
+        setFinnhubRows(prev => {
+          const idx = prev.findIndex(r => r.symbol === q);
+          const next = [...prev];
+          if (idx >= 0) next[idx] = enriched; else next.unshift(enriched);
+          return next;
+        });
+      } else {
+        setFinnhubRows(prev => prev.map(r => r.symbol === q ? { ...r, loading: false } : r));
+      }
+    } catch (err) {
+      console.error('Finnhub search error:', err);
+    }
+    setFinnhubSearchBusy(false);
   }
 
   // ── Check S&P 500 / FTSE / VIX market conditions before scanning ─────────
@@ -1210,14 +1314,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     if (resolvedEpic !== market.epic)
       log('info', `  ↳ Epic: ${market.epic} → ${resolvedEpic} [${accountType}]`);
 
-    // For spread-bet accounts: verify the epic is available before trading
-    if (accountType === 'SPREADBET') {
-      const epicOk = await validateEpic(resolvedEpic);
-      if (!epicOk) {
-        log('error', `${acctTag} ⚠️ Epic ${resolvedEpic} not available on ${accountId} — skipping ${market.name}`);
-        setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`Epic not available on ${accountType}` } }));
-        return sig;
-      }
+    // Validate the epic is available on this account (applies to both SPREADBET and CFD)
+    const epicOk = await validateEpic(resolvedEpic);
+    if (!epicOk) {
+      log('info', `${acctTag} ⚠️ Epic ${resolvedEpic} not available on ${accountId} (${accountType}) — skipping ${market.name}`);
+      setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`Epic not on ${accountType}` } }));
+      return sig;
     }
 
     const maxLoss = orderSize * stopDist;
@@ -1296,13 +1398,51 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
 
     // ── Step 2: Build market list (full scan for CFD if nav loaded) ────────
     const baseWatchlist = strat.watchlist?.length ? strat.watchlist : defaultWatchlist;
-    const markets = (accountType === 'CFD' && navLoaded && navCategories.length > 0)
+    let markets = (accountType === 'CFD' && navLoaded && navCategories.length > 0)
       ? buildFullScanList(baseWatchlist)
       : baseWatchlist.filter(m => m.enabled);
 
+    // Inject pinned Finnhub instruments — always scanned regardless of sector rotation
+    const pinnedAsMarkets: WatchlistMarket[] = pinnedInstruments
+      .filter(p => p.igEpic)
+      .map(p => ({
+        epic: p.igEpic!, name: p.symbol.replace(/^[^:]+:/, ''), enabled: true,
+        marketType: p.category === 'FOREX' ? 'FOREX' as const
+          : p.category === 'CRYPTO' ? 'CRYPTO' as const : 'STOCK' as const,
+      }));
+    const pinnedEpics = new Set(pinnedAsMarkets.map(m => m.epic));
+    markets = [...pinnedAsMarkets, ...markets.filter(m => !pinnedEpics.has(m.epic))];
+
+    // Discovery expansion: add 10 random Finnhub instruments not seen recently (CFD only)
+    if (accountType === 'CFD' && markets.length < 80) {
+      try {
+        const cats: FinnhubCategory[] = ['US_STOCK', 'UK_STOCK', 'FOREX', 'CRYPTO'];
+        const randCat = cats[Math.floor(Math.random() * cats.length)];
+        const ur = await fetch(`/api/finnhub/universe?category=${randCat}`);
+        const ud = await ur.json() as { ok: boolean; symbols?: Array<{ symbol: string; igEpic: string | null; yahooSymbol: string | null }> };
+        if (ud.ok && ud.symbols) {
+          const unseen = ud.symbols.filter(s =>
+            s.igEpic &&
+            !recentlyScannedRef.current.has(s.symbol) &&
+            !markets.some(m => m.epic === s.igEpic)
+          );
+          // Shuffle and take 10
+          const shuffled = unseen.sort(() => Math.random() - 0.5).slice(0, 10);
+          const mktType = randCat === 'FOREX' ? 'FOREX' as const : randCat === 'CRYPTO' ? 'CRYPTO' as const : 'STOCK' as const;
+          const extras: WatchlistMarket[] = shuffled.map(s => ({
+            epic: s.igEpic!, name: s.symbol.replace(/^[^:]+:/, ''), enabled: true, marketType: mktType,
+          }));
+          if (extras.length > 0) {
+            markets = [...markets, ...extras];
+            log('info', `🔭 Discovery: +${extras.length} random ${randCat} instruments added to scan`);
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+
     const funds = await fetchIGFunds();
     if (funds) log('info', `💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
-    log('info', `📡 Scanning ${markets.length} markets…`);
+    log('info', `📡 Scanning ${markets.length} markets (${pinnedAsMarkets.length} pinned)…`);
 
     // ── Step 3: Scan each market with sector rotation tracking ─────────────
     const sectorBull: Record<string, number> = {};
@@ -1322,6 +1462,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       scanParamsRef.current.sectorAdjust = sBull >= 2 ? 5 : sBear >= 2 ? 5 : 0;
 
       const sig = await scanMarket(strat, market);
+      recentlyScannedRef.current.add(market.name); // track for discovery dedup
       scanned++;
       if (sig && sig.direction !== 'HOLD') {
         signalsFound++;
@@ -2226,8 +2367,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
           }
         />
 
-        {/* Category tabs */}
-        <div className="flex gap-1 mb-3 flex-wrap">
+        {/* Category tabs + search */}
+        <div className="flex flex-wrap gap-1 mb-2 items-center">
           {(['US_STOCK','UK_STOCK','FOREX','CRYPTO'] as FinnhubCategory[]).map(cat => (
             <button key={cat}
               onClick={() => { setFinnhubCategory(cat); void loadFinnhubScreener(cat); }}
@@ -2240,6 +2381,32 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
             </button>
           ))}
         </div>
+        {/* Instrument search */}
+        <div className="flex gap-2 mb-3">
+          <input value={finnhubSearch} onChange={e => setFinnhubSearch(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && void searchFinnhubSymbol(finnhubSearch)}
+            placeholder="Search any ticker (AAPL, BARC.L, OANDA:GBP_USD…)"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-[11px] text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
+          <Button size="sm" loading={finnhubSearchBusy}
+            icon={<Search className="h-3 w-3" />}
+            onClick={() => void searchFinnhubSymbol(finnhubSearch)}>Find</Button>
+        </div>
+
+        {/* Pinned instruments */}
+        {pinnedInstruments.length > 0 && (
+          <div className="mb-3 p-2 bg-orange-950/20 border border-orange-900/30 rounded-lg">
+            <p className="text-[10px] text-orange-400 font-semibold mb-1.5">📌 Pinned (always scanned)</p>
+            <div className="flex flex-wrap gap-1">
+              {pinnedInstruments.map(p => (
+                <div key={p.symbol} className="flex items-center gap-1 bg-gray-800 rounded px-2 py-0.5">
+                  <span className="text-[10px] font-mono text-white">{p.symbol.replace(/^[^:]+:/, '')}</span>
+                  {p.direction && p.direction !== 'NEUTRAL' && <DirectionBadge dir={p.direction} size="xs" />}
+                  <button onClick={() => unpinInstrument(p.symbol)} className="text-gray-600 hover:text-red-400 ml-0.5"><X className="h-2.5 w-2.5" /></button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Table */}
         {finnhubRows.length === 0 && !finnhubLoading && (
@@ -2261,7 +2428,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                   <th className="pb-1.5 pr-2 font-medium hidden md:table-cell">EMA</th>
                   <th className="pb-1.5 pr-2 font-medium text-right">Score</th>
                   <th className="pb-1.5 pr-2 font-medium">Signal</th>
-                  <th className="pb-1.5 font-medium hidden lg:table-cell">IG Epic</th>
+                  <th className="pb-1.5 pr-2 font-medium hidden lg:table-cell">IG Epic</th>
+                  <th className="pb-1.5 font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
@@ -2329,12 +2497,45 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                         <span className="text-[10px] text-gray-600">HOLD</span>
                       )}
                     </td>
-                    <td className="py-1.5 hidden lg:table-cell">
+                    <td className="py-1.5 pr-2 hidden lg:table-cell">
                       {row.igEpic ? (
-                        <span className="text-[10px] font-mono text-gray-600 truncate max-w-[160px] block">{row.igEpic}</span>
+                        <span className="text-[10px] font-mono text-gray-600 truncate max-w-[140px] block">{row.igEpic}</span>
                       ) : (
                         <span className="text-gray-700 text-[10px]">—</span>
                       )}
+                    </td>
+                    {/* Actions: Pin + Trade */}
+                    <td className="py-1.5">
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => isPinned(row.symbol) ? unpinInstrument(row.symbol) : pinInstrument(row)}
+                          className={clsx('text-[10px] px-1.5 py-0.5 rounded transition-colors',
+                            isPinned(row.symbol)
+                              ? 'text-orange-400 bg-orange-500/20 hover:bg-orange-500/30'
+                              : 'text-gray-600 hover:text-orange-400 hover:bg-gray-800'
+                          )}
+                          title={isPinned(row.symbol) ? 'Unpin' : 'Pin — always scan'}>
+                          📌
+                        </button>
+                        {row.igEpic && row.direction && row.direction !== 'NEUTRAL' && !row.loading && (
+                          <button
+                            onClick={() => {
+                              setManualEpic(row.igEpic!);
+                              setManualName(row.symbol.replace(/^[^:]+:/, ''));
+                              setManualDir(row.direction === 'BUY' ? 'BUY' : 'SELL');
+                              setManualSize(1);
+                              setShowManual(true);
+                            }}
+                            className={clsx('text-[10px] px-1.5 py-0.5 rounded font-bold transition-colors',
+                              row.direction === 'BUY'
+                                ? 'text-emerald-400 bg-emerald-500/20 hover:bg-emerald-500/30'
+                                : 'text-red-400 bg-red-500/20 hover:bg-red-500/30'
+                            )}
+                            title={`Open manual trade: ${row.direction} ${row.symbol}`}>
+                            {row.direction}
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
