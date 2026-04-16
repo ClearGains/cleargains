@@ -384,6 +384,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     rsi14?: number; emaCross?: string; macdHistogram?: number;
     bullScore?: number; bearScore?: number; confidenceScore?: number;
     direction?: 'BUY' | 'SELL' | 'NEUTRAL';
+    atr14?: number; yahooPrice?: number; vwapDeviation?: number;
     // analyst
     analystBullScore?: number;
     loading?: boolean; error?: string;
@@ -1211,15 +1212,18 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
             const params = new URLSearchParams({ symbol: row.yahooSymbol });
             const ir = await fetch(`/api/ig/indicators?${params.toString()}`);
             const id = await ir.json() as {
-              ok: boolean; rsi14?: number; emaCross?: string; macdHistogram?: number;
+              ok: boolean; price?: number; rsi14?: number; emaCross?: string; macdHistogram?: number;
               bullScore?: number; bearScore?: number; confidenceScore?: number;
-              direction?: 'BUY' | 'SELL' | 'NEUTRAL';
+              direction?: 'BUY' | 'SELL' | 'NEUTRAL'; atr14?: number; vwapDeviation?: number;
             };
             if (id.ok) {
               return { ...row,
+                price: id.price ?? row.price,
+                yahooPrice: id.price,
                 rsi14: id.rsi14, emaCross: id.emaCross, macdHistogram: id.macdHistogram,
                 bullScore: id.bullScore, bearScore: id.bearScore,
                 confidenceScore: id.confidenceScore, direction: id.direction,
+                atr14: id.atr14, vwapDeviation: id.vwapDeviation,
                 loading: false,
               };
             }
@@ -1250,6 +1254,46 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         );
         void recResults; // just for eslint
         setFinnhubRows([...rows]);
+      }
+
+      // 4. Auto-trade: attempt trades for rows with ≥75% confidence (CFD, autoTrade strategy)
+      const activeStrat = strategies.find(s => s.id === activeStratId);
+      if (activeStrat?.autoTrade && accountType === 'CFD' && sessionRef.current) {
+        const highConf = rows.filter(
+          r => !r.loading && (r.confidenceScore ?? 0) >= 75 &&
+               (r.direction === 'BUY' || r.direction === 'SELL') &&
+               r.igEpic !== null,
+        );
+        if (highConf.length > 0) {
+          log('info', `📡 Scanner found ${highConf.length} high-confidence signal(s) — attempting trades`);
+        }
+        for (const row of highConf) {
+          if (!runningRef.current) break;
+          const epic = row.igEpic ?? `UA.D.${row.symbol}.CASH.IP`;
+          const px   = row.yahooPrice ?? row.price;
+          const atr  = row.atr14 ?? px * 0.02;   // fallback: 2% of price
+          const stop  = Math.max(1, atr * 1.5);
+          const limit = stop * 2;
+          const sig   = row.direction as 'BUY' | 'SELL';
+          const strength = row.confidenceScore ?? 75;
+          const market: WatchlistMarket = {
+            epic, name: row.description || row.symbol,
+            enabled: true, marketType: 'STOCK',
+          };
+          const signalData: SignalData = {
+            market,
+            sig: { direction: sig, strength, stopPoints: stop, targetPoints: limit, riskReward: '1:2', indicators: [], reason: `Scanner: ${sig} ${strength}%` },
+            resolvedEpic: epic,
+            stopDist: stop,
+            limitDist: limit,
+            scanChange: row.changePercent,
+            direction: sig,
+            strength,
+            atrHighVolatility: (row.atr14 ?? 0) / (px || 1) > 0.02,
+          };
+          log('info', `Signal found: ${row.symbol} | ${sig} ${strength}% confidence`);
+          await executeTrade(activeStrat, signalData);
+        }
       }
     } catch (err) {
       console.error('Finnhub screener error:', err);
@@ -1629,6 +1673,9 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     const { market, sig, resolvedEpic, stopDist, limitDist, direction, strength } = data;
     const tradeDir = direction as 'BUY'|'SELL';
 
+    // Step-by-step trade attempt logging
+    log('info', `▶ Trade attempt: ${market.name} | ${tradeDir} | strength=${strength}% | SL=${stopDist.toFixed(2)} TP=${limitDist.toFixed(2)} | epic=${resolvedEpic}`);
+
     // Auto-close opposite positions
     if (strat.autoClose) {
       const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
@@ -1772,12 +1819,14 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       // Extract Finnhub ticker from UA.D.{SYM}.CASH.IP, else treat epic as ticker
       const tickerMatch = resolvedEpic.match(/^UA\.D\.([A-Z0-9]+)\.CASH\.IP$/);
       const ticker = tickerMatch ? tickerMatch[1] : resolvedEpic;
+      log('info', `${acctTag} Epic lookup: searching IG for "${ticker}"...`);
       const found = await resolveIgEpicForSymbol(ticker);
       if (!found) {
-        log('info', `${acctTag} ⚠️ ${ticker} not available on IG — skipping ${market.name}`);
+        log('error', `${acctTag} ✗ Epic not found: "${ticker}" is not tradeable on IG — skipping ${market.name}`);
         setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`${ticker} not on IG` } }));
         return 'skipped';
       }
+      log('info', `${acctTag} Epic resolved: ${ticker} → ${found}`);
       actualEpic = found;
     } else {
       const epicOk = await validateEpic(resolvedEpic);
@@ -1791,8 +1840,10 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     const sizeLabel = accountType === 'CFD' ? `${orderSize} unit(s)` : `£${orderSize}/pt`;
     log(tradeDir === 'BUY' ? 'buy' : 'sell',
       `${acctTag} → ${tradeDir} ${market.name} | ${actualEpic} | ${sizeLabel} | SL ${stopDist}pt TP ${limitDist}pt | ${strength}% confidence`);
+    log('info', `${acctTag} Order payload: { epic:"${actualEpic}", dir:"${tradeDir}", size:${orderSize}, stop:${stopDist}, limit:${limitDist} }`);
 
     const or = await placeOrder(actualEpic, tradeDir, orderSize, stopDist, limitDist);
+    log('info', `${acctTag} IG response: ok=${or.ok} status=${or.dealStatus ?? '-'} reason=${or.reason ?? '-'} ref=${or.dealReference ?? '-'}`);
 
     if (or.ok) {
       scanCountersRef.current.traded++;
@@ -3541,8 +3592,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
           const st = computeStrategyStats(tradeHistory, activeStrat?.name);
           const accentCls = isCFD ? 'text-blue-400' : 'text-purple-400';
           const warnCls = (v: number, threshold: number) => v < threshold ? 'text-red-400' : 'text-emerald-400';
-          return st.total === 0 ? (
-            <p className="text-center py-6 text-gray-600 text-sm">No closed trades yet — stats will appear after first trade closes</p>
+          return st.total < 5 ? (
+            <div className="text-center py-8 space-y-2">
+              <p className="text-gray-400 text-sm font-medium">Insufficient data</p>
+              <p className="text-gray-600 text-xs">{st.total}/5 closed trades completed</p>
+              <p className="text-gray-700 text-[10px]">Stats will appear once 5 trades have closed</p>
+            </div>
           ) : (
             <div className="space-y-3 py-1">
               {/* Performance pause alert */}
