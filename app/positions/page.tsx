@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/Button';
 import { useClearGainsStore } from '@/lib/store';
 import Link from 'next/link';
 import {
-  LoadPortfolioButton, useLoadPortfolio, LoadPortfolioModal,
+  useLoadPortfolio, LoadPortfolioModal,
   PORTFOLIO_SNAPSHOT_KEY, type PortfolioData,
 } from '@/components/portfolio/LoadPortfolioModal';
 
@@ -774,7 +774,9 @@ export default function PositionsPage() {
           <span className="text-[10px] text-gray-600 flex items-center gap-1">
             <Clock className="h-3 w-3" /> Refreshing in {countdown}s
           </span>
-          <LoadPortfolioButton label="Load Portfolio" size="sm" />
+          <Button size="sm" variant="outline" icon={<BarChart3 className="h-3.5 w-3.5" />} onClick={portfolioModal.openModal} className="border-orange-500/30 text-orange-400 hover:border-orange-500/60">
+            Load Portfolio
+          </Button>
           <Button size="sm" variant="outline" loading={loading} icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => { void fetchAll(); void fetchHistory(); }}>
             Refresh
           </Button>
@@ -1177,6 +1179,19 @@ export default function PositionsPage() {
           </div>
         )}
       </div>
+
+      {/* Load Portfolio Modal — wired to page's portfolioModal hook */}
+      <LoadPortfolioModal
+        open={portfolioModal.open}
+        onClose={portfolioModal.closeModal}
+        loading={portfolioModal.loading}
+        done={portfolioModal.done}
+        accounts={portfolioModal.accounts}
+        data={portfolioModal.data}
+        totalPositions={portfolioModal.totalPositions}
+        connectedCount={portfolioModal.connectedCount}
+        onReload={portfolioModal.reload}
+      />
 
       {/* Manual position modal */}
       {showManualModal && (
