@@ -18,98 +18,31 @@ import { NextRequest, NextResponse } from 'next/server';
 // ── Symbol map ────────────────────────────────────────────────────────────────
 
 const YAHOO_MAP: Record<string, string> = {
-  // ── Volatility ────────────────────────────────────────────────────────────
-  'VIX':              '^VIX',
-  // ── Indices ───────────────────────────────────────────────────────────────
-  'FTSE 100':         '^FTSE',
-  'FTSE 100 CFD':     '^FTSE',
-  'S&P 500':          '^GSPC',
-  'S&P 500 CFD':      '^GSPC',
-  'NASDAQ 100':       '^NDX',
-  'NASDAQ 100 CFD':   '^NDX',
-  'Wall Street':      '^DJI',
-  'Wall Street (Dow)':'^DJI',
-  'Dow Jones':        '^DJI',
-  'Germany 40':       '^GDAXI',
-  'Germany 40 (DAX)': '^GDAXI',
-  'Japan 225':        '^N225',
-  'Australia 200':    '^AXJO',
-  // ── Commodities ───────────────────────────────────────────────────────────
-  'Gold':             'GC=F',
-  'Silver':           'SI=F',
-  'Oil (WTI)':        'CL=F',
-  'Brent Crude':      'BZ=F',
-  'Natural Gas':      'NG=F',
-  // ── Forex ─────────────────────────────────────────────────────────────────
-  'GBP/USD':          'GBPUSD=X',
-  'EUR/USD':          'EURUSD=X',
-  'EUR/GBP':          'EURGBP=X',
-  'USD/JPY':          'JPY=X',
-  'AUD/USD':          'AUDUSD=X',
-  'USD/CHF':          'CHF=X',
-  // ── Crypto ────────────────────────────────────────────────────────────────
-  'Bitcoin':          'BTC-USD',
-  'Ethereum':         'ETH-USD',
-  // ── US Stocks ─────────────────────────────────────────────────────────────
-  'Apple':            'AAPL',
-  'Tesla':            'TSLA',
-  'Microsoft':        'MSFT',
-  'Amazon':           'AMZN',
-  'NVIDIA':           'NVDA',
-  'Meta':             'META',
-  'Alphabet (GOOGL)': 'GOOGL',
-  'Google':           'GOOGL',
-  'Netflix':          'NFLX',
+  // Indices
+  'FTSE 100':      '^FTSE',
+  'S&P 500':       '^GSPC',
+  'NASDAQ 100':    '^IXIC',
+  'Germany 40':    '^GDAXI',
+  'Wall Street':   '^DJI',
+  'Japan 225':     '^N225',
+  'Australia 200': '^AXJO',
+  // Commodities
+  'Gold':          'GC=F',
+  'Oil (WTI)':     'CL=F',
+  'Brent Crude':   'BZ=F',
+  'Silver':        'SI=F',
+  'Natural Gas':   'NG=F',
+  // Forex
+  'GBP/USD':       'GBPUSD=X',
+  'EUR/USD':       'EURUSD=X',
+  'EUR/GBP':       'EURGBP=X',
+  'USD/JPY':       'JPY=X',
+  'AUD/USD':       'AUDUSD=X',
+  'USD/CHF':       'USDCHF=X',
+  // Crypto
+  'Bitcoin':       'BTC-USD',
+  'Ethereum':      'ETH-USD',
 };
-
-/**
- * Smart Yahoo Finance symbol guesser for instruments not in YAHOO_MAP.
- *
- * Priority order:
- *  1. UA.D.{TICKER}.CASH.IP  → extract ticker directly
- *  2. CS.D.{PAIR6}.*.IP      → reformat as {PAIR6}=X (forex)
- *  3. Heuristics on instrument name (indices, commodities, crypto)
- */
-function guessYahooSymbol(name: string, epic?: string): string | null {
-  // Stock CFDs: UA.D.AAPL.CASH.IP → AAPL
-  if (epic) {
-    const stockMatch = epic.match(/^UA\.D\.([A-Z]+)\.CASH\.IP$/);
-    if (stockMatch) return stockMatch[1];
-
-    // Forex rolling/today epics: CS.D.GBPUSD.TODAY.IP → GBPUSD=X
-    const fxMatch = epic.match(/^CS\.D\.([A-Z]{6})\./);
-    if (fxMatch) return `${fxMatch[1]}=X`;
-  }
-
-  const n = name.toLowerCase();
-
-  // Index name heuristics
-  if (n.includes('ftse') || n.includes('uk 100'))        return '^FTSE';
-  if (n.includes('s&p') || n.includes('sp 500'))         return '^GSPC';
-  if (n.includes('nasdaq'))                               return '^NDX';
-  if (n.includes('dow') || n.includes('wall street'))     return '^DJI';
-  if (n.includes('dax') || n.includes('germany 40'))      return '^GDAXI';
-  if (n.includes('nikkei') || n.includes('japan 225'))    return '^N225';
-  if (n.includes('hang seng') || n.includes('hong kong')) return '^HSI';
-  if (n.includes('asx') || n.includes('australia'))       return '^AXJO';
-  if (n.includes('cac') || n.includes('france 40'))       return '^FCHI';
-  if (n.includes('euro stoxx'))                           return '^STOXX50E';
-
-  // Commodity name heuristics
-  if (n.includes('gold'))                                 return 'GC=F';
-  if (n.includes('silver'))                               return 'SI=F';
-  if (n.includes('crude') || n.includes('wti') || (n.includes('oil') && !n.includes('brent'))) return 'CL=F';
-  if (n.includes('brent'))                                return 'BZ=F';
-  if (n.includes('natural gas') || n.includes('natgas')) return 'NG=F';
-  if (n.includes('copper'))                               return 'HG=F';
-  if (n.includes('wheat'))                                return 'ZW=F';
-
-  // Crypto heuristics
-  if (n.includes('bitcoin') || n.includes('btc'))         return 'BTC-USD';
-  if (n.includes('ethereum') || n.includes('eth'))        return 'ETH-USD';
-
-  return null;
-}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -128,8 +61,8 @@ const CACHE_TTL = 5 * 60_000;
 
 // ── Yahoo Finance fetch ───────────────────────────────────────────────────────
 
-async function fetchSnapshot(name: string, epic?: string): Promise<MarketSnapshot | null> {
-  const symbol = YAHOO_MAP[name] ?? guessYahooSymbol(name, epic);
+async function fetchSnapshot(name: string): Promise<MarketSnapshot | null> {
+  const symbol = YAHOO_MAP[name];
   if (!symbol) return null;
 
   const url =
@@ -188,30 +121,28 @@ async function fetchSnapshot(name: string, epic?: string): Promise<MarketSnapsho
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const name = searchParams.get('name') ?? '';
-  const epic = searchParams.get('epic') ?? undefined;
+  // timeframe is accepted but unused — signal is purely price-momentum based
 
   if (!name) {
     return NextResponse.json({ ok: false, error: 'name parameter required' }, { status: 400 });
   }
-
-  const resolvedSymbol = YAHOO_MAP[name] ?? guessYahooSymbol(name, epic);
-  if (!resolvedSymbol) {
+  if (!YAHOO_MAP[name]) {
     return NextResponse.json(
-      { ok: false, error: `No Yahoo Finance symbol mapping for "${name}". Add a mapping or pass epic= for auto-detection.` },
+      { ok: false, error: `No Yahoo Finance symbol mapping for "${name}". Add it to YAHOO_MAP.` },
       { status: 400 },
     );
   }
 
-  // Cache by name (symbol resolution is deterministic)
+  // Cache hit
   const hit = cache.get(name);
   if (hit && hit.expiresAt > Date.now()) {
     return NextResponse.json({ ok: true, ...hit.data, cached: true });
   }
 
-  const snapshot = await fetchSnapshot(name, epic);
+  const snapshot = await fetchSnapshot(name);
   if (!snapshot) {
     return NextResponse.json(
-      { ok: false, error: `Yahoo Finance returned no data for "${name}" (symbol: ${resolvedSymbol}). Market may be closed.` },
+      { ok: false, error: `Yahoo Finance returned no data for "${name}". Market may be closed.` },
       { status: 502 },
     );
   }

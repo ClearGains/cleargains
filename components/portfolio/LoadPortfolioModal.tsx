@@ -2,10 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import {
-  RefreshCw, CheckCircle2, X, AlertCircle, WifiOff, BarChart3,
-  ChevronDown, ChevronUp, TrendingUp, TrendingDown,
-} from 'lucide-react';
+import { RefreshCw, CheckCircle2, X, AlertCircle, WifiOff, BarChart3, ChevronDown, ChevronUp } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Button } from '@/components/ui/Button';
 import { useClearGainsStore } from '@/lib/store';
@@ -19,9 +16,6 @@ export type T212PortfolioResult = {
   account:  string;
   label:    string;
   color:    string;
-  env:      string;
-  key:      string;   // kept for close-position calls
-  secret:   string;
   positions: {
     ticker: string; name: string; quantity: number; averagePrice: number;
     currentPrice: number; pnl: number; pnlPct: number; value: number; initialFillDate?: string;
@@ -70,25 +64,12 @@ interface AccountState {
   count:    number;
   error?:   string;
   debug?:   string;
-  steps?:   string[];  // diagnostic steps from API (IG)
-}
-
-// ── Credential helpers (read from individual localStorage keys) ───────────────
-
-function getT212CredsFromLS(lsKey: string): { key: string; secret: string } | null {
-  try {
-    const raw = typeof window !== 'undefined' ? localStorage.getItem(lsKey) : null;
-    if (!raw) return null;
-    const p = JSON.parse(raw) as { key?: string; secret?: string };
-    if (p.key && p.secret) return { key: p.key, secret: p.secret };
-  } catch {}
-  return null;
+  steps?:   string[];  // diagnostic steps from API
 }
 
 // ── Hook: load portfolio ──────────────────────────────────────────────────────
 
 export function useLoadPortfolio() {
-  // Keep Zustand values as fallback for users who haven't re-saved credentials
   const {
     t212ApiKey, t212ApiSecret,
     t212IsaApiKey, t212IsaApiSecret,
@@ -110,18 +91,21 @@ export function useLoadPortfolio() {
     setDone(false);
     setData(null);
 
-    // Read T212 credentials: localStorage first (new format { key, secret }),
-    // then fall back to Zustand store values (legacy format from prior sessions)
-    function getT212Creds(lsKey: string, storeKey: string, storeSecret: string) {
-      const fromLS = getT212CredsFromLS(lsKey);
-      if (fromLS) return fromLS;
+    // Read T212 credentials from store (persisted) or localStorage fallback
+    function getT212Creds(storeKey: string, storeSecret: string, lsKey: string) {
       if (storeKey && storeSecret) return { key: storeKey, secret: storeSecret };
+      try {
+        const raw = typeof window !== 'undefined' ? localStorage.getItem(lsKey) : null;
+        if (!raw) return null;
+        const p = JSON.parse(raw) as { apiKey?: string; apiSecret?: string };
+        if (p.apiKey && p.apiSecret) return { key: p.apiKey, secret: p.apiSecret };
+      } catch {}
       return null;
     }
 
-    const t212InvestCreds = getT212Creds('t212_invest_credentials', t212ApiKey,     t212ApiSecret);
-    const t212IsaCreds    = getT212Creds('t212_isa_credentials',    t212IsaApiKey,  t212IsaApiSecret);
-    const t212DemoCreds   = getT212Creds('t212_demo_credentials',   t212DemoApiKey, t212DemoApiSecret);
+    const t212InvestCreds = getT212Creds(t212ApiKey,     t212ApiSecret,    't212_invest_credentials');
+    const t212IsaCreds    = getT212Creds(t212IsaApiKey,  t212IsaApiSecret, 't212_isa_credentials');
+    const t212DemoCreds   = getT212Creds(t212DemoApiKey, t212DemoApiSecret,'t212_demo_credentials');
 
     // Read IG credentials from localStorage
     function getIGCreds(envKey: 'demo' | 'live') {
@@ -151,29 +135,18 @@ export function useLoadPortfolio() {
     const t212Results:  T212PortfolioResult[] = [];
     const igResults:    IGPortfolioResult[]   = [];
 
-    // T212 fetch helper — sends key+secret directly, API encodes them
-    async function fetchT212(
-      creds: { key: string; secret: string },
-      accountKey: string, label: string, color: string, env: string,
-    ) {
+    // T212 fetch helper
+    async function fetchT212(key: string, secret: string, accountKey: string, label: string, color: string, env: string) {
       setStatus(accountKey, { status: 'loading', debug: `Connecting to ${label}…` });
       try {
         const r = await fetch('/api/portfolio/t212', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: creds.key, secret: creds.secret, env }),
+          body: JSON.stringify({ encoded: btoa(key + ':' + secret), env }),
         });
-        const d = await r.json() as T212PortfolioResult & { ok: boolean; error?: string; status?: number };
-        if (!d.ok) {
-          const errMsg = d.status === 401 ? 'Invalid credentials (401)' : d.error ?? `Fetch failed (HTTP ${d.status ?? r.status})`;
-          setStatus(accountKey, { status: 'error', error: errMsg, debug: undefined });
-          return;
-        }
-        const result: T212PortfolioResult = {
-          account: accountKey, label, color, env,
-          key: creds.key, secret: creds.secret,
-          positions: d.positions, orders: d.orders, cash: d.cash, summary: d.summary,
-        };
+        const d = await r.json() as T212PortfolioResult & { ok: boolean; error?: string };
+        if (!d.ok) throw new Error(d.error ?? 'Fetch failed');
+        const result: T212PortfolioResult = { account: accountKey, label, color, positions: d.positions, orders: d.orders, cash: d.cash, summary: d.summary };
         t212Results.push(result);
         setStatus(accountKey, { status: 'done', count: d.summary.positionCount, debug: undefined });
       } catch (e) {
@@ -181,11 +154,8 @@ export function useLoadPortfolio() {
       }
     }
 
-    // IG fetch helper — fresh auth every time
-    async function fetchIG(
-      envKey: 'demo' | 'live', accountKey: string, label: string, color: string,
-      creds: { username: string; password: string; apiKey: string },
-    ) {
+    // IG fetch helper — fresh auth every time, fetches all sub-accounts
+    async function fetchIG(envKey: 'demo' | 'live', accountKey: string, label: string, color: string, creds: { username: string; password: string; apiKey: string }) {
       try {
         setStatus(accountKey, { status: 'loading', debug: `Authenticating with ${label}…` });
         const sessionRes = await fetch('/api/ig/session', {
@@ -199,7 +169,7 @@ export function useLoadPortfolio() {
           return;
         }
 
-        setStatus(accountKey, { status: 'loading', debug: `Fetching positions from ${label}…` });
+        setStatus(accountKey, { status: 'loading', debug: `Fetching all sub-accounts from ${label}…` });
         const r = await fetch('/api/portfolio/ig', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -210,6 +180,7 @@ export function useLoadPortfolio() {
           accounts?: { accountId: string; accountName: string; accountType: string; preferred: boolean; balance: { balance: number; available: number; deposit: number; profitLoss: number }; currency: string }[];
         };
 
+        // Always capture steps for diagnostics, even on error
         const apiSteps = d.steps ?? [];
 
         if (!d.ok) {
@@ -217,6 +188,7 @@ export function useLoadPortfolio() {
           return;
         }
 
+        // Build per-sub-account position counts
         const subAccountMap = new Map<string, { accountId: string; accountName: string; accountType: string; positionCount: number }>();
         (d.accounts ?? []).forEach(acc => {
           subAccountMap.set(acc.accountId, { accountId: acc.accountId, accountName: acc.accountName, accountType: acc.accountType, positionCount: 0 });
@@ -229,7 +201,9 @@ export function useLoadPortfolio() {
         });
 
         const result: IGPortfolioResult = {
-          account: accountKey, label, color,
+          account: accountKey,
+          label,
+          color,
           positions:     d.positions,
           workingOrders: d.workingOrders,
           activeAccount: d.activeAccount,
@@ -244,9 +218,9 @@ export function useLoadPortfolio() {
     }
 
     await Promise.all([
-      t212InvestCreds ? fetchT212(t212InvestCreds, 'T212_INVEST', 'T212 Invest', 'text-emerald-400', 'live') : Promise.resolve(),
-      t212IsaCreds    ? fetchT212(t212IsaCreds,    'T212_ISA',    'T212 ISA',    'text-blue-400',    'live') : Promise.resolve(),
-      t212DemoCreds   ? fetchT212(t212DemoCreds,   'T212_DEMO',   'T212 Demo',   'text-purple-400',  'demo') : Promise.resolve(),
+      t212InvestCreds ? fetchT212(t212InvestCreds.key, t212InvestCreds.secret, 'T212_INVEST', 'T212 Invest', 'text-emerald-400', 'live') : Promise.resolve(),
+      t212IsaCreds    ? fetchT212(t212IsaCreds.key,    t212IsaCreds.secret,    'T212_ISA',    'T212 ISA',    'text-blue-400',    'live') : Promise.resolve(),
+      t212DemoCreds   ? fetchT212(t212DemoCreds.key,   t212DemoCreds.secret,   'T212_DEMO',   'T212 Demo',   'text-purple-400',  'demo') : Promise.resolve(),
       igDemoCreds     ? fetchIG('demo', 'IG_DEMO', 'IG Demo', 'text-orange-400', igDemoCreds) : Promise.resolve(),
       igLiveCreds     ? fetchIG('live', 'IG_LIVE', 'IG Live', 'text-amber-400',  igLiveCreds) : Promise.resolve(),
     ]);
@@ -288,44 +262,6 @@ function ModalPortal({ children }: { children: React.ReactNode }) {
   return createPortal(children, document.body);
 }
 
-// ── Small UI helpers ──────────────────────────────────────────────────────────
-
-function StatusIcon({ status }: { status: AccountStatus }) {
-  if (status === 'loading') return <RefreshCw className="h-3.5 w-3.5 text-blue-400 animate-spin" />;
-  if (status === 'done')    return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />;
-  if (status === 'error')   return <AlertCircle className="h-3.5 w-3.5 text-red-400" />;
-  if (status === 'skipped') return <WifiOff className="h-3.5 w-3.5 text-gray-600" />;
-  return <span className="h-3.5 w-3.5 rounded-full border border-gray-700 inline-block" />;
-}
-
-function AccountTypeBadge({ type }: { type?: string }) {
-  if (!type) return null;
-  const label = type === 'SPREADBET' ? 'Spread Bet' : type === 'CFD' ? 'CFD' : type === 'SHARES' ? 'Shares' : type;
-  const cls = type === 'SPREADBET'
-    ? 'bg-purple-500/15 text-purple-400 border-purple-500/25'
-    : type === 'CFD'
-    ? 'bg-blue-500/15 text-blue-400 border-blue-500/25'
-    : 'bg-gray-700 text-gray-400 border-gray-600';
-  return (
-    <span className={clsx('text-[8px] px-1.5 py-0.5 rounded border font-medium', cls)}>{label}</span>
-  );
-}
-
-function fmtMoney(n: number, symbol = '£') {
-  return (n >= 0 ? symbol : '-' + symbol) + Math.abs(n).toFixed(2);
-}
-
-function cleanTicker(raw: string) {
-  return raw.replace(/_[A-Z]{2}_[A-Z]{2}$/, '');
-}
-
-function fmtDate(iso?: string) {
-  if (!iso) return null;
-  try {
-    return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-  } catch { return null; }
-}
-
 // ── Modal component ───────────────────────────────────────────────────────────
 
 interface Props {
@@ -340,37 +276,35 @@ interface Props {
   onReload:       () => void;
 }
 
+function StatusIcon({ status }: { status: AccountStatus }) {
+  if (status === 'loading') return <RefreshCw className="h-3.5 w-3.5 text-blue-400 animate-spin" />;
+  if (status === 'done')    return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />;
+  if (status === 'error')   return <AlertCircle className="h-3.5 w-3.5 text-red-400" />;
+  if (status === 'skipped') return <WifiOff className="h-3.5 w-3.5 text-gray-600" />;
+  return <span className="h-3.5 w-3.5 rounded-full border border-gray-700 inline-block" />;
+}
+
+function AccountTypeBadge({ type }: { type?: string }) {
+  if (!type) return null;
+  const label = type === 'SPREADBET' ? 'Spread Bet' : type === 'CFD' ? 'CFD' : type === 'SHARES' ? 'Shares' : type;
+  const cls   = type === 'SPREADBET'
+    ? 'bg-purple-500/15 text-purple-400 border-purple-500/25'
+    : type === 'CFD'
+    ? 'bg-blue-500/15 text-blue-400 border-blue-500/25'
+    : 'bg-gray-700 text-gray-400 border-gray-600';
+  return (
+    <span className={clsx('text-[8px] px-1.5 py-0.5 rounded border font-medium', cls)}>{label}</span>
+  );
+}
+
 export function LoadPortfolioModal({ open, onClose, loading, done, accounts, data, totalPositions, connectedCount, onReload }: Props) {
-  const [expandedDebug, setExpandedDebug]   = useState<Set<string>>(new Set());
-  const [expandedAcct, setExpandedAcct]     = useState<Set<string>>(new Set());
-  const [closingTicker, setClosingTicker]   = useState<string | null>(null);
-  const [confirmClose, setConfirmClose]     = useState<{ ticker: string; quantity: number; accountKey: string } | null>(null);
-  const [closeMsg, setCloseMsg]             = useState<{ ok: boolean; text: string } | null>(null);
-
+  const [expandedDebug, setExpandedDebug] = useState<Set<string>>(new Set());
   const toggleDebug = (key: string) =>
-    setExpandedDebug(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
-  const toggleAcct = (key: string) =>
-    setExpandedAcct(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
-
-  async function handleClosePosition(t212: T212PortfolioResult, ticker: string, quantity: number) {
-    setClosingTicker(ticker);
-    setCloseMsg(null);
-    try {
-      const encoded = btoa(t212.key + ':' + t212.secret);
-      const r = await fetch('/api/t212/live-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-t212-auth': encoded },
-        body: JSON.stringify({ ticker, quantity: -Math.abs(quantity), env: t212.env }),
-      });
-      const d = await r.json() as { ok: boolean; error?: string };
-      setCloseMsg({ ok: d.ok, text: d.ok ? `Position closed` : (d.error ?? 'Close failed') });
-    } catch (e) {
-      setCloseMsg({ ok: false, text: e instanceof Error ? e.message : 'Request failed' });
-    } finally {
-      setClosingTicker(null);
-      setConfirmClose(null);
-    }
-  }
+    setExpandedDebug(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
 
   if (!open) return null;
 
@@ -380,7 +314,7 @@ export function LoadPortfolioModal({ open, onClose, loading, done, accounts, dat
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-lg shadow-2xl mt-[80px] mb-8"
+        className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-md shadow-2xl mt-[80px] mb-8"
         style={{ maxHeight: 'calc(100vh - 120px)', overflowY: 'auto' }}
       >
         {/* Header */}
@@ -404,209 +338,84 @@ export function LoadPortfolioModal({ open, onClose, loading, done, accounts, dat
           </button>
         </div>
 
-        {/* Close result toast */}
-        {closeMsg && (
-          <div className={clsx('mb-3 px-3 py-2 rounded-lg text-xs font-medium',
-            closeMsg.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                       : 'bg-red-500/10 border border-red-500/20 text-red-400'
-          )}>
-            {closeMsg.ok ? '✓' : '✗'} {closeMsg.text}
-            <button onClick={() => setCloseMsg(null)} className="ml-2 opacity-60 hover:opacity-100">×</button>
-          </div>
-        )}
-
         {/* Account progress list */}
         <div className="space-y-2 mb-4">
-          {accounts.map(a => {
-            const isT212 = a.key.startsWith('T212_');
-            const t212Result = isT212 && data ? data.t212.find(r => r.account === a.key) : null;
-            const isIG = a.key.startsWith('IG_');
-            const igResult = isIG && data ? data.ig.find(r => r.account === a.key) : null;
-            const hasPositions = (t212Result?.positions?.length ?? 0) + (igResult?.positions?.length ?? 0) > 0;
-            const isExpanded = expandedAcct.has(a.key);
-
-            return (
-              <div key={a.key} className={clsx(
-                'rounded-lg border text-xs',
-                a.status === 'done'    ? 'bg-emerald-500/5 border-emerald-500/15' :
-                a.status === 'loading' ? 'bg-blue-500/5 border-blue-500/20' :
-                a.status === 'error'   ? 'bg-red-500/5 border-red-500/15' :
-                a.status === 'skipped' ? 'bg-gray-800/30 border-gray-800' :
-                'bg-gray-800/20 border-gray-800'
-              )}>
-                {/* Account header row */}
-                <div className="flex items-start gap-3 px-3 py-2">
-                  <div className="mt-0.5 flex-shrink-0">
-                    <StatusIcon status={a.status} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <span className={clsx('font-medium',
-                      a.status === 'done'    ? 'text-emerald-400' :
-                      a.status === 'loading' ? 'text-blue-400' :
-                      a.status === 'error'   ? 'text-red-400' :
-                      a.status === 'skipped' ? 'text-gray-600' : 'text-gray-500'
-                    )}>{a.label}</span>
-                    {a.status === 'loading' && a.debug && (
-                      <p className="text-[10px] text-blue-400/70 truncate mt-0.5">{a.debug}</p>
-                    )}
-                    {a.status === 'error' && a.error && (
-                      <p className="text-[10px] text-red-400/70 truncate mt-0.5">{a.error}</p>
-                    )}
-                    {/* IG sub-account breakdown */}
-                    {a.status === 'done' && isIG && igResult?.subAccounts && (() => {
-                      const withPos = igResult.subAccounts.filter(s => s.positionCount > 0);
-                      if (!withPos.length) return null;
-                      return (
-                        <div className="mt-1 space-y-0.5">
-                          {withPos.map(sub => (
-                            <div key={sub.accountId} className="flex items-center gap-1.5 text-[10px] text-gray-400">
-                              <AccountTypeBadge type={sub.accountType} />
-                              <span className="truncate">{sub.accountName}</span>
-                              <span className="text-emerald-400 flex-shrink-0">{sub.positionCount} pos</span>
-                            </div>
-                          ))}
+          {accounts.map(a => (
+            <div key={a.key} className={clsx(
+              'flex items-start gap-3 px-3 py-2 rounded-lg border text-xs',
+              a.status === 'done'    ? 'bg-emerald-500/5 border-emerald-500/15' :
+              a.status === 'loading' ? 'bg-blue-500/5 border-blue-500/20' :
+              a.status === 'error'   ? 'bg-red-500/5 border-red-500/15' :
+              a.status === 'skipped' ? 'bg-gray-800/30 border-gray-800' :
+              'bg-gray-800/20 border-gray-800'
+            )}>
+              <div className="mt-0.5 flex-shrink-0">
+                <StatusIcon status={a.status} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <span className={clsx('font-medium',
+                  a.status === 'done'    ? 'text-emerald-400' :
+                  a.status === 'loading' ? 'text-blue-400' :
+                  a.status === 'error'   ? 'text-red-400' :
+                  a.status === 'skipped' ? 'text-gray-600' : 'text-gray-500'
+                )}>{a.label}</span>
+                {a.status === 'loading' && a.debug && (
+                  <p className="text-[10px] text-blue-400/70 truncate mt-0.5">{a.debug}</p>
+                )}
+                {a.status === 'error' && a.error && (
+                  <p className="text-[10px] text-red-400/70 truncate mt-0.5">{a.error}</p>
+                )}
+                {/* Show IG sub-account breakdown when done */}
+                {a.status === 'done' && (a.key === 'IG_DEMO' || a.key === 'IG_LIVE') && data && (() => {
+                  const igResult = data.ig.find(r => r.account === a.key);
+                  if (!igResult?.subAccounts?.length) return null;
+                  const withPositions = igResult.subAccounts.filter(s => s.positionCount > 0);
+                  if (!withPositions.length) return null;
+                  return (
+                    <div className="mt-1 space-y-0.5">
+                      {withPositions.map(sub => (
+                        <div key={sub.accountId} className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                          <AccountTypeBadge type={sub.accountType} />
+                          <span className="truncate">{sub.accountName}</span>
+                          <span className="text-emerald-400 flex-shrink-0">{sub.positionCount} pos</span>
                         </div>
-                      );
-                    })()}
-                    {/* IG debug steps */}
-                    {isIG && (a.steps?.length ?? 0) > 0 && (
-                      <div className="mt-1">
-                        <button
-                          onClick={() => toggleDebug(a.key)}
-                          className="flex items-center gap-1 text-[9px] text-gray-500 hover:text-gray-300 transition-colors"
-                        >
-                          {expandedDebug.has(a.key) ? <ChevronUp className="h-2.5 w-2.5" /> : <ChevronDown className="h-2.5 w-2.5" />}
-                          Debug info ({a.steps!.length} steps)
-                        </button>
-                        {expandedDebug.has(a.key) && (
-                          <div className="mt-1 bg-gray-950/80 border border-gray-800 rounded p-1.5 space-y-0.5 max-h-40 overflow-y-auto">
-                            {a.steps!.map((step, i) => (
-                              <p key={i} className="text-[9px] font-mono text-gray-400 leading-relaxed whitespace-pre-wrap break-all">{step}</p>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <span className={clsx('text-[10px]',
-                      a.status === 'done'    ? 'text-emerald-400' :
-                      a.status === 'skipped' ? 'text-gray-600' : 'text-gray-500'
-                    )}>
-                      {a.status === 'done'    ? `${a.count} position${a.count !== 1 ? 's' : ''}` :
-                       a.status === 'loading' ? 'loading…' :
-                       a.status === 'skipped' ? 'not connected' :
-                       a.status === 'error'   ? 'error' : 'waiting'}
-                    </span>
-                    {a.status === 'done' && isT212 && (
-                      <button
-                        onClick={() => toggleAcct(a.key)}
-                        className="text-gray-500 hover:text-gray-300 transition-colors"
-                      >
-                        {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* T212 expanded: cash summary + positions */}
-                {isExpanded && a.status === 'done' && t212Result && (
-                  <div className="px-3 pb-3 space-y-2 border-t border-gray-800/60 pt-2">
-                    {/* Cash summary */}
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <div className="bg-gray-800/60 rounded p-1.5 text-center">
-                        <p className="text-[8px] text-gray-500 uppercase tracking-wide">Available</p>
-                        <p className="text-[11px] font-bold text-white">{fmtMoney(t212Result.cash.available)}</p>
-                      </div>
-                      <div className="bg-gray-800/60 rounded p-1.5 text-center">
-                        <p className="text-[8px] text-gray-500 uppercase tracking-wide">Invested</p>
-                        <p className="text-[11px] font-bold text-white">{fmtMoney(t212Result.cash.invested)}</p>
-                      </div>
-                      <div className="bg-gray-800/60 rounded p-1.5 text-center">
-                        <p className="text-[8px] text-gray-500 uppercase tracking-wide">Total P&L</p>
-                        <p className={clsx('text-[11px] font-bold',
-                          t212Result.cash.ppl >= 0 ? 'text-emerald-400' : 'text-red-400'
-                        )}>{fmtMoney(t212Result.cash.ppl)}</p>
-                      </div>
+                      ))}
                     </div>
-
-                    {/* Position list */}
-                    {t212Result.positions.length === 0 ? (
-                      <p className="text-[10px] text-gray-600 text-center py-1">No open positions</p>
-                    ) : (
-                      <div className="space-y-1.5">
-                        {t212Result.positions.map(pos => {
-                          const ticker  = cleanTicker(pos.ticker);
-                          const isProfit = pos.pnl >= 0;
-                          const isClosing = closingTicker === pos.ticker;
-                          const showConfirm = confirmClose?.ticker === pos.ticker;
-                          return (
-                            <div key={pos.ticker} className="bg-gray-800/50 rounded-lg p-2">
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="text-[11px] font-bold text-white font-mono">{ticker}</span>
-                                    {pos.initialFillDate && (
-                                      <span className="text-[8px] text-gray-600">Opened {fmtDate(pos.initialFillDate)}</span>
-                                    )}
-                                  </div>
-                                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                                    <span className="text-[10px] text-gray-400">{pos.quantity} shares</span>
-                                    <span className="text-[10px] text-gray-500">Entry {fmtMoney(pos.averagePrice, '$')}</span>
-                                    <span className="text-[10px] text-gray-500">Now {fmtMoney(pos.currentPrice, '$')}</span>
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-1.5 flex-shrink-0">
-                                  <div className={clsx('flex items-center gap-0.5 text-[10px] font-bold',
-                                    isProfit ? 'text-emerald-400' : 'text-red-400'
-                                  )}>
-                                    {isProfit ? <TrendingUp className="h-2.5 w-2.5" /> : <TrendingDown className="h-2.5 w-2.5" />}
-                                    {fmtMoney(pos.pnl)}
-                                  </div>
-                                  {!showConfirm && (
-                                    <button
-                                      onClick={() => setConfirmClose({ ticker: pos.ticker, quantity: pos.quantity, accountKey: a.key })}
-                                      disabled={isClosing}
-                                      className="text-[9px] text-red-400/80 hover:text-red-300 border border-red-500/25 hover:border-red-500/50 rounded px-1.5 py-0.5 transition-all disabled:opacity-40"
-                                    >
-                                      {isClosing ? <RefreshCw className="h-2.5 w-2.5 animate-spin inline" /> : 'Close'}
-                                    </button>
-                                  )}
-                                </div>
-                              </div>
-                              {/* Confirm close */}
-                              {showConfirm && (
-                                <div className="mt-1.5 bg-red-500/10 border border-red-500/20 rounded p-1.5">
-                                  <p className="text-[9px] text-red-400 mb-1">
-                                    Close {ticker} position? Sell {pos.quantity} share{pos.quantity !== 1 ? 's' : ''} at market price
-                                  </p>
-                                  <div className="flex gap-1">
-                                    <button
-                                      onClick={() => handleClosePosition(t212Result, pos.ticker, pos.quantity)}
-                                      disabled={isClosing}
-                                      className="text-[9px] bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded px-2 py-0.5 font-medium transition-colors disabled:opacity-40"
-                                    >
-                                      {isClosing ? 'Closing…' : 'Confirm'}
-                                    </button>
-                                    <button
-                                      onClick={() => setConfirmClose(null)}
-                                      className="text-[9px] text-gray-500 hover:text-gray-300 rounded px-2 py-0.5 transition-colors"
-                                    >
-                                      Cancel
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
+                  );
+                })()}
+                {/* Collapsible debug steps for IG accounts */}
+                {(a.key === 'IG_DEMO' || a.key === 'IG_LIVE') && (a.steps?.length ?? 0) > 0 && (
+                  <div className="mt-1">
+                    <button
+                      onClick={() => toggleDebug(a.key)}
+                      className="flex items-center gap-1 text-[9px] text-gray-500 hover:text-gray-300 transition-colors"
+                    >
+                      {expandedDebug.has(a.key)
+                        ? <ChevronUp className="h-2.5 w-2.5" />
+                        : <ChevronDown className="h-2.5 w-2.5" />}
+                      Debug info ({a.steps!.length} steps)
+                    </button>
+                    {expandedDebug.has(a.key) && (
+                      <div className="mt-1 bg-gray-950/80 border border-gray-800 rounded p-1.5 space-y-0.5 max-h-40 overflow-y-auto">
+                        {a.steps!.map((step, i) => (
+                          <p key={i} className="text-[9px] font-mono text-gray-400 leading-relaxed whitespace-pre-wrap break-all">{step}</p>
+                        ))}
                       </div>
                     )}
                   </div>
                 )}
               </div>
-            );
-          })}
+              <span className={clsx('text-[10px] flex-shrink-0 mt-0.5',
+                a.status === 'done'    ? 'text-emerald-400' :
+                a.status === 'skipped' ? 'text-gray-600' : 'text-gray-500'
+              )}>
+                {a.status === 'done'    ? `${a.count} position${a.count !== 1 ? 's' : ''}` :
+                 a.status === 'loading' ? 'loading…' :
+                 a.status === 'skipped' ? 'not connected' :
+                 a.status === 'error'   ? 'error' : 'waiting'}
+              </span>
+            </div>
+          ))}
         </div>
 
         {/* Summary */}

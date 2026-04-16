@@ -1,13 +1,42 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { ALL_KNOWN_EPICS, isCfdEpic } from '@/lib/igConfig';
 
-/** If the epic isn't in the central table, search IG and return the best match. */
+// ── Verified IG spread-bet epic map (DFB / TODAY rolling instruments only) ────
+// ⚠️  Using a CFD epic on a spread-bet account returns REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT
+const VERIFIED_EPICS: Record<string, string> = {
+  // Indices — Daily Funded Bets
+  'FTSE 100':      'IX.D.FTSE.DAILY.IP',
+  'S&P 500':       'IX.D.SPTRD.DAILY.IP',
+  'NASDAQ 100':    'IX.D.NASDAQ.DAILY.IP',
+  'Wall Street':   'IX.D.DOW.DAILY.IP',
+  'Germany 40':    'IX.D.DAX.DAILY.IP',
+  'Japan 225':     'IX.D.NIKKEI.DAILY.IP',
+  'Australia 200': 'IX.D.ASX.DAILY.IP',
+  // Forex — spread bet
+  'GBP/USD':       'CS.D.GBPUSD.TODAY.IP',
+  'EUR/USD':       'CS.D.EURUSD.TODAY.IP',
+  'USD/JPY':       'CS.D.USDJPY.TODAY.IP',
+  'EUR/GBP':       'CS.D.EURGBP.TODAY.IP',
+  'AUD/USD':       'CS.D.AUDUSD.TODAY.IP',
+  'USD/CHF':       'CS.D.USDCHF.TODAY.IP',
+  // Commodities — spread bet  (NOT the CFD CS.D.CFDGOLD / CS.D.CRUDEOIL variants)
+  'Gold':          'CS.D.GOLD.TODAY.IP',
+  'Silver':        'CS.D.SILVER.TODAY.IP',
+  'Oil (WTI)':     'CS.D.CRUDE.TODAY.IP',
+  'Natural Gas':   'CS.D.NATGAS.TODAY.IP',
+  // Crypto — spread bet
+  'Bitcoin':       'CS.D.BITCOIN.TODAY.IP',
+  'Ethereum':      'CS.D.ETHUSD.TODAY.IP',
+};
+
+const VERIFIED_EPIC_SET = new Set(Object.values(VERIFIED_EPICS));
+
+/** If the epic isn't in our verified set, search IG and return the best match. */
 async function resolveEpic(
   epic: string,
   apiKey: string, cst: string, securityToken: string,
   base: string,
 ): Promise<{ epic: string; resolvedVia: string }> {
-  if (ALL_KNOWN_EPICS.has(epic)) return { epic, resolvedVia: 'table' };
+  if (VERIFIED_EPIC_SET.has(epic)) return { epic, resolvedVia: 'verified' };
   // Try searching by epic string itself
   try {
     const r = await fetch(`${base}/markets?searchTerm=${encodeURIComponent(epic)}&pageSize=5`, {
@@ -38,7 +67,7 @@ function getAuth(request: NextRequest) {
   return {
     cst:           request.headers.get('x-ig-cst') ?? '',
     securityToken: request.headers.get('x-ig-security-token') ?? '',
-    apiKey:        request.headers.get('x-ig-api-key') || (process.env.IG_API_KEY ?? ''),
+    apiKey:        request.headers.get('x-ig-api-key') ?? '',
     env:          (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live',
   };
 }
@@ -47,50 +76,6 @@ function baseUrl(env: 'demo' | 'live') {
   return env === 'demo'
     ? 'https://demo-api.ig.com/gateway/deal'
     : 'https://api.ig.com/gateway/deal';
-}
-
-/**
- * Determine the correct currency for an IG order from the epic alone.
- * This is the authoritative fallback — always correct regardless of what the client sends.
- *
- * US stock CFDs: UA.D.* → USD
- * FTSE index:    IX.D.FTSE.* → GBP
- * Other indices: IX.D.* → USD (S&P, NASDAQ, Dow, DAX etc.)
- * FX:            CS.D.*USD* or matching pair → pair currency
- * Gold/Oil/Commodities: USD
- * All others: GBP
- */
-function currencyForEpic(epic: string, clientCurrency?: string): string {
-  // If client explicitly sent a non-GBP currency, trust it
-  if (clientCurrency && clientCurrency !== 'GBP') return clientCurrency;
-  // US stock CFD: always USD
-  if (epic.startsWith('UA.D.')) return 'USD';
-  // FTSE: GBP
-  if (epic.startsWith('IX.D.FTSE')) return 'GBP';
-  // Other IG indices (S&P, NASDAQ, DOW, DAX, NIKKEI): USD for the margin currency
-  if (epic.startsWith('IX.D.')) return 'USD';
-  // Gold, Oil, Silver, commodities: USD
-  if (epic.includes('GOLD') || epic.includes('SILVER') || epic.includes('OILCRUD') ||
-      epic.includes('CRUDEOIL') || epic.includes('NATGAS') || epic.includes('BITCOIN')) return 'USD';
-  // FX pairs: use quote currency (second currency in pair)
-  if (epic.includes('GBPUSD') || epic.includes('EURUSD') || epic.includes('AUDUSD')) return 'USD';
-  if (epic.includes('USDJPY') || epic.includes('USDCHF') || epic.includes('USDCAD')) return 'USD';
-  if (epic.includes('EURGBP')) return 'GBP';
-  // Fall back to client value or GBP
-  return clientCurrency ?? 'GBP';
-}
-
-/**
- * CFD positions use expiry '-' (rolling / no expiry).
- * Spread-bet DFB positions use expiry 'DFB'.
- * Sending 'DFB' to a CFD account causes EXPIRY_NOT_SUPPORTED rejection.
- */
-function resolveExpiry(epic: string, explicitExpiry?: string): string {
-  if (explicitExpiry) return explicitExpiry;
-  // UA.D.* = CFD stocks (e.g. UA.D.AAPL.CASH.IP)
-  // IX.D.*.CFD.IP = CFD indices
-  if (epic.startsWith('UA.D.') || epic.includes('.CFD.IP')) return '-';
-  return 'DFB';
 }
 
 // ── POST — open market position OR create working order ───────────────────────
@@ -111,10 +96,10 @@ export async function POST(request: NextRequest) {
       orderType?: 'MARKET' | 'LIMIT' | 'STOP';
       level?: number;          // required for LIMIT/STOP working orders
       guaranteedStop?: boolean;
-      stopDistance?: number;   // spread-bet style: points below/above entry
-      profitDistance?: number; // spread-bet style: points above/below entry
-      stopLevel?: number;      // CFD style: absolute stop price level
-      limitLevel?: number;     // CFD style: absolute limit price level
+      stopDistance?: number;   // points below/above entry for auto stop-loss
+      profitDistance?: number; // points above/below entry for auto take-profit
+      stopLevel?: number;      // absolute stop level (alternative to stopDistance)
+      limitLevel?: number;     // absolute limit level (alternative to profitDistance)
       currencyCode?: string;
       forceOpen?: boolean;
       timeInForce?: 'GOOD_TILL_CANCELLED' | 'GOOD_TILL_DATE';
@@ -131,19 +116,18 @@ export async function POST(request: NextRequest) {
       if (!body.level) {
         return NextResponse.json({ ok: false, error: 'level is required for LIMIT/STOP working orders' }, { status: 400 });
       }
-      const woIsCfd = isCfdEpic(resolvedEpic);
       const woPayload: Record<string, unknown> = {
         epic:          resolvedEpic,
-        expiry:        resolveExpiry(resolvedEpic, body.expiry),
+        expiry:        body.expiry ?? 'DFB',
         direction:     body.direction,
         size:          body.size,
         level:         body.level,
         type:          orderType,
         guaranteedStop: body.guaranteedStop ?? false,
+        currencyCode:  body.currencyCode ?? 'GBP',
         timeInForce:   body.timeInForce ?? 'GOOD_TILL_CANCELLED',
         forceOpen:     body.forceOpen ?? true,
       };
-      woPayload.currencyCode = body.currencyCode ?? 'GBP';
       // Only include optional fields if they have actual values
       if (body.stopDistance)    woPayload.stopDistance  = body.stopDistance;
       if (body.profitDistance)  woPayload.limitDistance = body.profitDistance;
@@ -165,25 +149,17 @@ export async function POST(request: NextRequest) {
     // ── Market position ───────────────────────────────────────────────────────
     // IMPORTANT: do NOT include null fields — they cause silent rejections on some IG accounts.
     // SL/TP are applied separately via PUT after the deal is confirmed ACCEPTED.
-    const isCfd = isCfdEpic(resolvedEpic);
     const payload: Record<string, unknown> = {
       epic:          resolvedEpic,
-      expiry:        resolveExpiry(resolvedEpic, body.expiry),
+      expiry:        body.expiry ?? 'DFB',
       direction:     body.direction,
       size:          body.size,
       orderType:     'MARKET',
       guaranteedStop: body.guaranteedStop ?? false,
       trailingStop:  false,
       forceOpen:     body.forceOpen ?? true,
+      currencyCode:  body.currencyCode ?? 'GBP',
     };
-    // Spread bet: stake currency is ALWAYS GBP (£/point) for UK accounts.
-    //   currencyForEpic returns USD for non-FTSE indices which breaks SB orders.
-    // CFD: derive from epic — USD for US stocks / most indices, GBP for FTSE.
-    if (isCfd) {
-      payload.currencyCode = currencyForEpic(resolvedEpic, body.currencyCode);
-    } else {
-      payload.currencyCode = 'GBP';
-    }
 
     console.log(`[ig/order] POST → ${env} ${resolvedEpic} (via ${resolvedVia})`, JSON.stringify(payload));
 
@@ -192,10 +168,6 @@ export async function POST(request: NextRequest) {
       headers: igHeaders(apiKey, cst, securityToken, '2'),
       body: JSON.stringify(payload),
     });
-
-    // Capture fresh tokens — IG rotates CST/X-SECURITY-TOKEN on every API call
-    const freshCst      = res.headers.get('CST') ?? null;
-    const freshSecToken = res.headers.get('X-SECURITY-TOKEN') ?? null;
 
     const resText = await res.text();
     let data: { dealReference?: string; errorCode?: string } = {};
@@ -243,40 +215,20 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Apply SL/TP via separate PUT after deal is confirmed ACCEPTED ─────────
-    // CFD:        use stopLevel / limitLevel (absolute price levels) — NEVER distance fields
-    // Spread-bet: use stopDistance / profitDistance converted to levels from fill price
+    // (Including these in the initial order causes rejections on some accounts)
     let slTpResult: { ok: boolean; error?: string } = { ok: true };
-    const isCfdOrder = isCfd; // already computed above
-    const hasSl = isCfdOrder
-      ? body.stopLevel  !== undefined
-      : (body.stopLevel !== undefined || body.stopDistance !== undefined);
-    const hasTp = isCfdOrder
-      ? body.limitLevel !== undefined
-      : (body.limitLevel !== undefined || body.profitDistance !== undefined);
-    if (confirm.dealId && (hasSl || hasTp)) {
-      const fillPrice = confirm.level ?? 0;
+    if (confirm.dealId && confirm.level && (body.stopDistance || body.profitDistance)) {
+      const fillPrice = confirm.level;
       const slTpPayload: Record<string, unknown> = { trailingStop: false };
-
-      if (isCfdOrder) {
-        // CFD: absolute levels only — stopDistance/profitDistance are spread-bet fields
-        if (body.stopLevel  !== undefined) slTpPayload.stopLevel  = body.stopLevel;
-        if (body.limitLevel !== undefined) slTpPayload.limitLevel = body.limitLevel;
-      } else {
-        // Spread-bet: prefer absolute level if sent; otherwise convert distance to level
-        if (body.stopLevel !== undefined) {
-          slTpPayload.stopLevel = body.stopLevel;
-        } else if (body.stopDistance && fillPrice) {
-          slTpPayload.stopLevel = Math.round(
-            (body.direction === 'BUY' ? fillPrice - body.stopDistance : fillPrice + body.stopDistance) * 100,
-          ) / 100;
-        }
-        if (body.limitLevel !== undefined) {
-          slTpPayload.limitLevel = body.limitLevel;
-        } else if (body.profitDistance && fillPrice) {
-          slTpPayload.limitLevel = Math.round(
-            (body.direction === 'BUY' ? fillPrice + body.profitDistance : fillPrice - body.profitDistance) * 100,
-          ) / 100;
-        }
+      if (body.stopDistance) {
+        slTpPayload.stopLevel = Math.round(
+          (body.direction === 'BUY' ? fillPrice - body.stopDistance : fillPrice + body.stopDistance) * 100,
+        ) / 100;
+      }
+      if (body.profitDistance) {
+        slTpPayload.limitLevel = Math.round(
+          (body.direction === 'BUY' ? fillPrice + body.profitDistance : fillPrice - body.profitDistance) * 100,
+        ) / 100;
       }
       console.log(`[ig/order] SL/TP PUT for ${confirm.dealId}:`, JSON.stringify(slTpPayload));
       try {
@@ -306,8 +258,6 @@ export async function POST(request: NextRequest) {
       resolvedVia,
       sentPayload: payload,
       slTpResult,
-      freshCst,
-      freshSecurityToken: freshSecToken,
     });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });

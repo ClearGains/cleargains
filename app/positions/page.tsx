@@ -244,24 +244,11 @@ function PositionRow({ pos, onClose, closing, cgIds }: {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-// Read T212 credentials from localStorage (individual keys), with Zustand fallback
-function getT212CredsLS(lsKey: string, storeKey: string, storeSecret: string): { key: string; secret: string } | null {
-  try {
-    const raw = typeof window !== 'undefined' ? localStorage.getItem(lsKey) : null;
-    if (raw) {
-      const p = JSON.parse(raw) as { key?: string; secret?: string };
-      if (p.key && p.secret) return { key: p.key, secret: p.secret };
-    }
-  } catch {}
-  if (storeKey && storeSecret) return { key: storeKey, secret: storeSecret };
-  return null;
-}
-
 export default function PositionsPage() {
   const {
-    t212ApiKey, t212ApiSecret,
-    t212IsaApiKey, t212IsaApiSecret,
-    t212DemoApiKey, t212DemoApiSecret,
+    t212ApiKey, t212ApiSecret, t212Connected,
+    t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
+    t212DemoApiKey, t212DemoApiSecret, t212DemoConnected,
   } = useClearGainsStore();
 
   const [positions, setPositions]       = useState<UnifiedPosition[]>([]);
@@ -476,16 +463,11 @@ export default function PositionsPage() {
       }
     }
 
-    // Read T212 creds from localStorage (falls back to Zustand store)
-    const t212InvestCreds = getT212CredsLS('t212_invest_credentials', t212ApiKey,     t212ApiSecret);
-    const t212IsaCreds    = getT212CredsLS('t212_isa_credentials',    t212IsaApiKey,  t212IsaApiSecret);
-    const t212DemoCreds   = getT212CredsLS('t212_demo_credentials',   t212DemoApiKey, t212DemoApiSecret);
-
     // Fetch all accounts in parallel
     await Promise.all([
-      t212InvestCreds ? fetchT212(t212InvestCreds.key, t212InvestCreds.secret, 'T212_INVEST', 'live') : Promise.resolve(),
-      t212IsaCreds    ? fetchT212(t212IsaCreds.key,    t212IsaCreds.secret,    'T212_ISA',    'live') : Promise.resolve(),
-      t212DemoCreds   ? fetchT212(t212DemoCreds.key,   t212DemoCreds.secret,   'T212_DEMO',   'demo') : Promise.resolve(),
+      t212Connected     ? fetchT212(t212ApiKey,    t212ApiSecret,    'T212_INVEST', 'live') : Promise.resolve(),
+      t212IsaConnected  ? fetchT212(t212IsaApiKey, t212IsaApiSecret, 'T212_ISA',    'live') : Promise.resolve(),
+      t212DemoConnected ? fetchT212(t212DemoApiKey, t212DemoApiSecret, 'T212_DEMO', 'demo') : Promise.resolve(),
       fetchIG('demo', 'IG_DEMO'),
       fetchIG('live', 'IG_LIVE'),
     ]);
@@ -534,18 +516,18 @@ export default function PositionsPage() {
     }
 
     await Promise.all([
-      t212InvestCreds ? loadT212Cash(t212InvestCreds.key, t212InvestCreds.secret, 'live', 'T212 Invest', 'text-emerald-400') : Promise.resolve(),
-      t212IsaCreds    ? loadT212Cash(t212IsaCreds.key,    t212IsaCreds.secret,    'live', 'T212 ISA',    'text-blue-400')    : Promise.resolve(),
-      t212DemoCreds   ? loadT212Cash(t212DemoCreds.key,   t212DemoCreds.secret,   'demo', 'T212 Demo',   'text-purple-400') : Promise.resolve(),
+      t212Connected     ? loadT212Cash(t212ApiKey,    t212ApiSecret,    'live', 'T212 Invest', 'text-emerald-400') : Promise.resolve(),
+      t212IsaConnected  ? loadT212Cash(t212IsaApiKey, t212IsaApiSecret, 'live', 'T212 ISA',    'text-blue-400')    : Promise.resolve(),
+      t212DemoConnected ? loadT212Cash(t212DemoApiKey, t212DemoApiSecret, 'demo', 'T212 Demo', 'text-purple-400') : Promise.resolve(),
       loadIGFunds('demo', 'IG Demo', 'text-orange-400'),
       loadIGFunds('live', 'IG Live', 'text-amber-400'),
     ]);
     setFundsData(funds);
 
   }, [
-    t212ApiKey, t212ApiSecret,
-    t212IsaApiKey, t212IsaApiSecret,
-    t212DemoApiKey, t212DemoApiSecret,
+    t212ApiKey, t212ApiSecret, t212Connected,
+    t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
+    t212DemoApiKey, t212DemoApiSecret, t212DemoConnected,
     manualPositions,
   ]);
 
@@ -611,14 +593,10 @@ export default function PositionsPage() {
       } catch {}
     }
 
-    const hInvestCreds = getT212CredsLS('t212_invest_credentials', t212ApiKey,     t212ApiSecret);
-    const hIsaCreds    = getT212CredsLS('t212_isa_credentials',    t212IsaApiKey,  t212IsaApiSecret);
-    const hDemoCreds   = getT212CredsLS('t212_demo_credentials',   t212DemoApiKey, t212DemoApiSecret);
-
     await Promise.all([
-      hInvestCreds ? fetchT212History(hInvestCreds.key, hInvestCreds.secret, 'live', 'T212_INVEST') : Promise.resolve(),
-      hIsaCreds    ? fetchT212History(hIsaCreds.key,    hIsaCreds.secret,    'live', 'T212_ISA')    : Promise.resolve(),
-      hDemoCreds   ? fetchT212History(hDemoCreds.key,   hDemoCreds.secret,   'demo', 'T212_DEMO')   : Promise.resolve(),
+      t212Connected     ? fetchT212History(t212ApiKey,    t212ApiSecret,    'live', 'T212_INVEST') : Promise.resolve(),
+      t212IsaConnected  ? fetchT212History(t212IsaApiKey, t212IsaApiSecret, 'live', 'T212_ISA')    : Promise.resolve(),
+      t212DemoConnected ? fetchT212History(t212DemoApiKey, t212DemoApiSecret, 'demo', 'T212_DEMO') : Promise.resolve(),
       fetchIGHistory('demo', 'IG_DEMO'),
       fetchIGHistory('live', 'IG_LIVE'),
     ]);
@@ -626,9 +604,9 @@ export default function PositionsPage() {
     history.sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime());
     setClosedHistory(history.slice(0, 100));
   }, [
-    t212ApiKey, t212ApiSecret,
-    t212IsaApiKey, t212IsaApiSecret,
-    t212DemoApiKey, t212DemoApiSecret,
+    t212ApiKey, t212ApiSecret, t212Connected,
+    t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
+    t212DemoApiKey, t212DemoApiSecret, t212DemoConnected,
   ]);
 
   // ── Auto-refresh every 30s ────────────────────────────────────────────────
@@ -768,9 +746,9 @@ export default function PositionsPage() {
   };
 
   const connectedAccounts: (AccountKey | 'ALL')[] = ['ALL'];
-  if (getT212CredsLS('t212_invest_credentials', t212ApiKey,     t212ApiSecret))  connectedAccounts.push('T212_INVEST');
-  if (getT212CredsLS('t212_isa_credentials',    t212IsaApiKey,  t212IsaApiSecret)) connectedAccounts.push('T212_ISA');
-  if (getT212CredsLS('t212_demo_credentials',   t212DemoApiKey, t212DemoApiSecret)) connectedAccounts.push('T212_DEMO');
+  if (t212Connected)     connectedAccounts.push('T212_INVEST');
+  if (t212IsaConnected)  connectedAccounts.push('T212_ISA');
+  if (t212DemoConnected) connectedAccounts.push('T212_DEMO');
   connectedAccounts.push('IG_DEMO', 'IG_LIVE');
 
   const filteredHistory = historyFilter === 'ALL' ? closedHistory : closedHistory.filter(h => h.account === historyFilter);
@@ -1178,7 +1156,7 @@ export default function PositionsPage() {
 
       {/* Not connected notices */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {!getT212CredsLS('t212_invest_credentials', t212ApiKey, t212ApiSecret) && (
+        {!t212Connected && (
           <div className="flex items-center gap-3 bg-gray-900 border border-gray-800 rounded-xl p-4 text-xs text-gray-500">
             <Wifi className="h-4 w-4 text-gray-600 flex-shrink-0" />
             <div>
@@ -1189,7 +1167,7 @@ export default function PositionsPage() {
             </div>
           </div>
         )}
-        {!getT212CredsLS('t212_isa_credentials', t212IsaApiKey, t212IsaApiSecret) && (
+        {!t212IsaConnected && (
           <div className="flex items-center gap-3 bg-gray-900 border border-gray-800 rounded-xl p-4 text-xs text-gray-500">
             <Wifi className="h-4 w-4 text-gray-600 flex-shrink-0" />
             <div>

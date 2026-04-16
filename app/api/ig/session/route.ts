@@ -1,216 +1,155 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-/**
- * IG session — simple login, no account switching.
- *
- * Flow:
- *  1. POST /session with API key + credentials
- *  2. Read CST and X-SECURITY-TOKEN from RESPONSE HEADERS (not body)
- *  3. Cache for 5 hours so repeated calls don't re-login
- *  4. Return tokens — the order route uses them directly
- *
- * No PUT /session, no sub-account switching.  IG lands the session on
- * whichever account is the preferred/default for the credentials supplied.
- */
-
-// ── In-memory session cache ────────────────────────────────────────────────────
-// Key = `${env}:${username}:${apiKey}`
+/** In-memory token cache: { cacheKey → { cst, securityToken, accountId, accounts, expiresAt } } */
 const tokenCache = new Map<string, {
-  cst:           string;
+  cst: string;
   securityToken: string;
-  accountId:     string;
-  accountType:   string | null;
-  accounts:      unknown[];
-  expiresAt:     number;
+  accountId: string;
+  accounts: unknown[];
+  expiresAt: number;
 }>();
 
-const TOKEN_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours
-
-type AccountEntry = {
-  accountId:   string;
-  accountName: string;
-  accountType: string;
-  preferred:   boolean;
-  status:      string;
-  balance?:    { balance: number; available: number };
-};
-
-function igHeaders(apiKey: string, cst: string, secToken: string, version = '1'): Record<string, string> {
-  return {
-    'X-IG-API-KEY':     apiKey,
-    'CST':              cst,
-    'X-SECURITY-TOKEN': secToken,
-    'Content-Type':     'application/json',
-    'Accept':           'application/json; charset=UTF-8',
-    'Version':          version,
-  };
-}
+const TOKEN_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours (IG tokens last 6h; refresh before expiry)
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json() as {
-      username?:          string;
-      password?:          string;
-      apiKey?:            string;
-      env?:               'demo' | 'live';
-      targetAccountId?:   string;   // accepted but ignored — no switching
-      useEnvCredentials?: boolean;
-      forceRefresh?:      boolean;
+      username: string;
+      password: string;
+      apiKey: string;
+      env: 'demo' | 'live';
     };
-
-    const forceRefresh = body.forceRefresh === true;
-
-    const username = ((body.username ?? '').trim().replace(/\s+/g, ''))
-      || (process.env.IG_USERNAME ?? '');
-    const password = body.password || (process.env.IG_PASSWORD ?? '');
-    const apiKey   = body.apiKey   || (process.env.IG_API_KEY  ?? '');
-    const env: 'demo' | 'live' = body.env
-      ?? (process.env.IG_DEMO === 'true' ? 'demo' : 'live');
+    const { password, apiKey, env } = body;
+    const forceRefresh = (body as { forceRefresh?: boolean }).forceRefresh === true;
+    // Sanitise — IG rejects identifiers that contain spaces or @ symbols
+    const username = (body.username ?? '').trim().replace(/\s+/g, '');
 
     if (!username || !password || !apiKey) {
-      return NextResponse.json(
-        { ok: false, error: 'username, password and apiKey are required (or set IG_USERNAME / IG_PASSWORD / IG_API_KEY env vars)' },
-        { status: 400 },
-      );
+      return NextResponse.json({ ok: false, error: 'username, password, and apiKey are required' }, { status: 400 });
     }
 
     const baseUrl = env === 'demo'
       ? 'https://demo-api.ig.com/gateway/deal'
       : 'https://api.ig.com/gateway/deal';
 
-    // ── Cache lookup ───────────────────────────────────────────────────────────
     const cacheKey = `${env}:${username}:${apiKey}`;
     const cached = tokenCache.get(cacheKey);
     if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
-      console.log(`[ig/session] Cache hit — accountId=${cached.accountId}`);
       return NextResponse.json({
-        ok:            true,
-        cst:           cached.cst,
+        ok: true,
+        cst: cached.cst,
         securityToken: cached.securityToken,
-        accountId:     cached.accountId,
-        accountType:   cached.accountType,
-        accounts:      cached.accounts,
-        apiKey,
-        spreadbetAccountId: (cached.accounts as AccountEntry[]).find(a => a.accountType === 'SPREADBET')?.accountId ?? null,
+        accountId: cached.accountId,
+        accounts: cached.accounts,
       });
     }
 
-    // ── POST /session — login ──────────────────────────────────────────────────
-    // CST and X-SECURITY-TOKEN come from RESPONSE HEADERS, not the body.
-    console.log(`[ig/session] Logging in as ${username} (env=${env})`);
-    const loginRes = await fetch(`${baseUrl}/session`, {
-      method:  'POST',
+    const res = await fetch(`${baseUrl}/session`, {
+      method: 'POST',
       headers: {
         'X-IG-API-KEY': apiKey,
         'Content-Type': 'application/json',
-        'Accept':       'application/json; charset=UTF-8',
-        'Version':      '2',
+        'Accept': 'application/json; charset=UTF-8',
+        'Version': '2',
       },
       body: JSON.stringify({ identifier: username, password }),
     });
 
-    if (!loginRes.ok) {
-      const text = await loginRes.text().catch(() => '');
-      let errMsg = `IG login error ${loginRes.status}`;
+    if (!res.ok) {
+      const text = await res.text();
+      let errMsg = `IG API error ${res.status}`;
       try {
         const j = JSON.parse(text) as { errorCode?: string };
-        if (j.errorCode?.includes('identifier') || j.errorCode?.includes('invalid.identifier')) {
-          errMsg = 'IG rejected the username — use your IG account number, not your email.';
-        } else if (j.errorCode?.includes('password') || j.errorCode?.includes('authentication')) {
-          errMsg = 'IG authentication failed — check username and password.';
-        } else if (j.errorCode) {
-          errMsg = `IG: ${j.errorCode}`;
+        if (j.errorCode) {
+          if (j.errorCode.includes('authenticationRequest.identifier') || j.errorCode.includes('invalid.identifier')) {
+            errMsg = 'IG rejected the username. Please use your IG username/account number — NOT your email address. Find it in the IG app → My Account → Account details.';
+          } else if (j.errorCode.includes('invalid.password') || j.errorCode.includes('authentication')) {
+            errMsg = 'IG authentication failed. Check your username and password are correct.';
+          } else {
+            errMsg = `IG: ${j.errorCode}`;
+          }
         }
       } catch {}
-      return NextResponse.json({ ok: false, error: errMsg }, { status: loginRes.status });
+      return NextResponse.json({ ok: false, error: errMsg }, { status: res.status });
     }
 
-    // Tokens are in RESPONSE HEADERS for POST /session
-    const cst           = loginRes.headers.get('CST') ?? '';
-    const securityToken = loginRes.headers.get('X-SECURITY-TOKEN') ?? '';
+    // IG returns session tokens in RESPONSE HEADERS (not body)
+    let cst           = res.headers.get('CST') ?? '';
+    let securityToken = res.headers.get('X-SECURITY-TOKEN') ?? '';
 
-    if (!cst || !securityToken) {
-      return NextResponse.json(
-        { ok: false, error: 'IG login succeeded but CST/X-SECURITY-TOKEN missing from response headers' },
-        { status: 502 },
-      );
-    }
-
-    const loginData = await loginRes.json() as {
-      currentAccountId?: string;
-      accountId?:        string;
-      accountType?:      string;
-      accounts?:         AccountEntry[];
+    type AccountEntry = { accountId: string; accountName: string; accountType: string; preferred: boolean; status: string };
+    const data = await res.json() as {
+      accountType?: string;
+      accountId?: string;
+      accounts?: AccountEntry[];
+      clientId?: string;
     };
 
-    const activeAccountId = (loginData.currentAccountId ?? loginData.accountId ?? '').trim();
-    let accounts: AccountEntry[] = loginData.accounts ?? [];
+    // ── Auto-switch to the SPREADBET account ─────────────────────────────────
+    // If the user has both a CFD and a Spread Bet account, IG may default to
+    // CFD on login.  Orders placed on the wrong account type are rejected with
+    // REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT (or vice-versa).  Explicitly
+    // switching before trading prevents this.
+    let activeAccountId = data.accountId ?? '';
+    const accounts = data.accounts ?? [];
+    const spreadbetAccount = accounts.find((a: AccountEntry) => a.accountType === 'SPREADBET');
 
-    console.log(`[ig/session] Login OK — accountId=${activeAccountId || '(empty)'}, accounts=${accounts.length}`);
-
-    // ── Fetch accounts list if not in login response ───────────────────────────
-    if (accounts.length === 0) {
+    if (spreadbetAccount && spreadbetAccount.accountId !== activeAccountId) {
       try {
-        const accsRes = await fetch(`${baseUrl}/accounts`, {
-          headers: igHeaders(apiKey, cst, securityToken),
-          signal:  AbortSignal.timeout(5_000),
+        const switchRes = await fetch(`${baseUrl}/session`, {
+          method: 'PUT',
+          headers: {
+            'X-IG-API-KEY': apiKey,
+            'CST': cst,
+            'X-SECURITY-TOKEN': securityToken,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json; charset=UTF-8',
+            'Version': '1',
+          },
+          body: JSON.stringify({ accountId: spreadbetAccount.accountId, dealingEnabled: true }),
         });
-        if (accsRes.ok) {
-          const d = await accsRes.json() as { accounts?: AccountEntry[] };
-          accounts = d.accounts ?? [];
-          console.log(`[ig/session] Fetched ${accounts.length} accounts from GET /accounts`);
+        if (switchRes.ok) {
+          // IG issues fresh tokens after account switch
+          const newCst      = switchRes.headers.get('CST');
+          const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
+          if (newCst)      cst           = newCst;
+          if (newSecToken) securityToken = newSecToken;
+          activeAccountId = spreadbetAccount.accountId;
+          console.log(`[ig/session] Switched to SPREADBET account ${activeAccountId}`);
+        } else {
+          const errText = await switchRes.text().catch(() => '');
+          console.warn(`[ig/session] Account switch failed (${switchRes.status}):`, errText.slice(0, 200));
         }
       } catch (e) {
-        console.warn('[ig/session] GET /accounts failed:', e instanceof Error ? e.message : e);
+        console.warn('[ig/session] Account switch error:', e instanceof Error ? e.message : String(e));
       }
+    } else if (spreadbetAccount) {
+      console.log(`[ig/session] Already on SPREADBET account ${activeAccountId}`);
+    } else {
+      console.log(`[ig/session] No SPREADBET account found — using default account ${activeAccountId}`);
     }
 
-    // ── Fetch account balances ─────────────────────────────────────────────────
-    let accountsWithBalance: AccountEntry[] = accounts;
-    try {
-      const accsRes = await fetch(`${baseUrl}/accounts`, {
-        headers: igHeaders(apiKey, cst, securityToken),
-        signal:  AbortSignal.timeout(5_000),
-      });
-      if (accsRes.ok) {
-        const d = await accsRes.json() as {
-          accounts?: Array<{ accountId: string; balance?: { balance: number; available: number } }>;
-        };
-        if (d.accounts?.length) {
-          const balMap = new Map(d.accounts.map(a => [a.accountId, a.balance]));
-          accountsWithBalance = accounts.map(a => ({ ...a, balance: balMap.get(a.accountId) ?? undefined }));
-        }
-      }
-    } catch { /* non-fatal */ }
-
-    const activeAccount = accountsWithBalance.find(a => a.accountId === activeAccountId) ?? null;
-    console.log(`[ig/session] Session ready — accountId=${activeAccountId} accountType=${activeAccount?.accountType ?? 'unknown'}`);
-
-    // ── Cache and return ───────────────────────────────────────────────────────
-    tokenCache.set(cacheKey, {
+    const entry = {
       cst,
       securityToken,
-      accountId:   activeAccountId,
-      accountType: activeAccount?.accountType ?? null,
-      accounts:    accountsWithBalance,
-      expiresAt:   Date.now() + TOKEN_TTL_MS,
-    });
+      accountId: activeAccountId,
+      accounts,
+      expiresAt: Date.now() + TOKEN_TTL_MS,
+    };
+    tokenCache.set(cacheKey, entry);
 
     return NextResponse.json({
-      ok:            true,
+      ok: true,
       cst,
       securityToken,
-      accountId:     activeAccountId,
-      accountType:   activeAccount?.accountType ?? null,
-      accounts:      accountsWithBalance,
-      apiKey,
-      spreadbetAccountId: accountsWithBalance.find(a => a.accountType === 'SPREADBET')?.accountId ?? null,
+      accountId: activeAccountId,
+      accounts,
+      spreadbetAccountId: spreadbetAccount?.accountId ?? null,
     });
-
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : 'Unknown error' },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }
