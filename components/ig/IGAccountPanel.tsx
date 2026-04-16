@@ -15,6 +15,7 @@ import {
   type WatchlistMarket, type MarketType,
   loadStrategies, saveStrategy, deleteStrategy,
   TIMEFRAME_CONFIG, DEFAULT_WATCHLIST, CFD_WATCHLIST, getMarketType,
+  spreadbetSignalFromIndicators,
 } from '@/lib/igStrategyEngine';
 import {
   type AccountType,
@@ -264,6 +265,21 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const lastReauthRef   = useRef(0);
   // Per-session epic validation cache — avoids repeating GET /markets/{epic} for known-good epics
   const epicValidRef    = useRef<Record<string, boolean>>({});
+  // Persistent IG epic resolution cache: Finnhub symbol → actual IG epic (or null = not available)
+  // Pre-seeded with confirmed-working CFD epics; persisted to localStorage across sessions
+  const igEpicCacheRef = useRef<Record<string, string | null>>(
+    (() => {
+      const seed: Record<string, string> = {
+        TSLA: 'UA.D.TSLA.CASH.IP', AAPL: 'UA.D.AAPL.CASH.IP', MSFT: 'UA.D.MSFT.CASH.IP',
+        AMZN: 'UA.D.AMZN.CASH.IP', NVDA: 'UA.D.NVDA.CASH.IP', META: 'UA.D.META.CASH.IP',
+        GOOGL: 'UA.D.GOOGL.CASH.IP', GOOG: 'UA.D.GOOGL.CASH.IP',
+      };
+      try {
+        const stored = localStorage.getItem('ig_epic_cache');
+        return { ...seed, ...(stored ? JSON.parse(stored) as Record<string, string|null> : {}) };
+      } catch { return { ...seed }; }
+    })(),
+  );
   // Login backoff state
   const loginFailCountRef    = useRef(0);
   const loginBlockedUntilRef = useRef(0);
@@ -328,8 +344,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const liveTradeResolveRef = useRef<((ok: boolean) => void)|null>(null);
   const [showLiveTradeDisclaimer, setShowLiveTradeDisclaimer] = useState(false);
 
+  // ── Performance tracking (Part 7) ─────────────────────────────────────────
+  const performancePausedRef = useRef(false); // auto-set when win rate < 40%
+  const [perfPauseAlert, setPerfPauseAlert] = useState<string|null>(null);
+
   // ── UI state ───────────────────────────────────────────────────────────────
-  const [posTab, setPosTab] = useState<'positions'|'orders'|'history'>('positions');
+  const [posTab, setPosTab] = useState<'positions'|'orders'|'history'|'stats'>('positions');
   const [runLog, setRunLog] = useState<RunLog[]>([]);
   const [toast, setToast]   = useState<{ok:boolean;msg:string}|null>(null);
 
@@ -813,7 +833,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     return null;
   }
 
-  // ── Validate epic on this account (SPREADBET and CFD) ───────────────────────
+  // ── Validate epic on this account (SPREADBET path only) ────────────────────
   async function validateEpic(epic: string): Promise<boolean> {
     if (epicValidRef.current[epic] !== undefined) return epicValidRef.current[epic];
     const sess = sessionRef.current;
@@ -829,6 +849,158 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     } catch {
       return true; // network error — allow the attempt
     }
+  }
+
+  // ── Part 4: Trading session check (spread-bet only) ───────────────────────
+  // London session: 08:00–16:30 GMT. Avoid last 30 min before close (16:00).
+  // Outside these hours: low liquidity, erratic moves.
+  function tradingSessionCheck(): { allowed: boolean; reason: string } {
+    const now   = new Date();
+    const gmtH  = now.getUTCHours();
+    const gmtM  = now.getUTCMinutes();
+    const mins  = gmtH * 60 + gmtM;
+
+    const londonOpen  = 8  * 60;       // 08:00 GMT
+    const londonClose = 16 * 60 + 30;  // 16:30 GMT
+    const noNewPos    = 16 * 60;       // 16:00 GMT — no new positions in last 30 min
+
+    if (mins < londonOpen)  return { allowed: false, reason: `Pre-market (${gmtH.toString().padStart(2,'0')}:${gmtM.toString().padStart(2,'0')} GMT) — London opens 08:00` };
+    if (mins >= londonClose) return { allowed: false, reason: `Post-market (${gmtH.toString().padStart(2,'0')}:${gmtM.toString().padStart(2,'0')} GMT) — resumes 08:00` };
+    if (mins >= noNewPos)   return { allowed: false, reason: `Last 30 min before close (${gmtH.toString().padStart(2,'0')}:${gmtM.toString().padStart(2,'0')} GMT) — no new positions` };
+
+    const inUsOverlap = mins >= 13 * 60 + 30; // 13:30–16:00 GMT
+    return { allowed: true, reason: inUsOverlap ? 'US/London overlap (highest volume)' : 'London session' };
+  }
+
+  // ── Part 6: Kelly Criterion position sizing ────────────────────────────────
+  // Uses last 20 closed trades for the instrument. Falls back to £1/pt if < 10.
+  function calcKellySize(market: string, history: IGTradeRecord[]): number {
+    const trades = history
+      .filter(t => t.market === market && t.status === 'CLOSED' && t.pnl !== null)
+      .slice(0, 20);
+    if (trades.length < 10) return 1.0; // insufficient history — conservative flat
+
+    const wins   = trades.filter(t => (t.pnl ?? 0) > 0);
+    const losses = trades.filter(t => (t.pnl ?? 0) <= 0);
+    const winRate  = wins.length / trades.length;
+    const lossRate = losses.length / trades.length;
+    const avgWin   = wins.length   ? wins.reduce((s, t)   => s + (t.pnl ?? 0), 0) / wins.length   : 0;
+    const avgLoss  = losses.length ? Math.abs(losses.reduce((s, t) => s + (t.pnl ?? 0), 0) / losses.length) : 0;
+    const rr       = avgLoss > 0 ? avgWin / avgLoss : 1;
+    const kelly    = rr > 0 ? winRate - lossRate / rr : 0;
+    const halfK    = Math.max(0, kelly / 2);
+
+    // Map to IG £/pt: half-Kelly as fraction of a £5/pt max
+    const size = halfK * 10; // e.g. kelly=0.2 → 1.0 £/pt
+    return Math.min(5, Math.max(1, Math.round(size * 2) / 2)); // round to nearest 0.5
+  }
+
+  // ── Part 7: Strategy performance stats ────────────────────────────────────
+  function computeStrategyStats(history: IGTradeRecord[], stratName?: string) {
+    const closed = history.filter(t =>
+      t.status === 'CLOSED' && t.closedAt && t.pnl !== null &&
+      (!stratName || t.portfolioName === stratName),
+    );
+    const last20  = closed.slice(0, 20);
+    const last50  = closed.slice(0, 50);
+    const last100 = closed.slice(0, 100);
+
+    function stats(trades: IGTradeRecord[]) {
+      if (!trades.length) return { winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0 };
+      const wins   = trades.filter(t => (t.pnl ?? 0) > 0);
+      const losses = trades.filter(t => (t.pnl ?? 0) <= 0);
+      const winRate = wins.length / trades.length;
+      const avgWin  = wins.length   ? wins.reduce((s, t)   => s + (t.pnl ?? 0), 0) / wins.length   : 0;
+      const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + (t.pnl ?? 0), 0) / losses.length) : 0;
+      const gp = wins.reduce((s, t) => s + (t.pnl ?? 0), 0);
+      const gl = Math.abs(losses.reduce((s, t) => s + (t.pnl ?? 0), 0));
+      const profitFactor = gl > 0 ? gp / gl : gp > 0 ? Infinity : 0;
+      return { winRate, avgWin, avgLoss, profitFactor };
+    }
+
+    // Max drawdown over entire closed history
+    let equity = 0, peak = 0, maxDD = 0;
+    for (const t of [...closed].reverse()) {
+      equity += t.pnl ?? 0;
+      peak = Math.max(peak, equity);
+      maxDD = Math.max(maxDD, peak - equity);
+    }
+
+    // Best/worst instruments
+    const byInstrument = new Map<string, number>();
+    for (const t of closed) {
+      byInstrument.set(t.market, (byInstrument.get(t.market) ?? 0) + (t.pnl ?? 0));
+    }
+    const instrArr = [...byInstrument.entries()].sort((a, b) => b[1] - a[1]);
+    const bestInstr  = instrArr[0]  ? `${instrArr[0][0]} (£${instrArr[0][1].toFixed(0)})` : '—';
+    const worstInstr = instrArr.at(-1) ? `${instrArr.at(-1)![0]} (£${instrArr.at(-1)![1].toFixed(0)})` : '—';
+
+    // Sharpe estimate (daily P&L std dev)
+    const pnls = closed.map(t => t.pnl ?? 0);
+    const mean = pnls.length ? pnls.reduce((s, v) => s + v, 0) / pnls.length : 0;
+    const variance = pnls.length > 1 ? pnls.reduce((s, v) => s + (v - mean) ** 2, 0) / (pnls.length - 1) : 0;
+    const stdDev = Math.sqrt(variance);
+    const sharpe = stdDev > 0 ? (mean / stdDev) * Math.sqrt(252) : 0;
+
+    return {
+      total: closed.length,
+      s20:  stats(last20),  s50:  stats(last50),  s100: stats(last100),
+      maxDrawdown: maxDD, sharpe,
+      bestInstr, worstInstr,
+    };
+  }
+
+  // ── Resolve the actual IG epic for a Finnhub stock symbol (CFD path) ────────
+  // Fix 4: known-good epics are returned immediately without any IG call.
+  // Fix 2: cache hit (localStorage) → return immediately.
+  // Fix 1: search GET /api/ig/markets?searchTerm={symbol}&instrumentTypes=SHARES.
+  // Fix 3: null cached → symbol not on IG, never retry.
+  function saveEpicCache(sym: string, epic: string | null) {
+    igEpicCacheRef.current[sym] = epic;
+    try {
+      localStorage.setItem('ig_epic_cache', JSON.stringify(igEpicCacheRef.current));
+    } catch {}
+  }
+
+  async function resolveIgEpicForSymbol(symbol: string): Promise<string | null> {
+    // Fix 4 + Fix 2: cache hit (includes pre-seeded known-good epics)
+    if (symbol in igEpicCacheRef.current) return igEpicCacheRef.current[symbol];
+
+    const sess = sessionRef.current;
+    if (!sess) {
+      // No session — fall back to constructed epic without caching
+      return `UA.D.${symbol}.CASH.IP`;
+    }
+
+    // Fix 1: search IG markets API for the actual epic
+    try {
+      const url = `/api/ig/markets?searchTerm=${encodeURIComponent(symbol)}&instrumentTypes=SHARES`;
+      const r = await igQueue.enqueue(
+        () => fetch(url, { headers: makeHeaders(sess, env) }),
+        accountId,
+      );
+      if (r.ok) {
+        const d = await r.json() as { ok: boolean; markets?: { epic: string; instrumentName: string }[] };
+        if (d.ok && d.markets && d.markets.length > 0) {
+          // Pick the best match: prefer exact symbol match in epic, then first result
+          const sym = symbol.toUpperCase();
+          const best =
+            d.markets.find(m => m.epic.includes(`.${sym}.`)) ??
+            d.markets.find(m => m.instrumentName.toUpperCase().includes(sym)) ??
+            d.markets[0];
+          log('info', `🔍 Epic resolved: ${symbol} → ${best.epic} (${best.instrumentName})`);
+          saveEpicCache(symbol, best.epic);
+          return best.epic;
+        }
+      }
+    } catch (e) {
+      log('error', `Epic search error for ${symbol}: ${e instanceof Error ? e.message : e}`);
+    }
+
+    // Fix 3: not found on IG — cache null so we never retry
+    log('info', `⚠️ ${symbol} not found on IG — caching as unavailable`);
+    saveEpicCache(symbol, null);
+    return null;
   }
 
   // ── Pinned instruments helpers ─────────────────────────────────────────────
@@ -982,9 +1154,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   // ── Fetch technical indicators (RSI, EMA, MACD, Volume, VWAP) ────────────
   type IndicatorResult = {
     price:number; previousClose:number; changePercent:number; gapPercent:number;
-    rsi14:number; ema20:number; ema50:number; emaCross:string;
-    macdLine:number; macdSignal:number; macdHistogram:number; macdCross:string;
-    volumeSurge:number; vwapDeviation:number;
+    rsi14:number; rsiPrev:number; rsiCrossedAbove30:boolean; rsiCrossedBelow70:boolean;
+    ema20:number; ema50:number; emaCross:string;
+    macdLine:number; macdSignal:number; macdHistogram:number;
+    macdHistPrev1:number; macdHistPrev2:number;
+    macdCross:string; macdCrossedBullRecently:boolean; macdCrossedBearRecently:boolean;
+    volumeSurge:number; vwapDeviation:number; atr14:number;
     bullScore:number; bearScore:number; confidenceScore:number;
     direction:'BUY'|'SELL'|'NEUTRAL';
   };
@@ -1302,6 +1477,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     scanChange: number;
     direction: 'BUY'|'SELL'|'HOLD';
     strength: number;
+    atrHighVolatility?: boolean; // Part 2: ATR > 2% → halve position size
   };
 
   // ── Phase 1: Fetch indicators + compute signal — NO trade placement ────────
@@ -1310,13 +1486,47 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
 
     const resolvedEpic = epicForAccount(market.name, accountType) ?? market.epic;
     const mType = market.marketType ?? getMarketType(market.epic);
-    const { stopDist, limitDist } = getStopDistances(mType, accountType);
+
+    // ── Part 4: Session gate (spreadbet only) ────────────────────────────────
+    if (accountType === 'SPREADBET' && strat.timeframe === 'spreadbet') {
+      const sess = tradingSessionCheck();
+      if (!sess.allowed) {
+        const msg = `⏰ Session: ${sess.reason}`;
+        setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'idle', error:msg } }));
+        log('info', `${market.name} skipped — ${sess.reason}`);
+        scanCountersRef.current.skippedConditions++;
+        return null;
+      }
+    }
+
+    // ── Part 5: Avoid stocks & crypto on spread bet ──────────────────────────
+    if (accountType === 'SPREADBET' && (mType === 'STOCK' || mType === 'CRYPTO')) {
+      const msg = `${mType} not suitable for spread betting (wide spreads) — skipped`;
+      setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'idle', error:msg } }));
+      log('info', `${market.name}: ${msg}`);
+      scanCountersRef.current.skippedConditions++;
+      return null;
+    }
+
+    // ── Part 7: Performance pause check ─────────────────────────────────────
+    if (performancePausedRef.current) {
+      const msg = '⚠️ Trading paused — win rate below 40%';
+      setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'idle', error:msg } }));
+      log('info', `${market.name} skipped — ${msg}`);
+      return null;
+    }
+
+    const { stopDist: fixedStop, limitDist: fixedLimit } = getStopDistances(mType, accountType);
     const ind = await fetchIndicators(market.name, resolvedEpic);
 
     let direction: 'BUY'|'SELL'|'HOLD';
     let strength: number;
     let pctStr: string;
     let scanChange = 0;
+    let stopDist = fixedStop;
+    let limitDist = fixedLimit;
+    let atrHighVolatility = false;
+    let sig: StrategySignal;
 
     if (ind) {
       if (Math.abs(ind.gapPercent) > 3) {
@@ -1326,10 +1536,52 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         scanCountersRef.current.skippedVolatile++;
         return null;
       }
-      direction  = ind.direction === 'BUY' ? 'BUY' : ind.direction === 'SELL' ? 'SELL' : 'HOLD';
-      strength   = Math.min(100, ind.confidenceScore + (scanParamsRef.current.sectorAdjust ?? 0));
       pctStr     = `${ind.changePercent >= 0 ? '+' : ''}${ind.changePercent.toFixed(2)}%`;
       scanChange = ind.changePercent;
+
+      if (strat.timeframe === 'spreadbet' && accountType === 'SPREADBET') {
+        // ── Parts 1 & 2: Multi-confirmation spreadbet signal + ATR stops ──────
+        sig = spreadbetSignalFromIndicators(ind, mType);
+        direction = sig.direction === 'BUY' ? 'BUY' : sig.direction === 'SELL' ? 'SELL' : 'HOLD';
+        strength  = sig.strength;
+
+        // ATR-based stop/limit override (Part 2)
+        if (ind.atr14 > 0) {
+          const atrPct = (ind.atr14 / ind.price) * 100;
+          if (atrPct < 0.15) {
+            // Ranging market — skip entirely
+            const msg = `ATR ${atrPct.toFixed(2)}% — ranging market, no trend`;
+            setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'idle', error:msg } }));
+            log('info', `${market.name}: ${msg}`);
+            scanCountersRef.current.skippedConditions++;
+            return null;
+          }
+          stopDist  = Math.round(ind.atr14 * 1.5 * 10) / 10;
+          limitDist = Math.round(ind.atr14 * 3.0 * 10) / 10;
+          // Enforce minimum 2:1 R:R
+          if (limitDist < stopDist * 2) limitDist = stopDist * 2;
+          atrHighVolatility = atrPct > 2.0; // flag: position size halved in executeTrade
+        }
+      } else {
+        // Standard indicator-based signal
+        direction = ind.direction === 'BUY' ? 'BUY' : ind.direction === 'SELL' ? 'SELL' : 'HOLD';
+        strength  = Math.min(100, ind.confidenceScore + (scanParamsRef.current.sectorAdjust ?? 0));
+        sig = {
+          direction, strength,
+          reason: `RSI ${ind.rsi14.toFixed(0)} | EMA ${ind.emaCross} | MACD ${ind.macdCross} | Vol ${ind.volumeSurge.toFixed(1)}x | ${pctStr}`,
+          stopPoints: stopDist, targetPoints: limitDist,
+          riskReward: `1:${(limitDist / stopDist).toFixed(1)}`,
+          indicators: [
+            { label:'RSI 14',    value:ind.rsi14.toFixed(1),             status:ind.rsi14<30?'bullish':ind.rsi14>70?'bearish':'neutral' },
+            { label:'EMA 20/50', value:ind.emaCross,                      status:ind.emaCross==='bullish'?'bullish':'bearish' },
+            { label:'MACD',      value:ind.macdCross,                     status:ind.macdCross==='bullish'?'bullish':'bearish' },
+            { label:'Volume',    value:`${ind.volumeSurge.toFixed(1)}x`,  status:ind.volumeSurge>=1.5?'bullish':'neutral' },
+            { label:'VWAP dev',  value:`${ind.vwapDeviation>=0?'+':''}${ind.vwapDeviation.toFixed(2)}%`, status:ind.vwapDeviation>0?'bullish':'bearish' },
+            { label:'Daily Δ',   value:pctStr,                            status:direction==='BUY'?'bullish':direction==='SELL'?'bearish':'neutral' },
+            { label:'Score',     value:`${ind.bullScore}↑ / ${ind.bearScore}↓`, status:'neutral' },
+          ],
+        };
+      }
     } else {
       const snapshot = await fetchSnapshot(market.name, resolvedEpic);
       if (!snapshot || snapshot.error) {
@@ -1342,30 +1594,19 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       direction  = cal.direction; strength = cal.strength;
       pctStr     = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
       scanChange = snapshot.changePercent;
+      sig = {
+        direction, strength,
+        reason: `Daily ${pctStr} (${mType})`,
+        stopPoints: stopDist, targetPoints: limitDist,
+        riskReward: `1:${(limitDist / stopDist).toFixed(1)}`,
+        indicators: [
+          { label:'Daily Change', value:pctStr,          status:direction==='BUY'?'bullish':direction==='SELL'?'bearish':'neutral' },
+          { label:'Type',         value:mType,            status:'neutral' },
+          { label:'Stop dist',    value:`${stopDist}pt`,  status:'neutral' },
+          { label:'TP dist',      value:`${limitDist}pt`, status:'neutral' },
+        ],
+      };
     }
-
-    const sig: StrategySignal = {
-      direction, strength,
-      reason: ind
-        ? `RSI ${ind.rsi14.toFixed(0)} | EMA ${ind.emaCross} | MACD ${ind.macdCross} | Vol ${ind.volumeSurge.toFixed(1)}x | ${pctStr}`
-        : `Daily ${pctStr} (${mType})`,
-      stopPoints: stopDist, targetPoints: limitDist,
-      riskReward: `1:${(limitDist / stopDist).toFixed(1)}`,
-      indicators: ind ? [
-        { label:'RSI 14',    value:ind.rsi14.toFixed(1),             status:ind.rsi14<30?'bullish':ind.rsi14>70?'bearish':'neutral' },
-        { label:'EMA 20/50', value:ind.emaCross,                      status:ind.emaCross==='bullish'?'bullish':'bearish' },
-        { label:'MACD',      value:ind.macdCross,                     status:ind.macdCross==='bullish'?'bullish':'bearish' },
-        { label:'Volume',    value:`${ind.volumeSurge.toFixed(1)}x`,  status:ind.volumeSurge>=1.5?'bullish':'neutral' },
-        { label:'VWAP dev',  value:`${ind.vwapDeviation>=0?'+':''}${ind.vwapDeviation.toFixed(2)}%`, status:ind.vwapDeviation>0?'bullish':'bearish' },
-        { label:'Daily Δ',   value:pctStr,                            status:direction==='BUY'?'bullish':direction==='SELL'?'bearish':'neutral' },
-        { label:'Score',     value:`${ind.bullScore}↑ / ${ind.bearScore}↓`, status:'neutral' },
-      ] : [
-        { label:'Daily Change', value:pctStr,         status:direction==='BUY'?'bullish':direction==='SELL'?'bearish':'neutral' },
-        { label:'Type',         value:mType,           status:'neutral' },
-        { label:'Stop dist',    value:`${stopDist}pt`, status:'neutral' },
-        { label:'TP dist',      value:`${limitDist}pt`, status:'neutral' },
-      ],
-    };
 
     setScans(p => ({ ...p, [market.epic]: {
       epic:market.epic, name:market.name, signal:sig,
@@ -1379,8 +1620,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     else
       log('info', `${market.name} → HOLD (no clear direction)`);
 
-    if (direction === 'HOLD' || strength < effectiveMinStrength) return null; // no tradeable signal
-    return { market, sig, resolvedEpic, stopDist, limitDist, scanChange, direction, strength };
+    if (direction === 'HOLD' || strength < effectiveMinStrength) return null;
+    return { market, sig, resolvedEpic, stopDist, limitDist, scanChange, direction, strength, atrHighVolatility };
   }
 
   // ── Phase 2: Execute one trade for a pre-computed signal (sequential) ─────
@@ -1430,7 +1671,16 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     // Dynamic sizing: 1% risk when funds < 50% of start, else 2%
     const riskPct  = startBal > 0 && available < startBal * 0.50 ? 0.01 : 0.02;
     const totalBal = fundsNow?.balance ?? 0;
-    const orderSize = calcRiskBasedSize(available, stopDist, accountType, strat.size, scanParamsRef.current.sizeMultiplier, riskPct, totalBal);
+
+    // Part 6: Kelly Criterion for SPREADBET (overrides strat.size when ≥10 trades)
+    const kellySize = accountType === 'SPREADBET' ? calcKellySize(data.market.name, tradeHistory) : strat.size;
+    // Part 2: ATR high volatility → halve size
+    const atrMult = data.atrHighVolatility ? 0.5 : 1.0;
+    const effectiveSize = accountType === 'SPREADBET'
+      ? Math.max(0.5, Math.round(kellySize * atrMult * 2) / 2)
+      : strat.size;
+    const sizeMult = scanParamsRef.current.sizeMultiplier * atrMult;
+    const orderSize = calcRiskBasedSize(available, stopDist, accountType, effectiveSize, sizeMult, riskPct, totalBal);
 
     if (orderSize === 0) {
       // Part 2: if signal is very strong (≥85%), try to free capital by closing weakest position
@@ -1514,19 +1764,35 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       }
     }
 
-    // Validate epic — if 200, trade immediately
-    const epicOk = await validateEpic(resolvedEpic);
-    if (!epicOk) {
-      log('info', `${acctTag} ⚠️ Epic ${resolvedEpic} not available on ${accountId} (${accountType}) — skipping ${market.name}`);
-      setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`Epic not on ${accountType}` } }));
-      return 'skipped';
+    // Resolve to actual IG epic
+    // CFD path: search-based resolution with localStorage cache (Fix 1-4)
+    // SPREADBET path: keep existing validateEpic (watchlist epics are already verified)
+    let actualEpic = resolvedEpic;
+    if (accountType === 'CFD') {
+      // Extract Finnhub ticker from UA.D.{SYM}.CASH.IP, else treat epic as ticker
+      const tickerMatch = resolvedEpic.match(/^UA\.D\.([A-Z0-9]+)\.CASH\.IP$/);
+      const ticker = tickerMatch ? tickerMatch[1] : resolvedEpic;
+      const found = await resolveIgEpicForSymbol(ticker);
+      if (!found) {
+        log('info', `${acctTag} ⚠️ ${ticker} not available on IG — skipping ${market.name}`);
+        setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`${ticker} not on IG` } }));
+        return 'skipped';
+      }
+      actualEpic = found;
+    } else {
+      const epicOk = await validateEpic(resolvedEpic);
+      if (!epicOk) {
+        log('info', `${acctTag} ⚠️ Epic ${resolvedEpic} not available on ${accountId} (${accountType}) — skipping ${market.name}`);
+        setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`Epic not on ${accountType}` } }));
+        return 'skipped';
+      }
     }
 
     const sizeLabel = accountType === 'CFD' ? `${orderSize} unit(s)` : `£${orderSize}/pt`;
     log(tradeDir === 'BUY' ? 'buy' : 'sell',
-      `${acctTag} → ${tradeDir} ${market.name} | ${resolvedEpic} | ${sizeLabel} | SL ${stopDist}pt TP ${limitDist}pt | ${strength}% confidence`);
+      `${acctTag} → ${tradeDir} ${market.name} | ${actualEpic} | ${sizeLabel} | SL ${stopDist}pt TP ${limitDist}pt | ${strength}% confidence`);
 
-    const or = await placeOrder(resolvedEpic, tradeDir, orderSize, stopDist, limitDist);
+    const or = await placeOrder(actualEpic, tradeDir, orderSize, stopDist, limitDist);
 
     if (or.ok) {
       scanCountersRef.current.traded++;
@@ -1552,8 +1818,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       }
       if ((or.reason ?? '').toUpperCase() === 'UNKNOWN' || errStr.includes('instrument_not_found') || errStr.includes('epic')) {
         const hint = accountType === 'CFD'
-          ? `Epic mismatch? Sent "${resolvedEpic}" to CFD account.`
-          : `Epic mismatch? Sent "${resolvedEpic}" to SPREADBET account.`;
+          ? `Epic mismatch? Sent "${actualEpic}" to CFD account.`
+          : `Epic mismatch? Sent "${actualEpic}" to SPREADBET account.`;
         log('error', `${acctTag} ⚠️ ${hint}`);
       }
       // Log and continue — do NOT abort remaining opportunities
@@ -1583,6 +1849,25 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   // ── Signal scan ────────────────────────────────────────────────────────────
   const runSignalScan = useCallback(async (strat: IGSavedStrategy) => {
     if (!runningRef.current) return;
+
+    // ── Part 7: Win rate check — pause if below 40% over last 20 trades ─────
+    {
+      const stats = computeStrategyStats(tradeHistory, strat.name);
+      const wr20 = stats.s20.winRate;
+      if (stats.s20 && stats.total >= 20 && wr20 < 0.40) {
+        if (!performancePausedRef.current) {
+          performancePausedRef.current = true;
+          const msg = `🚨 Win rate ${(wr20*100).toFixed(0)}% over last 20 trades — trading paused. Review strategy settings.`;
+          setPerfPauseAlert(msg);
+          log('error', msg);
+        }
+        return; // skip entire scan cycle
+      } else if (performancePausedRef.current && (stats.total < 20 || wr20 >= 0.40)) {
+        performancePausedRef.current = false;
+        setPerfPauseAlert(null);
+        log('info', `✅ Win rate ${stats.total >= 20 ? `${(wr20*100).toFixed(0)}%` : 'insufficient data'} — trading resumed`);
+      }
+    }
 
     // ── Step 1: Market condition awareness ─────────────────────────────────
     const conditions = await checkMarketConditions();
@@ -1779,13 +2064,77 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       const health = computePositionHealth(pos, ind, pnlPct);
       setPositionHealth(prev => ({ ...prev, [pos.dealId]: health }));
 
-      // RSI reversal exit — Part 3: >60 on long, <40 on short
-      if (strat.autoClose && ind) {
-        const rsiReversed =
-          (pos.direction === 'BUY'  && ind.rsi14 > 60) ||
-          (pos.direction === 'SELL' && ind.rsi14 < 40);
-        if (rsiReversed && health === 'red') {
-          log('close', `${acctTag} 📉 RSI reversal (${ind.rsi14.toFixed(0)}) — ${pos.instrumentName ?? pos.epic} health RED → closing`);
+      const isSpreadbet = strat.timeframe === 'spreadbet';
+
+      // ── Always track best price for 30% retrace rule ─────────────────────
+      if (!trailingBestPriceRef.current[pos.dealId]) {
+        trailingBestPriceRef.current[pos.dealId] = currentPx;
+      }
+      const prevBest = trailingBestPriceRef.current[pos.dealId];
+      trailingBestPriceRef.current[pos.dealId] = pos.direction === 'BUY'
+        ? Math.max(prevBest, currentPx)
+        : Math.min(prevBest, currentPx);
+      const bestPrice = trailingBestPriceRef.current[pos.dealId];
+
+      // Part 3 early exit rules (spreadbet strategy)
+      if (strat.autoClose && isSpreadbet && ind) {
+        const pName = pos.instrumentName ?? pos.epic;
+
+        // (a) VWAP cross against position (only close if profitable — avoid false exits)
+        if (pnlPct > 0.5) {
+          const vwapAgainst = (pos.direction === 'BUY' && ind.vwapDeviation < -0.3) ||
+                              (pos.direction === 'SELL' && ind.vwapDeviation > 0.3);
+          if (vwapAgainst && health === 'red') {
+            log('close', `${acctTag} 📉 VWAP crossed against ${pos.direction} (dev ${ind.vwapDeviation.toFixed(2)}%) — ${pName}`);
+            const cr = await closePos(pos);
+            if (cr.ok) {
+              const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+            }
+            continue;
+          }
+        }
+
+        // (b) EMA cross against position direction
+        const emaAgainst = (pos.direction === 'BUY' && ind.emaCross === 'bearish') ||
+                           (pos.direction === 'SELL' && ind.emaCross === 'bullish');
+        if (emaAgainst && health === 'red') {
+          log('close', `${acctTag} 📉 EMA crossed against ${pos.direction} position — ${pName}`);
+          const cr = await closePos(pos);
+          if (cr.ok) {
+            const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+            setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+          }
+          continue;
+        }
+
+        // (c) MACD histogram shrinking for 2 consecutive candles after being profitable
+        if (pnlPct > 1) {
+          const h0 = ind.macdHistogram;
+          const h1 = ind.macdHistPrev1;
+          const h2 = ind.macdHistPrev2;
+          const histShrinkLong  = pos.direction === 'BUY'  && h2 > h1 && h1 > h0 && h0 > 0;
+          const histShrinkShort = pos.direction === 'SELL' && h2 < h1 && h1 < h0 && h0 < 0;
+          if ((histShrinkLong || histShrinkShort) && health !== 'green') {
+            log('close', `${acctTag} 📉 MACD momentum fading (hist: ${h2.toFixed(3)} → ${h1.toFixed(3)} → ${h0.toFixed(3)}) — ${pName} at +${pnlPct.toFixed(2)}%`);
+            const cr = await closePos(pos);
+            if (cr.ok) {
+              const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+            }
+            continue;
+          }
+        }
+
+        // (d) 30% retrace from peak profit → close and take profits
+        const profitFromEntry = pos.direction === 'BUY'
+          ? bestPrice - entryPx
+          : entryPx - bestPrice;
+        const retraceFromPeak = pos.direction === 'BUY'
+          ? bestPrice - currentPx
+          : currentPx - bestPrice;
+        if (profitFromEntry > 0 && retraceFromPeak > profitFromEntry * 0.30 && pnlPct > 0.5) {
+          log('close', `${acctTag} 📉 30% retrace from peak (retrace ${retraceFromPeak.toFixed(2)}pt / peak ${profitFromEntry.toFixed(2)}pt) — ${pName} at +${pnlPct.toFixed(2)}%`);
           const cr = await closePos(pos);
           if (cr.ok) {
             const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
@@ -1795,15 +2144,30 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         }
       }
 
-      // Trailing stop management (Part 1)
+      // RSI reversal exit — tighter thresholds for spreadbet (70/30 vs 60/40 default)
+      if (strat.autoClose && ind) {
+        const rsiLongLimit  = isSpreadbet ? 70 : 60;
+        const rsiShortLimit = isSpreadbet ? 30 : 40;
+        const rsiReversed =
+          (pos.direction === 'BUY'  && ind.rsi14 > rsiLongLimit) ||
+          (pos.direction === 'SELL' && ind.rsi14 < rsiShortLimit);
+        if (rsiReversed && health === 'red') {
+          log('close', `${acctTag} 📉 RSI ${isSpreadbet ? 'extreme' : 'reversal'} (${ind.rsi14.toFixed(0)}) — ${pos.instrumentName ?? pos.epic} health RED → closing`);
+          const cr = await closePos(pos);
+          if (cr.ok) {
+            const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+            setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+          }
+          continue;
+        }
+      }
+
+      // Trailing stop management (Part 1) — bestPrice already updated above
       if (trailingStops.has(pos.dealId)) {
-        const bestPrev = trailingBestPriceRef.current[pos.dealId] ?? currentPx;
-        const bestNow  = pos.direction === 'BUY' ? Math.max(bestPrev, currentPx) : Math.min(bestPrev, currentPx);
-        trailingBestPriceRef.current[pos.dealId] = bestNow;
-        const trailDist = bestNow * 0.015; // 1.5% trailing distance
+        const trailDist = bestPrice * 0.015; // 1.5% trailing distance
         const trailStop = pos.direction === 'BUY'
-          ? Math.round((bestNow - trailDist) * 100) / 100
-          : Math.round((bestNow + trailDist) * 100) / 100;
+          ? Math.round((bestPrice - trailDist) * 100) / 100
+          : Math.round((bestPrice + trailDist) * 100) / 100;
         if (!pos.stopLevel || (pos.direction === 'BUY' ? trailStop > pos.stopLevel : trailStop < pos.stopLevel)) {
           const tr = await updatePositionSL(pos, trailStop, pos.limitLevel ?? null);
           if (tr.ok) log('info', `${acctTag} 🎯 Trail stop → ${trailStop} (${pos.instrumentName ?? pos.epic})`);
@@ -2976,12 +3340,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       <Card>
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div className="flex gap-1">
-            {(['positions','orders','history'] as const).map(tab => (
+            {(['positions','orders','history','stats'] as const).map(tab => (
               <button key={tab} onClick={() => setPosTab(tab)}
                 className={clsx('px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
                   posTab === tab ? (isCFD?'bg-blue-500/20 text-blue-300':'bg-purple-500/20 text-purple-300') : 'text-gray-500 hover:text-gray-300'
                 )}>
-                {tab === 'positions' ? `Positions (${positions.length})` : tab === 'orders' ? `Orders (${workingOrders.length})` : 'History'}
+                {tab === 'positions' ? `Positions (${positions.length})` : tab === 'orders' ? `Orders (${workingOrders.length})` : tab === 'history' ? 'History' : 'Stats'}
               </button>
             ))}
           </div>
@@ -3171,6 +3535,81 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                 ))}
               </div>
         )}
+
+        {posTab === 'stats' && (() => {
+          const activeStrat = strategies.find(s => s.id === activeStratId);
+          const st = computeStrategyStats(tradeHistory, activeStrat?.name);
+          const accentCls = isCFD ? 'text-blue-400' : 'text-purple-400';
+          const warnCls = (v: number, threshold: number) => v < threshold ? 'text-red-400' : 'text-emerald-400';
+          return st.total === 0 ? (
+            <p className="text-center py-6 text-gray-600 text-sm">No closed trades yet — stats will appear after first trade closes</p>
+          ) : (
+            <div className="space-y-3 py-1">
+              {/* Performance pause alert */}
+              {perfPauseAlert && (
+                <div className="px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between gap-2">
+                  <p className="text-[10px] text-red-400">{perfPauseAlert}</p>
+                  <button onClick={() => { performancePausedRef.current = false; setPerfPauseAlert(null); }}
+                    className="text-[9px] text-gray-500 hover:text-gray-300 flex-shrink-0">Resume</button>
+                </div>
+              )}
+              {/* Win rate by period */}
+              <div>
+                <p className="text-[10px] text-gray-500 mb-1.5 font-medium uppercase tracking-wider">Win Rate</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {([['Last 20', st.s20, 20], ['Last 50', st.s50, 50], ['Last 100', st.s100, 100]] as [string, typeof st.s20, number][]).map(([label, s, n]) => (
+                    <div key={label} className="bg-gray-900/60 rounded-lg p-2 text-center">
+                      <p className={clsx('text-base font-bold', st.total >= n ? warnCls(s.winRate, 0.4) : 'text-gray-600')}>{st.total >= n ? `${(s.winRate*100).toFixed(0)}%` : '—'}</p>
+                      <p className="text-[9px] text-gray-600">{label}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {/* P&L stats */}
+              <div>
+                <p className="text-[10px] text-gray-500 mb-1.5 font-medium uppercase tracking-wider">Profit / Loss</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    ['Avg Win', st.s20.avgWin, true],
+                    ['Avg Loss', st.s20.avgLoss, false],
+                    ['Profit Factor', st.s20.profitFactor, null],
+                    ['Max Drawdown', st.maxDrawdown, null],
+                  ] as [string, number, boolean|null][]).map(([label, val, isWin]) => (
+                    <div key={label} className="bg-gray-900/60 rounded-lg p-2">
+                      <p className={clsx('text-sm font-bold',
+                        isWin === true ? 'text-emerald-400' :
+                        isWin === false ? 'text-red-400' :
+                        label === 'Profit Factor' ? (val >= 1.5 ? 'text-emerald-400' : val >= 1 ? 'text-amber-400' : 'text-red-400') :
+                        'text-amber-400'
+                      )}>
+                        {label === 'Profit Factor' ? (isFinite(val) ? val.toFixed(2) : '∞') : `£${val.toFixed(2)}`}
+                      </p>
+                      <p className="text-[9px] text-gray-600">{label}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {/* Sharpe + totals */}
+              <div className="grid grid-cols-3 gap-2">
+                <div className="bg-gray-900/60 rounded-lg p-2 text-center">
+                  <p className={clsx('text-sm font-bold', accentCls)}>{st.sharpe.toFixed(2)}</p>
+                  <p className="text-[9px] text-gray-600">Sharpe Est.</p>
+                </div>
+                <div className="bg-gray-900/60 rounded-lg p-2 text-center">
+                  <p className={clsx('text-sm font-bold', accentCls)}>{st.total}</p>
+                  <p className="text-[9px] text-gray-600">Closed Trades</p>
+                </div>
+                <div className="bg-gray-900/60 rounded-lg p-2 text-center">
+                  <p className="text-[10px] font-medium text-gray-400 truncate">{st.bestInstr}</p>
+                  <p className="text-[9px] text-gray-600">Best Instrument</p>
+                </div>
+              </div>
+              <div className="bg-gray-900/60 rounded-lg p-2">
+                <p className="text-[10px] text-gray-500">Worst instrument: <span className="text-red-400">{st.worstInstr}</span></p>
+              </div>
+            </div>
+          );
+        })()}
       </Card>
 
       {/* ── Login cooldown banner (shown when backoff is active) ──────────── */}

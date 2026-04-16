@@ -12,15 +12,23 @@ export interface IndicatorResult {
   changePercent:   number;
   gapPercent:      number;
   rsi14:           number;
+  rsiPrev:         number;   // RSI one candle back (for crossover detection)
+  rsiCrossedAbove30: boolean; // RSI crossed from <30 to >=30 on last candle
+  rsiCrossedBelow70: boolean; // RSI crossed from >70 to <=70 on last candle
   ema20:           number;
   ema50:           number;
   emaCross:        'bullish' | 'bearish' | 'neutral';
   macdLine:        number;
   macdSignal:      number;
   macdHistogram:   number;
+  macdHistPrev1:   number;   // MACD histogram one candle back
+  macdHistPrev2:   number;   // MACD histogram two candles back
   macdCross:       'bullish' | 'bearish' | 'neutral';
+  macdCrossedBullRecently: boolean; // histogram turned positive within last 3 candles
+  macdCrossedBearRecently: boolean; // histogram turned negative within last 3 candles
   volumeSurge:     number;
   vwapDeviation:   number;
+  atr14:           number;   // Average True Range over 14 periods (price units)
   bullScore:       number;
   bearScore:       number;
   confidenceScore: number;
@@ -89,6 +97,9 @@ export function computeIndicators(candles: Candle[]): IndicatorResult | null {
 
   const rsiArr = calcRSI(closes, 14);
   const rsi14  = rsiArr.length > 0 ? rsiArr[rsiArr.length - 1] : 50;
+  const rsiPrev = rsiArr.length > 1 ? rsiArr[rsiArr.length - 2] : rsi14;
+  const rsiCrossedAbove30 = rsiPrev < 30 && rsi14 >= 30;
+  const rsiCrossedBelow70 = rsiPrev > 70 && rsi14 <= 70;
 
   const ema20Arr  = calcEMA(closes, 20);
   const ema50Arr  = calcEMA(closes, 50);
@@ -106,14 +117,30 @@ export function computeIndicators(candles: Candle[]): IndicatorResult | null {
   const macdSigVal   = signalLine[n - 1];
   const macdHistVal  = histogram[n - 1];
   const prevHistVal  = histogram[n - 2];
+  const prev2HistVal = histogram.length > 3 ? histogram[n - 3] : prevHistVal;
   const macdCross: IndicatorResult['macdCross'] =
     macdHistVal > 0 && prevHistVal <= 0 ? 'bullish' :
     macdHistVal < 0 && prevHistVal >= 0 ? 'bearish' :
     macdHistVal > 0 ? 'bullish' : 'bearish';
+  // Bull cross: current histogram positive AND was non-positive within last 3 candles
+  const macdCrossedBullRecently = macdHistVal > 0 && (prevHistVal <= 0 || prev2HistVal <= 0);
+  // Bear cross: current histogram negative AND was non-negative within last 3 candles
+  const macdCrossedBearRecently = macdHistVal < 0 && (prevHistVal >= 0 || prev2HistVal >= 0);
 
   const recentVols  = volumes.slice(-21, -1);
   const avgVol      = recentVols.length > 0 ? recentVols.reduce((a, b) => a + b, 0) / recentVols.length : 1;
   const volumeSurge = avgVol > 0 ? volumes[n - 1] / avgVol : 1;
+
+  // ATR(14) — average true range over last 14 periods
+  const atrCandles = candles.slice(-15);
+  let atrSum = 0;
+  for (let i = 1; i < atrCandles.length; i++) {
+    const hl  = atrCandles[i].high - atrCandles[i].low;
+    const hcp = Math.abs(atrCandles[i].high  - atrCandles[i - 1].close);
+    const lcp = Math.abs(atrCandles[i].low   - atrCandles[i - 1].close);
+    atrSum += Math.max(hl, hcp, lcp);
+  }
+  const atr14 = atrCandles.length > 1 ? atrSum / (atrCandles.length - 1) : 0;
 
   const vwapCandles   = candles.slice(-20);
   const totalVol      = vwapCandles.reduce((s, c) => s + c.volume, 0);
@@ -145,9 +172,13 @@ export function computeIndicators(candles: Candle[]): IndicatorResult | null {
 
   return {
     symbol: '', price, previousClose, changePercent, gapPercent,
-    rsi14, ema20, ema50, emaCross,
-    macdLine: macdLineVal, macdSignal: macdSigVal, macdHistogram: macdHistVal, macdCross,
-    volumeSurge, vwapDeviation, bullScore, bearScore, confidenceScore, direction,
+    rsi14, rsiPrev, rsiCrossedAbove30, rsiCrossedBelow70,
+    ema20, ema50, emaCross,
+    macdLine: macdLineVal, macdSignal: macdSigVal,
+    macdHistogram: macdHistVal, macdHistPrev1: prevHistVal, macdHistPrev2: prev2HistVal,
+    macdCross, macdCrossedBullRecently, macdCrossedBearRecently,
+    volumeSurge, vwapDeviation, atr14,
+    bullScore, bearScore, confidenceScore, direction,
   };
 }
 

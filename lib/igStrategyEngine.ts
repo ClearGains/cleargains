@@ -27,7 +27,7 @@ export type StrategySignal = {
   riskReward: string;
 };
 
-export type Timeframe = 'hourly' | 'daily' | 'longterm' | 'rsi2';
+export type Timeframe = 'hourly' | 'daily' | 'longterm' | 'rsi2' | 'spreadbet';
 
 export type MarketType = 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO' | 'STOCK';
 
@@ -107,30 +107,29 @@ export type IGSavedStrategy = {
 // ⚠️  CFD variants (CS.D.CFDGOLD.*, CS.D.CRUDEOIL.*) are NOT valid here and
 //     will cause REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT rejections.
 export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
-  // ── Indices (Daily Funded Bets) ─────────────────────────────────────────────
+  // ── Indices — best spread-bet characteristics: tight spreads, high liquidity ─
   { epic: 'IX.D.FTSE.DAILY.IP',    name: 'FTSE 100',      enabled: true,  marketType: 'INDEX'     },
   // IX.D.SPTRD.DAILY.IP is spread-bet only — rejected (UNKNOWN) on CFD demo accounts.
   // Use IX.D.SPTRD.CFD.IP from CFD_WATCHLIST for CFD accounts instead.
-  { epic: 'IX.D.SPTRD.DAILY.IP',   name: 'S&P 500',       enabled: false, marketType: 'INDEX'     },
-  { epic: 'IX.D.NASDAQ.DAILY.IP',  name: 'NASDAQ 100',    enabled: false, marketType: 'INDEX'     },
+  { epic: 'IX.D.SPTRD.DAILY.IP',   name: 'S&P 500',       enabled: true,  marketType: 'INDEX'     },
+  { epic: 'IX.D.NASDAQ.DAILY.IP',  name: 'NASDAQ 100',    enabled: true,  marketType: 'INDEX'     },
   { epic: 'IX.D.DOW.DAILY.IP',     name: 'Wall Street',   enabled: false, marketType: 'INDEX'     },
-  { epic: 'IX.D.DAX.DAILY.IP',     name: 'Germany 40',    enabled: false, marketType: 'INDEX'     },
+  { epic: 'IX.D.DAX.DAILY.IP',     name: 'Germany 40',    enabled: true,  marketType: 'INDEX'     },
   { epic: 'IX.D.NIKKEI.DAILY.IP',  name: 'Japan 225',     enabled: false, marketType: 'INDEX'     },
   { epic: 'IX.D.ASX.DAILY.IP',     name: 'Australia 200', enabled: false, marketType: 'INDEX'     },
-  // ── Commodities (spread-bet TODAY instruments) ───────────────────────────────
+  // ── Commodities — strong trending behaviour, suitable for spread betting ─────
   { epic: 'CS.D.GOLD.TODAY.IP',    name: 'Gold',          enabled: true,  marketType: 'COMMODITY' },
+  { epic: 'CS.D.CRUDE.TODAY.IP',   name: 'Oil (WTI)',     enabled: true,  marketType: 'COMMODITY' },
   { epic: 'CS.D.SILVER.TODAY.IP',  name: 'Silver',        enabled: false, marketType: 'COMMODITY' },
-  { epic: 'CS.D.CRUDE.TODAY.IP',   name: 'Oil (WTI)',     enabled: false, marketType: 'COMMODITY' },
   { epic: 'CS.D.NATGAS.TODAY.IP',  name: 'Natural Gas',   enabled: false, marketType: 'COMMODITY' },
-  // ── Forex ───────────────────────────────────────────────────────────────────
-  { epic: 'CS.D.GBPUSD.TODAY.IP',  name: 'GBP/USD',       enabled: false, marketType: 'FOREX'     },
-  { epic: 'CS.D.EURUSD.TODAY.IP',  name: 'EUR/USD',       enabled: false, marketType: 'FOREX'     },
-  { epic: 'CS.D.USDJPY.TODAY.IP',  name: 'USD/JPY',       enabled: false, marketType: 'FOREX'     },
+  // ── Forex — major pairs only (24hr liquidity, tight spreads) ─────────────────
+  { epic: 'CS.D.EURUSD.TODAY.IP',  name: 'EUR/USD',       enabled: true,  marketType: 'FOREX'     },
+  { epic: 'CS.D.GBPUSD.TODAY.IP',  name: 'GBP/USD',       enabled: true,  marketType: 'FOREX'     },
+  { epic: 'CS.D.USDJPY.TODAY.IP',  name: 'USD/JPY',       enabled: true,  marketType: 'FOREX'     },
   { epic: 'CS.D.EURGBP.TODAY.IP',  name: 'EUR/GBP',       enabled: false, marketType: 'FOREX'     },
   { epic: 'CS.D.AUDUSD.TODAY.IP',  name: 'AUD/USD',       enabled: false, marketType: 'FOREX'     },
   { epic: 'CS.D.USDCHF.TODAY.IP',  name: 'USD/CHF',       enabled: false, marketType: 'FOREX'     },
-  // ── Crypto ──────────────────────────────────────────────────────────────────
-  // Note: Ethereum spread-bet epic is unreliable on some IG accounts — only Bitcoin used
+  // ── Crypto — disabled by default (wide spreads, erratic moves on spread bet) ─
   { epic: 'CS.D.BITCOIN.TODAY.IP', name: 'Bitcoin',       enabled: false, marketType: 'CRYPTO'    },
 ];
 
@@ -509,7 +508,112 @@ export function getSignal(timeframe: Timeframe, candles: Candle[]): StrategySign
   if (timeframe === 'hourly')   return hourlySignal(candles);
   if (timeframe === 'daily')    return dailySignal(candles);
   if (timeframe === 'rsi2')     return rsi2Signal(candles);
+  // 'spreadbet' uses indicator-based signal — callers should use spreadbetSignalFromIndicators instead
   return longtermSignal(candles);
+}
+
+// ── Multi-confirmation spread-bet signal ──────────────────────────────────────
+// Requires ALL 5 conditions to align (Part 1 of the spreadbet strategy overhaul).
+// ATR-based stops (Part 2): SL = 1.5×ATR, TP = 3×ATR.
+// Import lazily to avoid a circular type dependency (IndicatorResult is from yahooIndicators).
+
+export type SpreadbetIndicators = {
+  rsi14: number; rsiPrev: number; rsiCrossedAbove30: boolean; rsiCrossedBelow70: boolean;
+  emaCross: string; macdCrossedBullRecently: boolean; macdCrossedBearRecently: boolean;
+  volumeSurge: number; vwapDeviation: number; atr14: number; price: number;
+  macdHistogram: number; macdHistPrev1: number; macdHistPrev2: number;
+};
+
+export function spreadbetSignalFromIndicators(
+  ind: SpreadbetIndicators,
+  mType: MarketType,
+): StrategySignal {
+  const {
+    rsi14, rsiPrev, rsiCrossedAbove30, rsiCrossedBelow70,
+    emaCross, macdCrossedBullRecently, macdCrossedBearRecently,
+    volumeSurge, vwapDeviation, atr14, price,
+  } = ind;
+
+  // ATR volatility checks (Part 2)
+  const atrPct = price > 0 ? (atr14 / price) * 100 : 0;
+  if (atrPct > 0 && atrPct < 0.15) {
+    return {
+      direction: 'HOLD', strength: 0,
+      reason: `⏸ ATR too low (${atrPct.toFixed(2)}%) — ${mType} ranging, no clear trend to follow`,
+      indicators: [{ label: 'ATR', value: `${atrPct.toFixed(2)}%`, status: 'neutral' }],
+      stopPoints: 0, targetPoints: 0, riskReward: '—',
+    };
+  }
+
+  // ATR-based stop and take-profit distances
+  const stopPts  = atr14 > 0 ? Math.round(atr14 * 1.5 * 10) / 10 : 20;
+  const tpPts    = atr14 > 0 ? Math.round(atr14 * 3.0 * 10) / 10 : 40;
+  const highVol  = atrPct > 2.0; // flag for 50% size reduction in executeTrade
+
+  // ── LONG entry conditions ─────────────────────────────────────────────────
+  // 1. RSI oversold recovery OR midzone upward momentum
+  const rsiLong  = rsiCrossedAbove30 || (rsi14 >= 45 && rsi14 <= 55 && rsi14 > rsiPrev);
+  // 2. EMA20 above EMA50 (uptrend)
+  const emaLong  = emaCross === 'bullish';
+  // 3. MACD crossed above signal in last 3 candles
+  const macdLong = macdCrossedBullRecently;
+  // 4. Volume confirmation 1.5x
+  const volOk    = volumeSurge >= 1.5;
+  // 5. Price above VWAP
+  const vwapLong = vwapDeviation > 0;
+
+  // ── SHORT entry conditions ────────────────────────────────────────────────
+  const rsiShort  = rsiCrossedBelow70 || (rsi14 >= 45 && rsi14 <= 55 && rsi14 < rsiPrev);
+  const emaShort  = emaCross === 'bearish';
+  const macdShort = macdCrossedBearRecently;
+  const vwapShort = vwapDeviation < 0;
+
+  const LABELS = ['RSI', 'EMA', 'MACD', 'Volume', 'VWAP'];
+  const longConds  = [rsiLong,  emaLong,  macdLong,  volOk, vwapLong];
+  const shortConds = [rsiShort, emaShort, macdShort, volOk, vwapShort];
+  const longScore  = longConds.filter(Boolean).length;
+  const shortScore = shortConds.filter(Boolean).length;
+
+  let direction: SignalDirection = 'HOLD';
+  let strength = 0;
+  let reason = '';
+
+  if (longScore === 5) {
+    direction = 'BUY';
+    // Stronger signal if RSI actually crossed from oversold
+    strength = rsiCrossedAbove30 ? 90 : 80;
+    if (highVol) { strength -= 5; }
+    reason = `LONG ✓ All 5 confirmed | RSI ${rsi14.toFixed(0)} | EMA bullish | MACD bull cross | Vol ${volumeSurge.toFixed(1)}x | VWAP +${vwapDeviation.toFixed(2)}%${highVol ? ' | ⚠ High ATR — size halved' : ''}`;
+  } else if (shortScore === 5) {
+    direction = 'SELL';
+    strength = rsiCrossedBelow70 ? 90 : 80;
+    if (highVol) { strength -= 5; }
+    reason = `SHORT ✓ All 5 confirmed | RSI ${rsi14.toFixed(0)} | EMA bearish | MACD bear cross | Vol ${volumeSurge.toFixed(1)}x | VWAP ${vwapDeviation.toFixed(2)}%${highVol ? ' | ⚠ High ATR — size halved' : ''}`;
+  } else {
+    // Explain what's missing
+    const betterDir  = longScore >= shortScore ? 'LONG' : 'SHORT';
+    const missing = (longScore >= shortScore ? longConds : shortConds)
+      .map((c, i) => !c ? LABELS[i] : null).filter(Boolean);
+    reason = `${betterDir} setup incomplete (${Math.max(longScore, shortScore)}/5): missing ${missing.join(', ')}`;
+  }
+
+  return {
+    direction, strength,
+    reason,
+    indicators: [
+      { label: 'RSI(14)', value: `${rsi14.toFixed(1)} ← ${rsiPrev.toFixed(1)}`, status: rsiLong ? 'bullish' : rsiShort ? 'bearish' : 'neutral' },
+      { label: 'EMA trend', value: emaCross, status: emaCross === 'bullish' ? 'bullish' : 'bearish' },
+      { label: 'MACD cross', value: macdCrossedBullRecently ? '▲ Bull (3c)' : macdCrossedBearRecently ? '▼ Bear (3c)' : 'None', status: macdCrossedBullRecently ? 'bullish' : macdCrossedBearRecently ? 'bearish' : 'neutral' },
+      { label: 'Volume', value: `${volumeSurge.toFixed(1)}x`, status: volOk ? 'bullish' : 'neutral' },
+      { label: 'VWAP dev', value: `${vwapDeviation >= 0 ? '+' : ''}${vwapDeviation.toFixed(2)}%`, status: vwapDeviation > 0 ? 'bullish' : 'bearish' },
+      { label: 'ATR(14)', value: `${atr14.toFixed(2)}pt (${atrPct.toFixed(2)}%)`, status: highVol ? 'bearish' : 'neutral' },
+      { label: 'Long score', value: `${longScore}/5`, status: longScore === 5 ? 'bullish' : 'neutral' },
+      { label: 'Short score', value: `${shortScore}/5`, status: shortScore === 5 ? 'bearish' : 'neutral' },
+    ],
+    stopPoints:  stopPts,
+    targetPoints: tpPts,
+    riskReward: '2:1',
+  };
 }
 
 /**
@@ -532,10 +636,11 @@ export function getSignal(timeframe: Timeframe, candles: Candle[]): StrategySign
  *  longterm : 205 × 4 × (7*2)   =  11 480 ← just within allowance
  */
 export const TIMEFRAME_CONFIG: Record<Timeframe, { resolution: string; max: number; label: string; pollMs: number; description: string }> = {
-  hourly:   { resolution: 'MINUTE_5', max: 30,  label: 'Hourly (Scalp)',      pollMs: 15 * 60_000,        description: '5-min candles · EMA9/21 + RSI · 2:1 R:R · polls every 15 min' },
-  daily:    { resolution: 'HOUR',     max: 60,  label: 'Daily (Swing)',        pollMs:  4 * 60 * 60_000,   description: '1-hr candles · EMA20/50 + MACD · 3:1 R:R · polls every 4 hrs' },
-  longterm: { resolution: 'DAY',      max: 205, label: 'Long-term Trend',      pollMs: 12 * 60 * 60_000,   description: 'Daily candles · Golden/Death Cross EMA50/200 · 3:1 R:R · polls every 12 hrs' },
-  rsi2:     { resolution: 'DAY',      max: 215, label: 'RSI(2) Mean Reversion', pollMs: 24 * 60 * 60_000,  description: 'Daily candles · RSI(2) + EMA200 trend filter · ATR stops · polls once per day · lowest allowance usage' },
+  hourly:    { resolution: 'MINUTE_5', max: 30,  label: 'Hourly (Scalp)',           pollMs: 15 * 60_000,       description: '5-min candles · EMA9/21 + RSI · 2:1 R:R · polls every 15 min' },
+  daily:     { resolution: 'HOUR',     max: 60,  label: 'Daily (Swing)',             pollMs:  4 * 60 * 60_000,  description: '1-hr candles · EMA20/50 + MACD · 3:1 R:R · polls every 4 hrs' },
+  longterm:  { resolution: 'DAY',      max: 205, label: 'Long-term Trend',           pollMs: 12 * 60 * 60_000,  description: 'Daily candles · Golden/Death Cross EMA50/200 · 3:1 R:R · polls every 12 hrs' },
+  rsi2:      { resolution: 'DAY',      max: 215, label: 'RSI(2) Mean Reversion',     pollMs: 24 * 60 * 60_000,  description: 'Daily candles · RSI(2) + EMA200 trend filter · ATR stops · polls once per day · lowest allowance usage' },
+  spreadbet: { resolution: 'DAY',      max: 60,  label: 'Pro Spread Bet (5-confirm)', pollMs: 60 * 60_000,      description: 'Daily Yahoo indicators · 5-confirmation entry (RSI+EMA+MACD+Vol+VWAP) · ATR stops · session-filtered · Kelly sizing · polls hourly' },
 };
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
