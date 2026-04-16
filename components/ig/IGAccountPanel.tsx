@@ -1195,13 +1195,27 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
           ? { username:creds.username, password:creds.password, apiKey:creds.apiKey, env, forceRefresh:true, targetAccountId:accountId }
           : { env, forceRefresh:true, useEnvCredentials:true, targetAccountId:accountId }),
       }), accountId);
-      const d = await loginRes.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string; accountType?:string; error?:string };
+      const d = await loginRes.json() as {
+        ok:boolean; cst?:string; securityToken?:string; accountId?:string;
+        accountType?:string; error?:string; confirmedAccountId?:string;
+        accounts?:{accountId:string;accountType:string}[];
+      };
       diag(`  ← HTTP ${loginRes.status}`);
-      if (!d.ok || !d.cst) { diag(`  ✗ Login failed: ${d.error ?? 'unknown'}`); setTestOrderBusy(false); return; }
+      if (!d.ok || !d.cst) {
+        diag(`  ✗ FAILED: ${d.error ?? 'unknown'}`);
+        if (d.confirmedAccountId) diag(`  ℹ️ IG confirmed active account is ${d.confirmedAccountId} (switch rejected)`);
+        setTestOrderBusy(false); return;
+      }
       cst = d.cst; secToken = d.securityToken ?? '';
       diag(`  ✓ CST: "${cst.slice(0,12)}…"`);
       diag(`  ✓ accountId: ${d.accountId ?? '(empty)'} | accountType: ${d.accountType ?? '(empty)'}`);
-      if (d.accountId !== accountId) diag(`  ⚠️ Expected ${accountId} but got ${d.accountId ?? 'empty'} — switch may have failed`);
+      if (d.accounts?.length) diag(`  ℹ️ Accounts: ${d.accounts.map(a=>`${a.accountId}(${a.accountType})`).join(', ')}`);
+      if (d.accountId !== accountId) {
+        diag(`  ✗ Expected ${accountId} but got ${d.accountId ?? 'empty'} — account switch failed`);
+        diag(`  ℹ️ Check server logs for the exact PUT /session response code`);
+        setTestOrderBusy(false); return;
+      }
+      diag(`  ✓ Account confirmed: ${d.accountId} [${d.accountType}]`);
       // Propagate fresh tokens to the central store so positions panel uses them immediately
       const apiKeyForStore = creds?.apiKey ?? '';
       storeSession({ cst, securityToken: secToken, accountId: d.accountId ?? accountId, apiKey: apiKeyForStore, accountType: d.accountType ?? accountType });
