@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/Button';
 import { ConnectModal } from '@/components/t212/ConnectModal';
 import { TaxYearTracker } from '@/components/dashboard/TaxYearTracker';
 import { CGTMonitorWidget } from '@/components/tax/CGTMonitorWidget';
+import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 import { clsx } from 'clsx';
 import Link from 'next/link';
 
@@ -404,6 +405,7 @@ export default function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <LoadPortfolioButton label="Load Portfolio" size="sm" />
           {t212Connected ? (
             <Badge variant={t212AccountType === 'LIVE' ? 'live' : 'demo'}>
               <Wifi className="h-3 w-3 mr-1" />

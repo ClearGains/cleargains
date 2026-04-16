@@ -2,15 +2,20 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  RefreshCw, TrendingUp, TrendingDown, X, AlertCircle,
+  RefreshCw, X, AlertCircle,
   BarChart3, Clock, Wifi, ExternalLink, Download, Plus,
   ChevronDown, ChevronUp, Bell, Edit2, CheckCircle2, History,
+  Layers,
 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { Card, CardHeader } from '@/components/ui/Card';
+import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useClearGainsStore } from '@/lib/store';
 import Link from 'next/link';
+import {
+  LoadPortfolioButton, useLoadPortfolio, LoadPortfolioModal,
+  PORTFOLIO_SNAPSHOT_KEY, type PortfolioData,
+} from '@/components/portfolio/LoadPortfolioModal';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -252,6 +257,7 @@ export default function PositionsPage() {
   const [errors, setErrors]             = useState<Partial<Record<AccountKey, string>>>({});
   const [alerts, setAlerts]             = useState<Alert[]>([]);
   const [activeTab, setActiveTab]       = useState<AccountKey | 'ALL'>('ALL');
+  const [posTab, setPosTab]             = useState<'positions' | 'orders'>('positions');
   const [countdown, setCountdown]       = useState(30);
   const [closingId, setClosingId]       = useState<string | null>(null);
   const [closeError, setCloseError]     = useState<string | null>(null);
@@ -265,20 +271,46 @@ export default function PositionsPage() {
     quantity: 1, entryPrice: 0, openedAt: new Date().toISOString().slice(0, 16),
   });
   const [manualPositions, setManualPositions] = useState<UnifiedPosition[]>([]);
+  const [portfolioData, setPortfolioData] = useState<PortfolioData | null>(null);
+  const [cacheWarning, setCacheWarning]   = useState(false);
+  const [lastSynced, setLastSynced]       = useState<Date | null>(null);
+
+  // Portfolio modal hook
+  const portfolioModal = useLoadPortfolio();
 
   const prevPositionsRef = useRef<UnifiedPosition[]>([]);
   const refreshRef       = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const cgIdsRef         = useRef<Set<string>>(new Set());
 
-  // Load manual positions and CG ids from localStorage on mount
+  // Load manual positions, CG ids, and cached snapshot on mount
   useEffect(() => {
     cgIdsRef.current = getClearGainsOpenedIds();
     try {
       const raw = localStorage.getItem('manual_positions');
       if (raw) setManualPositions(JSON.parse(raw) as UnifiedPosition[]);
     } catch {}
+    // Load cached portfolio snapshot
+    try {
+      const snap = localStorage.getItem(PORTFOLIO_SNAPSHOT_KEY);
+      if (snap) {
+        const parsed = JSON.parse(snap) as PortfolioData;
+        const ageMin = (Date.now() - new Date(parsed.loadedAt).getTime()) / 60_000;
+        setPortfolioData(parsed);
+        setLastSynced(new Date(parsed.loadedAt));
+        if (ageMin > 5) setCacheWarning(true);
+      }
+    } catch {}
   }, []);
+
+  // Update portfolioData when modal finishes loading
+  useEffect(() => {
+    if (portfolioModal.done && portfolioModal.data) {
+      setPortfolioData(portfolioModal.data);
+      setLastSynced(new Date(portfolioModal.data.loadedAt));
+      setCacheWarning(false);
+    }
+  }, [portfolioModal.done, portfolioModal.data]);
 
   // ── Detect position changes ───────────────────────────────────────────────
   function detectChanges(prev: UnifiedPosition[], curr: UnifiedPosition[]) {
@@ -731,12 +763,18 @@ export default function PositionsPage() {
             <BarChart3 className="h-5 w-5 text-orange-400" />
             Live Positions
           </h1>
-          <p className="text-xs text-gray-500 mt-0.5">All open positions across connected accounts · auto-synced every 30s</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            All open positions across connected accounts · auto-synced every 30s
+            {lastSynced && (
+              <span className="ml-2 text-gray-600">· Last synced: {lastSynced.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
+            )}
+          </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[10px] text-gray-600 flex items-center gap-1">
             <Clock className="h-3 w-3" /> Refreshing in {countdown}s
           </span>
+          <LoadPortfolioButton label="Load Portfolio" size="sm" />
           <Button size="sm" variant="outline" loading={loading} icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => { void fetchAll(); void fetchHistory(); }}>
             Refresh
           </Button>
@@ -748,6 +786,15 @@ export default function PositionsPage() {
           </Button>
         </div>
       </div>
+
+      {/* Cache warning */}
+      {cacheWarning && (
+        <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-400">
+          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+          Showing cached data from {lastSynced ? Math.round((Date.now() - lastSynced.getTime()) / 60_000) : '?'} minutes ago — live data may differ.
+          <button onClick={() => portfolioModal.openModal()} className="ml-auto underline hover:no-underline">Reload now</button>
+        </div>
+      )}
 
       {/* Toasts */}
       {closeSuccess && (
@@ -844,6 +891,54 @@ export default function PositionsPage() {
         </div>
       )}
 
+      {/* Account summary cards — shown when portfolio data is available */}
+      {portfolioData && (portfolioData.t212.length > 0 || portfolioData.ig.length > 0) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
+          {portfolioData.t212.map(a => (
+            <Card key={a.account} className="p-3">
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded-full border', {
+                  'bg-emerald-500/20 text-emerald-400 border-emerald-500/30': a.account === 'T212_INVEST',
+                  'bg-blue-500/20 text-blue-400 border-blue-500/30':         a.account === 'T212_ISA',
+                  'bg-purple-500/20 text-purple-400 border-purple-500/30':   a.account === 'T212_DEMO',
+                })}>{a.label}</span>
+                {a.account === 'T212_DEMO' && <span className="text-[8px] text-purple-400 bg-purple-500/10 px-1 rounded">Practice</span>}
+                {a.account === 'T212_ISA'  && <span className="text-[8px] text-blue-400 bg-blue-500/10 px-1 rounded">Tax Free</span>}
+              </div>
+              <div className="space-y-1 text-[11px]">
+                <div className="flex justify-between"><span className="text-gray-500">Account value</span><span className="text-white font-semibold">£{a.summary.totalValue.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">Invested</span><span className="text-gray-300">£{a.cash.invested.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">Available cash</span><span className="text-gray-300">£{a.cash.available.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">P&amp;L</span><span className={a.summary.totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400'}>{a.summary.totalPnL >= 0 ? '+' : ''}£{Math.abs(a.summary.totalPnL).toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">Positions</span><span className="text-gray-300">{a.summary.positionCount}</span></div>
+              </div>
+            </Card>
+          ))}
+          {portfolioData.ig.map(a => (
+            <Card key={a.account} className="p-3">
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded-full border', {
+                  'bg-orange-500/20 text-orange-400 border-orange-500/30': a.account === 'IG_DEMO',
+                  'bg-amber-500/20 text-amber-400 border-amber-500/30':    a.account === 'IG_LIVE',
+                })}>{a.label}</span>
+                <span className="text-[8px] text-purple-400 bg-purple-500/10 px-1 rounded">Spread Bet</span>
+              </div>
+              {a.activeAccount ? (
+                <div className="space-y-1 text-[11px]">
+                  <div className="flex justify-between"><span className="text-gray-500">Equity</span><span className="text-white font-semibold">£{a.activeAccount.balance.toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">Available</span><span className="text-gray-300">£{a.activeAccount.available.toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">Deposit</span><span className="text-gray-300">£{a.activeAccount.deposit.toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">Open P&amp;L</span><span className={a.summary.totalUpl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{a.summary.totalUpl >= 0 ? '+' : ''}£{Math.abs(a.summary.totalUpl).toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">Positions</span><span className="text-gray-300">{a.summary.positionCount}</span></div>
+                </div>
+              ) : (
+                <p className="text-[11px] text-gray-500">No session data</p>
+              )}
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* Error banners */}
       {Object.entries(errors).map(([acc, err]) => err && (
         <div key={acc} className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400">
@@ -869,47 +964,119 @@ export default function PositionsPage() {
         ))}
       </div>
 
+      {/* Positions / Orders sub-tab */}
+      <div className="flex items-center gap-1 bg-gray-800/40 rounded-lg p-0.5 w-fit">
+        {(['positions', 'orders'] as const).map(t => {
+          const orderCount = portfolioData
+            ? portfolioData.t212.reduce((s, a) => s + (a.orders as unknown[]).length, 0)
+              + portfolioData.ig.reduce((s, a) => s + a.workingOrders.length, 0)
+            : 0;
+          return (
+            <button key={t} onClick={() => setPosTab(t)}
+              className={clsx('px-3 py-1.5 text-xs font-medium rounded-md transition-all',
+                posTab === t ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
+              )}>
+              {t === 'positions' ? `Open Positions (${filtered.length})` : `Working Orders (${orderCount})`}
+            </button>
+          );
+        })}
+      </div>
+
       {/* Positions table */}
-      <Card className="overflow-hidden p-0">
-        {loading && positions.length === 0 ? (
-          <div className="flex items-center justify-center py-12 gap-3 text-gray-500">
-            <RefreshCw className="h-5 w-5 animate-spin" />
-            <span className="text-sm">Loading positions…</span>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="py-12 text-center space-y-3">
-            <BarChart3 className="h-8 w-8 text-gray-700 mx-auto" />
-            <p className="text-sm text-gray-500">No open positions</p>
-            {activeTab === 'ALL' && (
-              <p className="text-xs text-gray-600">
-                Connect accounts in{' '}
-                <Link href="/settings/accounts" className="text-orange-400 hover:underline">Settings → Accounts</Link>
-              </p>
-            )}
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="border-b border-gray-800 bg-gray-900/50">
-                  {['Account / Market', 'Dir', 'Qty/Size', 'Entry', 'Current', 'P&L', 'SL', 'TP', 'Age', ''].map(h => (
-                    <th key={h} className="px-3 py-2 text-[10px] text-gray-500 font-medium uppercase tracking-wider whitespace-nowrap">{h}</th>
+      {posTab === 'positions' && (
+        <Card className="overflow-hidden p-0">
+          {loading && positions.length === 0 ? (
+            <div className="flex items-center justify-center py-12 gap-3 text-gray-500">
+              <RefreshCw className="h-5 w-5 animate-spin" />
+              <span className="text-sm">Loading positions…</span>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="py-12 text-center space-y-3">
+              <BarChart3 className="h-8 w-8 text-gray-700 mx-auto" />
+              <p className="text-sm text-gray-500">No open positions</p>
+              {activeTab === 'ALL' && (
+                <p className="text-xs text-gray-600">
+                  Connect accounts in{' '}
+                  <Link href="/settings/accounts" className="text-orange-400 hover:underline">Settings → Accounts</Link>
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="border-b border-gray-800 bg-gray-900/50">
+                    {['Account / Market', 'Dir', 'Qty/Size', 'Entry', 'Current', 'P&L', 'SL', 'TP', 'Age', ''].map(h => (
+                      <th key={h} className="px-3 py-2 text-[10px] text-gray-500 font-medium uppercase tracking-wider whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map(pos => (
+                    <PositionRow key={pos.id} pos={pos}
+                      onClose={closePosition}
+                      closing={closingId === pos.id}
+                      cgIds={cgIdsRef.current}
+                    />
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(pos => (
-                  <PositionRow key={pos.id} pos={pos}
-                    onClose={closePosition}
-                    closing={closingId === pos.id}
-                    cgIds={cgIdsRef.current}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Working Orders table */}
+      {posTab === 'orders' && (
+        <Card className="overflow-hidden p-0">
+          {!portfolioData || (portfolioData.t212.every(a => (a.orders as unknown[]).length === 0) && portfolioData.ig.every(a => a.workingOrders.length === 0)) ? (
+            <div className="py-12 text-center space-y-2">
+              <Layers className="h-8 w-8 text-gray-700 mx-auto" />
+              <p className="text-sm text-gray-500">No working orders</p>
+              <p className="text-xs text-gray-600">Click &quot;Load Portfolio&quot; to fetch working orders from connected accounts</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="border-b border-gray-800 bg-gray-900/50">
+                    {['Account', 'Market', 'Type', 'Dir', 'Size', 'Level', 'Created', 'Good Till'].map(h => (
+                      <th key={h} className="px-3 py-2 text-[10px] text-gray-500 font-medium uppercase tracking-wider whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {portfolioData.ig.flatMap(a =>
+                    a.workingOrders.map(o => (
+                      <tr key={`${a.account}_${o.dealId}`} className="border-t border-gray-800 hover:bg-gray-800/30 text-xs">
+                        <td className="px-3 py-2.5"><AccountBadge account={a.account as AccountKey} /></td>
+                        <td className="px-3 py-2.5">
+                          <p className="font-semibold text-white">{o.instrumentName || o.epic}</p>
+                          <p className="text-[10px] text-gray-500 font-mono">{o.epic}</p>
+                        </td>
+                        <td className="px-3 py-2.5"><span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 font-medium">{o.orderType}</span></td>
+                        <td className="px-3 py-2.5">
+                          <span className={clsx('text-[10px] font-bold px-1.5 py-0.5 rounded',
+                            o.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                          )}>{o.direction}</span>
+                        </td>
+                        <td className="px-3 py-2.5 text-gray-300 tabular-nums">{o.size}</td>
+                        <td className="px-3 py-2.5 text-gray-300 tabular-nums">{fmtPrice(o.orderLevel)}</td>
+                        <td className="px-3 py-2.5 text-[10px] text-gray-500">
+                          {o.createdDate ? new Date(o.createdDate).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' }) : '—'}
+                        </td>
+                        <td className="px-3 py-2.5 text-[10px] text-gray-500">
+                          {o.goodTillDate ? new Date(o.goodTillDate).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' }) : 'GTC'}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Closed Positions / History toggle */}
       <button

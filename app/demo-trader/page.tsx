@@ -19,6 +19,7 @@ import { clsx } from 'clsx';
 import { sendPush } from '@/lib/pushNotifications';
 import Modal from '@/components/ui/Modal';
 import { IGStrategyTrader } from '@/components/ig/IGStrategyTrader';
+import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 
 const SECTORS = ['All', 'Technology', 'Healthcare', 'Energy', 'Finance', 'Consumer'] as const;
 type Sector = typeof SECTORS[number];
@@ -2774,6 +2775,8 @@ export default function DemoTraderPage() {
               </span>
             )}
           </div>
+
+          <LoadPortfolioButton label="Load Portfolio" size="sm" />
 
           {/* Manual save button */}
           <button

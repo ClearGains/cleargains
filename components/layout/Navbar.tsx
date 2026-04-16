@@ -26,6 +26,7 @@ import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useClearGainsStore } from '@/lib/store';
 import { T212NavButton } from '@/components/t212/T212NavButton';
+import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 
 const navLinks = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -112,6 +113,7 @@ export function Navbar() {
               )}
             </div>
           )}
+          <LoadPortfolioButton variant="icon" />
           <T212NavButton />
 
           <Link
