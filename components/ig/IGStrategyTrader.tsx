@@ -1829,11 +1829,44 @@ export function IGStrategyTrader() {
 
             {/* Watchlist */}
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs text-gray-400">Markets to scan</label>
-                <span className="text-[10px] text-gray-600">
-                  {bWatchlist.filter(m=>m.enabled).length} enabled · signals via Yahoo Finance
+              {/* Header row with master checkbox + select all / deselect all */}
+              <div className="flex items-center gap-2 mb-1.5">
+                {/* Master toggle checkbox */}
+                <button
+                  onClick={() => {
+                    const allOn = bWatchlist.every(m => m.enabled);
+                    setBWatchlist(p => p.map(m => ({ ...m, enabled: !allOn })));
+                  }}
+                  title={bWatchlist.every(m => m.enabled) ? 'Deselect all' : 'Select all'}
+                  className={clsx(
+                    'w-4 h-4 rounded flex items-center justify-center flex-shrink-0 transition-all',
+                    bWatchlist.every(m => m.enabled)
+                      ? 'bg-orange-500'
+                      : bWatchlist.some(m => m.enabled)
+                      ? 'bg-orange-500/40 border border-orange-500/60'
+                      : 'bg-gray-700 border border-gray-600',
+                  )}>
+                  {bWatchlist.every(m => m.enabled) && <span className="text-white text-[8px] font-bold">✓</span>}
+                  {!bWatchlist.every(m => m.enabled) && bWatchlist.some(m => m.enabled) && (
+                    <span className="text-orange-400 text-[8px] font-bold">−</span>
+                  )}
+                </button>
+                <label className="text-xs text-gray-400 flex-1">Markets to scan</label>
+                <span className="text-[10px] text-orange-400 font-medium">
+                  {bWatchlist.filter(m => m.enabled).length} enabled
                 </span>
+                <span className="text-[10px] text-gray-700">·</span>
+                <button
+                  onClick={() => setBWatchlist(p => p.map(m => ({ ...m, enabled: true })))}
+                  className="text-[10px] text-gray-500 hover:text-orange-400 transition-colors">
+                  all
+                </button>
+                <span className="text-[10px] text-gray-700">/</span>
+                <button
+                  onClick={() => setBWatchlist(p => p.map(m => ({ ...m, enabled: false })))}
+                  className="text-[10px] text-gray-500 hover:text-red-400 transition-colors">
+                  none
+                </button>
               </div>
               <div className="space-y-1 max-h-56 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800/50">
                 {bWatchlist.map((m, i) => (
