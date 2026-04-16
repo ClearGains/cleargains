@@ -165,7 +165,6 @@ export async function POST(request: NextRequest) {
     // ── Market position ───────────────────────────────────────────────────────
     // IMPORTANT: do NOT include null fields — they cause silent rejections on some IG accounts.
     // SL/TP are applied separately via PUT after the deal is confirmed ACCEPTED.
-    // CFD orders use margin — do NOT include currencyCode (IG rejects it on CFD accounts).
     const isCfd = isCfdEpic(resolvedEpic);
     const payload: Record<string, unknown> = {
       epic:          resolvedEpic,
@@ -177,8 +176,14 @@ export async function POST(request: NextRequest) {
       trailingStop:  false,
       forceOpen:     body.forceOpen ?? true,
     };
-    // currencyCode: derive from epic (authoritative) with client value as hint
-    payload.currencyCode = currencyForEpic(resolvedEpic, body.currencyCode);
+    // Spread bet: stake currency is ALWAYS GBP (£/point) for UK accounts.
+    //   currencyForEpic returns USD for non-FTSE indices which breaks SB orders.
+    // CFD: derive from epic — USD for US stocks / most indices, GBP for FTSE.
+    if (isCfd) {
+      payload.currencyCode = currencyForEpic(resolvedEpic, body.currencyCode);
+    } else {
+      payload.currencyCode = 'GBP';
+    }
 
     console.log(`[ig/order] POST → ${env} ${resolvedEpic} (via ${resolvedVia})`, JSON.stringify(payload));
 

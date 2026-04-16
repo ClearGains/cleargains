@@ -22,7 +22,7 @@ import {
   epicForAccount, toCfdEpic, toSpreadbetEpic,
   getStopDistances, MIN_STRENGTH,
 } from '@/lib/igConfig';
-import { igQueue } from '@/lib/igApiQueue';
+import { igQueue, withTradeLock } from '@/lib/igApiQueue';
 import {
   type FinnhubCategory, CATEGORY_LABELS as FINNHUB_CATEGORY_LABELS,
   toIgEpic, toYahooSymbol,
@@ -298,7 +298,6 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const [connecting, setConnecting] = useState(false);
   const sessionRef      = useRef<IGSession|null>(null);
   const sessionReadyRef = useRef(false);   // true once at least one confirmed-live session stored
-  const tradeLockRef    = useRef(false);
   const lastReauthRef   = useRef(0);
   // Per-session epic validation cache — avoids repeating GET /markets/{epic} for known-good epics
   const epicValidRef    = useRef<Record<string, boolean>>({});
@@ -565,7 +564,10 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   // Never calls IG login if a valid cached token exists.
   // If a login is already in progress, waits for it rather than starting a second one.
   // Uses exponential backoff after failures; blocks after 3 consecutive failures.
-  async function connectForAccount(forceRefresh = false): Promise<IGSession|null> {
+  async function connectForAccount(
+    forceRefresh = false,         // bypass the localStorage cache (always call server)
+    serverForceRefresh = false,   // force full re-login on the server (clears server cache)
+  ): Promise<IGSession|null> {
     const credKey  = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
     const sessKey  = `ig_session_${accountId}`;
     const lockKey  = `${env}:${accountId}`;
@@ -608,9 +610,9 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       if (raw) {
         const c = JSON.parse(raw) as { username:string; password:string; apiKey:string; connected?:boolean };
         if (!c.connected) return null;
-        authBody = { username:c.username, password:c.password, apiKey:c.apiKey, env, forceRefresh: true, targetAccountId: accountId };
+        authBody = { username:c.username, password:c.password, apiKey:c.apiKey, env, forceRefresh: serverForceRefresh, targetAccountId: accountId };
       } else {
-        authBody = { env, forceRefresh: true, useEnvCredentials: true, targetAccountId: accountId };
+        authBody = { env, forceRefresh: serverForceRefresh, useEnvCredentials: true, targetAccountId: accountId };
       }
 
       try {
@@ -1470,10 +1472,11 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     stopLevel?: number, limitLevel?: number,
     currencyCode?: string,
   ): Promise<OrderResult> {
-    for (let i = 0; i < 150 && tradeLockRef.current; i++) await sleep(100);
-    tradeLockRef.current = true;
-    try { return await _placeOrderInner(epic, direction, size, stopDist, limitDist, stopLevel, limitLevel, currencyCode); }
-    finally { await sleep(500); tradeLockRef.current = false; }
+    // withTradeLock is shared across both CFD and SB panels — only one
+    // switch-account + execute-trade sequence runs at a time.
+    return withTradeLock(() =>
+      _placeOrderInner(epic, direction, size, stopDist, limitDist, stopLevel, limitLevel, currencyCode)
+    );
   }
 
   async function _placeOrderInner(
@@ -1482,7 +1485,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     stopLevel?: number, limitLevel?: number,
     currencyCode?: string,
   ): Promise<OrderResult> {
-    let sess = await freshSession();
+    // Always re-confirm the session is on the correct account before placing an
+    // order.  Since _placeOrderInner runs inside withTradeLock, this switch is
+    // serialised — no other panel can interleave between the switch and the order.
+    // serverForceRefresh=false: reuse the server's shared session + quick-switch;
+    // only do a full re-login if the server cache is empty/expired.
+    let sess = await connectForAccount(true, false);
     if (!sess) return { ok:false, error:`No ${env} session`, epic };
 
     // CFD uses absolute price levels (stopLevel/limitLevel) — never distance fields
@@ -1517,7 +1525,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         return { ok:false, error:'Auth error — re-auth cooldown active', epic };
       lastReauthRef.current = Date.now();
       localStorage.removeItem(`ig_session_${accountId}`);
-      const fresh = await connectForAccount(true);
+      // serverForceRefresh=true: tokens known bad — force full re-login, clear server cache
+      const fresh = await connectForAccount(true, true);
       if (!fresh) return { ok:false, error:'Re-auth failed', epic };
       storeSession(fresh); sess = fresh; activeSess = sess;
       r = await igQueue.enqueue(() => fetch('/api/ig/order', {

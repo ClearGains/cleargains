@@ -4,19 +4,46 @@
  * Client-side rate-limited queue for all IG API calls.
  *
  * Rules enforced:
- *  - Max 20 calls per 60-second rolling window (shared across all accounts)
+ *  - Max 15 calls per 60-second rolling window (single shared counter for both tabs)
  *  - Minimum 1 second gap between consecutive calls
- *  - Per-account fair-share: when both CFD and SPREADBET accounts are active,
- *    each is capped at 10/min; when only one is active it gets the full 20/min
  *  - On 403 (rate limit): pause ALL calls for 60 seconds, then resume
  *  - Tracks timestamps of recent calls so the UI can display a live counter
+ *
+ * withTradeLock — shared across every IGAccountPanel instance on the page.
+ *  Guarantees only one "switch account → execute trade" sequence runs at a time,
+ *  so CFD and spread-bet operations never interleave mid-sequence.
  */
 
-const MAX_PER_MINUTE  = 20;
+const MAX_PER_MINUTE  = 15;
 const MIN_GAP_MS      = 1_000;
 const PAUSE_ON_403_MS = 60_000;
 
 function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }
+
+// ── Trade lock ─────────────────────────────────────────────────────────────────
+// Module-level promise chain acting as a mutex.  Every call to withTradeLock
+// queues behind the previous one, so only one trade sequence runs at a time
+// regardless of which panel initiated it.
+
+let _tradeLockChain: Promise<void> = Promise.resolve();
+
+/**
+ * Run `fn` exclusively — no other withTradeLock call can start until fn resolves.
+ * Use this to wrap the switch-account → place-order sequence so CFD and SB
+ * operations never interleave.
+ */
+export function withTradeLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = _tradeLockChain;
+  let release: () => void;
+  // Extend the chain: the next caller waits for THIS call to complete
+  _tradeLockChain = new Promise<void>(r => { release = r; });
+  return prev.then(async (): Promise<T> => {
+    try   { return await fn(); }
+    finally { release!(); }
+  });
+}
+
+// ── Queue ─────────────────────────────────────────────────────────────────────
 
 type QueueEntry = {
   fn:      () => Promise<Response>;
@@ -26,15 +53,14 @@ type QueueEntry = {
 };
 
 class IGApiQueue {
-  private queue:         QueueEntry[]          = [];
-  private busy           = false;
-  private lastCallAt     = 0;
-  private pausedUntil    = 0;
-  private callTimes:     number[]              = [];
-  private acctCallTimes: Map<string, number[]> = new Map();
-  private listeners:     (() => void)[]        = [];
+  private queue:      QueueEntry[]   = [];
+  private busy        = false;
+  private lastCallAt  = 0;
+  private pausedUntil = 0;
+  private callTimes:  number[]       = [];
+  private listeners:  (() => void)[] = [];
 
-  /** Enqueue an IG API call. Pass acctId to enable per-account fair-share limiting. */
+  /** Enqueue an IG API call. acctId is retained for telemetry only. */
   enqueue(fn: () => Promise<Response>, acctId?: string): Promise<Response> {
     return new Promise<Response>((resolve, reject) => {
       this.queue.push({ fn, resolve, reject, acctId });
@@ -51,7 +77,7 @@ class IGApiQueue {
       const pauseLeft = this.pausedUntil - Date.now();
       if (pauseLeft > 0) { this.notify(); await sleep(pauseLeft); }
 
-      // 2. Global per-minute cap
+      // 2. Global per-minute cap (15/min)
       let now = Date.now();
       this.callTimes = this.callTimes.filter(t => now - t < 60_000);
       if (this.callTimes.length >= MAX_PER_MINUTE) {
@@ -60,41 +86,13 @@ class IGApiQueue {
         this.callTimes = this.callTimes.filter(t => Date.now() - t < 60_000);
       }
 
-      // 3. Per-account fair-share cap
-      if (item.acctId) {
-        now = Date.now();
-        // Active = had calls in last 60s, or currently queued
-        const activeAccts = new Set<string>();
-        for (const [id, times] of this.acctCallTimes) {
-          if (times.some(t => now - t < 60_000)) activeAccts.add(id);
-        }
-        activeAccts.add(item.acctId);
-        this.queue.forEach(q => { if (q.acctId) activeAccts.add(q.acctId); });
-
-        const perAcctCap = Math.floor(MAX_PER_MINUTE / Math.max(1, activeAccts.size));
-        const myTimes = (this.acctCallTimes.get(item.acctId) ?? []).filter(t => now - t < 60_000);
-        this.acctCallTimes.set(item.acctId, myTimes);
-
-        if (myTimes.length >= perAcctCap && myTimes.length > 0) {
-          const waitFor = myTimes[0] + 60_000 - Date.now();
-          if (waitFor > 0) await sleep(waitFor);
-          const refreshed = (this.acctCallTimes.get(item.acctId) ?? []).filter(t => Date.now() - t < 60_000);
-          this.acctCallTimes.set(item.acctId, refreshed);
-        }
-      }
-
-      // 4. Enforce minimum gap
+      // 3. Enforce minimum gap
       const gap = Date.now() - this.lastCallAt;
       if (gap < MIN_GAP_MS) await sleep(MIN_GAP_MS - gap);
 
-      // 5. Execute
+      // 4. Execute
       this.lastCallAt = Date.now();
       this.callTimes.push(this.lastCallAt);
-      if (item.acctId) {
-        const times = this.acctCallTimes.get(item.acctId) ?? [];
-        times.push(this.lastCallAt);
-        this.acctCallTimes.set(item.acctId, times);
-      }
       this.notify();
 
       try {
@@ -117,9 +115,9 @@ class IGApiQueue {
     return this.callTimes.filter(t => Date.now() - t < 60_000).length;
   }
 
-  /** Calls in the last 60 seconds for a specific account. */
-  recentCallsFor(acctId: string): number {
-    return (this.acctCallTimes.get(acctId) ?? []).filter(t => Date.now() - t < 60_000).length;
+  /** Alias kept for UI compatibility — same as recentCalls (single shared counter). */
+  recentCallsFor(_acctId: string): number {
+    return this.recentCalls;
   }
 
   /** Remaining 403-pause in ms (0 when not rate-limited). */
