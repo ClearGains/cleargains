@@ -79,7 +79,7 @@ export async function POST(request: NextRequest) {
     let cst           = res.headers.get('CST') ?? '';
     let securityToken = res.headers.get('X-SECURITY-TOKEN') ?? '';
 
-    type AccountEntry = { accountId: string; accountName: string; accountType: string; preferred: boolean; status: string };
+    type AccountEntry = { accountId: string; accountName: string; accountType: string; preferred: boolean; status: string; balance?: { balance: number; available: number } };
     const data = await res.json() as {
       accountType?: string;
       accountId?: string;
@@ -131,23 +131,54 @@ export async function POST(request: NextRequest) {
       console.log(`[ig/session] Using default account ${activeAccountId}`);
     }
 
+    // ── Fetch per-account balances from GET /accounts ───────────────────────
+    // POST /session does NOT include balance in the accounts array.
+    // GET /accounts returns { accounts: [{ accountId, preferred, balance: { balance, available } }] }
+    let accountsWithBalance: AccountEntry[] = accounts;
+    try {
+      const accsRes = await fetch(`${baseUrl}/accounts`, {
+        headers: {
+          'X-IG-API-KEY': apiKey,
+          'CST': cst,
+          'X-SECURITY-TOKEN': securityToken,
+          'Accept': 'application/json; charset=UTF-8',
+          'Version': '1',
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (accsRes.ok) {
+        const accsData = await accsRes.json() as {
+          accounts?: Array<{ accountId: string; balance?: { balance: number; available: number }; preferred?: boolean }>;
+        };
+        if (accsData.accounts?.length) {
+          const balanceMap = new Map(accsData.accounts.map(a => [a.accountId, a.balance]));
+          accountsWithBalance = accounts.map(a => ({
+            ...a,
+            balance: balanceMap.get(a.accountId) ?? undefined,
+          }));
+        }
+      }
+    } catch {
+      // Non-fatal — proceed without balance data
+    }
+
     const entry = {
       cst,
       securityToken,
       accountId: activeAccountId,
-      accounts,
+      accounts: accountsWithBalance,
       expiresAt: Date.now() + TOKEN_TTL_MS,
     };
     tokenCache.set(cacheKey, entry);
 
-    const activeAccount = accounts.find((a: AccountEntry) => a.accountId === activeAccountId) ?? null;
+    const activeAccount = accountsWithBalance.find((a: AccountEntry) => a.accountId === activeAccountId) ?? null;
     return NextResponse.json({
       ok: true,
       cst,
       securityToken,
       accountId: activeAccountId,
       accountType: activeAccount?.accountType ?? null,
-      accounts,
+      accounts: accountsWithBalance,
       spreadbetAccountId: spreadbetAccount?.accountId ?? null,
     });
   } catch (err) {

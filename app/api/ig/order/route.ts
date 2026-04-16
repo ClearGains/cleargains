@@ -78,6 +78,19 @@ function baseUrl(env: 'demo' | 'live') {
     : 'https://api.ig.com/gateway/deal';
 }
 
+/**
+ * CFD positions use expiry '-' (rolling / no expiry).
+ * Spread-bet DFB positions use expiry 'DFB'.
+ * Sending 'DFB' to a CFD account causes EXPIRY_NOT_SUPPORTED rejection.
+ */
+function resolveExpiry(epic: string, explicitExpiry?: string): string {
+  if (explicitExpiry) return explicitExpiry;
+  // UA.D.* = CFD stocks (e.g. UA.D.AAPL.CASH.IP)
+  // IX.D.*.CFD.IP = CFD indices
+  if (epic.startsWith('UA.D.') || epic.includes('.CFD.IP')) return '-';
+  return 'DFB';
+}
+
 // ── POST — open market position OR create working order ───────────────────────
 export async function POST(request: NextRequest) {
   try {
@@ -118,7 +131,7 @@ export async function POST(request: NextRequest) {
       }
       const woPayload: Record<string, unknown> = {
         epic:          resolvedEpic,
-        expiry:        body.expiry ?? 'DFB',
+        expiry:        resolveExpiry(resolvedEpic, body.expiry),
         direction:     body.direction,
         size:          body.size,
         level:         body.level,
@@ -151,7 +164,7 @@ export async function POST(request: NextRequest) {
     // SL/TP are applied separately via PUT after the deal is confirmed ACCEPTED.
     const payload: Record<string, unknown> = {
       epic:          resolvedEpic,
-      expiry:        body.expiry ?? 'DFB',
+      expiry:        resolveExpiry(resolvedEpic, body.expiry),
       direction:     body.direction,
       size:          body.size,
       orderType:     'MARKET',

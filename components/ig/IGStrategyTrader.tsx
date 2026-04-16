@@ -29,20 +29,22 @@ type IGSubAccount = {
 };
 
 type IGPosition = {
-  dealId:         string;
-  direction:      string;
-  size:           number;
-  level:          number;
-  upl:            number;
-  currency:       string;
-  epic:           string;
-  instrumentName: string;
-  bid:            number;
-  offer:          number;
-  stopLevel?:     number;
-  limitLevel?:    number;
-  contractSize?:  number;
-  createdDate?:   string;
+  dealId:           string;
+  direction:        string;
+  size:             number;
+  level:            number;
+  upl:              number;
+  currency:         string;
+  epic:             string;
+  instrumentName:   string;
+  bid:              number;
+  offer:            number;
+  stopLevel?:       number;
+  limitLevel?:      number;
+  contractSize?:    number;
+  createdDate?:     string;
+  subAccountId?:    string;   // which IG sub-account this position belongs to
+  subAccountType?:  string;   // 'SPREADBET' | 'CFD' | 'SHARES'
 };
 
 type IGWorkingOrder = {
@@ -496,7 +498,34 @@ export function IGStrategyTrader() {
     return () => clearInterval(t);
   }, [isRunning, signalScanMs, posMonitorMs]);
 
-  // ── Load positions ─────────────────────────────────────────────────────────
+  // ── Helper: switch session to a specific sub-account ─────────────────────
+  async function switchSessionTo(
+    env: 'demo'|'live',
+    currentSess: IGSession,
+    accountId: string,
+  ): Promise<IGSession> {
+    if (currentSess.accountId === accountId) return currentSess;
+    try {
+      const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+      const rawCred = localStorage.getItem(credKey);
+      const apiKey  = rawCred ? (JSON.parse(rawCred) as { apiKey?: string }).apiKey ?? currentSess.apiKey : currentSess.apiKey;
+      const swRes = await fetch('/api/ig/switch-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cst: currentSess.cst, securityToken: currentSess.securityToken, apiKey, env, accountId }),
+      });
+      const swData = await swRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string };
+      if (swData.ok && swData.cst && swData.securityToken) {
+        const switched: IGSession = { cst: swData.cst, securityToken: swData.securityToken, accountId: swData.accountId ?? accountId, apiKey: currentSess.apiKey };
+        setSessions(s => ({ ...s, [env]: switched }));
+        localStorage.setItem(`ig_session_${env}`, JSON.stringify({ ...switched, authenticatedAt: Date.now() }));
+        return switched;
+      }
+    } catch {}
+    return currentSess; // return unchanged if switch fails
+  }
+
+  // ── Load positions — iterates ALL sub-accounts so both SB and CFD show ───
   const loadPositions = useCallback(async (envFilter?: 'demo'|'live') => {
     const envs: ('demo'|'live')[] = envFilter ? [envFilter] : ['demo','live'];
     setLoadingPos(true);
@@ -504,28 +533,55 @@ export function IGStrategyTrader() {
     for (const env of envs) {
       let sess = sessions[env];
       if (!sess) continue;
-      try {
-        let r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
-        // 401 → clear stale cache, re-authenticate fresh and retry once
-        if (r.status === 401) {
-          localStorage.removeItem(`ig_session_${env}`);
-          const fresh = await connectIG(env, true);
-          if (fresh) { setSessions(s => ({...s,[env]:fresh})); sess = fresh; }
-          r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+      const accs = subAccounts[env] ?? [];
+
+      if (accs.length > 1) {
+        // Iterate every sub-account: switch → fetch → tag with sub-account info
+        const allEnvPositions: IGPosition[] = [];
+        for (const acct of accs) {
+          sess = await switchSessionTo(env, sess, acct.accountId);
+          try {
+            const r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+            const d = await r.json() as { ok: boolean; positions?: IGPosition[] };
+            if (d.ok) {
+              allEnvPositions.push(
+                ...(d.positions ?? []).map(p => ({ ...p, subAccountId: acct.accountId, subAccountType: acct.accountType })),
+              );
+            }
+          } catch {}
         }
-        const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
-        if (d.ok) {
-          setPositions(p => ({...p, [env]: d.positions ?? []}));
-        } else {
-          const msg = `[${env.toUpperCase()}] Positions error: ${d.error ?? 'unknown'}${d.detail ? ` — ${d.detail}` : ''}`;
-          setPosError(msg);
+        setPositions(p => ({ ...p, [env]: allEnvPositions }));
+        // Switch back to the user's selected default after iterating
+        const defaultId = selectedSubAccount[env] ?? accs.find(a => a.accountType === 'SPREADBET')?.accountId;
+        if (defaultId && sess.accountId !== defaultId) {
+          sess = await switchSessionTo(env, sess, defaultId);
         }
-      } catch (e) {
-        setPosError(`[${env.toUpperCase()}] Failed to fetch positions: ${e instanceof Error ? e.message : String(e)}`);
+      } else {
+        // Single sub-account (or no sub-account data yet) — use session as-is
+        try {
+          let r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+          // 401 → clear stale cache, re-authenticate fresh and retry once
+          if (r.status === 401) {
+            localStorage.removeItem(`ig_session_${env}`);
+            const fresh = await connectIG(env, true);
+            if (fresh) { setSessions(s => ({...s,[env]:fresh})); sess = fresh; }
+            r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
+          }
+          const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
+          if (d.ok) {
+            setPositions(p => ({...p, [env]: d.positions ?? []}));
+          } else {
+            const msg = `[${env.toUpperCase()}] Positions error: ${d.error ?? 'unknown'}${d.detail ? ` — ${d.detail}` : ''}`;
+            setPosError(msg);
+          }
+        } catch (e) {
+          setPosError(`[${env.toUpperCase()}] Failed to fetch positions: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     }
     setLoadingPos(false);
-  }, [sessions]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, subAccounts, selectedSubAccount]);
 
   useEffect(() => {
     if (Object.values(sessions).some(Boolean)) {
@@ -2468,7 +2524,18 @@ function PositionCard({ pos, env, closingId, reversingId, onClose, onMoveSL, onM
         <button className="flex-1 min-w-0 text-left flex items-start gap-2" onClick={() => setExp(v=>!v)}>
           <DirectionBadge dir={pos.direction} />
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
+            <div className="flex items-center gap-1.5">
+              <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
+              {pos.subAccountType && (
+                <span className={clsx('text-[9px] font-bold px-1 py-0 rounded flex-shrink-0',
+                  pos.subAccountType === 'SPREADBET' ? 'bg-purple-500/20 text-purple-400' :
+                  pos.subAccountType === 'CFD'       ? 'bg-blue-500/20 text-blue-400' :
+                  'bg-gray-700 text-gray-400'
+                )}>
+                  {pos.subAccountType === 'SPREADBET' ? 'SB' : pos.subAccountType}
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-3 flex-wrap mt-0.5">
               <span className="text-[10px] text-gray-500">£{pos.size}/pt</span>
               <span className="text-[10px] text-gray-500">Entry: <span className="text-white font-mono">{entryPx}</span></span>
