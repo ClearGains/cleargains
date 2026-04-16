@@ -29,7 +29,7 @@ export type StrategySignal = {
 
 export type Timeframe = 'hourly' | 'daily' | 'longterm' | 'rsi2';
 
-export type MarketType = 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO';
+export type MarketType = 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO' | 'STOCK';
 
 export type WatchlistMarket = {
   epic: string;
@@ -39,10 +39,12 @@ export type WatchlistMarket = {
   forceOpen?: boolean;     // trade regardless of signal strength
 };
 
-/** Classify an IG spread-bet epic by market type. */
+/** Classify an IG spread-bet or CFD epic by market type. */
 export function getMarketType(epic: string): MarketType {
   if (epic.startsWith('IX.D.')) return 'INDEX';
   if (epic.includes('BITCOIN') || epic.includes('ETHUSD') || epic.includes('CRYPTO')) return 'CRYPTO';
+  // UA.D.* are CFD stock epics (e.g. UA.D.AAPL.CASH.IP)
+  if (epic.startsWith('UA.D.')) return 'STOCK';
   // Exclude known commodity epics before testing for forex currency patterns
   if (epic.includes('GOLD') || epic.includes('SILVER') || epic.includes('CRUDE') || epic.includes('NATGAS') || epic.includes('OIL')) return 'COMMODITY';
   if (epic.startsWith('CS.D.') && /USD|EUR|GBP|JPY|CHF|AUD|NZD|CAD/.test(epic)) return 'FOREX';
@@ -62,6 +64,7 @@ export type IGSavedStrategy = {
   size: number;
   maxPositions: number;
   accounts: ('demo' | 'live')[];
+  accountId?: string;           // specific IG sub-account to trade on (accountId from IG)
   autoTrade: boolean;
   autoClose: boolean;
   createdAt: string;
@@ -127,6 +130,25 @@ export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
   // ── Crypto ──────────────────────────────────────────────────────────────────
   // Note: Ethereum spread-bet epic is unreliable on some IG accounts — only Bitcoin used
   { epic: 'CS.D.BITCOIN.TODAY.IP', name: 'Bitcoin',       enabled: false, marketType: 'CRYPTO'    },
+];
+
+/**
+ * CFD stock and index epics for IG CFD accounts.
+ * Format: UA.D.<TICKER>.CASH.IP for US stocks, IX.D.*.CFD.IP for indices.
+ */
+export const CFD_WATCHLIST: WatchlistMarket[] = [
+  // ── US Stock CFDs ────────────────────────────────────────────────────────────
+  { epic: 'UA.D.AAPL.CASH.IP',   name: 'Apple',           enabled: false, marketType: 'STOCK' },
+  { epic: 'UA.D.TSLA.CASH.IP',   name: 'Tesla',           enabled: false, marketType: 'STOCK' },
+  { epic: 'UA.D.MSFT.CASH.IP',   name: 'Microsoft',       enabled: false, marketType: 'STOCK' },
+  { epic: 'UA.D.AMZN.CASH.IP',   name: 'Amazon',          enabled: false, marketType: 'STOCK' },
+  { epic: 'UA.D.NVDA.CASH.IP',   name: 'NVIDIA',          enabled: false, marketType: 'STOCK' },
+  { epic: 'UA.D.META.CASH.IP',   name: 'Meta',            enabled: false, marketType: 'STOCK' },
+  { epic: 'UA.D.GOOGL.CASH.IP',  name: 'Alphabet (GOOGL)',enabled: false, marketType: 'STOCK' },
+  // ── Index CFDs ───────────────────────────────────────────────────────────────
+  { epic: 'IX.D.FTSE.CFD.IP',    name: 'FTSE 100 CFD',    enabled: false, marketType: 'INDEX' },
+  { epic: 'IX.D.SPTRD.CFD.IP',   name: 'S&P 500 CFD',     enabled: false, marketType: 'INDEX' },
+  { epic: 'IX.D.NASDAQ.CFD.IP',  name: 'NASDAQ 100 CFD',  enabled: false, marketType: 'INDEX' },
 ];
 
 // ── Technical indicators ──────────────────────────────────────────────────────

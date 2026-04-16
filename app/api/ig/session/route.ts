@@ -18,9 +18,11 @@ export async function POST(request: NextRequest) {
       password: string;
       apiKey: string;
       env: 'demo' | 'live';
+      targetAccountId?: string;  // switch to this sub-account after login
     };
     const { password, apiKey, env } = body;
     const forceRefresh = (body as { forceRefresh?: boolean }).forceRefresh === true;
+    const targetAccountId = body.targetAccountId ?? null;
     // Sanitise — IG rejects identifiers that contain spaces or @ symbols
     const username = (body.username ?? '').trim().replace(/\s+/g, '');
 
@@ -85,16 +87,17 @@ export async function POST(request: NextRequest) {
       clientId?: string;
     };
 
-    // ── Auto-switch to the SPREADBET account ─────────────────────────────────
-    // If the user has both a CFD and a Spread Bet account, IG may default to
-    // CFD on login.  Orders placed on the wrong account type are rejected with
-    // REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT (or vice-versa).  Explicitly
-    // switching before trading prevents this.
+    // ── Optionally switch to a specific sub-account ──────────────────────────
+    // If targetAccountId is given: switch to that account.
+    // Otherwise: switch to the SPREADBET account if one exists (backward compat).
     let activeAccountId = data.accountId ?? '';
     const accounts = data.accounts ?? [];
     const spreadbetAccount = accounts.find((a: AccountEntry) => a.accountType === 'SPREADBET');
+    const switchTarget = targetAccountId
+      ? accounts.find((a: AccountEntry) => a.accountId === targetAccountId)
+      : spreadbetAccount;
 
-    if (spreadbetAccount && spreadbetAccount.accountId !== activeAccountId) {
+    if (switchTarget && switchTarget.accountId !== activeAccountId) {
       try {
         const switchRes = await fetch(`${baseUrl}/session`, {
           method: 'PUT',
@@ -106,16 +109,15 @@ export async function POST(request: NextRequest) {
             'Accept': 'application/json; charset=UTF-8',
             'Version': '1',
           },
-          body: JSON.stringify({ accountId: spreadbetAccount.accountId, dealingEnabled: true }),
+          body: JSON.stringify({ accountId: switchTarget.accountId, dealingEnabled: true }),
         });
         if (switchRes.ok) {
-          // IG issues fresh tokens after account switch
           const newCst      = switchRes.headers.get('CST');
           const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
           if (newCst)      cst           = newCst;
           if (newSecToken) securityToken = newSecToken;
-          activeAccountId = spreadbetAccount.accountId;
-          console.log(`[ig/session] Switched to SPREADBET account ${activeAccountId}`);
+          activeAccountId = switchTarget.accountId;
+          console.log(`[ig/session] Switched to ${switchTarget.accountType} account ${activeAccountId}`);
         } else {
           const errText = await switchRes.text().catch(() => '');
           console.warn(`[ig/session] Account switch failed (${switchRes.status}):`, errText.slice(0, 200));
@@ -123,10 +125,10 @@ export async function POST(request: NextRequest) {
       } catch (e) {
         console.warn('[ig/session] Account switch error:', e instanceof Error ? e.message : String(e));
       }
-    } else if (spreadbetAccount) {
-      console.log(`[ig/session] Already on SPREADBET account ${activeAccountId}`);
+    } else if (switchTarget) {
+      console.log(`[ig/session] Already on ${switchTarget.accountType} account ${activeAccountId}`);
     } else {
-      console.log(`[ig/session] No SPREADBET account found — using default account ${activeAccountId}`);
+      console.log(`[ig/session] Using default account ${activeAccountId}`);
     }
 
     const entry = {
@@ -138,11 +140,13 @@ export async function POST(request: NextRequest) {
     };
     tokenCache.set(cacheKey, entry);
 
+    const activeAccount = accounts.find((a: AccountEntry) => a.accountId === activeAccountId) ?? null;
     return NextResponse.json({
       ok: true,
       cst,
       securityToken,
       accountId: activeAccountId,
+      accountType: activeAccount?.accountType ?? null,
       accounts,
       spreadbetAccountId: spreadbetAccount?.accountId ?? null,
     });

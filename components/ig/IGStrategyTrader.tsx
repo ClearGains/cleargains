@@ -14,12 +14,19 @@ import {
   type Timeframe, type IGSavedStrategy, type StrategySignal,
   type WatchlistMarket, type MarketType,
   loadStrategies, saveStrategy, deleteStrategy,
-  TIMEFRAME_CONFIG, DEFAULT_WATCHLIST, getMarketType,
+  TIMEFRAME_CONFIG, DEFAULT_WATCHLIST, CFD_WATCHLIST, getMarketType,
 } from '@/lib/igStrategyEngine';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type IGSession = { cst: string; securityToken: string; accountId: string; apiKey: string };
+
+type IGSubAccount = {
+  accountId:   string;
+  accountName: string;
+  accountType: string;  // 'SPREADBET' | 'CFD' | 'SHARES'
+  balance?: { balance: number; available: number };
+};
 
 type IGPosition = {
   dealId:         string;
@@ -198,10 +205,11 @@ function MarketSearch({ session, env, onSelect }: {
 /** Stop/limit distances in POINTS (IG spread-bet "points" = pips for forex). */
 function getStopLimitDist(mType: MarketType): { stopDist: number; limitDist: number } {
   switch (mType) {
-    case 'INDEX':     return { stopDist: 20, limitDist: 40 };
-    case 'FOREX':     return { stopDist: 20, limitDist: 40 };
-    case 'COMMODITY': return { stopDist: 2,  limitDist: 4  };
-    case 'CRYPTO':    return { stopDist: 50, limitDist: 100 };
+    case 'INDEX':     return { stopDist: 20,  limitDist: 40  };
+    case 'FOREX':     return { stopDist: 20,  limitDist: 40  };
+    case 'COMMODITY': return { stopDist: 2,   limitDist: 4   };
+    case 'CRYPTO':    return { stopDist: 50,  limitDist: 100 };
+    case 'STOCK':     return { stopDist: 50,  limitDist: 100 };
   }
 }
 
@@ -231,6 +239,7 @@ function calibrateSignal(
       strength = pct >= 2.0 ? 85 : pct >= 1.0 ? 75 : pct >= 0.5 ? 65 : Math.round((pct / 0.5) * 60);
       break;
     case 'CRYPTO':
+    case 'STOCK':
       strength = pct >= 3.0 ? 85 : pct >= 2.0 ? 75 : pct >= 1.0 ? 65 : Math.round((pct / 1.0) * 60);
       break;
   }
@@ -305,6 +314,10 @@ export function IGStrategyTrader() {
   // ── Sessions ───────────────────────────────────────────────────────────────
   const [sessions, setSessions]     = useState<Partial<Record<'demo'|'live', IGSession>>>({});
   const [connecting, setConnecting] = useState<Partial<Record<'demo'|'live', boolean>>>({});
+
+  // ── Sub-accounts ───────────────────────────────────────────────────────────
+  const [subAccounts, setSubAccounts]         = useState<Partial<Record<'demo'|'live', IGSubAccount[]>>>({});
+  const [selectedSubAccount, setSelectedSubAccount] = useState<Partial<Record<'demo'|'live', string>>>({});
 
   // ── Positions ──────────────────────────────────────────────────────────────
   const [positions, setPositions] = useState<PositionMap>({ demo:[], live:[] });
@@ -385,6 +398,7 @@ export function IGStrategyTrader() {
   const [bMaxPos, setBMaxPos]               = useState(3);
   const [bMinStrength, setBMinStrength]     = useState(55);
   const [bAccounts, setBAccounts]           = useState<('demo'|'live')[]>(['demo']);
+  const [bAccountId, setBAccountId]         = useState<string>('');
   const [bAutoClose, setBAutoClose]         = useState(true);
   const [bWatchlist, setBWatchlist]         = useState<WatchlistMarket[]>([...DEFAULT_WATCHLIST]);
   const [bSignalScanMs, setBSignalScanMs]   = useState(5 * 60_000);
@@ -431,6 +445,22 @@ export function IGStrategyTrader() {
     setTradeHistory(loadIGTradeHistory());
     liveTradeAckedRef.current = localStorage.getItem('ig_live_first_trade_ack') === '1';
     const savedMode = localStorage.getItem('ig_active_mode') as 'demo'|'live'|null;
+
+    // Load sub-accounts and selected defaults from localStorage
+    (['demo','live'] as const).forEach(env => {
+      const accsKey    = `ig_${env}_accounts`;
+      const defaultKey = `ig_${env}_default_account`;
+      try {
+        const rawAccs = localStorage.getItem(accsKey);
+        if (rawAccs) {
+          const accs = JSON.parse(rawAccs) as IGSubAccount[];
+          setSubAccounts(s => ({ ...s, [env]: accs }));
+        }
+      } catch {}
+      const defaultId = localStorage.getItem(defaultKey);
+      if (defaultId) setSelectedSubAccount(s => ({ ...s, [env]: defaultId }));
+    });
+
     (['demo','live'] as const).forEach(env => {
       setConnecting(c => ({...c,[env]:true}));
       connectIG(env).then(sess => {
@@ -623,10 +653,34 @@ export function IGStrategyTrader() {
     return sessions[env] ?? null;
   }
 
-  async function placeOrder(env: 'demo'|'live', epic:string, direction:'BUY'|'SELL', size:number, stopDist?:number, limitDist?:number) {
+  async function placeOrder(env: 'demo'|'live', epic:string, direction:'BUY'|'SELL', size:number, stopDist?:number, limitDist?:number, targetAccountId?:string) {
     // Proactive freshness check (spec: validate before every IG call)
     let sess = await freshSession(env);
     if (!sess) return { ok:false as const, error:`No ${env} session`, epic, sentPayload: null, igBody: null };
+
+    // Switch to target sub-account if specified and different from current
+    if (targetAccountId && targetAccountId !== sess.accountId) {
+      try {
+        const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+        const rawCred = localStorage.getItem(credKey);
+        const apiKey  = rawCred ? (JSON.parse(rawCred) as { apiKey?: string }).apiKey ?? sess.apiKey : sess.apiKey;
+        const swRes = await fetch('/api/ig/switch-account', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cst: sess.cst, securityToken: sess.securityToken, apiKey, env, accountId: targetAccountId }),
+        });
+        const swData = await swRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; error?: string };
+        if (swData.ok && swData.cst && swData.securityToken) {
+          sess = { cst: swData.cst, securityToken: swData.securityToken, accountId: swData.accountId ?? targetAccountId, apiKey: sess.apiKey };
+          setSessions(s => ({ ...s, [env]: sess! }));
+          localStorage.setItem(`ig_session_${env}`, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
+        } else {
+          return { ok: false as const, error: `Account switch failed: ${swData.error ?? 'unknown'}`, epic, sentPayload: null, igBody: null };
+        }
+      } catch (e) {
+        return { ok: false as const, error: `Account switch error: ${e instanceof Error ? e.message : String(e)}`, epic, sentPayload: null, igBody: null };
+      }
+    }
 
     const orderBody = { epic, direction, size, stopDistance: stopDist, profitDistance: limitDist, currencyCode:'GBP' };
     let r = await fetch('/api/ig/order', {
@@ -838,10 +892,11 @@ export function IGStrategyTrader() {
         }
 
         const maxLoss = orderSize * stopDist;
+        const acctSuffix = strat.accountId ? ` | acct ${strat.accountId}` : '';
         log(tradeDir === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}] → ${tradeDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+          `[${env.toUpperCase()}] → ${tradeDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${acctSuffix}${forceOpen ? ' (FORCE)' : ''}`);
 
-        const or = await placeOrder(env, market.epic, tradeDir, orderSize, stopDist, limitDist);
+        const or = await placeOrder(env, market.epic, tradeDir, orderSize, stopDist, limitDist, strat.accountId);
 
         if (or.ok) {
           log(tradeDir === 'BUY' ? 'buy' : 'sell',
@@ -1316,7 +1371,7 @@ export function IGStrategyTrader() {
       setEditId(existing.id); setBName(existing.name); setBTimeframe(existing.timeframe);
       setBSize(existing.size); setBMaxPos(existing.maxPositions);
       setBMinStrength(existing.minStrength ?? 55);
-      setBAccounts(existing.accounts); setBAutoClose(existing.autoClose ?? true);
+      setBAccounts(existing.accounts); setBAccountId(existing.accountId ?? ''); setBAutoClose(existing.autoClose ?? true);
       setBWatchlist(existing.watchlist?.length ? existing.watchlist : [...DEFAULT_WATCHLIST]);
       setBSignalScanMs(existing.signalScanMs ?? 5 * 60_000);
       setBPosMonitorMs(existing.posMonitorMs ?? 60_000);
@@ -1325,6 +1380,8 @@ export function IGStrategyTrader() {
       setBMinStrength(55);
       // Only default to live if we actually have a live session
       setBAccounts([sessions[activeMode] ? activeMode : 'demo']);
+      // Default accountId to the selected sub-account for the active mode
+      setBAccountId(selectedSubAccount[activeMode] ?? '');
       setBAutoClose(true);
       setBWatchlist([...DEFAULT_WATCHLIST]);
       setBSignalScanMs(5 * 60_000);
@@ -1347,6 +1404,7 @@ export function IGStrategyTrader() {
       size: bSize,
       maxPositions: bMaxPos,
       accounts: bAccounts,
+      accountId: bAccountId || undefined,
       autoTrade: true,
       autoClose: bAutoClose,
       createdAt: new Date().toISOString(),
@@ -1460,16 +1518,38 @@ export function IGStrategyTrader() {
               );
             })}
           </div>
-          {/* Connection chips + funds */}
+          {/* Connection chips + funds + sub-account selector */}
           {(['demo','live'] as const).map(env => sessions[env] && (
-            <div key={env} className={clsx('flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full',
-              env==='demo' ? 'bg-blue-500/15 text-blue-400' : 'bg-amber-500/15 text-amber-400'
-            )}>
-              <Wifi className="h-2.5 w-2.5" />
-              #{sessions[env]!.accountId}
-              {igFundsDisplay[env] && (
-                <span className="ml-1 opacity-80">£{igFundsDisplay[env]!.available.toFixed(0)} avail</span>
-              )}
+            <div key={env} className="flex items-center gap-1 flex-wrap">
+              <div className={clsx('flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full',
+                env==='demo' ? 'bg-blue-500/15 text-blue-400' : 'bg-amber-500/15 text-amber-400'
+              )}>
+                <Wifi className="h-2.5 w-2.5" />
+                #{sessions[env]!.accountId}
+                {igFundsDisplay[env] && (
+                  <span className="ml-1 opacity-80">£{igFundsDisplay[env]!.available.toFixed(0)} avail</span>
+                )}
+              </div>
+              {/* Sub-account selector buttons */}
+              {(subAccounts[env] ?? []).length > 1 && (subAccounts[env] ?? []).map(acct => {
+                const isSelected = (selectedSubAccount[env] ?? sessions[env]!.accountId) === acct.accountId;
+                const typeLabel  = acct.accountType === 'SPREADBET' ? 'SB' : acct.accountType === 'CFD' ? 'CFD' : acct.accountType;
+                return (
+                  <button key={acct.accountId}
+                    title={`${acct.accountName} (${acct.accountId})`}
+                    onClick={() => {
+                      setSelectedSubAccount(s => ({ ...s, [env]: acct.accountId }));
+                      localStorage.setItem(`ig_${env}_default_account`, acct.accountId);
+                    }}
+                    className={clsx('text-[10px] px-1.5 py-0.5 rounded font-semibold border transition-all',
+                      isSelected
+                        ? env === 'demo' ? 'bg-blue-500/30 text-blue-300 border-blue-500/40' : 'bg-amber-500/30 text-amber-300 border-amber-500/40'
+                        : 'bg-gray-800 text-gray-500 border-gray-700 hover:text-gray-300'
+                    )}>
+                    {typeLabel}
+                  </button>
+                );
+              })}
             </div>
           ))}
           <span className="text-[10px] text-gray-600 px-2 py-1 bg-gray-800/50 rounded-full">
@@ -1708,6 +1788,43 @@ export function IGStrategyTrader() {
               </div>
             </div>
 
+            {/* Sub-account picker */}
+            {bAccounts.map(env => (subAccounts[env] ?? []).length > 1 && (
+              <div key={env}>
+                <label className="text-xs text-gray-400 mb-1.5 block">
+                  Sub-account for {env === 'demo' ? 'Demo' : 'Live'} trades
+                </label>
+                <div className="flex gap-2 flex-wrap">
+                  {(subAccounts[env] ?? []).map(acct => {
+                    const typeLabel = acct.accountType === 'SPREADBET' ? 'Spread Bet' : acct.accountType === 'CFD' ? 'CFD' : acct.accountType;
+                    const taxLabel  = acct.accountType === 'SPREADBET' ? '(tax-free)' : acct.accountType === 'CFD' ? '(taxable)' : '';
+                    return (
+                      <button key={acct.accountId}
+                        onClick={() => setBAccountId(acct.accountId)}
+                        className={clsx('flex-1 min-w-[140px] px-3 py-2 rounded-lg border text-left transition-all',
+                          bAccountId === acct.accountId
+                            ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
+                            : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200'
+                        )}>
+                        <p className="text-xs font-semibold">{typeLabel} <span className="text-[10px] opacity-60">{taxLabel}</span></p>
+                        <p className="text-[10px] font-mono opacity-60">{acct.accountId}</p>
+                        {acct.balance && <p className="text-[10px] opacity-70">£{acct.balance.available.toFixed(0)} avail</p>}
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => setBAccountId('')}
+                    className={clsx('px-3 py-2 rounded-lg border text-xs transition-all',
+                      bAccountId === ''
+                        ? 'bg-gray-600 text-gray-200 border-gray-500'
+                        : 'bg-gray-800 text-gray-500 border-gray-700 hover:text-gray-300'
+                    )}>
+                    Auto
+                  </button>
+                </div>
+              </div>
+            ))}
+
             {/* Auto-close toggle */}
             <div className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2.5">
               <div>
@@ -1783,10 +1900,27 @@ export function IGStrategyTrader() {
                   </div>
                 ))}
               </div>
+              {/* Preset CFD watchlist button */}
+              <div className="mt-2 flex gap-2 flex-wrap">
+                <button
+                  onClick={() => setBWatchlist(p => {
+                    const existing = new Set(p.map(x => x.epic));
+                    const toAdd = CFD_WATCHLIST.filter(m => !existing.has(m.epic));
+                    return [...p, ...toAdd];
+                  })}
+                  className="text-[10px] px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 hover:text-white transition-colors">
+                  + Add CFD stocks &amp; index epics
+                </button>
+                <button
+                  onClick={() => setBWatchlist([...DEFAULT_WATCHLIST])}
+                  className="text-[10px] px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 hover:text-white transition-colors">
+                  Reset to spread-bet defaults
+                </button>
+              </div>
               {/* Add custom market */}
               {builderSession && (
                 <div className="mt-2">
-                  <p className="text-[10px] text-gray-500 mb-1.5">Add a market to the watchlist:</p>
+                  <p className="text-[10px] text-gray-500 mb-1.5">Search and add any market:</p>
                   <MarketSearch session={builderSession} env={bAccounts.includes('live') ? 'live' : 'demo'}
                     onSelect={m => {
                       if (!bWatchlist.some(x => x.epic === m.epic))

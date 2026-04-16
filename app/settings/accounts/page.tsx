@@ -476,31 +476,47 @@ function PracticeAccountCard() {
 }
 
 // ── IG Account Card (shared for demo + live) ──────────────────────────────────
+
+type IGSubAccount = { accountId: string; accountName: string; accountType: string; balance?: { balance: number; available: number } };
+
 function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
-  const storageKey = mode === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+  const credKey     = mode === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+  const accountsKey = mode === 'demo' ? 'ig_demo_accounts'    : 'ig_live_accounts';
+  const defaultKey  = mode === 'demo' ? 'ig_demo_default_account' : 'ig_live_default_account';
   const isDemo = mode === 'demo';
 
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [apiKey, setApiKey] = useState('');
-  const [showPass, setShowPass] = useState(false);
-  const [showKey, setShowKey] = useState(false);
+  const [username, setUsername]   = useState('');
+  const [password, setPassword]   = useState('');
+  const [apiKey, setApiKey]       = useState('');
+  const [showPass, setShowPass]   = useState(false);
+  const [showKey, setShowKey]     = useState(false);
   const [connected, setConnected] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [testing, setTesting]     = useState(false);
+  const [error, setError]         = useState<string | null>(null);
+  const [subAccounts, setSubAccounts]   = useState<IGSubAccount[]>([]);
+  const [defaultAccount, setDefaultAccount] = useState<string>('');
 
-  // Load saved credentials
+  // Load saved credentials + accounts
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(storageKey);
+      const saved = localStorage.getItem(credKey);
       if (saved) {
         const creds = JSON.parse(saved) as { username: string; connected: boolean };
         setUsername(creds.username ?? '');
         setConnected(creds.connected ?? false);
       }
+      const savedAccounts = localStorage.getItem(accountsKey);
+      if (savedAccounts) setSubAccounts(JSON.parse(savedAccounts) as IGSubAccount[]);
+      const savedDefault = localStorage.getItem(defaultKey);
+      if (savedDefault) setDefaultAccount(savedDefault);
     } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function saveDefault(accountId: string) {
+    setDefaultAccount(accountId);
+    localStorage.setItem(defaultKey, accountId);
+  }
 
   async function handleTest() {
     const cleanUsername = username.trim().replace(/\s+/g, '');
@@ -514,11 +530,22 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: cleanUsername, password, apiKey, env: mode }),
       });
-      const data = await res.json() as { ok: boolean; accountId?: string; error?: string };
+      const data = await res.json() as {
+        ok: boolean; accountId?: string; error?: string;
+        accounts?: IGSubAccount[];
+      };
       if (data.ok) {
-        localStorage.setItem(storageKey, JSON.stringify({
-          username, password, apiKey, connected: true, accountId: data.accountId,
+        // Store credentials
+        localStorage.setItem(credKey, JSON.stringify({
+          username: cleanUsername, password, apiKey, connected: true, accountId: data.accountId,
         }));
+        // Store sub-accounts list
+        const accts = data.accounts ?? [];
+        localStorage.setItem(accountsKey, JSON.stringify(accts));
+        setSubAccounts(accts);
+        // Set default to SPREADBET if available, else first account
+        const sb = accts.find(a => a.accountType === 'SPREADBET') ?? accts[0];
+        if (sb && !defaultAccount) saveDefault(sb.accountId);
         setConnected(true);
         setError(null);
       } else {
@@ -532,14 +559,22 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
   }
 
   function handleDisconnect() {
-    localStorage.removeItem(storageKey);
+    localStorage.removeItem(credKey);
+    localStorage.removeItem(accountsKey);
+    localStorage.removeItem(defaultKey);
     setUsername(''); setPassword(''); setApiKey('');
     setConnected(false); setError(null);
+    setSubAccounts([]); setDefaultAccount('');
   }
 
-  const accentColor = isDemo ? 'blue' : 'emerald';
   const connectedBg = isDemo ? 'bg-blue-500/20 text-blue-400' : 'bg-emerald-500/20 text-emerald-400';
   const iconBg = isDemo ? (connected ? 'bg-blue-500/20' : 'bg-gray-800') : (connected ? 'bg-emerald-500/20' : 'bg-gray-800');
+
+  function accountTypeBadge(type: string) {
+    if (type === 'SPREADBET') return 'bg-purple-500/20 text-purple-400';
+    if (type === 'CFD')       return 'bg-blue-500/20 text-blue-400';
+    return 'bg-gray-700 text-gray-400';
+  }
 
   return (
     <Card>
@@ -549,9 +584,7 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
             {isDemo ? '🧪' : '💰'}
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-white">
-              IG {isDemo ? 'Demo' : 'Live'} Account
-            </h3>
+            <h3 className="text-sm font-semibold text-white">IG {isDemo ? 'Demo' : 'Live'} Account</h3>
             <p className="text-xs text-gray-500">
               {isDemo ? 'demo-api.ig.com · virtual money' : 'api.ig.com · real money'}
             </p>
@@ -559,7 +592,7 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
         </div>
         <div className={clsx('flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full', connected ? connectedBg : 'bg-gray-800 text-gray-500')}>
           {connected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-          {connected ? `Connected — IG ${isDemo ? 'Demo' : 'Live'}` : 'Not connected'}
+          {connected ? `Connected — ${subAccounts.length} sub-account${subAccounts.length !== 1 ? 's' : ''}` : 'Not connected'}
         </div>
       </div>
 
@@ -577,14 +610,39 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
 
       {connected ? (
         <div className="space-y-3">
-          <div className={clsx('border rounded-lg px-3 py-2.5 text-xs',
-            isDemo ? 'bg-blue-500/10 border-blue-500/20 text-blue-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-          )}>
-            <div className="flex items-center gap-1.5">
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              Connected as <span className="font-mono">{username}</span>
+          {/* Sub-accounts list */}
+          {subAccounts.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-xs text-gray-500 font-medium">Sub-accounts found:</p>
+              {subAccounts.map(acc => (
+                <div key={acc.accountId} className={clsx(
+                  'flex items-center gap-2 px-2.5 py-2 rounded-lg border text-xs',
+                  defaultAccount === acc.accountId ? 'border-orange-500/40 bg-orange-500/5' : 'border-gray-800 bg-gray-800/40'
+                )}>
+                  <input
+                    type="radio"
+                    name={`${mode}-default`}
+                    checked={defaultAccount === acc.accountId}
+                    onChange={() => saveDefault(acc.accountId)}
+                    className="accent-orange-500 flex-shrink-0"
+                  />
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400 flex-shrink-0" />
+                  <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded', accountTypeBadge(acc.accountType))}>
+                    {acc.accountType === 'SPREADBET' ? 'SB' : acc.accountType}
+                  </span>
+                  <span className="text-white font-medium flex-1 truncate">{acc.accountName}</span>
+                  <span className="text-gray-500 font-mono text-[10px]">{acc.accountId}</span>
+                  {acc.balance && (
+                    <span className="text-emerald-400 text-[10px] flex-shrink-0">£{acc.balance.available?.toFixed(0)} avail</span>
+                  )}
+                  {defaultAccount === acc.accountId && (
+                    <span className="text-orange-400 text-[9px] flex-shrink-0 font-medium">DEFAULT</span>
+                  )}
+                </div>
+              ))}
+              <p className="text-[10px] text-gray-600">Select default sub-account for trading (can be overridden per strategy)</p>
             </div>
-          </div>
+          )}
           <button onClick={handleDisconnect} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors">
             <LogOut className="h-3.5 w-3.5" /> Disconnect
           </button>
@@ -620,7 +678,7 @@ function IGAccountCard({ mode }: { mode: 'demo' | 'live' }) {
             className={isDemo ? 'bg-blue-600 hover:bg-blue-500' : undefined}
             icon={<CheckCircle2 className="h-4 w-4" />}
           >
-            {testing ? 'Testing…' : `Test Connection`}
+            {testing ? 'Testing connection…' : 'Connect & Show Sub-accounts'}
           </Button>
         </div>
       )}
