@@ -59,15 +59,16 @@ interface AccountState {
   status:  AccountStatus;
   count:   number;
   error?:  string;
+  debug?:  string;
 }
 
 // ── Hook: load portfolio ──────────────────────────────────────────────────────
 
 export function useLoadPortfolio() {
   const {
-    t212ApiKey, t212ApiSecret, t212Connected,
-    t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
-    t212DemoApiKey, t212DemoApiSecret, t212DemoConnected,
+    t212ApiKey, t212ApiSecret,
+    t212IsaApiKey, t212IsaApiSecret,
+    t212DemoApiKey, t212DemoApiSecret,
   } = useClearGainsStore();
 
   const [open, setOpen]         = useState(false);
@@ -85,12 +86,45 @@ export function useLoadPortfolio() {
     setDone(false);
     setData(null);
 
+    // Read T212 credentials from localStorage directly (don't rely on store connected flags)
+    function getT212Creds(storeKey: string, storeSecret: string, lsKey: string) {
+      // Prefer store values; fall back to localStorage
+      if (storeKey && storeSecret) return { key: storeKey, secret: storeSecret };
+      try {
+        const raw = typeof window !== 'undefined' ? localStorage.getItem(lsKey) : null;
+        if (!raw) return null;
+        const p = JSON.parse(raw) as { apiKey?: string; apiSecret?: string };
+        if (p.apiKey && p.apiSecret) return { key: p.apiKey, secret: p.apiSecret };
+      } catch {}
+      return null;
+    }
+
+    const t212InvestCreds = getT212Creds(t212ApiKey,     t212ApiSecret,    't212_invest_credentials');
+    const t212IsaCreds    = getT212Creds(t212IsaApiKey,  t212IsaApiSecret, 't212_isa_credentials');
+    const t212DemoCreds   = getT212Creds(t212DemoApiKey, t212DemoApiSecret,'t212_demo_credentials');
+
+    // Read IG credentials from localStorage
+    function getIGCreds(envKey: 'demo' | 'live') {
+      try {
+        const raw = typeof window !== 'undefined'
+          ? localStorage.getItem(envKey === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials')
+          : null;
+        if (!raw) return null;
+        const p = JSON.parse(raw) as { username?: string; password?: string; apiKey?: string };
+        if (p.username && p.password && p.apiKey) return p as { username: string; password: string; apiKey: string };
+      } catch {}
+      return null;
+    }
+
+    const igDemoCreds = getIGCreds('demo');
+    const igLiveCreds = getIGCreds('live');
+
     const accountDefs: AccountState[] = [
-      { key: 'T212_INVEST', label: 'T212 Invest', status: t212Connected    ? 'pending' : 'skipped', count: 0 },
-      { key: 'T212_ISA',    label: 'T212 ISA',    status: t212IsaConnected ? 'pending' : 'skipped', count: 0 },
-      { key: 'T212_DEMO',   label: 'T212 Demo',   status: t212DemoConnected? 'pending' : 'skipped', count: 0 },
-      { key: 'IG_DEMO',     label: 'IG Demo',     status: 'pending',                                count: 0 },
-      { key: 'IG_LIVE',     label: 'IG Live',     status: 'pending',                                count: 0 },
+      { key: 'T212_INVEST', label: 'T212 Invest', status: t212InvestCreds ? 'pending' : 'skipped', count: 0 },
+      { key: 'T212_ISA',    label: 'T212 ISA',    status: t212IsaCreds    ? 'pending' : 'skipped', count: 0 },
+      { key: 'T212_DEMO',   label: 'T212 Demo',   status: t212DemoCreds   ? 'pending' : 'skipped', count: 0 },
+      { key: 'IG_DEMO',     label: 'IG Demo',     status: igDemoCreds     ? 'pending' : 'skipped', count: 0 },
+      { key: 'IG_LIVE',     label: 'IG Live',     status: igLiveCreds     ? 'pending' : 'skipped', count: 0 },
     ];
     setAccounts(accountDefs);
 
@@ -99,7 +133,7 @@ export function useLoadPortfolio() {
 
     // T212 fetch helper
     async function fetchT212(key: string, secret: string, accountKey: string, label: string, color: string, env: string) {
-      setStatus(accountKey, { status: 'loading' });
+      setStatus(accountKey, { status: 'loading', debug: `Connecting to ${label}…` });
       try {
         const r = await fetch('/api/portfolio/t212', {
           method: 'POST',
@@ -110,41 +144,49 @@ export function useLoadPortfolio() {
         if (!d.ok) throw new Error(d.error ?? 'Fetch failed');
         const result: T212PortfolioResult = { account: accountKey, label, color, positions: d.positions, orders: d.orders, cash: d.cash, summary: d.summary };
         t212Results.push(result);
-        setStatus(accountKey, { status: 'done', count: d.summary.positionCount });
+        setStatus(accountKey, { status: 'done', count: d.summary.positionCount, debug: undefined });
       } catch (e) {
-        setStatus(accountKey, { status: 'error', error: e instanceof Error ? e.message : String(e) });
+        setStatus(accountKey, { status: 'error', error: e instanceof Error ? e.message : String(e), debug: undefined });
       }
     }
 
-    // IG fetch helper
-    async function fetchIG(envKey: 'demo' | 'live', accountKey: string, label: string, color: string) {
+    // IG fetch helper — always does fresh auth to avoid stale token issues
+    async function fetchIG(envKey: 'demo' | 'live', accountKey: string, label: string, color: string, creds: { username: string; password: string; apiKey: string }) {
       try {
-        const raw = typeof window !== 'undefined' ? localStorage.getItem(`ig_session_${envKey}`) : null;
-        if (!raw) { setStatus(accountKey, { status: 'skipped' }); return; }
-        const sess = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
-        if (!sess.cst || !sess.securityToken || !sess.apiKey) { setStatus(accountKey, { status: 'skipped' }); return; }
-        setStatus(accountKey, { status: 'loading' });
+        setStatus(accountKey, { status: 'loading', debug: `Authenticating with ${label}…` });
+        const sessionRes = await fetch('/api/ig/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: envKey, forceRefresh: true }),
+        });
+        const sessD = await sessionRes.json() as { ok: boolean; cst?: string; securityToken?: string; error?: string };
+        if (!sessD.ok || !sessD.cst) {
+          setStatus(accountKey, { status: 'error', error: sessD.error ?? 'Authentication failed', debug: undefined });
+          return;
+        }
+
+        setStatus(accountKey, { status: 'loading', debug: `Fetching positions from ${label}…` });
         const r = await fetch('/api/portfolio/ig', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey: sess.apiKey, cst: sess.cst, securityToken: sess.securityToken, env: envKey }),
+          body: JSON.stringify({ apiKey: creds.apiKey, cst: sessD.cst, securityToken: sessD.securityToken, env: envKey }),
         });
         const d = await r.json() as IGPortfolioResult & { ok: boolean; error?: string };
         if (!d.ok) throw new Error(d.error ?? 'Fetch failed');
         const result: IGPortfolioResult = { account: accountKey, label, color, positions: d.positions, workingOrders: d.workingOrders, activeAccount: d.activeAccount, summary: d.summary };
         igResults.push(result);
-        setStatus(accountKey, { status: 'done', count: d.summary.positionCount });
+        setStatus(accountKey, { status: 'done', count: d.summary.positionCount, debug: undefined });
       } catch (e) {
-        setStatus(accountKey, { status: 'error', error: e instanceof Error ? e.message : String(e) });
+        setStatus(accountKey, { status: 'error', error: e instanceof Error ? e.message : String(e), debug: undefined });
       }
     }
 
     await Promise.all([
-      t212Connected     ? fetchT212(t212ApiKey,    t212ApiSecret,    'T212_INVEST', 'T212 Invest', 'text-emerald-400', 'live') : Promise.resolve(),
-      t212IsaConnected  ? fetchT212(t212IsaApiKey, t212IsaApiSecret, 'T212_ISA',    'T212 ISA',    'text-blue-400',    'live') : Promise.resolve(),
-      t212DemoConnected ? fetchT212(t212DemoApiKey,t212DemoApiSecret,'T212_DEMO',   'T212 Demo',   'text-purple-400',  'demo') : Promise.resolve(),
-      fetchIG('demo', 'IG_DEMO', 'IG Demo', 'text-orange-400'),
-      fetchIG('live', 'IG_LIVE', 'IG Live', 'text-amber-400'),
+      t212InvestCreds ? fetchT212(t212InvestCreds.key, t212InvestCreds.secret, 'T212_INVEST', 'T212 Invest', 'text-emerald-400', 'live') : Promise.resolve(),
+      t212IsaCreds    ? fetchT212(t212IsaCreds.key,    t212IsaCreds.secret,    'T212_ISA',    'T212 ISA',    'text-blue-400',    'live') : Promise.resolve(),
+      t212DemoCreds   ? fetchT212(t212DemoCreds.key,   t212DemoCreds.secret,   'T212_DEMO',   'T212 Demo',   'text-purple-400',  'demo') : Promise.resolve(),
+      igDemoCreds     ? fetchIG('demo', 'IG_DEMO', 'IG Demo', 'text-orange-400', igDemoCreds) : Promise.resolve(),
+      igLiveCreds     ? fetchIG('live', 'IG_LIVE', 'IG Live', 'text-amber-400',  igLiveCreds) : Promise.resolve(),
     ]);
 
     const portfolioData: PortfolioData = {
@@ -162,9 +204,9 @@ export function useLoadPortfolio() {
     setLoading(false);
     setDone(true);
   }, [
-    t212ApiKey, t212ApiSecret, t212Connected,
-    t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
-    t212DemoApiKey, t212DemoApiSecret, t212DemoConnected,
+    t212ApiKey, t212ApiSecret,
+    t212IsaApiKey, t212IsaApiSecret,
+    t212DemoApiKey, t212DemoApiSecret,
   ]);
 
   function openModal() { setOpen(true); void load(); }
@@ -241,6 +283,9 @@ export function LoadPortfolioModal({ open, onClose, loading, done, accounts, dat
                   a.status === 'error'   ? 'text-red-400' :
                   a.status === 'skipped' ? 'text-gray-600' : 'text-gray-500'
                 )}>{a.label}</span>
+                {a.status === 'loading' && a.debug && (
+                  <p className="text-[10px] text-blue-400/70 truncate">{a.debug}</p>
+                )}
                 {a.status === 'error' && a.error && (
                   <p className="text-[10px] text-red-400/70 truncate">{a.error}</p>
                 )}
