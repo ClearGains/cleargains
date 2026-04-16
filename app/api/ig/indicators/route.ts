@@ -251,14 +251,16 @@ const CACHE_TTL = 30 * 60_000;
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
-  const name = searchParams.get('name') ?? '';
-  const epic = searchParams.get('epic') ?? undefined;
+  const name   = searchParams.get('name') ?? '';
+  const epic   = searchParams.get('epic') ?? undefined;
+  // Allow direct Yahoo symbol passthrough (e.g. from Finnhub screener which already resolved it)
+  const direct = searchParams.get('symbol') ?? undefined;
 
-  if (!name) {
-    return NextResponse.json({ ok: false, error: 'name parameter required' }, { status: 400 });
+  if (!name && !direct) {
+    return NextResponse.json({ ok: false, error: 'name or symbol parameter required' }, { status: 400 });
   }
 
-  const symbol = YAHOO_MAP[name] ?? guessYahooSymbol(name, epic);
+  const symbol = direct ?? YAHOO_MAP[name] ?? guessYahooSymbol(name, epic);
   if (!symbol) {
     return NextResponse.json(
       { ok: false, error: `No Yahoo Finance symbol for "${name}". Pass epic= for auto-detection.` },

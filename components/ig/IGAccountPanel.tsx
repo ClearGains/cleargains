@@ -336,6 +336,28 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const [navLoaded, setNavLoaded]               = useState(false);
   const [navSelectedEpics, setNavSelectedEpics] = useState<Set<string>>(new Set());
 
+  // ── Finnhub scanner ────────────────────────────────────────────────────────
+  type FinnhubCategory = 'US_STOCK' | 'UK_STOCK' | 'FOREX' | 'CRYPTO';
+  type FinnhubRow = {
+    symbol: string; description: string; category: FinnhubCategory;
+    price: number; changePercent: number;
+    igEpic: string | null; yahooSymbol: string | null;
+    // indicators (filled in after Yahoo fetch)
+    rsi14?: number; emaCross?: string; macdHistogram?: number;
+    bullScore?: number; bearScore?: number; confidenceScore?: number;
+    direction?: 'BUY' | 'SELL' | 'NEUTRAL';
+    // analyst
+    analystBullScore?: number;
+    loading?: boolean; error?: string;
+  };
+  const FINNHUB_CATEGORY_LABELS: Record<FinnhubCategory, string> = {
+    US_STOCK: 'US Stocks', UK_STOCK: 'UK Stocks', FOREX: 'Forex', CRYPTO: 'Crypto',
+  };
+  const [finnhubCategory, setFinnhubCategory]   = useState<FinnhubCategory>('US_STOCK');
+  const [finnhubRows, setFinnhubRows]           = useState<FinnhubRow[]>([]);
+  const [finnhubLoading, setFinnhubLoading]     = useState(false);
+  const [finnhubLastScan, setFinnhubLastScan]   = useState<string>('');
+
   // ── Manual trade ───────────────────────────────────────────────────────────
   const [showManual, setShowManual]       = useState(false);
   const [manualEpic, setManualEpic]       = useState('');
@@ -805,6 +827,90 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       const d = await r.json() as { ok:boolean } & Partial<IndicatorResult>;
       return d.ok ? d as IndicatorResult : null;
     } catch { return null; }
+  }
+
+  // ── Finnhub category scanner ──────────────────────────────────────────────
+  async function loadFinnhubScreener(cat: FinnhubCategory) {
+    setFinnhubLoading(true);
+    setFinnhubRows([]);
+    try {
+      // 1. Screener: pre-filtered top movers (5-min cache, calls Finnhub quotes)
+      const sr = await fetch(`/api/finnhub/screener?category=${cat}&limit=50`);
+      const sd = await sr.json() as {
+        ok: boolean;
+        results?: Array<{
+          symbol: string; description: string; category: FinnhubCategory;
+          price: number; changePercent: number; volume: number;
+          igEpic: string | null; yahooSymbol: string | null;
+        }>;
+      };
+      if (!sd.ok || !sd.results) { setFinnhubLoading(false); return; }
+
+      // Seed rows immediately so the user sees something
+      const initialRows: FinnhubRow[] = sd.results.map(r => ({
+        symbol: r.symbol, description: r.description, category: r.category,
+        price: r.price, changePercent: r.changePercent,
+        igEpic: r.igEpic, yahooSymbol: r.yahooSymbol,
+        loading: true,
+      }));
+      setFinnhubRows(initialRows);
+      setFinnhubLastScan(new Date().toLocaleTimeString('en-GB'));
+
+      // 2. Fetch indicators for each row in parallel (batches of 5 to avoid overloading Yahoo)
+      const BATCH = 5;
+      const rows = [...initialRows];
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const slice = rows.slice(i, i + BATCH);
+        const results = await Promise.allSettled(slice.map(async row => {
+          if (!row.yahooSymbol) return row;
+          try {
+            const params = new URLSearchParams({ symbol: row.yahooSymbol });
+            const ir = await fetch(`/api/ig/indicators?${params.toString()}`);
+            const id = await ir.json() as {
+              ok: boolean; rsi14?: number; emaCross?: string; macdHistogram?: number;
+              bullScore?: number; bearScore?: number; confidenceScore?: number;
+              direction?: 'BUY' | 'SELL' | 'NEUTRAL';
+            };
+            if (id.ok) {
+              return { ...row,
+                rsi14: id.rsi14, emaCross: id.emaCross, macdHistogram: id.macdHistogram,
+                bullScore: id.bullScore, bearScore: id.bearScore,
+                confidenceScore: id.confidenceScore, direction: id.direction,
+                loading: false,
+              };
+            }
+          } catch {}
+          return { ...row, loading: false };
+        }));
+
+        results.forEach((r, j) => {
+          if (r.status === 'fulfilled') rows[i + j] = r.value as FinnhubRow;
+        });
+        setFinnhubRows([...rows]);
+
+        if (i + BATCH < rows.length) await new Promise(res => setTimeout(res, 300));
+      }
+
+      // 3. Fetch analyst recommendations for stocks only (US/UK) — best-effort
+      if (cat === 'US_STOCK' || cat === 'UK_STOCK') {
+        const recResults = await Promise.allSettled(
+          rows.slice(0, 20).map(async (row, idx) => {
+            try {
+              const rr = await fetch(`/api/finnhub/recommendation?symbol=${encodeURIComponent(row.symbol)}`);
+              const rd = await rr.json() as { ok: boolean; bullScore?: number };
+              if (rd.ok && rd.bullScore !== undefined) {
+                rows[idx] = { ...rows[idx], analystBullScore: rd.bullScore };
+              }
+            } catch {}
+          })
+        );
+        void recResults; // just for eslint
+        setFinnhubRows([...rows]);
+      }
+    } catch (err) {
+      console.error('Finnhub screener error:', err);
+    }
+    setFinnhubLoading(false);
   }
 
   // ── Check S&P 500 / FTSE / VIX market conditions before scanning ─────────
@@ -2102,46 +2208,182 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         )}
       </Card>
 
-      {/* ── Market scanner ─────────────────────────────────────────────────── */}
-      {scanEntries.length > 0 && (
-        <Card>
-          <CardHeader title="Market Scanner" subtitle={`${accountType} epics · Yahoo Finance signals`} icon={<Target className="h-4 w-4" />} />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {scanEntries.map(entry => (
-              <div key={entry.epic} className={clsx('border rounded-lg p-2.5 text-xs',
-                entry.status === 'error' ? 'border-red-900/40 bg-red-950/20' :
-                entry.scanning ? 'border-gray-700 bg-gray-900/50 animate-pulse' :
-                entry.signal?.direction === 'BUY'  ? 'border-emerald-900/40 bg-emerald-950/20' :
-                entry.signal?.direction === 'SELL' ? 'border-red-900/40 bg-red-950/20' :
-                'border-gray-800 bg-gray-900/30'
+      {/* ── Finnhub Market Scanner ─────────────────────────────────────────── */}
+      <Card>
+        <CardHeader
+          title="Market Scanner"
+          subtitle="Finnhub universe · Yahoo Finance signals"
+          icon={<Target className="h-4 w-4" />}
+          action={
+            <div className="flex items-center gap-2">
+              {finnhubLastScan && <span className="text-[10px] text-gray-500">Last: {finnhubLastScan}</span>}
+              <Button size="sm" loading={finnhubLoading}
+                icon={<RefreshCw className="h-3 w-3" />}
+                onClick={() => void loadFinnhubScreener(finnhubCategory)}>
+                Scan
+              </Button>
+            </div>
+          }
+        />
+
+        {/* Category tabs */}
+        <div className="flex gap-1 mb-3 flex-wrap">
+          {(['US_STOCK','UK_STOCK','FOREX','CRYPTO'] as FinnhubCategory[]).map(cat => (
+            <button key={cat}
+              onClick={() => { setFinnhubCategory(cat); void loadFinnhubScreener(cat); }}
+              className={clsx('px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all',
+                finnhubCategory === cat
+                  ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30'
+                  : 'text-gray-500 hover:text-gray-300 border border-transparent hover:border-gray-700'
               )}>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-semibold text-white truncate mr-1">{entry.name}</span>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    {entry.scanning && <RefreshCw className="h-2.5 w-2.5 animate-spin text-gray-400" />}
-                    {entry.signal && <DirectionBadge dir={entry.signal.direction} size="xs" />}
-                  </div>
-                </div>
-                <p className="text-[10px] font-mono text-gray-600 truncate mb-1">
-                  {epicForAccount(entry.name, accountType) ?? entry.epic}
-                </p>
-                {entry.status === 'error' && <p className="text-red-400 text-[10px] truncate">{entry.error}</p>}
-                {entry.signal && (
-                  <div className="flex items-center gap-2">
-                    <StrengthBar strength={entry.signal.strength} dir={entry.signal.direction} />
-                    <span className={clsx('font-mono', entry.signal.direction==='BUY'?'text-emerald-400':entry.signal.direction==='SELL'?'text-red-400':'text-gray-500')}>{entry.signal.strength}%</span>
-                    {entry.changePercent !== undefined && (
-                      <span className={clsx('ml-auto', entry.changePercent>=0?'text-emerald-400':'text-red-400')}>
-                        {entry.changePercent>=0?'+':''}{entry.changePercent.toFixed(2)}%
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
+              {FINNHUB_CATEGORY_LABELS[cat]}
+            </button>
+          ))}
+        </div>
+
+        {/* Table */}
+        {finnhubRows.length === 0 && !finnhubLoading && (
+          <p className="text-center text-gray-600 text-xs py-6">
+            Press Scan to load top movers for {FINNHUB_CATEGORY_LABELS[finnhubCategory]}
+          </p>
+        )}
+
+        {(finnhubRows.length > 0 || finnhubLoading) && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="border-b border-gray-800 text-gray-500 text-left">
+                  <th className="pb-1.5 pr-2 font-medium">Symbol</th>
+                  <th className="pb-1.5 pr-2 font-medium hidden sm:table-cell">Description</th>
+                  <th className="pb-1.5 pr-2 font-medium text-right">Price</th>
+                  <th className="pb-1.5 pr-2 font-medium text-right">Δ%</th>
+                  <th className="pb-1.5 pr-2 font-medium text-right hidden md:table-cell">RSI</th>
+                  <th className="pb-1.5 pr-2 font-medium hidden md:table-cell">EMA</th>
+                  <th className="pb-1.5 pr-2 font-medium text-right">Score</th>
+                  <th className="pb-1.5 pr-2 font-medium">Signal</th>
+                  <th className="pb-1.5 font-medium hidden lg:table-cell">IG Epic</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {finnhubRows.map(row => (
+                  <tr key={row.symbol} className={clsx('transition-colors',
+                    row.direction === 'BUY'  ? 'bg-emerald-950/10 hover:bg-emerald-950/20' :
+                    row.direction === 'SELL' ? 'bg-red-950/10 hover:bg-red-950/20' :
+                    'hover:bg-gray-800/30'
+                  )}>
+                    <td className="py-1.5 pr-2 font-mono font-semibold text-white">
+                      {row.symbol.replace(/^[^:]+:/, '')}
+                    </td>
+                    <td className="py-1.5 pr-2 text-gray-400 truncate max-w-[140px] hidden sm:table-cell">
+                      {row.description !== row.symbol ? row.description : ''}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right font-mono text-gray-300">
+                      {row.price > 0 ? row.price.toLocaleString('en-GB', { maximumFractionDigits: 4 }) : '—'}
+                    </td>
+                    <td className={clsx('py-1.5 pr-2 text-right font-mono',
+                      row.changePercent > 0 ? 'text-emerald-400' : row.changePercent < 0 ? 'text-red-400' : 'text-gray-500'
+                    )}>
+                      {row.changePercent !== 0 ? `${row.changePercent > 0 ? '+' : ''}${row.changePercent.toFixed(2)}%` : '—'}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right hidden md:table-cell">
+                      {row.loading ? <span className="text-gray-700">…</span> :
+                        row.rsi14 !== undefined ? (
+                          <span className={clsx('font-mono',
+                            row.rsi14 < 30 ? 'text-emerald-400' :
+                            row.rsi14 > 70 ? 'text-red-400' : 'text-gray-400'
+                          )}>{row.rsi14.toFixed(0)}</span>
+                        ) : <span className="text-gray-700">—</span>
+                      }
+                    </td>
+                    <td className="py-1.5 pr-2 hidden md:table-cell">
+                      {row.loading ? <span className="text-gray-700">…</span> :
+                        row.emaCross ? (
+                          <span className={clsx('text-[10px]',
+                            row.emaCross === 'bullish' ? 'text-emerald-400' : 'text-red-400'
+                          )}>{row.emaCross === 'bullish' ? '▲ bull' : '▼ bear'}</span>
+                        ) : <span className="text-gray-700">—</span>
+                      }
+                    </td>
+                    <td className="py-1.5 pr-2 text-right">
+                      {row.loading ? (
+                        <RefreshCw className="h-3 w-3 animate-spin text-gray-600 ml-auto" />
+                      ) : row.confidenceScore !== undefined ? (
+                        <div className="flex items-center justify-end gap-1">
+                          <div className="w-10 h-1 bg-gray-800 rounded-full overflow-hidden">
+                            <div className={clsx('h-full rounded-full',
+                              row.direction === 'BUY' ? 'bg-emerald-500' :
+                              row.direction === 'SELL' ? 'bg-red-500' : 'bg-gray-600'
+                            )} style={{ width: `${row.confidenceScore}%` }} />
+                          </div>
+                          <span className={clsx('font-mono text-[10px]',
+                            row.direction === 'BUY' ? 'text-emerald-400' :
+                            row.direction === 'SELL' ? 'text-red-400' : 'text-gray-500'
+                          )}>{row.confidenceScore}%</span>
+                        </div>
+                      ) : <span className="text-gray-700">—</span>}
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      {row.direction && row.direction !== 'NEUTRAL' ? (
+                        <DirectionBadge dir={row.direction} size="xs" />
+                      ) : row.loading ? null : (
+                        <span className="text-[10px] text-gray-600">HOLD</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 hidden lg:table-cell">
+                      {row.igEpic ? (
+                        <span className="text-[10px] font-mono text-gray-600 truncate max-w-[160px] block">{row.igEpic}</span>
+                      ) : (
+                        <span className="text-gray-700 text-[10px]">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        </Card>
-      )}
+        )}
+
+        {/* Old scanner entries (from auto-run strategy) */}
+        {scanEntries.length > 0 && (
+          <div className="mt-3 pt-3 border-t border-gray-800">
+            <p className="text-[10px] text-gray-600 mb-2">Strategy scan results</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {scanEntries.map(entry => (
+                <div key={entry.epic} className={clsx('border rounded-lg p-2.5 text-xs',
+                  entry.status === 'error' ? 'border-red-900/40 bg-red-950/20' :
+                  entry.scanning ? 'border-gray-700 bg-gray-900/50 animate-pulse' :
+                  entry.signal?.direction === 'BUY'  ? 'border-emerald-900/40 bg-emerald-950/20' :
+                  entry.signal?.direction === 'SELL' ? 'border-red-900/40 bg-red-950/20' :
+                  'border-gray-800 bg-gray-900/30'
+                )}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-white truncate mr-1">{entry.name}</span>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {entry.scanning && <RefreshCw className="h-2.5 w-2.5 animate-spin text-gray-400" />}
+                      {entry.signal && <DirectionBadge dir={entry.signal.direction} size="xs" />}
+                    </div>
+                  </div>
+                  <p className="text-[10px] font-mono text-gray-600 truncate mb-1">
+                    {epicForAccount(entry.name, accountType) ?? entry.epic}
+                  </p>
+                  {entry.status === 'error' && <p className="text-red-400 text-[10px] truncate">{entry.error}</p>}
+                  {entry.signal && (
+                    <div className="flex items-center gap-2">
+                      <StrengthBar strength={entry.signal.strength} dir={entry.signal.direction} />
+                      <span className={clsx('font-mono', entry.signal.direction==='BUY'?'text-emerald-400':entry.signal.direction==='SELL'?'text-red-400':'text-gray-500')}>{entry.signal.strength}%</span>
+                      {entry.changePercent !== undefined && (
+                        <span className={clsx('ml-auto', entry.changePercent>=0?'text-emerald-400':'text-red-400')}>
+                          {entry.changePercent>=0?'+':''}{entry.changePercent.toFixed(2)}%
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Card>
 
       {/* ── Positions / Orders / History ───────────────────────────────────── */}
       <Card>
