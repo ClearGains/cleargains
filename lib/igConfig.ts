@@ -134,10 +134,10 @@ export function getStopDistances(
 }
 
 // ── Minimum signal strength thresholds ────────────────────────────────────────
-// CFD: 75% (higher bar — taxable, margin-based)
-// SPREADBET: 65% (lower bar acceptable — tax-free)
+// CFD: 50% — Yahoo daily indicators score 50-75; volume kept as score modifier not gate
+// SPREADBET: 65% (multi-confirmation entry, higher natural bar)
 
 export const MIN_STRENGTH: Record<AccountType, number> = {
-  CFD:       75,
+  CFD:       50,
   SPREADBET: 65,
 };

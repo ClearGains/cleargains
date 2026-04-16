@@ -1687,12 +1687,13 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   }
 
   // ── Phase 2: Execute one trade for a pre-computed signal (sequential) ─────
-  async function executeTrade(strat: IGSavedStrategy, data: SignalData): Promise<'ok'|'funds_low'|'skipped'> {
+  // forceTop=true: top-ranked signal — bypasses duplicate and maxPositions guards
+  async function executeTrade(strat: IGSavedStrategy, data: SignalData, forceTop = false): Promise<'ok'|'funds_low'|'skipped'> {
     const { market, sig, resolvedEpic, stopDist, limitDist, direction, strength } = data;
     const tradeDir = direction as 'BUY'|'SELL';
 
     // Step-by-step trade attempt logging
-    log('info', `▶ Trade attempt: ${market.name} | ${tradeDir} | strength=${strength}% | SL=${stopDist.toFixed(2)} TP=${limitDist.toFixed(2)} | epic=${resolvedEpic}`);
+    log('info', `[EXEC] Trade attempt: ${market.name} | ${tradeDir} | strength=${strength}% | SL=${stopDist.toFixed(2)} TP=${limitDist.toFixed(2)} | epic=${resolvedEpic}${forceTop ? ' [FORCE]' : ''}`);
 
     // Auto-close opposite positions
     if (strat.autoClose) {
@@ -1708,29 +1709,41 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       await loadPositions();
     }
 
-    // Skip if already long/short this instrument in same direction
-    if (positionsRef.current.some(p => p.epic === market.epic && p.direction === tradeDir)) return 'skipped';
+    // Skip if already long/short this instrument in same direction (bypass for force-top)
+    const alreadyOpen = positionsRef.current.some(p => p.epic === market.epic && p.direction === tradeDir);
+    if (alreadyOpen) {
+      if (forceTop) {
+        log('info', `[EXEC] Already have ${tradeDir} ${market.name} — force-top skips duplicate check`);
+      } else {
+        log('info', `[EXEC] Already have ${tradeDir} ${market.name} — skipping duplicate`);
+        return 'skipped';
+      }
+    }
 
-    // User-configured position cap (0 = unlimited)
+    // User-configured position cap (0 = unlimited) — bypass for force-top
     const openCount = positionsRef.current.filter(p => p.epic !== market.epic).length;
-    if (strat.maxPositions > 0 && openCount >= strat.maxPositions) {
-      log('info', `${acctTag} Max ${strat.maxPositions} positions reached — skip ${market.name}`);
+    if (!forceTop && strat.maxPositions > 0 && openCount >= strat.maxPositions) {
+      log('info', `[EXEC] Max ${strat.maxPositions} positions reached (${openCount} open) — skip ${market.name}`);
       return 'skipped';
+    } else if (strat.maxPositions > 0) {
+      log('info', `[EXEC] Position count: ${openCount}/${strat.maxPositions === 0 ? '∞' : strat.maxPositions}`);
     }
 
     // Funds-based hard pause: < 20% of starting balance
     const fundsNow  = igFundsRef.current;
     const available = fundsNow?.available ?? Infinity;
     const startBal  = startingBalanceRef.current;
+    log('info', `[EXEC] Funds check: available=£${available === Infinity ? '?' : available.toFixed(2)} startBal=£${startBal.toFixed(2)}`);
     if (startBal > 0 && available < startBal * 0.20) {
-      log('info', `${acctTag} 🔴 Funds below 20% of start (£${available.toFixed(2)} / £${startBal.toFixed(2)}) — no new trades`);
+      log('info', `[EXEC] 🔴 Funds below 20% of start (£${available.toFixed(2)} / £${startBal.toFixed(2)}) — no new trades`);
       showToast(false, `⚠️ Funds below 20% — trades paused`);
       return 'funds_low';
     }
 
     if (env === 'live') {
+      log('info', `[EXEC] Live account — requesting user confirmation…`);
       const ok = await confirmLiveTrade();
-      if (!ok) { log('info', `${acctTag} Disclaimer declined — skipping ${market.name}`); return 'skipped'; }
+      if (!ok) { log('info', `[EXEC] Disclaimer declined — skipping ${market.name}`); return 'skipped'; }
     }
 
     // Dynamic sizing: 1% risk when funds < 50% of start, else 2%
@@ -1746,8 +1759,10 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       : strat.size;
     const sizeMult = scanParamsRef.current.sizeMultiplier * atrMult;
     const orderSize = calcRiskBasedSize(available, stopDist, accountType, effectiveSize, sizeMult, riskPct, totalBal);
+    log('info', `[EXEC] Sizing: acct=${accountType} available=£${available === Infinity ? '?' : available.toFixed(2)} stopDist=${stopDist} effectiveSize=${effectiveSize} → orderSize=${orderSize}`);
 
-    if (orderSize === 0) {
+    if (orderSize === 0 && accountType !== 'CFD') {
+      // CFD uses price-tier unit sizing computed after price fetch — never blocked by orderSize=0
       // Part 2: if signal is very strong (≥85%), try to free capital by closing weakest position
       if (strength >= 85 && positionsRef.current.length > 0) {
         log('info', `${acctTag} 🎯 Strong signal (${strength}%) but low funds — evaluating positions for redeployment`);
@@ -1837,22 +1852,24 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       // Extract Finnhub ticker from UA.D.{SYM}.CASH.IP, else treat epic as ticker
       const tickerMatch = resolvedEpic.match(/^UA\.D\.([A-Z0-9]+)\.CASH\.IP$/);
       const ticker = tickerMatch ? tickerMatch[1] : resolvedEpic;
-      log('info', `${acctTag} Epic lookup: searching IG for "${ticker}"...`);
+      log('info', `[EXEC] Epic lookup: searching IG for "${ticker}"...`);
       const found = await resolveIgEpicForSymbol(ticker);
       if (!found) {
-        log('error', `${acctTag} ✗ Epic not found: "${ticker}" is not tradeable on IG — skipping ${market.name}`);
+        log('error', `[EXEC] ✗ Epic NOT FOUND: "${ticker}" — symbol not tradeable on IG, skipping ${market.name}`);
         setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`${ticker} not on IG` } }));
         return 'skipped';
       }
-      log('info', `${acctTag} Epic resolved: ${ticker} → ${found}`);
+      log('info', `[EXEC] Epic resolved: ${ticker} → ${found}`);
       actualEpic = found;
     } else {
+      log('info', `[EXEC] Validating epic: ${resolvedEpic}…`);
       const epicOk = await validateEpic(resolvedEpic);
       if (!epicOk) {
-        log('info', `${acctTag} ⚠️ Epic ${resolvedEpic} not available on ${accountId} (${accountType}) — skipping ${market.name}`);
+        log('error', `[EXEC] ✗ Epic INVALID: ${resolvedEpic} not available on ${accountId} (${accountType}) — skipping`);
         setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`Epic not on ${accountType}` } }));
         return 'skipped';
       }
+      log('info', `[EXEC] Epic valid: ${resolvedEpic}`);
     }
 
     // ── CFD: fetch live price and compute absolute SL/TP price levels ─────────
@@ -1876,7 +1893,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
           }
         } catch { /* use fallback */ }
       }
-      log('info', `${acctTag} Current price: ${currentPx > 0 ? currentPx.toFixed(4) : 'unknown'}`);
+      log('info', `[EXEC] Market price: bid/offer fetch for ${actualEpic} → ${currentPx > 0 ? currentPx.toFixed(4) : 'UNKNOWN — will use fallback'}`);
 
       // 2. ATR-based stop/limit as absolute price levels
       const atr = data.atr14 ?? (stopDist / 1.5);  // derive ATR from distance if not stored
@@ -1885,11 +1902,14 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         const tp = tradeDir === 'BUY' ? currentPx + atr * 3.0 : currentPx - atr * 3.0;
         cfdStopLvl  = Math.round(sl * 100) / 100;
         cfdLimitLvl = Math.round(tp * 100) / 100;
-        log('info', `${acctTag} SL/TP levels: stop=${cfdStopLvl} limit=${cfdLimitLvl} (ATR=${atr.toFixed(4)})`);
+        log('info', `[EXEC] Stop level: ${cfdStopLvl} | Limit level: ${cfdLimitLvl} (ATR=${atr.toFixed(4)})`);
+      } else {
+        log('info', `[EXEC] No price/ATR — SL/TP levels omitted from order`);
       }
 
       // 3. Unit-based sizing
       finalSize = calcCfdUnits(currentPx > 0 ? currentPx : 100, data.market.marketType);
+      log('info', `[EXEC] CFD units: ${finalSize} (price=${currentPx.toFixed(2)})`);
     }
 
     const sizeLabel = accountType === 'CFD' ? `${finalSize} unit(s)` : `£${orderSize}/pt`;
@@ -1897,18 +1917,21 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       ? `SL @ ${cfdStopLvl} TP @ ${cfdLimitLvl}`
       : `SL ${stopDist}pt TP ${limitDist}pt`;
     log(tradeDir === 'BUY' ? 'buy' : 'sell',
-      `${acctTag} → ${tradeDir} ${market.name} | ${actualEpic} | ${sizeLabel} | ${slTpLabel} | ${strength}% confidence`);
-    log('info', `${acctTag} Order payload: { epic:"${actualEpic}", dir:"${tradeDir}", size:${finalSize}${accountType==='CFD' ? `, stopLevel:${cfdStopLvl ?? 'n/a'}, limitLevel:${cfdLimitLvl ?? 'n/a'}` : `, stopDist:${stopDist}, limitDist:${limitDist}`} }`);
+      `[EXEC] Placing order: ${tradeDir} ${market.name} | ${actualEpic} | ${sizeLabel} | ${slTpLabel} | ${strength}%`);
+    const orderPayloadStr = accountType === 'CFD'
+      ? `{ epic:"${actualEpic}", dir:"${tradeDir}", size:${finalSize}, stopLevel:${cfdStopLvl ?? 'none'}, limitLevel:${cfdLimitLvl ?? 'none'} }`
+      : `{ epic:"${actualEpic}", dir:"${tradeDir}", size:${orderSize}, stopDist:${stopDist}, limitDist:${limitDist} }`;
+    log('info', `[EXEC] Order payload: ${orderPayloadStr}`);
 
     const or = accountType === 'CFD'
       ? await placeOrder(actualEpic, tradeDir, finalSize, undefined, undefined, cfdStopLvl, cfdLimitLvl)
       : await placeOrder(actualEpic, tradeDir, orderSize, stopDist, limitDist);
-    log('info', `${acctTag} IG response: ok=${or.ok} status=${or.dealStatus ?? '-'} reason=${or.reason ?? '-'} ref=${or.dealReference ?? '-'}`);
+    log('info', `[EXEC] IG response: ok=${or.ok} | status=${or.dealStatus ?? '-'} | reason=${or.reason ?? '-'} | ref=${or.dealReference ?? '-'} | err=${or.error ?? 'none'}`);
 
     if (or.ok) {
       scanCountersRef.current.traded++;
       log(tradeDir === 'BUY' ? 'buy' : 'sell',
-        `${acctTag} ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · @ ${or.level ?? '?'}`);
+        `[EXEC] ✅ SUCCESS — ${or.dealStatus ?? 'ACCEPTED'} | ref ${or.dealReference ?? 'n/a'} | dealId ${or.dealId ?? 'pending'} | fill @ ${or.level ?? '?'}`);
       showToast(true, `[${accountType}] ${tradeDir} ${market.name}`);
       setTradeHistory(prev => recordTradeOpen(prev, {
         portfolioName:strat.name, market:market.name, epic:resolvedEpic,
@@ -1923,7 +1946,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     } else {
       const errStr = (or.error ?? '').toLowerCase();
       if (errStr.includes('insufficient_funds') || errStr.includes('insufficient funds')) {
-        log('error', `${acctTag} ⚠️ Insufficient funds`);
+        log('error', `[EXEC] ❌ FAILED — Insufficient funds`);
         showToast(false, `⚠️ Insufficient funds`);
         return 'funds_low';
       }
@@ -1931,10 +1954,10 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         const hint = accountType === 'CFD'
           ? `Epic mismatch? Sent "${actualEpic}" to CFD account.`
           : `Epic mismatch? Sent "${actualEpic}" to SPREADBET account.`;
-        log('error', `${acctTag} ⚠️ ${hint}`);
+        log('error', `[EXEC] ❌ ${hint}`);
       }
       // Log and continue — do NOT abort remaining opportunities
-      log('error', `${acctTag} ❌ ${market.name} FAILED — ${or.error ?? 'unknown'} — trying next opportunity`);
+      log('error', `[EXEC] ❌ FAILED — ${market.name}: ${or.error ?? 'unknown reason'}`);
       if (or.reason)      log('error', `  reason: ${or.reason}`);
       if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
       if (or.igBody)      log('error', `  ig: ${JSON.stringify(or.igBody)}`);
@@ -1982,14 +2005,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
 
     // ── Step 1: Market condition awareness ─────────────────────────────────
     const conditions = await checkMarketConditions();
-    if (conditions.vixHigh) {
-      log('info', `🚨 VIX ${conditions.vix.toFixed(0)} > 30 — market too volatile, skipping scan cycle`);
-      saveStrategy({ ...strat, lastRunAt: new Date().toISOString(), lastRunEnv: env });
-      setStrategies(loadStrategiesForAccount());
-      return;
-    }
-    // Reset per-scan params
-    // Apply portfolio-level adjustments from position monitor (Part 4)
+    // Reset per-scan params first
     scanParamsRef.current = {
       sizeMultiplier:  portfolioAdjRef.current.sizeMultiplier,
       confidenceBoost: portfolioAdjRef.current.extraMinStrength,
@@ -1997,13 +2013,19 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     };
     scanCountersRef.current = { traded: 0, skippedVolatile: 0, skippedConditions: 0 };
 
+    if (conditions.vixHigh) {
+      // High VIX: reduce size + log warning but DO NOT skip — opportunities exist in volatile markets
+      scanParamsRef.current.sizeMultiplier = Math.min(scanParamsRef.current.sizeMultiplier, 0.5);
+      log('info', `⚠️ VIX ${conditions.vix.toFixed(0)} > 30 — high volatility: position size halved, continuing scan`);
+    }
     if (conditions.marketStressed) {
-      scanParamsRef.current.sizeMultiplier = 0.5;
-      scanParamsRef.current.confidenceBoost = 10;
-      log('info', `⚠️ Market stress — S&P ${conditions.spChange.toFixed(1)}% FTSE ${conditions.ftseChange.toFixed(1)}% | threshold +10, size ×0.5`);
-    } else {
+      scanParamsRef.current.sizeMultiplier = Math.min(scanParamsRef.current.sizeMultiplier, 0.5);
+      log('info', `⚠️ Market stress — S&P ${conditions.spChange.toFixed(1)}% FTSE ${conditions.ftseChange.toFixed(1)}% | size ×0.5`);
+    } else if (!conditions.vixHigh) {
       log('info', `✅ Market healthy — S&P ${conditions.spChange.toFixed(1)}% FTSE ${conditions.ftseChange.toFixed(1)}% VIX ${conditions.vix.toFixed(0)}`);
     }
+    saveStrategy({ ...strat, lastRunAt: new Date().toISOString(), lastRunEnv: env });
+    setStrategies(loadStrategiesForAccount());
 
     // ── Step 2: Build market list ─────────────────────────────────────────────
     // CFD: let Finnhub tell us what's moving today — no hardcoded list.
@@ -2069,15 +2091,42 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     log('info', `   ${scanned}/${markets.length} fetched | ${signalsFound} tradeable signals ranked by confidence`);
 
     // ── Step 4: Execute trades sequentially — 1 per second ─────────────────
-    if (strat.autoTrade && tradeable.length > 0) {
-      log('info', `⚡ Executing ${tradeable.length} opportunities in order…`);
-      for (const data of tradeable) {
-        if (!runningRef.current) break;
+    if (!strat.autoTrade) {
+      log('info', `ℹ️ autoTrade is OFF — signals found but not executing. Enable Auto-Trade in strategy settings.`);
+    } else if (tradeable.length === 0) {
+      log('info', `ℹ️ No tradeable signals above threshold this cycle`);
+    } else {
+      log('info', `⚡ Executing ${tradeable.length} opportunit${tradeable.length===1?'y':'ies'} in order…`);
+      // Log all ranked signals upfront so we can see what's being attempted
+      tradeable.forEach((d, i) => {
+        log('info', `  [EXEC] #${i+1}: ${d.market.name} | ${d.direction} | Score: ${d.strength}% | Epic: ${d.resolvedEpic}`);
+      });
+
+      for (let idx = 0; idx < tradeable.length; idx++) {
+        const data = tradeable[idx];
+        const isTopSignal = idx === 0;
+
+        if (!runningRef.current) {
+          log('info', `[EXEC] ⛔ Strategy stopped mid-execution — aborting queue`);
+          break;
+        }
+
+        log('info', `[EXEC] ▶ Starting #${idx+1}/${tradeable.length}: ${data.market.name} | ${data.direction} | ${data.strength}%${isTopSignal ? ' [TOP SIGNAL — force-attempt]' : ''}`);
         setScanProgress(`Trading ${data.market.name}…`);
-        const result = await executeTrade(strat, data);
+
+        let result: 'ok'|'funds_low'|'skipped';
+        try {
+          result = await executeTrade(strat, data, isTopSignal);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log('error', `[EXEC] ❌ EXCEPTION in executeTrade for ${data.market.name}: ${msg}`);
+          result = 'skipped';
+        }
+
+        log('info', `[EXEC] ✔ Result for ${data.market.name}: ${result.toUpperCase()}`);
         if (result === 'funds_low') {
           log('info', `${acctTag} 🔴 Funds too low — stopping execution queue`);
-          break; // only stop on funds issue, not on rejected orders
+          break;
         }
         await sleep(1000); // 1s between executions to respect IG rate limits
       }
@@ -2091,9 +2140,6 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     setScanStats({ scanned, signals: signalsFound, traded, skippedVolatile, skippedConditions, lastScanAt: new Date().toISOString() });
     log('info', `📊 Scan done — ${scanned} scanned | ${signalsFound} signals | ${traded} traded | ${skippedVolatile} volatile`);
     log('info', `   Open positions: ${openCount} | Total P&L: ${totalPnL >= 0 ? '+' : ''}£${Math.abs(totalPnL).toFixed(2)}`);
-
-    saveStrategy({ ...strat, lastRunAt: new Date().toISOString(), lastRunEnv: env });
-    setStrategies(loadStrategiesForAccount());
     const nextMs = strat.signalScanMs ?? signalScanMs;
     const nextLabel = nextMs < 60_000 ? `${Math.round(nextMs/1000)}s` : `${Math.round(nextMs/60_000)}min`;
     log('info', `   Next scan in ${nextLabel}`);
