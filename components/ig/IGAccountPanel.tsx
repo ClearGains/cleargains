@@ -86,7 +86,12 @@ function makeHeaders(s: IGSession, env: 'demo'|'live', extra?: Record<string,str
   };
 }
 
-const SESSION_TTL_MS = 5 * 60 * 60 * 1000;
+const SESSION_TTL_MS    = 6 * 60 * 60 * 1000;  // 6 hours — only re-login after this
+const LOGIN_BACKOFF_MS  = [10_000, 30_000, 60_000] as const; // 10s, 30s, 60s
+
+// Module-level login lock — one promise per (env+accountId) key, shared across renders
+const loginLocks = new Map<string, Promise<IGSession|null>>();
+
 function uid() { return Math.random().toString(36).slice(2, 9); }
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 function fmt(n: number) { return `£${Math.abs(n).toFixed(2)}`; }
@@ -251,6 +256,10 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const lastReauthRef   = useRef(0);
   // Per-session epic validation cache — avoids repeating GET /markets/{epic} for known-good epics
   const epicValidRef    = useRef<Record<string, boolean>>({});
+  // Login backoff state
+  const loginFailCountRef    = useRef(0);
+  const loginBlockedUntilRef = useRef(0);
+  const [loginCooldown, setLoginCooldown] = useState<string>('');
 
   // ── Positions ──────────────────────────────────────────────────────────────
   const [positions, setPositions] = useState<IGPosition[]>([]);
@@ -414,14 +423,18 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     return loadStrategies().filter(s => !s.accountId || s.accountId === accountId);
   }
 
-  // ── connectForAccount: always logs in + switches to accountId atomically ───
+  // ── connectForAccount ─────────────────────────────────────────────────────
+  // Never calls IG login if a valid cached token exists.
+  // If a login is already in progress, waits for it rather than starting a second one.
+  // Uses exponential backoff after failures; blocks after 3 consecutive failures.
   async function connectForAccount(forceRefresh = false): Promise<IGSession|null> {
-    const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
-    const sessKey = `ig_session_${accountId}`;
-    try {
-      const raw = localStorage.getItem(credKey);
+    const credKey  = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
+    const sessKey  = `ig_session_${accountId}`;
+    const lockKey  = `${env}:${accountId}`;
 
-      if (!forceRefresh) {
+    // ── 1. Return cached session immediately if still valid ────────────────
+    if (!forceRefresh) {
+      try {
         const cachedRaw = localStorage.getItem(sessKey);
         if (cachedRaw) {
           const cached = JSON.parse(cachedRaw) as {
@@ -432,39 +445,89 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
             return { cst:cached.cst, securityToken:cached.securityToken, accountId:cached.accountId, apiKey:cached.apiKey, accountType:cached.accountType };
           }
         }
-      }
+      } catch {}
+    }
 
+    // ── 2. Honour backoff block ────────────────────────────────────────────
+    const blockedMs = loginBlockedUntilRef.current - Date.now();
+    if (blockedMs > 0) {
+      const secs = Math.ceil(blockedMs / 1000);
+      const msg  = `IG API cooldown — please wait ${secs}s before reconnecting`;
+      setLoginCooldown(msg);
+      log('error', `🚫 ${msg}`);
+      return null;
+    }
+
+    // ── 3. Login lock — coalesce parallel calls into one ──────────────────
+    const existing = loginLocks.get(lockKey);
+    if (existing) {
+      return existing;  // already logging in — wait for the same promise
+    }
+
+    const loginPromise = (async (): Promise<IGSession|null> => {
+      const raw = localStorage.getItem(credKey);
       let authBody: Record<string, unknown>;
       if (raw) {
         const c = JSON.parse(raw) as { username:string; password:string; apiKey:string; connected?:boolean };
         if (!c.connected) return null;
-        authBody = { username:c.username, password:c.password, apiKey:c.apiKey, env, forceRefresh, targetAccountId: accountId };
+        authBody = { username:c.username, password:c.password, apiKey:c.apiKey, env, forceRefresh: true, targetAccountId: accountId };
       } else {
-        authBody = { env, forceRefresh, useEnvCredentials: true, targetAccountId: accountId };
+        authBody = { env, forceRefresh: true, useEnvCredentials: true, targetAccountId: accountId };
       }
 
-      const r = await igQueue.enqueue(
-        () => fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(authBody) }),
-        accountId,
-      );
-      const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string; accountType?:string; apiKey?:string };
-      if (d.ok && d.cst && d.securityToken) {
-        // Prefer apiKey from session response (works for both manual creds and env credentials)
-        const apiKey = d.apiKey || (raw ? (JSON.parse(raw) as { apiKey:string }).apiKey : '') || '';
-        const sess: IGSession = { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId ?? accountId, apiKey, accountType:d.accountType ?? accountType };
-        localStorage.setItem(sessKey, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
-        return sess;
+      try {
+        const r = await igQueue.enqueue(
+          () => fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(authBody) }),
+          accountId,
+        );
+        const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string; accountType?:string; apiKey?:string; error?:string };
+
+        if (d.ok && d.cst && d.securityToken) {
+          // Success — reset backoff
+          loginFailCountRef.current = 0;
+          loginBlockedUntilRef.current = 0;
+          setLoginCooldown('');
+          const apiKey = d.apiKey || (raw ? (JSON.parse(raw) as { apiKey:string }).apiKey : '') || '';
+          const sess: IGSession = { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId ?? accountId, apiKey, accountType:d.accountType ?? accountType };
+          localStorage.setItem(sessKey, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
+          return sess;
+        }
+
+        // Failed — apply backoff
+        const attempt = loginFailCountRef.current;
+        loginFailCountRef.current = attempt + 1;
+        if (attempt < LOGIN_BACKOFF_MS.length) {
+          const wait = LOGIN_BACKOFF_MS[attempt];
+          loginBlockedUntilRef.current = Date.now() + wait;
+          const msg = `Login failed (attempt ${attempt + 1}/3) — waiting ${wait / 1000}s. ${d.error ?? ''}`;
+          setLoginCooldown(msg);
+          log('error', `⏳ ${msg}`);
+        } else {
+          loginBlockedUntilRef.current = Date.now() + 5 * 60_000; // 5 min hard block
+          const msg = 'IG API cooldown — please wait a few minutes before reconnecting';
+          setLoginCooldown(msg);
+          log('error', `🚫 ${msg}`);
+        }
+        return null;
+      } catch {
+        return null;
+      } finally {
+        loginLocks.delete(lockKey);
       }
-    } catch {}
-    return null;
+    })();
+
+    loginLocks.set(lockKey, loginPromise);
+    return loginPromise;
   }
 
+  // ── freshSession: use stored token or trigger a login if truly expired ────
   async function freshSession(): Promise<IGSession|null> {
     try {
       const raw = localStorage.getItem(`ig_session_${accountId}`);
       if (raw) {
         const meta = JSON.parse(raw) as { authenticatedAt?:number };
         if (meta.authenticatedAt && (Date.now() - meta.authenticatedAt) >= SESSION_TTL_MS) {
+          // Token genuinely expired — clear and re-login
           localStorage.removeItem(`ig_session_${accountId}`);
           const fresh = await connectForAccount(true);
           if (fresh) storeSession(fresh);
@@ -1744,14 +1807,16 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       try { creds = JSON.parse(raw) as CredShape; diag(`  ✓ username="${creds?.username}" apiKey="${creds?.apiKey?.slice(0,8)}…"`); } catch {}
     }
 
-    diag('\nSTEP 2 — Login + switch to ' + accountId);
+    diag('\nSTEP 2 — Session for ' + accountId + ' (using cached token if valid)');
     let cst = '', secToken = '';
     try {
+      // Re-use the existing cached session — do NOT force a fresh login.
+      // Only hit IG if the stored token is expired or missing.
       const loginRes = await igQueue.enqueue(() => fetch('/api/ig/session', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(creds
-          ? { username:creds.username, password:creds.password, apiKey:creds.apiKey, env, forceRefresh:true, targetAccountId:accountId }
-          : { env, forceRefresh:true, useEnvCredentials:true, targetAccountId:accountId }),
+          ? { username:creds.username, password:creds.password, apiKey:creds.apiKey, env, forceRefresh:false, targetAccountId:accountId }
+          : { env, forceRefresh:false, useEnvCredentials:true, targetAccountId:accountId }),
       }), accountId);
       const d = await loginRes.json() as {
         ok:boolean; cst?:string; securityToken?:string; accountId?:string;
@@ -1830,12 +1895,21 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
               <p className="text-xs text-gray-500 font-mono">{accountId} · {env}</p>
             </div>
           </div>
-          <p className="text-xs text-gray-400 mb-3">
-            Not connected. Add IG credentials in{' '}
-            <a href="/settings/accounts" className="text-orange-400 hover:underline">Settings → Accounts</a>{' '}
-            or ensure <code className="text-xs bg-gray-800 px-1 rounded">IG_USERNAME</code> env var is set.
-          </p>
-          <Button size="sm" onClick={() => { setConnecting(true); connectForAccount().then(s => { if (s) storeSession(s); setConnecting(false); }); }}>Reconnect</Button>
+          {loginCooldown ? (
+            <div className="mb-3 px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+              <p className="text-xs text-red-400">🚫 {loginCooldown}</p>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400 mb-3">
+              Not connected. Add IG credentials in{' '}
+              <a href="/settings/accounts" className="text-orange-400 hover:underline">Settings → Accounts</a>{' '}
+              or ensure <code className="text-xs bg-gray-800 px-1 rounded">IG_USERNAME</code> env var is set.
+            </p>
+          )}
+          <Button size="sm" disabled={loginBlockedUntilRef.current > Date.now()}
+            onClick={() => { setConnecting(true); connectForAccount(true).then(s => { if (s) storeSession(s); setConnecting(false); }); }}>
+            {loginBlockedUntilRef.current > Date.now() ? 'Cooling down…' : 'Reconnect'}
+          </Button>
         </Card>
       </div>
     );
@@ -2705,6 +2779,15 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
               </div>
         )}
       </Card>
+
+      {/* ── Login cooldown banner (shown when backoff is active) ──────────── */}
+      {loginCooldown && (
+        <div className="px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center justify-between gap-3">
+          <p className="text-xs text-red-400">🚫 {loginCooldown}</p>
+          <button onClick={() => { loginFailCountRef.current = 0; loginBlockedUntilRef.current = 0; setLoginCooldown(''); }}
+            className="text-[10px] text-gray-500 hover:text-gray-300 flex-shrink-0">Dismiss</button>
+        </div>
+      )}
 
       {/* ── Activity log ─────────────────────────────────────────────────── */}
       <Card>
