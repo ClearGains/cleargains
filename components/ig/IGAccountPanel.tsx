@@ -604,7 +604,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     const sess = sessionRef.current;
     if (!sess) return null;
     try {
-      const r = await igQueue.enqueue(() => fetch('/api/ig/account', { headers: makeHeaders(sess, env) }), accountId);
+      const r = await igQueue.enqueue(() => fetch('/api/ig/account', { headers: { ...makeHeaders(sess, env), 'x-ig-account-id': accountId } }), accountId);
       const d = await r.json() as { ok:boolean; available?:number; balance?:number };
       if (d.ok) {
         const funds = { available: d.available ?? 0, balance: d.balance ?? 0 };
