@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-/** In-memory token cache: { cacheKey → { cst, securityToken, accountId, accounts, expiresAt } } */
+/** In-memory token cache: { cacheKey → { cst, securityToken, accountId, accountType, accounts, expiresAt } } */
 const tokenCache = new Map<string, {
   cst: string;
   securityToken: string;
   accountId: string;
+  accountType: string | null;
   accounts: unknown[];
   expiresAt: number;
 }>();
@@ -41,7 +42,8 @@ export async function POST(request: NextRequest) {
       ? 'https://demo-api.ig.com/gateway/deal'
       : 'https://api.ig.com/gateway/deal';
 
-    const cacheKey = `${env}:${username}:${apiKey}`;
+    // Per-account cache key — CFD and SB tabs must never share a cache entry
+    const cacheKey = `${env}:${username}:${apiKey}:${targetAccountId ?? 'default'}`;
     const cached = tokenCache.get(cacheKey);
     if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
       return NextResponse.json({
@@ -49,6 +51,7 @@ export async function POST(request: NextRequest) {
         cst: cached.cst,
         securityToken: cached.securityToken,
         accountId: cached.accountId,
+        accountType: cached.accountType,
         accounts: cached.accounts,
       });
     }
@@ -123,7 +126,14 @@ export async function POST(request: NextRequest) {
           const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
           if (newCst)      cst           = newCst;
           if (newSecToken) securityToken = newSecToken;
-          activeAccountId = switchTarget.accountId;
+          // Try to read the confirmed active account from the PUT response body
+          try {
+            const switchBody = await switchRes.json() as Record<string, unknown>;
+            const confirmedId = (switchBody.currentAccountId ?? switchBody.accountId ?? '') as string;
+            activeAccountId = confirmedId || switchTarget.accountId;
+          } catch {
+            activeAccountId = switchTarget.accountId;
+          }
           console.log(`[ig/session] Switched to ${switchTarget.accountType} account ${activeAccountId}`);
         } else {
           const errText = await switchRes.text().catch(() => '');
@@ -136,6 +146,32 @@ export async function POST(request: NextRequest) {
       console.log(`[ig/session] Already on ${switchTarget.accountType} account ${activeAccountId}`);
     } else {
       console.log(`[ig/session] Using default account ${activeAccountId}`);
+    }
+
+    // Confirm the active account with GET /session — IG's source of truth
+    // after a switch, currentAccountId is the reliable field
+    try {
+      const getRes = await fetch(`${baseUrl}/session`, {
+        headers: {
+          'X-IG-API-KEY': apiKey,
+          'CST': cst,
+          'X-SECURITY-TOKEN': securityToken,
+          'Accept': 'application/json; charset=UTF-8',
+          'Version': '1',
+        },
+        signal: AbortSignal.timeout(4_000),
+      });
+      if (getRes.ok) {
+        const getSess = await getRes.json() as Record<string, unknown>;
+        const confirmedId = (getSess.currentAccountId ?? getSess.accountId ?? '') as string;
+        if (confirmedId) {
+          if (confirmedId !== activeAccountId)
+            console.warn(`[ig/session] GET /session says active=${confirmedId}, expected ${activeAccountId} — using confirmed`);
+          activeAccountId = confirmedId;
+        }
+      }
+    } catch {
+      // Non-fatal — proceed with activeAccountId from switch
     }
 
     // ── Fetch per-account balances from GET /accounts ───────────────────────
@@ -169,16 +205,16 @@ export async function POST(request: NextRequest) {
       // Non-fatal — proceed without balance data
     }
 
+    const activeAccount = accountsWithBalance.find((a: AccountEntry) => a.accountId === activeAccountId) ?? null;
     const entry = {
       cst,
       securityToken,
       accountId: activeAccountId,
+      accountType: activeAccount?.accountType ?? null,
       accounts: accountsWithBalance,
       expiresAt: Date.now() + TOKEN_TTL_MS,
     };
     tokenCache.set(cacheKey, entry);
-
-    const activeAccount = accountsWithBalance.find((a: AccountEntry) => a.accountId === activeAccountId) ?? null;
     return NextResponse.json({
       ok: true,
       cst,

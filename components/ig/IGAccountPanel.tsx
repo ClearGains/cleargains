@@ -229,9 +229,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   // ── Session ────────────────────────────────────────────────────────────────
   const [session, setSession] = useState<IGSession|null>(null);
   const [connecting, setConnecting] = useState(false);
-  const sessionRef  = useRef<IGSession|null>(null);
-  const tradeLockRef = useRef(false);
-  const lastReauthRef = useRef(0);
+  const sessionRef      = useRef<IGSession|null>(null);
+  const sessionReadyRef = useRef(false);   // true once at least one confirmed-live session stored
+  const tradeLockRef    = useRef(false);
+  const lastReauthRef   = useRef(0);
+  // Per-session epic validation cache — avoids repeating GET /markets/{epic} for known-good epics
+  const epicValidRef    = useRef<Record<string, boolean>>({});
 
   // ── Positions ──────────────────────────────────────────────────────────────
   const [positions, setPositions] = useState<IGPosition[]>([]);
@@ -340,6 +343,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
 
   function storeSession(sess: IGSession) {
     sessionRef.current = sess;
+    sessionReadyRef.current = true;
     setSession(sess);
     localStorage.setItem(`ig_session_${accountId}`, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
   }
@@ -484,8 +488,9 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
 
   // ── Load positions ─────────────────────────────────────────────────────────
   const loadPositions = useCallback(async () => {
+    // Wait for at least one confirmed session before polling
+    if (!sessionReadyRef.current || !sessionRef.current) return;
     const sess = sessionRef.current;
-    if (!sess) return;
     setLoadingPos(true); setPosError(null);
     try {
       let r = await igQueue.enqueue(() => fetch('/api/ig/positions', { headers: makeHeaders(sess, env) }), accountId);
@@ -493,6 +498,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         setPosError('Rate limited — retrying next cycle'); setLoadingPos(false); return;
       }
       if (r.status === 401) {
+        // Silent re-auth: don't show error until retry also fails
         if (Date.now() - lastReauthRef.current < 30_000) { setLoadingPos(false); return; }
         lastReauthRef.current = Date.now();
         localStorage.removeItem(`ig_session_${accountId}`);
@@ -501,6 +507,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         storeSession(fresh);
         const freshSess = fresh;
         r = await igQueue.enqueue(() => fetch('/api/ig/positions', { headers: makeHeaders(freshSess, env) }), accountId);
+        // If retry also 401, show error; otherwise fall through to parse positions
+        if (r.status === 401) { setPosError('Re-auth failed — please reconnect'); setLoadingPos(false); return; }
       }
       const d = await r.json() as { ok:boolean; positions?:IGPosition[]; error?:string; detail?:string };
       if (d.ok) {
@@ -597,6 +605,24 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       }
     } catch {}
     return null;
+  }
+
+  // ── Validate epic on this account — only called for SPREADBET ────────────────
+  async function validateEpic(epic: string): Promise<boolean> {
+    if (epicValidRef.current[epic] !== undefined) return epicValidRef.current[epic];
+    const sess = sessionRef.current;
+    if (!sess) return true; // can't validate, allow the attempt
+    try {
+      const r = await igQueue.enqueue(
+        () => fetch(`/api/ig/markets/${encodeURIComponent(epic)}`, { headers: makeHeaders(sess, env) }),
+        accountId,
+      );
+      const valid = r.ok;
+      epicValidRef.current[epic] = valid;
+      return valid;
+    } catch {
+      return true; // network error — allow the attempt
+    }
   }
 
   // ── Fetch market snapshot ──────────────────────────────────────────────────
@@ -805,6 +831,16 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     const resolvedEpic = epicForAccount(market.name, accountType) ?? market.epic;
     if (resolvedEpic !== market.epic)
       log('info', `  ↳ Epic: ${market.epic} → ${resolvedEpic} [${accountType}]`);
+
+    // For spread-bet accounts: verify the epic is available before trading
+    if (accountType === 'SPREADBET') {
+      const epicOk = await validateEpic(resolvedEpic);
+      if (!epicOk) {
+        log('error', `${acctTag} ⚠️ Epic ${resolvedEpic} not available on ${accountId} — skipping ${market.name}`);
+        setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`Epic not available on ${accountType}` } }));
+        return sig;
+      }
+    }
 
     const maxLoss = orderSize * stopDist;
     const sizeLabel = accountType === 'CFD' ? `${orderSize} unit(s)` : `£${orderSize}/pt`;
@@ -1094,8 +1130,11 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       if (!d.ok || !d.cst) { diag(`  ✗ Login failed: ${d.error ?? 'unknown'}`); setTestOrderBusy(false); return; }
       cst = d.cst; secToken = d.securityToken ?? '';
       diag(`  ✓ CST: "${cst.slice(0,12)}…"`);
-      diag(`  ✓ accountId: ${d.accountId} | accountType: ${d.accountType}`);
-      if (d.accountId !== accountId) diag(`  ⚠️ Expected ${accountId} but got ${d.accountId} — switch may have failed`);
+      diag(`  ✓ accountId: ${d.accountId ?? '(empty)'} | accountType: ${d.accountType ?? '(empty)'}`);
+      if (d.accountId !== accountId) diag(`  ⚠️ Expected ${accountId} but got ${d.accountId ?? 'empty'} — switch may have failed`);
+      // Propagate fresh tokens to the central store so positions panel uses them immediately
+      const apiKeyForStore = creds?.apiKey ?? '';
+      storeSession({ cst, securityToken: secToken, accountId: d.accountId ?? accountId, apiKey: apiKeyForStore, accountType: d.accountType ?? accountType });
     } catch (e) { diag(`  ✗ Exception: ${e instanceof Error ? e.message : String(e)}`); setTestOrderBusy(false); return; }
 
     diag('\nSTEP 3 — Fetch positions');
