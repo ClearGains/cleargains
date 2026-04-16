@@ -4,25 +4,38 @@ import { NextRequest, NextResponse } from 'next/server';
  * POST /api/portfolio/ig
  * Body: { apiKey, cst, securityToken, env }
  *
- * Iterates every IG sub-account (SPREADBET, CFD, SHARES…),
- * switches to each one, fetches its positions + working orders,
- * then returns all positions tagged with accountId / accountType.
+ * Uses the tokens exactly as received (already pointing at the correct
+ * account after /api/ig/session handled the SPREADBET switch).
+ * Also fetches the accounts list so the caller knows all sub-accounts.
+ * Returns a `steps` array for diagnostics.
  */
 export async function POST(request: NextRequest) {
+  const steps: string[] = [];
+
   const body = await request.json() as {
     apiKey?: string; cst?: string; securityToken?: string; env?: string;
   };
-  const { apiKey, cst: initCst, securityToken: initSecToken, env = 'demo' } = body;
+  const { apiKey, cst, securityToken, env = 'demo' } = body;
 
-  if (!apiKey || !initCst || !initSecToken) {
-    return NextResponse.json({ ok: false, error: 'Missing IG credentials' }, { status: 400 });
+  steps.push(`[1] env=${env}, apiKey=${apiKey?.slice(0, 8) ?? 'MISSING'}…, CST=${cst ? cst.slice(0, 10) + '…' : 'MISSING'}`);
+
+  if (!apiKey || !cst || !securityToken) {
+    steps.push('[1] ✗ Missing credentials');
+    return NextResponse.json({ ok: false, error: 'Missing IG credentials', steps }, { status: 400 });
   }
 
   const base = env === 'demo'
     ? 'https://demo-api.ig.com/gateway/deal'
     : 'https://api.ig.com/gateway/deal';
 
-  // ── Step 1: Fetch all accounts ────────────────────────────────────────────
+  const commonHeaders = {
+    'X-IG-API-KEY':     apiKey,
+    'CST':              cst,
+    'X-SECURITY-TOKEN': securityToken,
+    'Accept':           'application/json; charset=UTF-8',
+  };
+
+  // ── Step 2: Fetch accounts list ─────────────────────────────────────────
   type IGAccount = {
     accountId: string; accountName: string; accountType: string; preferred: boolean;
     balance: { balance: number; deposit: number; profitLoss: number; available: number };
@@ -30,204 +43,151 @@ export async function POST(request: NextRequest) {
   };
 
   let allAccounts: IGAccount[] = [];
+  steps.push(`[2] GET ${base}/accounts`);
   try {
     const accountsRes = await fetch(`${base}/accounts`, {
-      headers: {
-        'X-IG-API-KEY':     apiKey,
-        'CST':              initCst,
-        'X-SECURITY-TOKEN': initSecToken,
-        'Accept':           'application/json; charset=UTF-8',
-        'Version':          '1',
-      },
+      headers: { ...commonHeaders, 'Version': '1' },
       signal: AbortSignal.timeout(10_000),
     });
+    steps.push(`[2] HTTP ${accountsRes.status}`);
     if (accountsRes.ok) {
       const d = await accountsRes.json() as { accounts?: IGAccount[] };
       allAccounts = d.accounts ?? [];
+      steps.push(`[2] Found ${allAccounts.length} account(s): ${allAccounts.map(a => `${a.accountId}(${a.accountType})`).join(', ')}`);
+    } else {
+      const t = await accountsRes.text().catch(() => '');
+      steps.push(`[2] ✗ Accounts fetch failed: ${t.slice(0, 150)}`);
     }
-  } catch { /* fall through — will try with initCst tokens directly */ }
+  } catch (e) {
+    steps.push(`[2] ✗ Exception: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
-  // ── Step 2: For each account, switch + fetch positions ───────────────────
+  // ── Step 3: Fetch positions using the tokens we received ────────────────
+  // Do NOT switch accounts — the tokens from /api/ig/session are already
+  // pointing at the correct (SPREADBET) account after the login+switch.
+
   type IGRawPos = {
     position?: {
-      dealId?: string; dealReference?: string; size?: number; direction?: string;
-      level?: number; currency?: string; stopLevel?: number; limitLevel?: number;
+      dealId?: string; size?: number; direction?: string; level?: number;
+      currency?: string; stopLevel?: number; limitLevel?: number;
       createdDate?: string; createdDateUTC?: string;
     };
     market?: {
       epic?: string; instrumentName?: string; bid?: number; offer?: number;
-      percentageChange?: number; netChange?: number; instrumentType?: string;
+      percentageChange?: number; instrumentType?: string;
     };
   };
 
   type IGWorkingOrder = {
     workingOrderData?: {
       dealId?: string; direction?: string; size?: number; orderLevel?: number;
-      orderType?: string; currencyCode?: string; goodTillDate?: string | null;
-      createdDate?: string;
+      orderType?: string; currencyCode?: string; goodTillDate?: string | null; createdDate?: string;
     };
-    marketData?: { epic?: string; instrumentName?: string; bid?: number; offer?: number };
+    marketData?: { epic?: string; instrumentName?: string };
   };
 
-  interface NormalisedPosition {
-    dealId: string; direction: string; size: number; level: number;
-    currency: string; stopLevel?: number; limitLevel?: number; createdDate?: string;
-    epic: string; instrumentName: string; bid: number; offer: number;
-    currentPrice: number; upl: number; uplPct: number; instrumentType?: string;
-    accountId: string; accountType: string; accountName: string;
-  }
-
-  interface NormalisedOrder {
-    dealId: string; direction: string; size: number; orderLevel: number;
-    orderType: string; currency: string; createdDate?: string;
-    goodTillDate?: string | null; epic: string; instrumentName: string;
-    accountId: string; accountType: string;
-  }
-
-  const allPositions:    NormalisedPosition[] = [];
-  const allWorkingOrders: NormalisedOrder[]   = [];
-
-  function normalisePositions(raw: IGRawPos[], accountId: string, accountType: string, accountName: string): NormalisedPosition[] {
-    return raw.map((p) => {
-      const direction = p.position?.direction ?? '';
-      const level     = p.position?.level ?? 0;
-      const size      = p.position?.size ?? 0;
-      const bid       = p.market?.bid ?? 0;
-      const offer     = p.market?.offer ?? 0;
-      const curr      = direction === 'BUY' ? bid : offer;
-      const upl       = direction === 'BUY' ? (bid - level) * size : (level - offer) * size;
-      return {
-        dealId:         p.position?.dealId ?? '',
-        direction,
-        size,
-        level,
-        currency:       p.position?.currency ?? 'GBP',
-        stopLevel:      p.position?.stopLevel,
-        limitLevel:     p.position?.limitLevel,
-        createdDate:    p.position?.createdDateUTC ?? p.position?.createdDate,
-        epic:           p.market?.epic ?? '',
-        instrumentName: p.market?.instrumentName ?? '',
-        bid, offer,
-        currentPrice:   curr,
-        upl:            Math.round(upl * 100) / 100,
-        uplPct:         level > 0 ? Math.round((upl / (level * size)) * 10000) / 100 : 0,
-        instrumentType: p.market?.instrumentType,
-        accountId,
-        accountType,
-        accountName,
-      };
+  steps.push(`[3] GET ${base}/positions/otc (Version: 2, using initial tokens — no account switch)`);
+  let rawPositions: IGRawPos[] = [];
+  let rawPosText = '';
+  try {
+    const posRes = await fetch(`${base}/positions/otc`, {
+      headers: { ...commonHeaders, 'Version': '2' },
+      signal: AbortSignal.timeout(10_000),
     });
-  }
-
-  function normaliseOrders(raw: IGWorkingOrder[], accountId: string, accountType: string): NormalisedOrder[] {
-    return raw.map((o) => ({
-      dealId:       o.workingOrderData?.dealId ?? '',
-      direction:    o.workingOrderData?.direction ?? '',
-      size:         o.workingOrderData?.size ?? 0,
-      orderLevel:   o.workingOrderData?.orderLevel ?? 0,
-      orderType:    o.workingOrderData?.orderType ?? '',
-      currency:     o.workingOrderData?.currencyCode ?? 'GBP',
-      createdDate:  o.workingOrderData?.createdDate,
-      goodTillDate: o.workingOrderData?.goodTillDate ?? null,
-      epic:         o.marketData?.epic ?? '',
-      instrumentName: o.marketData?.instrumentName ?? '',
-      accountId,
-      accountType,
-    }));
-  }
-
-  // If we have multiple accounts, iterate each; otherwise just fetch with initial tokens
-  if (allAccounts.length > 0) {
-    let cst           = initCst;
-    let securityToken = initSecToken;
-
-    for (const account of allAccounts) {
-      // Switch to this account
-      try {
-        const switchRes = await fetch(`${base}/session`, {
-          method: 'PUT',
-          headers: {
-            'X-IG-API-KEY':     apiKey,
-            'CST':              cst,
-            'X-SECURITY-TOKEN': securityToken,
-            'Content-Type':     'application/json',
-            'Accept':           'application/json; charset=UTF-8',
-            'Version':          '1',
-          },
-          body: JSON.stringify({ accountId: account.accountId, dealingEnabled: true }),
-          signal: AbortSignal.timeout(8_000),
-        });
-        if (switchRes.ok) {
-          const newCst      = switchRes.headers.get('CST');
-          const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
-          if (newCst)      cst           = newCst;
-          if (newSecToken) securityToken = newSecToken;
-        }
-      } catch { /* continue with current tokens */ }
-
-      const switchedHeaders = {
-        'X-IG-API-KEY':     apiKey,
-        'CST':              cst,
-        'X-SECURITY-TOKEN': securityToken,
-        'Accept':           'application/json; charset=UTF-8',
-      };
-
-      // Fetch positions + working orders in parallel for this account
-      const [posRes, ordersRes] = await Promise.all([
-        fetch(`${base}/positions/otc`, {
-          headers: { ...switchedHeaders, 'Version': '2' },
-          signal: AbortSignal.timeout(10_000),
-        }).catch(() => null),
-        fetch(`${base}/workingorders/otc`, {
-          headers: { ...switchedHeaders, 'Version': '2' },
-          signal: AbortSignal.timeout(10_000),
-        }).catch(() => null),
-      ]);
-
-      if (posRes && posRes.ok) {
-        const d = await posRes.json().catch(() => null) as { positions?: IGRawPos[] } | null;
-        if (d?.positions) {
-          allPositions.push(...normalisePositions(d.positions, account.accountId, account.accountType, account.accountName));
-        }
+    steps.push(`[3] HTTP ${posRes.status}`);
+    rawPosText = await posRes.text().catch(() => '');
+    if (posRes.ok || posRes.status === 200) {
+      const d = JSON.parse(rawPosText) as { positions?: IGRawPos[] };
+      rawPositions = d.positions ?? [];
+      steps.push(`[3] Positions found: ${rawPositions.length}`);
+      rawPositions.slice(0, 3).forEach((p, i) => {
+        steps.push(`[3] pos[${i}]: dealId=${p.position?.dealId ?? '?'} dir=${p.position?.direction ?? '?'} epic=${p.market?.epic ?? '?'}`);
+      });
+      if (rawPositions.length === 0) {
+        steps.push('[3] ⚠ 0 positions. Raw: ' + rawPosText.slice(0, 200));
       }
-      if (ordersRes && ordersRes.ok) {
-        const d = await ordersRes.json().catch(() => null) as { workingOrders?: IGWorkingOrder[] } | null;
-        if (d?.workingOrders) {
-          allWorkingOrders.push(...normaliseOrders(d.workingOrders, account.accountId, account.accountType));
-        }
-      }
+    } else if (posRes.status === 404) {
+      steps.push('[3] 404 — account has no open positions');
+    } else {
+      steps.push(`[3] ✗ Error: ${rawPosText.slice(0, 200)}`);
     }
-  } else {
-    // No accounts list — fetch with initial tokens directly
-    const commonHeaders = {
-      'X-IG-API-KEY':     apiKey,
-      'CST':              initCst,
-      'X-SECURITY-TOKEN': initSecToken,
-      'Accept':           'application/json; charset=UTF-8',
+  } catch (e) {
+    steps.push(`[3] ✗ Exception: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // ── Step 4: Fetch working orders ────────────────────────────────────────
+  steps.push(`[4] GET ${base}/workingorders/otc`);
+  let rawOrders: IGWorkingOrder[] = [];
+  try {
+    const ordRes = await fetch(`${base}/workingorders/otc`, {
+      headers: { ...commonHeaders, 'Version': '2' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    steps.push(`[4] HTTP ${ordRes.status}`);
+    if (ordRes.ok) {
+      const d = await ordRes.json() as { workingOrders?: IGWorkingOrder[] };
+      rawOrders = d.workingOrders ?? [];
+      steps.push(`[4] Working orders: ${rawOrders.length}`);
+    }
+  } catch (e) {
+    steps.push(`[4] ✗ Exception: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // ── Normalise ────────────────────────────────────────────────────────────
+  const positions = rawPositions.map((p) => {
+    const direction = p.position?.direction ?? '';
+    const level     = p.position?.level ?? 0;
+    const size      = p.position?.size ?? 0;
+    const bid       = p.market?.bid ?? 0;
+    const offer     = p.market?.offer ?? 0;
+    const curr      = direction === 'BUY' ? bid : offer;
+    const upl       = direction === 'BUY' ? (bid - level) * size : (level - offer) * size;
+    return {
+      dealId:         p.position?.dealId ?? '',
+      direction,
+      size,
+      level,
+      currency:       p.position?.currency ?? 'GBP',
+      stopLevel:      p.position?.stopLevel,
+      limitLevel:     p.position?.limitLevel,
+      createdDate:    p.position?.createdDateUTC ?? p.position?.createdDate,
+      epic:           p.market?.epic ?? '',
+      instrumentName: p.market?.instrumentName ?? '',
+      bid, offer,
+      currentPrice:   curr,
+      upl:            Math.round(upl * 100) / 100,
+      uplPct:         level > 0 ? Math.round((upl / (level * size)) * 10000) / 100 : 0,
+      instrumentType: p.market?.instrumentType,
+      // Tag with the preferred/active account info
+      accountId:   allAccounts.find(a => a.preferred)?.accountId ?? allAccounts[0]?.accountId ?? '',
+      accountType: allAccounts.find(a => a.preferred)?.accountType ?? allAccounts[0]?.accountType ?? '',
+      accountName: allAccounts.find(a => a.preferred)?.accountName ?? allAccounts[0]?.accountName ?? '',
     };
-    const [posRes, ordersRes] = await Promise.all([
-      fetch(`${base}/positions/otc`, { headers: { ...commonHeaders, 'Version': '2' }, signal: AbortSignal.timeout(10_000) }).catch(() => null),
-      fetch(`${base}/workingorders/otc`, { headers: { ...commonHeaders, 'Version': '2' }, signal: AbortSignal.timeout(10_000) }).catch(() => null),
-    ]);
-    if (posRes && posRes.ok) {
-      const d = await posRes.json().catch(() => null) as { positions?: IGRawPos[] } | null;
-      if (d?.positions) allPositions.push(...normalisePositions(d.positions, 'default', 'UNKNOWN', 'IG Account'));
-    }
-    if (ordersRes && ordersRes.ok) {
-      const d = await ordersRes.json().catch(() => null) as { workingOrders?: IGWorkingOrder[] } | null;
-      if (d?.workingOrders) allWorkingOrders.push(...normaliseOrders(d.workingOrders, 'default', 'UNKNOWN'));
-    }
-  }
+  });
 
-  // ── Step 3: Preferred account summary ────────────────────────────────────
-  const preferred = allAccounts.find(a => a.preferred) ?? allAccounts[0] ?? null;
-  const totalUpl   = allPositions.reduce((s, p) => s + p.upl, 0);
+  const workingOrders = rawOrders.map((o) => ({
+    dealId:         o.workingOrderData?.dealId ?? '',
+    direction:      o.workingOrderData?.direction ?? '',
+    size:           o.workingOrderData?.size ?? 0,
+    orderLevel:     o.workingOrderData?.orderLevel ?? 0,
+    orderType:      o.workingOrderData?.orderType ?? '',
+    currency:       o.workingOrderData?.currencyCode ?? 'GBP',
+    createdDate:    o.workingOrderData?.createdDate,
+    goodTillDate:   o.workingOrderData?.goodTillDate ?? null,
+    epic:           o.marketData?.epic ?? '',
+    instrumentName: o.marketData?.instrumentName ?? '',
+  }));
+
+  const preferred  = allAccounts.find(a => a.preferred) ?? allAccounts[0] ?? null;
+  const totalUpl   = positions.reduce((s, p) => s + p.upl, 0);
+
+  steps.push(`[5] Done — returning ${positions.length} positions, ${workingOrders.length} orders`);
 
   return NextResponse.json({
     ok: true,
-    positions:     allPositions,
-    workingOrders: allWorkingOrders,
-    accounts:      allAccounts,
+    positions,
+    workingOrders,
+    accounts:  allAccounts,
     activeAccount: preferred ? {
       balance:     preferred.balance?.balance    ?? 0,
       available:   preferred.balance?.available  ?? 0,
@@ -237,9 +197,11 @@ export async function POST(request: NextRequest) {
       accountType: preferred.accountType,
     } : null,
     summary: {
-      positionCount:  allPositions.length,
-      workingOrders:  allWorkingOrders.length,
+      positionCount:  positions.length,
+      workingOrders:  workingOrders.length,
       totalUpl,
     },
+    steps,
+    rawPositionsResponse: rawPosText.slice(0, 1000),
   });
 }

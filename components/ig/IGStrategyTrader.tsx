@@ -237,6 +237,67 @@ function calibrateSignal(
   return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
 }
 
+// ── Trade history ─────────────────────────────────────────────────────────────
+
+const IG_TRADE_HISTORY_KEY = 'ig_trade_history';
+
+export interface IGTradeRecord {
+  id:            string;
+  portfolioName: string;
+  market:        string;
+  epic:          string;
+  direction:     'BUY' | 'SELL';
+  size:          number;
+  entryLevel:    number;
+  exitLevel:     number | null;
+  openedAt:      string;
+  closedAt:      string | null;
+  status:        'OPEN' | 'CLOSED' | 'REJECTED';
+  dealReference: string;
+  dealId:        string;
+  pnl:           number | null;
+  closeReason:   'STOP_LOSS' | 'TAKE_PROFIT' | 'MANUAL' | 'STRATEGY' | 'STALE' | null;
+  accountType:   'demo' | 'live';
+}
+
+function loadIGTradeHistory(): IGTradeRecord[] {
+  try {
+    const raw = typeof window !== 'undefined' ? localStorage.getItem(IG_TRADE_HISTORY_KEY) : null;
+    if (!raw) return [];
+    return JSON.parse(raw) as IGTradeRecord[];
+  } catch { return []; }
+}
+
+function saveIGTradeHistory(records: IGTradeRecord[]): void {
+  try { localStorage.setItem(IG_TRADE_HISTORY_KEY, JSON.stringify(records.slice(0, 500))); } catch {}
+}
+
+function recordTradeOpen(
+  prev: IGTradeRecord[],
+  rec: Omit<IGTradeRecord, 'id'>,
+): IGTradeRecord[] {
+  const next = [{ ...rec, id: Date.now().toString() }, ...prev];
+  saveIGTradeHistory(next);
+  return next;
+}
+
+function recordTradeClose(
+  prev: IGTradeRecord[],
+  dealId: string,
+  exitLevel: number,
+  pnl: number,
+  closeReason: IGTradeRecord['closeReason'],
+  closedAt: string,
+): IGTradeRecord[] {
+  const next = prev.map(r =>
+    (r.dealId === dealId || (r.dealId === '' && r.status === 'OPEN')) && r.status === 'OPEN'
+      ? { ...r, exitLevel, pnl, closeReason, closedAt, status: 'CLOSED' as const }
+      : r
+  );
+  saveIGTradeHistory(next);
+  return next;
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function IGStrategyTrader() {
@@ -309,8 +370,11 @@ export function IGStrategyTrader() {
   const [updatingPos, setUpdatingPos] = useState<string|null>(null);
   const [reversingPos, setReversingPos] = useState<string|null>(null);
 
-  // ── Tab (positions vs working orders) ─────────────────────────────────────
-  const [posTab, setPosTab] = useState<'positions'|'orders'>('positions');
+  // ── Tab (positions / working orders / trade history) ──────────────────────
+  const [posTab, setPosTab] = useState<'positions'|'orders'|'history'>('positions');
+
+  // ── Trade history ──────────────────────────────────────────────────────────
+  const [tradeHistory, setTradeHistory] = useState<IGTradeRecord[]>([]);
 
   // ── Builder ────────────────────────────────────────────────────────────────
   const [showBuilder, setShowBuilder]       = useState(false);
@@ -364,6 +428,7 @@ export function IGStrategyTrader() {
   // ── Connect on mount ───────────────────────────────────────────────────────
   useEffect(() => {
     setStrategies(loadStrategies());
+    setTradeHistory(loadIGTradeHistory());
     liveTradeAckedRef.current = localStorage.getItem('ig_live_first_trade_ack') === '1';
     const savedMode = localStorage.getItem('ig_active_mode') as 'demo'|'live'|null;
     (['demo','live'] as const).forEach(env => {
@@ -713,8 +778,11 @@ export function IGStrategyTrader() {
           for (const opp of envPos.filter(p => p.epic === market.epic && p.direction === opposite)) {
             log('close', `[${env.toUpperCase()}] Auto-closing ${opp.direction} ${market.name} — signal reversed`);
             const cr = await closePos(env, opp);
-            if (cr.ok) log('close', `[${env.toUpperCase()}] ✅ Closed ${market.name}`);
-            else log('error', `[${env.toUpperCase()}] Close failed: ${cr.error ?? 'unknown'}`);
+            if (cr.ok) {
+              log('close', `[${env.toUpperCase()}] ✅ Closed ${market.name}`);
+              const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
+              setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, opp.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+            } else log('error', `[${env.toUpperCase()}] Close failed: ${cr.error ?? 'unknown'}`);
           }
           await loadPositions(env);
         }
@@ -760,6 +828,8 @@ export function IGStrategyTrader() {
             const cr = await closePos(env, worst);
             if (cr.ok) {
               log('close', `[${env.toUpperCase()}] ✅ Freed capital by closing ${worst.instrumentName ?? worst.epic}`);
+              const exitPx = worst.direction === 'BUY' ? (worst.bid ?? worst.level) : (worst.offer ?? worst.level);
+              setTradeHistory(prev => recordTradeClose(prev, worst.dealId, exitPx, worst.upl ?? 0, 'STRATEGY', new Date().toISOString()));
               await loadPositions(env);
               // Refresh funds after close
               await fetchIGFunds(env);
@@ -777,6 +847,14 @@ export function IGStrategyTrader() {
           log(tradeDir === 'BUY' ? 'buy' : 'sell',
             `[${env.toUpperCase()}] ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · filled @ ${or.level ?? '?'} · epic: ${or.epic ?? market.epic}`);
           showToast(true, `[${env}] ${tradeDir} ${market.name}`);
+          // Record open trade in history
+          setTradeHistory(prev => recordTradeOpen(prev, {
+            portfolioName: strat.name, market: market.name, epic: market.epic,
+            direction: tradeDir, size: orderSize, entryLevel: or.level ?? 0,
+            exitLevel: null, openedAt: new Date().toISOString(), closedAt: null,
+            status: 'OPEN', dealReference: or.dealReference ?? '', dealId: or.dealId ?? '',
+            pnl: null, closeReason: null, accountType: env,
+          }));
           // Small delay then refresh so IG has time to register the position
           await sleep(1500);
           await loadPositions(env);
@@ -793,6 +871,14 @@ export function IGStrategyTrader() {
           log('error', `  epic: ${or.epic ?? market.epic}${or.reason ? ` | reason: ${or.reason}` : ''}`);
           if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
           if (or.igBody)      log('error', `  ig:   ${JSON.stringify(or.igBody)}`);
+          // Record rejected trade
+          setTradeHistory(prev => recordTradeOpen(prev, {
+            portfolioName: strat.name, market: market.name, epic: market.epic,
+            direction: tradeDir, size: orderSize, entryLevel: 0,
+            exitLevel: null, openedAt: new Date().toISOString(), closedAt: new Date().toISOString(),
+            status: 'REJECTED', dealReference: '', dealId: '',
+            pnl: null, closeReason: null, accountType: env,
+          }));
         }
       }
     }
@@ -854,8 +940,11 @@ export function IGStrategyTrader() {
           if (ageMs > 48 * 3_600_000 && Math.abs(pnlPct) < 0.5) {
             log('close', `[${env.toUpperCase()}] ♻️ Recycling stale position: ${pos.instrumentName ?? pos.epic} (${ageMs > 86_400_000 ? Math.floor(ageMs / 86_400_000) + 'd' : Math.floor(ageMs / 3_600_000) + 'h'} open, ${pnlPct.toFixed(2)}% P&L)`);
             const cr = await closePos(env, pos);
-            if (cr.ok) log('close', `[${env.toUpperCase()}] ✅ Stale position recycled — capital freed`);
-            else log('error', `[${env.toUpperCase()}] Recycle close failed: ${cr.error ?? 'unknown'}`);
+            if (cr.ok) {
+              log('close', `[${env.toUpperCase()}] ✅ Stale position recycled — capital freed`);
+              const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STALE', new Date().toISOString()));
+            } else log('error', `[${env.toUpperCase()}] Recycle close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
         }
@@ -1147,6 +1236,8 @@ export function IGStrategyTrader() {
     if (r.ok) {
       log('close', `[${env.toUpperCase()}] Closed ${pos.direction} ${pos.instrumentName ?? pos.epic}`);
       showToast(true, 'Position closed');
+      const exitPx = pos.direction === 'BUY' ? (pos.bid ?? pos.level) : (pos.offer ?? pos.level);
+      setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'MANUAL', new Date().toISOString()));
       await loadPositions(env);
       await loadWorkingOrders(env);
     } else showToast(false, r.error ?? 'Close failed');
@@ -1201,6 +1292,13 @@ export function IGStrategyTrader() {
       log(manualDir === 'BUY' ? 'buy' : 'sell',
         `[${manualEnv.toUpperCase()}] Manual ${manualDir} £${manualSize}/pt ${manualName || manualEpic} — ${r.dealStatus ?? 'ACCEPTED'} · ref ${r.dealReference ?? 'n/a'} · dealId ${r.dealId ?? 'pending'}`);
       showToast(true, `${manualDir} placed on ${manualName || manualEpic}`);
+      setTradeHistory(prev => recordTradeOpen(prev, {
+        portfolioName: 'Manual', market: manualName || manualEpic, epic: manualEpic,
+        direction: manualDir, size: manualSize, entryLevel: r.level ?? 0,
+        exitLevel: null, openedAt: new Date().toISOString(), closedAt: null,
+        status: 'OPEN', dealReference: r.dealReference ?? '', dealId: r.dealId ?? '',
+        pnl: null, closeReason: null, accountType: manualEnv,
+      }));
       await sleep(1500);
       await loadPositions(manualEnv);
     } else {
@@ -1933,23 +2031,24 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── Positions + Working Orders ─────────────────────────────────── */}
+      {/* ── Positions + Working Orders + Trade History ──────────────────── */}
       <Card>
         {/* Tab bar */}
-        <div className="flex items-center gap-0.5 mb-4 bg-gray-800/50 rounded-lg p-1 w-fit">
-          {(['positions','orders'] as const).map(tab => {
-            const count = tab === 'positions' ? allPositions.length : [...workingOrders.demo, ...workingOrders.live].length;
-            return (
-              <button key={tab} onClick={() => setPosTab(tab)}
-                className={clsx('px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5',
-                  posTab === tab ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
-                )}>
-                {tab === 'positions' ? <BarChart3 className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
-                {tab === 'positions' ? 'Positions' : 'Working Orders'}
-                {count > 0 && <span className={clsx('text-[9px] px-1 rounded-full', posTab===tab ? 'bg-orange-500/30 text-orange-300' : 'bg-gray-700 text-gray-500')}>{count}</span>}
-              </button>
-            );
-          })}
+        <div className="flex items-center gap-0.5 mb-4 bg-gray-800/50 rounded-lg p-1 w-fit flex-wrap">
+          {([
+            { id: 'positions' as const, label: 'Positions',      icon: <BarChart3 className="h-3 w-3" />, count: allPositions.length },
+            { id: 'orders'   as const, label: 'Working Orders',  icon: <Clock className="h-3 w-3" />,    count: [...workingOrders.demo, ...workingOrders.live].length },
+            { id: 'history'  as const, label: 'Trade History',   icon: <Activity className="h-3 w-3" />, count: tradeHistory.length },
+          ]).map(({ id, label, icon, count }) => (
+            <button key={id} onClick={() => setPosTab(id)}
+              className={clsx('px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5',
+                posTab === id ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
+              )}>
+              {icon}
+              {label}
+              {count > 0 && <span className={clsx('text-[9px] px-1 rounded-full', posTab===id ? 'bg-orange-500/30 text-orange-300' : 'bg-gray-700 text-gray-500')}>{count}</span>}
+            </button>
+          ))}
           <button onClick={() => { void loadPositions(); void loadWorkingOrders(); }}
             className="ml-1 p-1.5 text-gray-600 hover:text-white transition-colors" title="Refresh">
             <RefreshCw className={clsx('h-3 w-3', loadingPos && 'animate-spin')} />
@@ -2038,6 +2137,113 @@ export function IGStrategyTrader() {
             )}
           </>
         )}
+
+        {/* Trade History tab */}
+        {posTab === 'history' && (() => {
+          const closed   = tradeHistory.filter(r => r.status === 'CLOSED');
+          const wins     = closed.filter(r => (r.pnl ?? 0) > 0);
+          const losses   = closed.filter(r => (r.pnl ?? 0) < 0);
+          const totalPnLH = closed.reduce((s, r) => s + (r.pnl ?? 0), 0);
+          const winRate  = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
+          const avgWin   = wins.length   > 0 ? wins.reduce((s, r) => s + (r.pnl ?? 0), 0) / wins.length : 0;
+          const avgLoss  = losses.length > 0 ? losses.reduce((s, r) => s + (r.pnl ?? 0), 0) / losses.length : 0;
+          const bestPnL  = closed.length > 0 ? Math.max(...closed.map(r => r.pnl ?? 0)) : 0;
+          const worstPnL = closed.length > 0 ? Math.min(...closed.map(r => r.pnl ?? 0)) : 0;
+          return (
+            <>
+              {/* Stats */}
+              {tradeHistory.length > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+                  {[
+                    { label: 'Total Trades', value: tradeHistory.length.toString() },
+                    { label: 'Win Rate',     value: closed.length > 0 ? `${winRate}%` : '—', color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
+                    { label: 'Total P&L',    value: `${totalPnLH >= 0 ? '+' : ''}£${Math.abs(totalPnLH).toFixed(2)}`, color: totalPnLH >= 0 ? 'text-emerald-400' : 'text-red-400' },
+                    { label: 'Avg Win',      value: avgWin  > 0 ? `+£${avgWin.toFixed(2)}`  : '—', color: 'text-emerald-400' },
+                    { label: 'Avg Loss',     value: avgLoss < 0 ? `-£${Math.abs(avgLoss).toFixed(2)}` : '—', color: 'text-red-400' },
+                    { label: 'Best Trade',   value: bestPnL  > 0 ? `+£${bestPnL.toFixed(2)}`  : '—', color: 'text-emerald-400' },
+                    { label: 'Worst Trade',  value: worstPnL < 0 ? `-£${Math.abs(worstPnL).toFixed(2)}` : '—', color: 'text-red-400' },
+                    { label: 'Open',         value: tradeHistory.filter(r=>r.status==='OPEN').length.toString() },
+                  ].map(s => (
+                    <div key={s.label} className="bg-gray-800/40 rounded-lg px-3 py-2">
+                      <p className="text-[9px] text-gray-500 uppercase tracking-wider">{s.label}</p>
+                      <p className={clsx('text-sm font-bold tabular-nums', s.color ?? 'text-white')}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Clear button */}
+              {tradeHistory.length > 0 && (
+                <div className="flex justify-end mb-3">
+                  <button
+                    onClick={() => { if (confirm('Clear all trade history?')) { setTradeHistory([]); saveIGTradeHistory([]); } }}
+                    className="text-[10px] text-gray-600 hover:text-red-400 transition-colors"
+                  >
+                    Clear history
+                  </button>
+                </div>
+              )}
+
+              {tradeHistory.length === 0 ? (
+                <p className="text-sm text-gray-500 py-6 text-center">No trades recorded yet — run a strategy to start building history</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="border-b border-gray-800">
+                        {['Opened', 'Strategy', 'Market', 'Dir', 'Size', 'Entry', 'Exit', 'P&L', 'Status', 'Reason', 'Ref'].map(h => (
+                          <th key={h} className="px-2 py-2 text-[9px] text-gray-500 font-medium uppercase tracking-wider whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tradeHistory.map(r => (
+                        <tr key={r.id} className="border-t border-gray-800/50 hover:bg-gray-800/20 text-xs">
+                          <td className="px-2 py-2 text-[10px] text-gray-500 whitespace-nowrap">
+                            {new Date(r.openedAt).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}
+                          </td>
+                          <td className="px-2 py-2 text-[10px] text-gray-400 max-w-[80px] truncate">{r.portfolioName}</td>
+                          <td className="px-2 py-2">
+                            <p className="text-white font-medium truncate max-w-[100px]">{r.market}</p>
+                            <p className="text-[9px] text-gray-600 font-mono">{r.epic}</p>
+                          </td>
+                          <td className="px-2 py-2">
+                            <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded',
+                              r.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                            )}>{r.direction}</span>
+                          </td>
+                          <td className="px-2 py-2 text-gray-300 tabular-nums">£{r.size}</td>
+                          <td className="px-2 py-2 text-gray-300 tabular-nums">{r.entryLevel > 0 ? r.entryLevel.toLocaleString() : '—'}</td>
+                          <td className="px-2 py-2 text-gray-300 tabular-nums">
+                            {r.exitLevel != null ? r.exitLevel.toLocaleString() : <span className="text-blue-400">Open</span>}
+                          </td>
+                          <td className="px-2 py-2">
+                            {r.pnl != null ? (
+                              <span className={clsx('font-semibold tabular-nums', r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                                {r.pnl >= 0 ? '+' : ''}£{Math.abs(r.pnl).toFixed(2)}
+                              </span>
+                            ) : <span className="text-gray-600">—</span>}
+                          </td>
+                          <td className="px-2 py-2">
+                            <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded',
+                              r.status === 'OPEN'     ? 'bg-blue-500/20 text-blue-400' :
+                              r.status === 'CLOSED'   ? 'bg-gray-700 text-gray-300' :
+                              'bg-red-500/20 text-red-400'
+                            )}>{r.status}</span>
+                          </td>
+                          <td className="px-2 py-2 text-[10px] text-gray-500">
+                            {r.closeReason ? r.closeReason.replace('_', ' ') : '—'}
+                          </td>
+                          <td className="px-2 py-2 text-[9px] text-gray-600 font-mono truncate max-w-[70px]">{r.dealReference || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          );
+        })()}
       </Card>
 
       {/* ── Activity Log ────────────────────────────────────────────────── */}
