@@ -46,11 +46,12 @@ export type EpicEntry = {
 
 export const EPIC_TABLE: EpicEntry[] = [
   // ── Indices ──────────────────────────────────────────────────────────────────
-  // Spread-bet accounts use CS.D.* rolling "TODAY" epics; CFD accounts use IX.D.*.CFD.IP
-  { name: 'FTSE 100',   spreadbet: 'CS.D.FTSE.TODAY.IP',   cfd: 'IX.D.FTSE.CFD.IP',   marketType: 'INDEX' },
+  // Spread-bet: use IX.D.*.DAILY.IP (DFB rolling instruments for UK SB accounts)
+  // CFD:        use IX.D.*.CFD.IP
+  { name: 'FTSE 100',   spreadbet: 'IX.D.FTSE.DAILY.IP',   cfd: 'IX.D.FTSE.CFD.IP',   marketType: 'INDEX' },
   { name: 'S&P 500',    spreadbet: 'IX.D.SPTRD.DAILY.IP',  cfd: 'IX.D.SPTRD.CFD.IP',  marketType: 'INDEX' },
-  { name: 'NASDAQ 100', spreadbet: 'CS.D.NDAQ.TODAY.IP',   cfd: 'IX.D.NASDAQ.CFD.IP', marketType: 'INDEX' },
-  { name: 'Dow Jones',  spreadbet: 'CS.D.DOW.TODAY.IP',    cfd: 'IX.D.DOW.CFD.IP',    marketType: 'INDEX' },
+  { name: 'NASDAQ 100', spreadbet: 'IX.D.NASDAQ.DAILY.IP', cfd: 'IX.D.NASDAQ.CFD.IP', marketType: 'INDEX' },
+  { name: 'Dow Jones',  spreadbet: 'IX.D.DOW.DAILY.IP',    cfd: 'IX.D.DOW.CFD.IP',    marketType: 'INDEX' },
   { name: 'Germany 40', spreadbet: 'IX.D.DAX.DAILY.IP',    cfd: 'IX.D.DAX.CFD.IP',    marketType: 'INDEX' },
   { name: 'Japan 225',  spreadbet: 'IX.D.NIKKEI.DAILY.IP', cfd: 'IX.D.NIKKEI.CFD.IP', marketType: 'INDEX' },
   // ── Forex ─────────────────────────────────────────────────────────────────────

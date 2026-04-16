@@ -50,6 +50,37 @@ function baseUrl(env: 'demo' | 'live') {
 }
 
 /**
+ * Determine the correct currency for an IG order from the epic alone.
+ * This is the authoritative fallback — always correct regardless of what the client sends.
+ *
+ * US stock CFDs: UA.D.* → USD
+ * FTSE index:    IX.D.FTSE.* → GBP
+ * Other indices: IX.D.* → USD (S&P, NASDAQ, Dow, DAX etc.)
+ * FX:            CS.D.*USD* or matching pair → pair currency
+ * Gold/Oil/Commodities: USD
+ * All others: GBP
+ */
+function currencyForEpic(epic: string, clientCurrency?: string): string {
+  // If client explicitly sent a non-GBP currency, trust it
+  if (clientCurrency && clientCurrency !== 'GBP') return clientCurrency;
+  // US stock CFD: always USD
+  if (epic.startsWith('UA.D.')) return 'USD';
+  // FTSE: GBP
+  if (epic.startsWith('IX.D.FTSE')) return 'GBP';
+  // Other IG indices (S&P, NASDAQ, DOW, DAX, NIKKEI): USD for the margin currency
+  if (epic.startsWith('IX.D.')) return 'USD';
+  // Gold, Oil, Silver, commodities: USD
+  if (epic.includes('GOLD') || epic.includes('SILVER') || epic.includes('OILCRUD') ||
+      epic.includes('CRUDEOIL') || epic.includes('NATGAS') || epic.includes('BITCOIN')) return 'USD';
+  // FX pairs: use quote currency (second currency in pair)
+  if (epic.includes('GBPUSD') || epic.includes('EURUSD') || epic.includes('AUDUSD')) return 'USD';
+  if (epic.includes('USDJPY') || epic.includes('USDCHF') || epic.includes('USDCAD')) return 'USD';
+  if (epic.includes('EURGBP')) return 'GBP';
+  // Fall back to client value or GBP
+  return clientCurrency ?? 'GBP';
+}
+
+/**
  * CFD positions use expiry '-' (rolling / no expiry).
  * Spread-bet DFB positions use expiry 'DFB'.
  * Sending 'DFB' to a CFD account causes EXPIRY_NOT_SUPPORTED rejection.
@@ -146,8 +177,8 @@ export async function POST(request: NextRequest) {
       trailingStop:  false,
       forceOpen:     body.forceOpen ?? true,
     };
-    // currencyCode is required for ALL order types (both CFD and spread-bet)
-    payload.currencyCode = body.currencyCode ?? 'GBP';
+    // currencyCode: derive from epic (authoritative) with client value as hint
+    payload.currencyCode = currencyForEpic(resolvedEpic, body.currencyCode);
 
     console.log(`[ig/order] POST → ${env} ${resolvedEpic} (via ${resolvedVia})`, JSON.stringify(payload));
 
@@ -207,29 +238,40 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Apply SL/TP via separate PUT after deal is confirmed ACCEPTED ─────────
-    // (Including these in the initial order causes rejections on some accounts)
-    // CFD: use absolute price levels directly. Spread-bet: convert point distances to levels.
+    // CFD:        use stopLevel / limitLevel (absolute price levels) — NEVER distance fields
+    // Spread-bet: use stopDistance / profitDistance converted to levels from fill price
     let slTpResult: { ok: boolean; error?: string } = { ok: true };
-    const hasSl = body.stopLevel  !== undefined || body.stopDistance  !== undefined;
-    const hasTp = body.limitLevel !== undefined || body.profitDistance !== undefined;
+    const isCfdOrder = isCfd; // already computed above
+    const hasSl = isCfdOrder
+      ? body.stopLevel  !== undefined
+      : (body.stopLevel !== undefined || body.stopDistance !== undefined);
+    const hasTp = isCfdOrder
+      ? body.limitLevel !== undefined
+      : (body.limitLevel !== undefined || body.profitDistance !== undefined);
     if (confirm.dealId && (hasSl || hasTp)) {
       const fillPrice = confirm.level ?? 0;
       const slTpPayload: Record<string, unknown> = { trailingStop: false };
-      // Stop loss — prefer absolute level; fall back to distance conversion
-      if (body.stopLevel !== undefined) {
-        slTpPayload.stopLevel = body.stopLevel;
-      } else if (body.stopDistance && fillPrice) {
-        slTpPayload.stopLevel = Math.round(
-          (body.direction === 'BUY' ? fillPrice - body.stopDistance : fillPrice + body.stopDistance) * 100,
-        ) / 100;
-      }
-      // Take profit — prefer absolute level; fall back to distance conversion
-      if (body.limitLevel !== undefined) {
-        slTpPayload.limitLevel = body.limitLevel;
-      } else if (body.profitDistance && fillPrice) {
-        slTpPayload.limitLevel = Math.round(
-          (body.direction === 'BUY' ? fillPrice + body.profitDistance : fillPrice - body.profitDistance) * 100,
-        ) / 100;
+
+      if (isCfdOrder) {
+        // CFD: absolute levels only — stopDistance/profitDistance are spread-bet fields
+        if (body.stopLevel  !== undefined) slTpPayload.stopLevel  = body.stopLevel;
+        if (body.limitLevel !== undefined) slTpPayload.limitLevel = body.limitLevel;
+      } else {
+        // Spread-bet: prefer absolute level if sent; otherwise convert distance to level
+        if (body.stopLevel !== undefined) {
+          slTpPayload.stopLevel = body.stopLevel;
+        } else if (body.stopDistance && fillPrice) {
+          slTpPayload.stopLevel = Math.round(
+            (body.direction === 'BUY' ? fillPrice - body.stopDistance : fillPrice + body.stopDistance) * 100,
+          ) / 100;
+        }
+        if (body.limitLevel !== undefined) {
+          slTpPayload.limitLevel = body.limitLevel;
+        } else if (body.profitDistance && fillPrice) {
+          slTpPayload.limitLevel = Math.round(
+            (body.direction === 'BUY' ? fillPrice + body.profitDistance : fillPrice - body.profitDistance) * 100,
+          ) / 100;
+        }
       }
       console.log(`[ig/order] SL/TP PUT for ${confirm.dealId}:`, JSON.stringify(slTpPayload));
       try {

@@ -1485,13 +1485,18 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     let sess = await freshSession();
     if (!sess) return { ok:false, error:`No ${env} session`, epic };
 
-    // CFD uses absolute price levels; spread-bet uses point distances
+    // CFD uses absolute price levels (stopLevel/limitLevel) — never distance fields
+    // Spread-bet uses stopDistance/profitDistance
+    const isCfdEpicLocal = epic.startsWith('UA.D.') || epic.includes('.CFD.IP');
     const orderBody: Record<string, unknown> = { epic, direction, size };
-    if (currencyCode)              orderBody.currencyCode  = currencyCode;
-    if (stopLevel  !== undefined)  orderBody.stopLevel    = stopLevel;
-    if (limitLevel !== undefined)  orderBody.limitLevel   = limitLevel;
-    if (stopDist   !== undefined)  orderBody.stopDistance  = stopDist;
-    if (limitDist  !== undefined)  orderBody.profitDistance = limitDist;
+    if (currencyCode)              orderBody.currencyCode   = currencyCode;
+    if (stopLevel  !== undefined)  orderBody.stopLevel      = stopLevel;
+    if (limitLevel !== undefined)  orderBody.limitLevel     = limitLevel;
+    if (!isCfdEpicLocal) {
+      // Spread-bet only: point-distance fields
+      if (stopDist  !== undefined) orderBody.stopDistance   = stopDist;
+      if (limitDist !== undefined) orderBody.profitDistance = limitDist;
+    }
     let activeSess: IGSession = sess;
     let r = await igQueue.enqueue(() => fetch('/api/ig/order', {
       method:'POST',
@@ -1926,16 +1931,27 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       }
       log('info', `[EXEC] Market price: bid/offer fetch for ${actualEpic} → ${currentPx > 0 ? currentPx.toFixed(4) : 'UNKNOWN — will use fallback'}`);
 
-      // 2. ATR-based stop/limit as absolute price levels
-      const atr = data.atr14 ?? (stopDist / 1.5);  // derive ATR from distance if not stored
-      if (currentPx > 0 && atr > 0) {
-        const sl = tradeDir === 'BUY' ? currentPx - atr * 1.5 : currentPx + atr * 1.5;
-        const tp = tradeDir === 'BUY' ? currentPx + atr * 3.0 : currentPx - atr * 3.0;
-        cfdStopLvl  = Math.round(sl * 100) / 100;
+      // 2. Compute stop/limit as absolute price levels — always required for CFD
+      if (currentPx > 0) {
+        const atr = (data.atr14 && data.atr14 > 0) ? data.atr14 : null;
+        let stopOffset: number;
+        let limitOffset: number;
+        if (atr) {
+          // ATR-based: 1.5× stop, 3× target (preferred)
+          stopOffset  = atr * 1.5;
+          limitOffset = atr * 3.0;
+        } else {
+          // Percentage fallback: 2% stop, 4% target
+          stopOffset  = currentPx * 0.02;
+          limitOffset = currentPx * 0.04;
+        }
+        const sl = tradeDir === 'BUY' ? currentPx - stopOffset : currentPx + stopOffset;
+        const tp = tradeDir === 'BUY' ? currentPx + limitOffset : currentPx - limitOffset;
+        cfdStopLvl  = Math.round(sl  * 100) / 100;
         cfdLimitLvl = Math.round(tp * 100) / 100;
-        log('info', `[EXEC] Stop level: ${cfdStopLvl} | Limit level: ${cfdLimitLvl} (ATR=${atr.toFixed(4)})`);
+        log('info', `[EXEC] Stop level: ${cfdStopLvl} | Limit level: ${cfdLimitLvl} (${atr ? `ATR=${atr.toFixed(4)}` : '2%/4% fallback'})`);
       } else {
-        log('info', `[EXEC] No price/ATR — SL/TP levels omitted from order`);
+        log('info', `[EXEC] No price available — SL/TP omitted (order will still be sent without levels)`);
       }
 
       // 3. Unit-based sizing
