@@ -103,23 +103,27 @@ function fmtTime(iso: string) {
   return new Date(iso).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
 }
 
+// riskPct: fraction of available to risk per trade (default 2%)
+// totalBalance: used to cap any single trade at 5% of total equity (pass 0 to skip cap)
 function calcRiskBasedSize(
   available: number,
   stopDist: number,
   acctType: 'CFD' | 'SPREADBET',
   requestedSize: number,
   sizeMultiplier = 1.0,
+  riskPct = 0.02,
+  totalBalance = 0,
 ): number {
   if (available < 100) return 0;
   let size: number;
   if (acctType === 'CFD') {
-    // 2% risk rule: size = (balance × 0.02) / stopDistance
-    const riskAmount = available * 0.02;
-    size = stopDist > 0 ? riskAmount / stopDist : requestedSize;
+    const riskAmount = available * riskPct;
+    // Never risk more than 5% of total balance on one trade
+    const cappedRisk = totalBalance > 0 ? Math.min(riskAmount, totalBalance * 0.05) : riskAmount;
+    size = stopDist > 0 ? cappedRisk / stopDist : requestedSize;
   } else {
-    // Spread-bet: £/pt proportional to available balance
     if (available < 500) return 0.1;
-    const pctBased = Math.floor((available * 0.05) * 10) / 10;
+    const pctBased = Math.floor((available * Math.min(riskPct * 2.5, 0.05)) * 10) / 10;
     size = Math.min(requestedSize, Math.max(0.1, pctBased));
   }
   size *= sizeMultiplier;
@@ -301,10 +305,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   // ── Funds ──────────────────────────────────────────────────────────────────
   const igFundsRef = useRef<{available:number;balance:number}|null>(null);
   const [igFundsDisplay, setIgFundsDisplay] = useState<{available:number;balance:number}|null>(null);
+  // Snapshot of balance at strategy start — used for fund-level-based sizing and pause logic
+  const startingBalanceRef = useRef<number>(0);
 
   // ── Timers ─────────────────────────────────────────────────────────────────
-  const [signalScanMs, setSignalScanMs] = useState(5 * 60_000);
-  const [posMonitorMs, setPosMonitorMs] = useState(60_000);
+  const [signalScanMs, setSignalScanMs] = useState(60_000);    // default 60s
+  const [posMonitorMs, setPosMonitorMs] = useState(30_000);    // default 30s
   const signalStartRef = useRef<number|null>(null);
   const posStartRef    = useRef<number|null>(null);
   const [signalCountdown, setSignalCountdown] = useState('');
@@ -333,12 +339,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const [bName, setBName]                 = useState('');
   const [bTimeframe, setBTimeframe]       = useState<Timeframe>('daily');
   const [bSize, setBSize]                 = useState(1);
-  const [bMaxPos, setBMaxPos]             = useState(3);
+  const [bMaxPos, setBMaxPos]             = useState(0);        // 0 = unlimited
   const [bMinStrength, setBMinStrength]   = useState(55);
   const [bAutoClose, setBAutoClose]       = useState(true);
   const [bWatchlist, setBWatchlist]       = useState<WatchlistMarket[]>([...defaultWatchlist]);
-  const [bSignalScanMs, setBSignalScanMs] = useState(5 * 60_000);
-  const [bPosMonitorMs, setBPosMonitorMs] = useState(60_000);
+  const [bSignalScanMs, setBSignalScanMs] = useState(60_000);   // default 60s
+  const [bPosMonitorMs, setBPosMonitorMs] = useState(30_000);   // default 30s
 
   // ── Dynamic market navigator (CFD) ────────────────────────────────────────
   type IGNavNode    = { id: string; name: string };
@@ -1212,23 +1218,33 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     setReversingPos(null);
   }
 
-  // ── Scan one market ────────────────────────────────────────────────────────
-  async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
+  // ── Signal data type (result of getSignal — no side-effects, safe to call in parallel) ──
+  type SignalData = {
+    market: WatchlistMarket;
+    sig: StrategySignal;
+    resolvedEpic: string;
+    stopDist: number;
+    limitDist: number;
+    scanChange: number;
+    direction: 'BUY'|'SELL'|'HOLD';
+    strength: number;
+  };
+
+  // ── Phase 1: Fetch indicators + compute signal — NO trade placement ────────
+  async function getSignal(strat: IGSavedStrategy, market: WatchlistMarket): Promise<SignalData | null> {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
 
-    const resolvedEpicForSnap = epicForAccount(market.name, accountType) ?? market.epic;
+    const resolvedEpic = epicForAccount(market.name, accountType) ?? market.epic;
     const mType = market.marketType ?? getMarketType(market.epic);
     const { stopDist, limitDist } = getStopDistances(mType, accountType);
-
-    // Try technical indicators first; fall back to simple daily snapshot
-    const ind = await fetchIndicators(market.name, resolvedEpicForSnap);
+    const ind = await fetchIndicators(market.name, resolvedEpic);
 
     let direction: 'BUY'|'SELL'|'HOLD';
     let strength: number;
     let pctStr: string;
+    let scanChange = 0;
 
     if (ind) {
-      // Gap filter: skip if open gap > 3% (too volatile to trade reliably)
       if (Math.abs(ind.gapPercent) > 3) {
         const msg = `Gap ${ind.gapPercent > 0 ? '+' : ''}${ind.gapPercent.toFixed(1)}% — too volatile`;
         setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'error', error:msg } }));
@@ -1236,23 +1252,22 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         scanCountersRef.current.skippedVolatile++;
         return null;
       }
-      direction = ind.direction === 'BUY' ? 'BUY' : ind.direction === 'SELL' ? 'SELL' : 'HOLD';
-      // Apply sector rotation adjustment (set by runSignalScan)
-      const boost = scanParamsRef.current.sectorAdjust ?? 0;
-      strength = Math.min(100, ind.confidenceScore + boost);
-      pctStr   = `${ind.changePercent >= 0 ? '+' : ''}${ind.changePercent.toFixed(2)}%`;
+      direction  = ind.direction === 'BUY' ? 'BUY' : ind.direction === 'SELL' ? 'SELL' : 'HOLD';
+      strength   = Math.min(100, ind.confidenceScore + (scanParamsRef.current.sectorAdjust ?? 0));
+      pctStr     = `${ind.changePercent >= 0 ? '+' : ''}${ind.changePercent.toFixed(2)}%`;
+      scanChange = ind.changePercent;
     } else {
-      // Fallback: simple snapshot
-      const snapshot = await fetchSnapshot(market.name, resolvedEpicForSnap);
+      const snapshot = await fetchSnapshot(market.name, resolvedEpic);
       if (!snapshot || snapshot.error) {
         const errMsg = snapshot?.error ?? 'Failed to fetch market data';
         setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'error', error:errMsg } }));
         log('error', `${market.name}: ${errMsg}`);
         return null;
       }
-      const cal = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
-      direction = cal.direction; strength = cal.strength;
-      pctStr    = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
+      const cal  = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
+      direction  = cal.direction; strength = cal.strength;
+      pctStr     = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
+      scanChange = snapshot.changePercent;
     }
 
     const sig: StrategySignal = {
@@ -1278,74 +1293,84 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       ],
     };
 
-    const scanPrice  = ind?.price         ?? 0;
-    const scanChange = ind?.changePercent ?? 0;
     setScans(p => ({ ...p, [market.epic]: {
       epic:market.epic, name:market.name, signal:sig,
-      price:scanPrice, changePercent:scanChange,
+      price:ind?.price ?? 0, changePercent:scanChange,
       source:'yahoo', scanning:false, status:'ok', lastScanned:new Date().toISOString(),
     }}));
 
     const effectiveMinStrength = Math.max(strat.minStrength, MIN_STRENGTH[accountType]) + scanParamsRef.current.confidenceBoost;
-    const forceOpen = market.forceOpen === true;
-    const tradeDir: 'BUY'|'SELL'|null =
-      forceOpen
-        ? (direction !== 'HOLD' ? direction : scanChange >= 0 ? 'BUY' : 'SELL')
-        : direction !== 'HOLD' && strength >= effectiveMinStrength ? direction
-        : null;
+    if (direction !== 'HOLD')
+      log('signal', `${market.name} → ${direction} ${strength}% | ${sig.reason}`);
+    else
+      log('info', `${market.name} → HOLD (no clear direction)`);
 
-    if (!strat.autoTrade || !tradeDir) {
-      if (direction !== 'HOLD' && !forceOpen)
-        log('signal', `${market.name} → ${direction} ${strength}% (need ${effectiveMinStrength}% — no trade)`);
-      return sig;
-    }
+    if (direction === 'HOLD' || strength < effectiveMinStrength) return null; // no tradeable signal
+    return { market, sig, resolvedEpic, stopDist, limitDist, scanChange, direction, strength };
+  }
 
-    // ── Decide whether to trade ───────────────────────────────────────────────
-    const envPositions = positionsRef.current;
-    const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
+  // ── Phase 2: Execute one trade for a pre-computed signal (sequential) ─────
+  async function executeTrade(strat: IGSavedStrategy, data: SignalData): Promise<'ok'|'funds_low'|'skipped'> {
+    const { market, sig, resolvedEpic, stopDist, limitDist, direction, strength } = data;
+    const tradeDir = direction as 'BUY'|'SELL';
 
+    // Auto-close opposite positions
     if (strat.autoClose) {
-      for (const opp of envPositions.filter(p => p.epic === market.epic && p.direction === opposite)) {
+      const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
+      for (const opp of positionsRef.current.filter(p => p.epic === market.epic && p.direction === opposite)) {
         log('close', `${acctTag} Auto-closing ${opp.direction} ${market.name} — signal reversed`);
         const cr = await closePos(opp);
         if (cr.ok) {
-          log('close', `${acctTag} ✅ Closed ${market.name}`);
           const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
           setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, opp.upl ?? 0, 'STRATEGY', new Date().toISOString()));
-          await sleep(1000);
         } else log('error', `${acctTag} Close failed: ${cr.error ?? 'unknown'}`);
       }
       await loadPositions();
     }
 
+    // Skip if already long/short this instrument in same direction
+    if (positionsRef.current.some(p => p.epic === market.epic && p.direction === tradeDir)) return 'skipped';
+
+    // User-configured position cap (0 = unlimited)
     const openCount = positionsRef.current.filter(p => p.epic !== market.epic).length;
-    if (openCount >= strat.maxPositions) {
-      log('info', `${acctTag} Max ${strat.maxPositions} positions reached — skip ${market.name}`); return sig;
+    if (strat.maxPositions > 0 && openCount >= strat.maxPositions) {
+      log('info', `${acctTag} Max ${strat.maxPositions} positions reached — skip ${market.name}`);
+      return 'skipped';
     }
-    if (positionsRef.current.some(p => p.epic === market.epic && p.direction === tradeDir)) return sig;
+
+    // Funds-based hard pause: < 20% of starting balance
+    const fundsNow  = igFundsRef.current;
+    const available = fundsNow?.available ?? Infinity;
+    const startBal  = startingBalanceRef.current;
+    if (startBal > 0 && available < startBal * 0.20) {
+      log('info', `${acctTag} 🔴 Funds below 20% of start (£${available.toFixed(2)} / £${startBal.toFixed(2)}) — no new trades`);
+      showToast(false, `⚠️ Funds below 20% — trades paused`);
+      return 'funds_low';
+    }
 
     if (env === 'live') {
       const ok = await confirmLiveTrade();
-      if (!ok) { log('info', `${acctTag} Disclaimer declined — skipping ${market.name}`); return sig; }
+      if (!ok) { log('info', `${acctTag} Disclaimer declined — skipping ${market.name}`); return 'skipped'; }
     }
 
-    const fundsNow = igFundsRef.current;
-    const available = fundsNow?.available ?? Infinity;
-    const orderSize = calcRiskBasedSize(available, stopDist, accountType, strat.size, scanParamsRef.current.sizeMultiplier);
+    // Dynamic sizing: 1% risk when funds < 50% of start, else 2%
+    const riskPct  = startBal > 0 && available < startBal * 0.50 ? 0.01 : 0.02;
+    const totalBal = fundsNow?.balance ?? 0;
+    const orderSize = calcRiskBasedSize(available, stopDist, accountType, strat.size, scanParamsRef.current.sizeMultiplier, riskPct, totalBal);
 
     if (orderSize === 0) {
-      log('error', `${acctTag} ⚠️ Insufficient funds (£${available.toFixed(2)}) — pausing trades`);
+      log('error', `${acctTag} ⚠️ Insufficient funds (£${available.toFixed(2)}) — skipping ${market.name}`);
       showToast(false, `⚠️ Low funds — skipping`);
-      return sig;
+      return 'funds_low';
     }
 
+    // Capital freeing: close worst loser if very low on funds
     if (available < 500 && positionsRef.current.length > 0) {
       const now = Date.now();
-      const oldLosers = positionsRef.current
+      const worst = [...positionsRef.current]
         .filter(p => p.upl < 0 && p.createdDate && (now - new Date(p.createdDate).getTime()) > 24 * 3_600_000)
-        .sort((a, b) => a.upl - b.upl);
-      if (oldLosers.length > 0) {
-        const worst = oldLosers[0];
+        .sort((a, b) => a.upl - b.upl)[0];
+      if (worst) {
         log('close', `${acctTag} 💡 Freeing capital: closing worst loser ${worst.instrumentName ?? worst.epic}`);
         const cr = await closePos(worst);
         if (cr.ok) {
@@ -1357,23 +1382,17 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       }
     }
 
-    // Always resolve the correct epic for this account type
-    const resolvedEpic = epicForAccount(market.name, accountType) ?? market.epic;
-    if (resolvedEpic !== market.epic)
-      log('info', `  ↳ Epic: ${market.epic} → ${resolvedEpic} [${accountType}]`);
-
-    // Validate the epic is available on this account (applies to both SPREADBET and CFD)
+    // Validate epic — if 200, trade immediately
     const epicOk = await validateEpic(resolvedEpic);
     if (!epicOk) {
       log('info', `${acctTag} ⚠️ Epic ${resolvedEpic} not available on ${accountId} (${accountType}) — skipping ${market.name}`);
       setScans(p => ({ ...p, [market.epic]: { ...p[market.epic]!, status:'error', error:`Epic not on ${accountType}` } }));
-      return sig;
+      return 'skipped';
     }
 
-    const maxLoss = orderSize * stopDist;
     const sizeLabel = accountType === 'CFD' ? `${orderSize} unit(s)` : `£${orderSize}/pt`;
     log(tradeDir === 'BUY' ? 'buy' : 'sell',
-      `${acctTag} → ${tradeDir} ${market.name} | ${resolvedEpic} | ${sizeLabel} | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | ${strength}%${forceOpen?' (FORCE)':''}`);
+      `${acctTag} → ${tradeDir} ${market.name} | ${resolvedEpic} | ${sizeLabel} | SL ${stopDist}pt TP ${limitDist}pt | ${strength}% confidence`);
 
     const or = await placeOrder(resolvedEpic, tradeDir, orderSize, stopDist, limitDist);
 
@@ -1389,23 +1408,24 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         status:'OPEN', dealReference:or.dealReference ?? '', dealId:or.dealId ?? '',
         pnl:null, closeReason:null, accountType:env,
       }));
-      await sleep(1500);
       await loadPositions();
       await loadWorkingOrders();
+      return 'ok';
     } else {
       const errStr = (or.error ?? '').toLowerCase();
       if (errStr.includes('insufficient_funds') || errStr.includes('insufficient funds')) {
-        log('error', `${acctTag} ⚠️ Insufficient funds — skipping`);
-        showToast(false, `⚠️ Insufficient funds — skipping`);
-        return sig;
+        log('error', `${acctTag} ⚠️ Insufficient funds`);
+        showToast(false, `⚠️ Insufficient funds`);
+        return 'funds_low';
       }
       if ((or.reason ?? '').toUpperCase() === 'UNKNOWN' || errStr.includes('instrument_not_found') || errStr.includes('epic')) {
         const hint = accountType === 'CFD'
-          ? `Epic mismatch? Sent "${resolvedEpic}" to CFD account. Check EPIC_TABLE has correct CFD epic.`
+          ? `Epic mismatch? Sent "${resolvedEpic}" to CFD account.`
           : `Epic mismatch? Sent "${resolvedEpic}" to SPREADBET account.`;
         log('error', `${acctTag} ⚠️ ${hint}`);
       }
-      log('error', `${acctTag} ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}`);
+      // Log and continue — do NOT abort remaining opportunities
+      log('error', `${acctTag} ❌ ${market.name} FAILED — ${or.error ?? 'unknown'} — trying next opportunity`);
       if (or.reason)      log('error', `  reason: ${or.reason}`);
       if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
       if (or.igBody)      log('error', `  ig: ${JSON.stringify(or.igBody)}`);
@@ -1416,8 +1436,16 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         status:'REJECTED', dealReference:'', dealId:'',
         pnl:null, closeReason:null, accountType:env,
       }));
+      return 'skipped'; // failed but not a funds issue — try next
     }
-    return sig;
+  }
+
+  // ── Thin wrapper for test scan (sequential, max-1-position path) ──────────
+  async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
+    const data = await getSignal(strat, market);
+    if (!data) return null;
+    if (strat.autoTrade) await executeTrade(strat, data);
+    return data.sig;
   }
 
   // ── Signal scan ────────────────────────────────────────────────────────────
@@ -1454,7 +1482,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       log('info', '🔭 CFD mode — screening full market via Finnhub…');
       try {
         const minMove = conditions.marketStressed ? 1.0 : 0.5; // raise bar when market is stressed
-        const oppRes = await fetch(`/api/finnhub/opportunities?limit=10&minMove=${minMove}`);
+        const oppRes = await fetch(`/api/finnhub/opportunities?limit=20&minMove=${minMove}`);
         const oppData = await oppRes.json() as {
           ok: boolean; opportunities?: OppResult[]; screened?: number; note?: string;
         };
@@ -1487,71 +1515,62 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     }
 
     const funds = await fetchIGFunds();
+    // Capture starting balance once per strategy run
+    if (!startingBalanceRef.current && funds?.balance) startingBalanceRef.current = funds.balance;
     if (funds) log('info', `💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
-    log('info', `📡 Scanning ${markets.length} markets…`);
+    log('info', `📡 Fetching signals for ${markets.length} markets in parallel…`);
 
-    // ── Step 3: Scan each market with sector rotation tracking ─────────────
-    const sectorBull: Record<string, number> = {};
-    const sectorBear: Record<string, number> = {};
-    let scanned = 0, signalsFound = 0;
+    // ── Step 3: Fetch ALL signals in parallel — no artificial delays ────────
+    setScanProgress(`Scanning ${markets.length} markets…`);
+    const rawResults = await Promise.all(markets.map(m => getSignal(strat, m)));
+    markets.forEach(m => recentlyScannedRef.current.add(m.name));
 
-    for (let i = 0; i < markets.length; i++) {
-      if (!runningRef.current) break;
-      const market = markets[i];
-      setScanProgress(`${market.name} (${i + 1}/${markets.length})`);
+    const scanned = rawResults.filter(r => r !== null).length;
 
-      const sector = getSector(market.epic);
-      scanParamsRef.current.sectorAdjust =
-        (sectorBull[sector] ?? 0) >= 2 ? 5 :
-        (sectorBear[sector] ?? 0) >= 2 ? 5 : 0;
+    // Build ranked list: tradeable signals sorted by strength (highest first)
+    const tradeable = rawResults
+      .filter((r): r is SignalData => r !== null)
+      .sort((a, b) => b.strength - a.strength);
 
-      const sig = await scanMarket(strat, market);
-      recentlyScannedRef.current.add(market.name);
-      scanned++;
-      if (sig && sig.direction !== 'HOLD') {
-        signalsFound++;
-        if (sig.direction === 'BUY')  sectorBull[sector] = (sectorBull[sector] ?? 0) + 1;
-        if (sig.direction === 'SELL') sectorBear[sector] = (sectorBear[sector] ?? 0) + 1;
+    const signalsFound = tradeable.length;
+    log('info', `   ${scanned}/${markets.length} fetched | ${signalsFound} tradeable signals ranked by confidence`);
+
+    // ── Step 4: Execute trades sequentially — 1 per second ─────────────────
+    if (strat.autoTrade && tradeable.length > 0) {
+      log('info', `⚡ Executing ${tradeable.length} opportunities in order…`);
+      for (const data of tradeable) {
+        if (!runningRef.current) break;
+        setScanProgress(`Trading ${data.market.name}…`);
+        const result = await executeTrade(strat, data);
+        if (result === 'funds_low') {
+          log('info', `${acctTag} 🔴 Funds too low — stopping execution queue`);
+          break; // only stop on funds issue, not on rejected orders
+        }
+        await sleep(1000); // 1s between executions to respect IG rate limits
       }
-      if (i < markets.length - 1) await sleep(800);
     }
     setScanProgress('');
 
-    // ── Step 4: Scan summary ───────────────────────────────────────────────
+    // ── Step 5: Scan summary ───────────────────────────────────────────────
     const openCount = positionsRef.current.length;
     const totalPnL  = positionsRef.current.reduce((s, p) => s + (p.upl ?? 0), 0);
     const { traded, skippedVolatile, skippedConditions } = scanCountersRef.current;
     setScanStats({ scanned, signals: signalsFound, traded, skippedVolatile, skippedConditions, lastScanAt: new Date().toISOString() });
-    log('info', `📊 Scan done — ${scanned} scanned | ${signalsFound} signals | ${traded} traded | ${skippedVolatile} volatile | ${skippedConditions} conditions`);
+    log('info', `📊 Scan done — ${scanned} scanned | ${signalsFound} signals | ${traded} traded | ${skippedVolatile} volatile`);
     log('info', `   Open positions: ${openCount} | Total P&L: ${totalPnL >= 0 ? '+' : ''}£${Math.abs(totalPnL).toFixed(2)}`);
 
     saveStrategy({ ...strat, lastRunAt: new Date().toISOString(), lastRunEnv: env });
     setStrategies(loadStrategiesForAccount());
-    log('info', `   Next scan in ${Math.round((strat.signalScanMs ?? signalScanMs) / 60_000)}min`);
+    const nextMs = strat.signalScanMs ?? signalScanMs;
+    const nextLabel = nextMs < 60_000 ? `${Math.round(nextMs/1000)}s` : `${Math.round(nextMs/60_000)}min`;
+    log('info', `   Next scan in ${nextLabel}`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, positions, signalScanMs, navLoaded, navCategories]);
 
   // ── Position monitor ───────────────────────────────────────────────────────
-  const MAX_CFD_POSITIONS = 5;
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
     if (!runningRef.current) return;
     await loadPositions();
-    const allPos = positionsRef.current;
-
-    // Enforce max positions cap for CFD
-    if (accountType === 'CFD' && allPos.length > MAX_CFD_POSITIONS) {
-      const excess = [...allPos].sort((a, b) => (a.upl ?? 0) - (b.upl ?? 0));
-      const toClose = excess.slice(0, allPos.length - MAX_CFD_POSITIONS);
-      for (const pos of toClose) {
-        log('close', `${acctTag} ⚠️ Max ${MAX_CFD_POSITIONS} positions — closing worst: ${pos.instrumentName ?? pos.epic} (P&L: £${(pos.upl ?? 0).toFixed(2)})`);
-        const cr = await closePos(pos);
-        if (cr.ok) {
-          const exitPx = pos.direction === 'BUY' ? (pos.bid ?? pos.level) : (pos.offer ?? pos.level);
-          setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
-        }
-      }
-      await loadPositions();
-    }
 
     for (const pos of positionsRef.current) {
       if (!pos.level || !pos.bid || !pos.offer) continue;
@@ -1634,9 +1653,12 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     if (timerRef.current)    clearInterval(timerRef.current);
     if (posTimerRef.current) clearInterval(posTimerRef.current);
     runningRef.current = true; setIsRunning(true);
+    startingBalanceRef.current = 0; // will be captured on first funds fetch
     const sScanMs = strat.signalScanMs ?? signalScanMs;
     const pMonMs  = strat.posMonitorMs ?? posMonitorMs;
-    log('info', `▶ Auto-trader started — "${strat.name}" · ${accountType} | ${accountId} · signals every ${Math.round(sScanMs/60_000)}min`);
+    const sScanLabel = sScanMs < 60_000 ? `${Math.round(sScanMs/1000)}s` : `${Math.round(sScanMs/60_000)}min`;
+    const pMonLabel  = pMonMs  < 60_000 ? `${Math.round(pMonMs/1000)}s`  : `${Math.round(pMonMs/60_000)}min`;
+    log('info', `▶ Auto-trader started — "${strat.name}" · ${accountType} | ${accountId} · scan ${sScanLabel} · monitor ${pMonLabel}`);
     signalStartRef.current = Date.now();
     void runSignalScan(strat);
     posStartRef.current = Date.now();
@@ -1746,11 +1768,11 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       setBSize(existing.size); setBMaxPos(existing.maxPositions);
       setBMinStrength(existing.minStrength ?? 55); setBAutoClose(existing.autoClose ?? true);
       setBWatchlist(existing.watchlist?.length ? existing.watchlist : [...defaultWatchlist]);
-      setBSignalScanMs(existing.signalScanMs ?? 5*60_000); setBPosMonitorMs(existing.posMonitorMs ?? 60_000);
+      setBSignalScanMs(existing.signalScanMs ?? 60_000); setBPosMonitorMs(existing.posMonitorMs ?? 30_000);
     } else {
-      setEditId(null); setBName(''); setBTimeframe('daily'); setBSize(1); setBMaxPos(3);
+      setEditId(null); setBName(''); setBTimeframe('daily'); setBSize(1); setBMaxPos(0);
       setBMinStrength(MIN_STRENGTH[accountType]); setBAutoClose(true);
-      setBWatchlist([...defaultWatchlist]); setBSignalScanMs(5*60_000); setBPosMonitorMs(60_000);
+      setBWatchlist([...defaultWatchlist]); setBSignalScanMs(60_000); setBPosMonitorMs(30_000);
     }
     setShowBuilder(true); setShowManual(false);
   }
@@ -2126,8 +2148,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
               </div>
               <div>
-                <label className="text-xs text-gray-400 mb-1.5 block">Max positions</label>
-                <input type="number" min={1} max={20} value={bMaxPos} onChange={e => setBMaxPos(Number(e.target.value))}
+                <label className="text-xs text-gray-400 mb-1.5 block">Max positions <span className="text-gray-600">(0 = unlimited)</span></label>
+                <input type="number" min={0} max={50} value={bMaxPos} onChange={e => setBMaxPos(Number(e.target.value))}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
               </div>
               <div>
@@ -2155,10 +2177,10 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                 <label className="text-xs text-gray-400 mb-1.5 block">Signal scan interval</label>
                 <select value={bSignalScanMs} onChange={e => setBSignalScanMs(Number(e.target.value))}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                  <option value={30_000}>30 seconds</option>
+                  <option value={60_000}>60 seconds</option>
+                  <option value={2*60_000}>2 minutes</option>
                   <option value={5*60_000}>5 minutes</option>
-                  <option value={10*60_000}>10 minutes</option>
-                  <option value={15*60_000}>15 minutes</option>
-                  <option value={30*60_000}>30 minutes</option>
                 </select>
               </div>
               <div>
@@ -2168,6 +2190,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                   <option value={30_000}>30 seconds</option>
                   <option value={60_000}>60 seconds</option>
                   <option value={2*60_000}>2 minutes</option>
+                  <option value={5*60_000}>5 minutes</option>
                 </select>
               </div>
             </div>
@@ -2394,7 +2417,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-white truncate">{strat.name}</p>
                         <p className="text-[10px] text-gray-500">
-                          {strat.timeframe} · {strat.size}{sizeUnit} · min {strat.minStrength}% · max {strat.maxPositions} pos
+                          {strat.timeframe} · {strat.size}{sizeUnit} · min {strat.minStrength}% · {strat.maxPositions > 0 ? `max ${strat.maxPositions} pos` : 'unlimited pos'}
                           {strat.lastRunAt && ` · last run ${fmtTime(strat.lastRunAt)}`}
                         </p>
                       </div>
