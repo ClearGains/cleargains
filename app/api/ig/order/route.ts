@@ -38,7 +38,7 @@ function getAuth(request: NextRequest) {
   return {
     cst:           request.headers.get('x-ig-cst') ?? '',
     securityToken: request.headers.get('x-ig-security-token') ?? '',
-    apiKey:        request.headers.get('x-ig-api-key') ?? '',
+    apiKey:        request.headers.get('x-ig-api-key') || (process.env.IG_API_KEY ?? ''),
     env:          (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live',
   };
 }
@@ -112,9 +112,7 @@ export async function POST(request: NextRequest) {
         timeInForce:   body.timeInForce ?? 'GOOD_TILL_CANCELLED',
         forceOpen:     body.forceOpen ?? true,
       };
-      if (!woIsCfd) {
-        woPayload.currencyCode = body.currencyCode ?? 'GBP';
-      }
+      woPayload.currencyCode = body.currencyCode ?? 'GBP';
       // Only include optional fields if they have actual values
       if (body.stopDistance)    woPayload.stopDistance  = body.stopDistance;
       if (body.profitDistance)  woPayload.limitDistance = body.profitDistance;
@@ -148,10 +146,8 @@ export async function POST(request: NextRequest) {
       trailingStop:  false,
       forceOpen:     body.forceOpen ?? true,
     };
-    // Spread-bet accounts require currencyCode (£/point); CFD accounts must NOT have it
-    if (!isCfd) {
-      payload.currencyCode = body.currencyCode ?? 'GBP';
-    }
+    // currencyCode is required for ALL order types (both CFD and spread-bet)
+    payload.currencyCode = body.currencyCode ?? 'GBP';
 
     console.log(`[ig/order] POST → ${env} ${resolvedEpic} (via ${resolvedVia})`, JSON.stringify(payload));
 

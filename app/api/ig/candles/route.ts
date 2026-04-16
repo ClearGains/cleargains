@@ -18,6 +18,8 @@ import { NextRequest, NextResponse } from 'next/server';
 // ── Symbol map ────────────────────────────────────────────────────────────────
 
 const YAHOO_MAP: Record<string, string> = {
+  // ── Volatility ────────────────────────────────────────────────────────────
+  'VIX':              '^VIX',
   // ── Indices ───────────────────────────────────────────────────────────────
   'FTSE 100':         '^FTSE',
   'FTSE 100 CFD':     '^FTSE',

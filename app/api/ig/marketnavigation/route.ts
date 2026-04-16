@@ -22,6 +22,7 @@ function igHeaders(apiKey: string, cst: string, secToken: string): Record<string
     'X-IG-API-KEY':      apiKey,
     'CST':               cst,
     'X-SECURITY-TOKEN':  secToken,
+    'Content-Type':      'application/json',
     'Accept':            'application/json; charset=UTF-8',
     'Version':           '1',
   };
@@ -30,7 +31,7 @@ function igHeaders(apiKey: string, cst: string, secToken: string): Record<string
 export async function GET(request: NextRequest) {
   const cst      = request.headers.get('x-ig-cst') ?? '';
   const secToken = request.headers.get('x-ig-security-token') ?? '';
-  const apiKey   = request.headers.get('x-ig-api-key') ?? '';
+  const apiKey   = request.headers.get('x-ig-api-key') || (process.env.IG_API_KEY ?? '');
   const env      = (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live';
   const nodeId   = request.nextUrl.searchParams.get('nodeId') ?? '';
 
@@ -48,17 +49,26 @@ export async function GET(request: NextRequest) {
     ? 'https://demo-api.ig.com/gateway/deal'
     : 'https://api.ig.com/gateway/deal';
 
-  const path = nodeId ? `/marketnavigation/${encodeURIComponent(nodeId)}` : '/marketnavigation';
+  // Use node ID as-is in the path (no encodeURIComponent — IG IDs are plain integers)
+  const path    = nodeId ? `/marketnavigation/${nodeId}` : '/marketnavigation';
+  const fullUrl = `${baseUrl}${path}`;
+
+  console.log(`[ig/marketnavigation] GET ${fullUrl} (env=${env}, nodeId=${nodeId || 'root'})`);
 
   try {
-    const res = await fetch(`${baseUrl}${path}`, {
+    const res = await fetch(fullUrl, {
       headers: igHeaders(apiKey, cst, secToken),
       signal: AbortSignal.timeout(8_000),
     });
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      return NextResponse.json({ ok: false, error: `IG API ${res.status}: ${text.slice(0, 200)}` }, { status: res.status });
+      console.error(`[ig/marketnavigation] IG ${res.status} for ${fullUrl}: ${text.slice(0, 200)}`);
+      return NextResponse.json({
+        ok: false,
+        error: `IG API ${res.status}: ${text.slice(0, 200)}`,
+        calledUrl: fullUrl,
+      }, { status: res.status });
     }
 
     const data = await res.json() as IGNavResp;
@@ -67,11 +77,13 @@ export async function GET(request: NextRequest) {
       markets: data.markets ?? [],
     };
 
+    console.log(`[ig/marketnavigation] OK — nodes=${result.nodes?.length ?? 0} markets=${result.markets?.length ?? 0}`);
     navCache.set(cacheKey, { data: result, expiresAt: Date.now() + CACHE_TTL });
     return NextResponse.json({ ok: true, ...result, cached: false });
   } catch (err) {
+    console.error(`[ig/marketnavigation] Exception for ${fullUrl}:`, err instanceof Error ? err.message : err);
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : 'Unknown error' },
+      { ok: false, error: err instanceof Error ? err.message : 'Unknown error', calledUrl: fullUrl },
       { status: 500 },
     );
   }

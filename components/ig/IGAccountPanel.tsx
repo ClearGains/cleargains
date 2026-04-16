@@ -94,11 +94,27 @@ function fmtTime(iso: string) {
   return new Date(iso).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
 }
 
-function calcDynamicSize(requestedSize: number, available: number): number {
+function calcRiskBasedSize(
+  available: number,
+  stopDist: number,
+  acctType: 'CFD' | 'SPREADBET',
+  requestedSize: number,
+  sizeMultiplier = 1.0,
+): number {
   if (available < 100) return 0;
-  if (available < 500) return 0.1;
-  const pctBased = Math.floor((available * 0.05) * 10) / 10;
-  return Math.min(requestedSize, Math.max(0.1, pctBased));
+  let size: number;
+  if (acctType === 'CFD') {
+    // 2% risk rule: size = (balance × 0.02) / stopDistance
+    const riskAmount = available * 0.02;
+    size = stopDist > 0 ? riskAmount / stopDist : requestedSize;
+  } else {
+    // Spread-bet: £/pt proportional to available balance
+    if (available < 500) return 0.1;
+    const pctBased = Math.floor((available * 0.05) * 10) / 10;
+    size = Math.min(requestedSize, Math.max(0.1, pctBased));
+  }
+  size *= sizeMultiplier;
+  return Math.max(0.1, Math.round(size * 10) / 10);
 }
 
 function calibrateSignal(
@@ -261,6 +277,13 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   // ── Scanner ────────────────────────────────────────────────────────────────
   const [scans, setScans]               = useState<Record<string, MarketScan>>({});
   const [scanProgress, setScanProgress] = useState('');
+  const [scanStats, setScanStats]       = useState<{
+    scanned:number; signals:number; traded:number;
+    skippedVolatile:number; skippedConditions:number; lastScanAt:string;
+  }|null>(null);
+  // Mutable scan context — set at the start of each signal scan cycle
+  const scanParamsRef   = useRef({ sizeMultiplier: 1.0, confidenceBoost: 0, sectorAdjust: 0 });
+  const scanCountersRef = useRef({ traded: 0, skippedVolatile: 0, skippedConditions: 0 });
 
   // ── Funds ──────────────────────────────────────────────────────────────────
   const igFundsRef = useRef<{available:number;balance:number}|null>(null);
@@ -394,9 +417,10 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         () => fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(authBody) }),
         accountId,
       );
-      const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string; accountType?:string };
+      const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string; accountType?:string; apiKey?:string };
       if (d.ok && d.cst && d.securityToken) {
-        const apiKey = raw ? (JSON.parse(raw) as { apiKey:string }).apiKey : '';
+        // Prefer apiKey from session response (works for both manual creds and env credentials)
+        const apiKey = d.apiKey || (raw ? (JSON.parse(raw) as { apiKey:string }).apiKey : '') || '';
         const sess: IGSession = { cst:d.cst, securityToken:d.securityToken, accountId:d.accountId ?? accountId, apiKey, accountType:d.accountType ?? accountType };
         localStorage.setItem(sessKey, JSON.stringify({ ...sess, authenticatedAt: Date.now() }));
         return sess;
@@ -634,46 +658,103 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     }
   }
 
-  // ── Load available markets from IG market navigation ──────────────────────
+  // ── Load available markets from IG market navigation (with search fallback) ─
   async function loadIGMarkets() {
     const sess = sessionRef.current;
     if (!sess) return;
     setNavLoading(true);
+
+    type NavResp = { ok:boolean; nodes?:{id:string;name:string}[]; markets?:{epic:string;instrumentName:string;instrumentType:string}[]; error?:string; calledUrl?:string };
+    type MktResp = { ok:boolean; markets?:{epic:string;instrumentName:string;instrumentType?:string;bid?:number;offer?:number}[]; error?:string };
+
     try {
-      type NavResp = { ok:boolean; nodes?:{id:string;name:string}[]; markets?:{epic:string;instrumentName:string;instrumentType:string}[]; error?:string };
-      // Fetch top-level nodes
-      const topRes = await fetch('/api/ig/marketnavigation', { headers: makeHeaders(sess, env) });
+      // ── Attempt 1: market navigation tree ──────────────────────────────────
+      log('info', '🌐 Loading market navigation…');
+      const topRes  = await fetch('/api/ig/marketnavigation', { headers: makeHeaders(sess, env) });
       const topData = await topRes.json() as NavResp;
-      if (!topData.ok) { log('error', `Market nav failed: ${topData.error ?? 'unknown'}`); setNavLoading(false); return; }
 
+      if (!topData.ok) {
+        const calledUrl = topData.calledUrl ?? 'unknown';
+        log('error', `Market nav failed HTTP ${topRes.status}: ${topData.error ?? 'unknown'}`);
+        log('error', `  Called URL: ${calledUrl}`);
+        log('info', '↩ Falling back to market search…');
+
+        // ── Attempt 2: direct market search by instrument type ──────────────
+        const SEARCHES = [
+          { term: 'wall street', type: 'INDICES',     label: 'Indices'     },
+          { term: 'AAPL',        type: 'SHARES',      label: 'US Shares'   },
+          { term: 'Barclays',    type: 'SHARES',      label: 'UK Shares'   },
+          { term: 'GBPUSD',      type: 'CURRENCIES',  label: 'Forex'       },
+          { term: 'gold',        type: 'COMMODITIES', label: 'Commodities' },
+          { term: 'bitcoin',     type: 'CRYPTOCURRENCIES', label: 'Crypto' },
+        ];
+        const fallbackCategories: IGNavCategory[] = [];
+        for (const s of SEARCHES) {
+          try {
+            const url = `/api/ig/markets?searchTerm=${encodeURIComponent(s.term)}&instrumentTypes=${s.type}`;
+            const r = await fetch(url, { headers: makeHeaders(sess, env) });
+            const d = await r.json() as MktResp;
+            if (d.ok && (d.markets?.length ?? 0) > 0) {
+              fallbackCategories.push({
+                node:     { id: `fallback_${s.type}`, name: s.label },
+                markets:  (d.markets ?? []).slice(0, 30).map(m => ({
+                  epic:            m.epic,
+                  instrumentName:  m.instrumentName,
+                  instrumentType:  m.instrumentType ?? s.type,
+                })),
+                subNodes: [],
+                expanded: false,
+              });
+              log('info', `  ✓ ${s.label}: ${d.markets?.length} instruments`);
+            } else {
+              log('error', `  ✗ ${s.label} search: ${d.error ?? `HTTP ${r.status}`}`);
+            }
+          } catch (e) {
+            log('error', `  ✗ ${s.label} search error: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+
+        if (fallbackCategories.length > 0) {
+          setNavCategories(fallbackCategories);
+          setNavLoaded(true);
+          log('info', `✅ Fallback loaded — ${fallbackCategories.length} categories via market search`);
+        } else {
+          log('error', '❌ Both market nav and fallback search failed — using hardcoded watchlist');
+        }
+        setNavLoading(false);
+        return;
+      }
+
+      // Navigation succeeded — drill into relevant top-level nodes
       const topNodes = topData.nodes ?? [];
+      log('info', `  Nav root: ${topNodes.length} top-level nodes`);
 
-      // Filter to the categories most relevant for CFD trading
       const RELEVANT = ['indices', 'currenc', 'commodit', 'shares', 'crypto', 'bitcoin', 'forex', 'popular'];
       const relevantNodes = topNodes.filter(n => RELEVANT.some(k => n.name.toLowerCase().includes(k)));
       const useNodes = relevantNodes.length > 0 ? relevantNodes : topNodes.slice(0, 8);
 
-      // Fetch one level deep for each relevant top-level node (up to 8)
       const categories: IGNavCategory[] = [];
       for (const node of useNodes.slice(0, 8)) {
-        const nodeRes = await fetch(`/api/ig/marketnavigation?nodeId=${encodeURIComponent(node.id)}`, { headers: makeHeaders(sess, env) });
+        const nodeRes  = await fetch(`/api/ig/marketnavigation?nodeId=${node.id}`, { headers: makeHeaders(sess, env) });
         const nodeData = await nodeRes.json() as NavResp;
-        if (!nodeData.ok) continue;
+        if (!nodeData.ok) {
+          log('error', `  Nav node ${node.name} failed: ${nodeData.error ?? `HTTP ${nodeRes.status}`}${nodeData.calledUrl ? ` (${nodeData.calledUrl})` : ''}`);
+          continue;
+        }
 
-        const markets = (nodeData.markets ?? []);
-        const subNodes = (nodeData.nodes ?? []);
+        const markets  = nodeData.markets ?? [];
+        const subNodes = nodeData.nodes   ?? [];
 
-        // If this node has sub-nodes but no direct markets, fetch the first few sub-nodes
         if (markets.length === 0 && subNodes.length > 0) {
           for (const sub of subNodes.slice(0, 4)) {
-            const subRes = await fetch(`/api/ig/marketnavigation?nodeId=${encodeURIComponent(sub.id)}`, { headers: makeHeaders(sess, env) });
+            const subRes  = await fetch(`/api/ig/marketnavigation?nodeId=${sub.id}`, { headers: makeHeaders(sess, env) });
             const subData = await subRes.json() as NavResp;
             if (!subData.ok) continue;
             const subMarkets = subData.markets ?? [];
             if (subMarkets.length > 0) {
               categories.push({
-                node: { id: sub.id, name: `${node.name} › ${sub.name}` },
-                markets: subMarkets.slice(0, 30),
+                node:     { id: sub.id, name: `${node.name} › ${sub.name}` },
+                markets:  subMarkets.slice(0, 30),
                 subNodes: [],
                 expanded: false,
               });
@@ -686,13 +767,16 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
 
       setNavCategories(categories);
       setNavLoaded(true);
+      const totalMkts = categories.reduce((s, c) => s + c.markets.length, 0);
+      log('info', `✅ Market nav loaded — ${categories.length} categories, ${totalMkts} instruments`);
+
     } catch (e) {
       log('error', `Market nav error: ${e instanceof Error ? e.message : String(e)}`);
     }
     setNavLoading(false);
   }
 
-  // ── Fetch market snapshot ──────────────────────────────────────────────────
+  // ── Fetch market snapshot (simple daily change — fallback only) ──────────
   async function fetchSnapshot(name: string, epic?: string) {
     try {
       const params = new URLSearchParams({ name });
@@ -702,6 +786,88 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
       if (!d.ok) return { price:0, changePercent:0, signal:'NEUTRAL' as const, source:'yahoo', error: d.error ?? `HTTP ${r.status}` };
       return { price:d.price ?? 0, changePercent:d.changePercent ?? 0, signal:d.signal ?? 'NEUTRAL' as const, source:d.source ?? 'yahoo' };
     } catch (e) { return { price:0, changePercent:0, signal:'NEUTRAL' as const, source:'yahoo', error: e instanceof Error ? e.message : 'Fetch failed' }; }
+  }
+
+  // ── Fetch technical indicators (RSI, EMA, MACD, Volume, VWAP) ────────────
+  type IndicatorResult = {
+    price:number; previousClose:number; changePercent:number; gapPercent:number;
+    rsi14:number; ema20:number; ema50:number; emaCross:string;
+    macdLine:number; macdSignal:number; macdHistogram:number; macdCross:string;
+    volumeSurge:number; vwapDeviation:number;
+    bullScore:number; bearScore:number; confidenceScore:number;
+    direction:'BUY'|'SELL'|'NEUTRAL';
+  };
+  async function fetchIndicators(name: string, epic?: string): Promise<IndicatorResult|null> {
+    try {
+      const params = new URLSearchParams({ name });
+      if (epic) params.set('epic', epic);
+      const r = await fetch(`/api/ig/indicators?${params.toString()}`);
+      const d = await r.json() as { ok:boolean } & Partial<IndicatorResult>;
+      return d.ok ? d as IndicatorResult : null;
+    } catch { return null; }
+  }
+
+  // ── Check S&P 500 / FTSE / VIX market conditions before scanning ─────────
+  async function checkMarketConditions() {
+    const [sp, ftse] = await Promise.allSettled([
+      fetchIndicators('S&P 500'),
+      fetchIndicators('FTSE 100'),
+    ]);
+    const spInd   = sp.status   === 'fulfilled' ? sp.value   : null;
+    const ftseInd = ftse.status === 'fulfilled' ? ftse.value : null;
+    let vixPrice = 15;
+    try {
+      const r = await fetch('/api/ig/candles?name=VIX');
+      const d = await r.json() as { ok:boolean; price?:number };
+      if (d.ok && d.price) vixPrice = d.price;
+    } catch {}
+    const spChange   = spInd?.changePercent   ?? 0;
+    const ftseChange = ftseInd?.changePercent ?? 0;
+    return {
+      spChange, ftseChange, vix: vixPrice,
+      marketStressed: spChange < -1 || ftseChange < -1,
+      vixHigh: vixPrice > 30,
+    };
+  }
+
+  // ── Build full scan list from nav categories (up to 100 instruments) ─────
+  function buildFullScanList(watchlist: WatchlistMarket[]): WatchlistMarket[] {
+    const seen = new Set<string>();
+    const out: WatchlistMarket[] = [];
+    // Seed with enabled watchlist entries
+    for (const m of watchlist.filter(w => w.enabled)) {
+      if (!seen.has(m.epic)) { seen.add(m.epic); out.push(m); }
+    }
+    // Fill from nav categories
+    const CAT_LIMIT: Record<string, number> = {
+      us: 25, shares: 25, uk: 15, indices: 8, forex: 8, commodit: 8, crypto: 5,
+    };
+    for (const cat of navCategories) {
+      const key = Object.keys(CAT_LIMIT).find(k => cat.node.name.toLowerCase().includes(k)) ?? '';
+      const lim = CAT_LIMIT[key] ?? 10;
+      for (const m of cat.markets.slice(0, lim)) {
+        if (seen.has(m.epic) || out.length >= 100) continue;
+        seen.add(m.epic);
+        const mktType = m.instrumentType === 'CURRENCIES' ? 'FOREX' as const
+          : m.instrumentType === 'INDICES'    ? 'INDEX' as const
+          : m.instrumentType === 'COMMODITIES'? 'COMMODITY' as const
+          : 'STOCK' as const;
+        out.push({ epic: m.epic, name: m.instrumentName, enabled: true, marketType: mktType });
+      }
+      if (out.length >= 100) break;
+    }
+    return out;
+  }
+
+  // ── Sector lookup for rotation scoring ───────────────────────────────────
+  function getSector(epic: string): string {
+    for (const cat of navCategories) {
+      if (cat.markets.some(m => m.epic === epic)) return cat.node.name;
+    }
+    if (epic.startsWith('CS.D.'))                             return 'Forex';
+    if (epic.startsWith('IX.D.') || epic.includes('.CFD.IP')) return 'Indices';
+    if (epic.startsWith('UA.D.') && epic.includes('CASH.IP')) return 'US Shares';
+    return 'Other';
   }
 
   // ── Place order ────────────────────────────────────────────────────────────
@@ -793,44 +959,80 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
 
     const resolvedEpicForSnap = epicForAccount(market.name, accountType) ?? market.epic;
-    const snapshot = await fetchSnapshot(market.name, resolvedEpicForSnap);
-    if (!snapshot || snapshot.error) {
-      const errMsg = snapshot?.error ?? 'Failed to fetch market data';
-      setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'error', error:errMsg } }));
-      log('error', `${market.name}: ${errMsg}`);
-      return null;
-    }
-
     const mType = market.marketType ?? getMarketType(market.epic);
     const { stopDist, limitDist } = getStopDistances(mType, accountType);
-    const { direction, strength } = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
-    const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
+
+    // Try technical indicators first; fall back to simple daily snapshot
+    const ind = await fetchIndicators(market.name, resolvedEpicForSnap);
+
+    let direction: 'BUY'|'SELL'|'HOLD';
+    let strength: number;
+    let pctStr: string;
+
+    if (ind) {
+      // Gap filter: skip if open gap > 3% (too volatile to trade reliably)
+      if (Math.abs(ind.gapPercent) > 3) {
+        const msg = `Gap ${ind.gapPercent > 0 ? '+' : ''}${ind.gapPercent.toFixed(1)}% — too volatile`;
+        setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'error', error:msg } }));
+        log('info', `⚡ ${market.name}: ${msg}`);
+        scanCountersRef.current.skippedVolatile++;
+        return null;
+      }
+      direction = ind.direction === 'BUY' ? 'BUY' : ind.direction === 'SELL' ? 'SELL' : 'HOLD';
+      // Apply sector rotation adjustment (set by runSignalScan)
+      const boost = scanParamsRef.current.sectorAdjust ?? 0;
+      strength = Math.min(100, ind.confidenceScore + boost);
+      pctStr   = `${ind.changePercent >= 0 ? '+' : ''}${ind.changePercent.toFixed(2)}%`;
+    } else {
+      // Fallback: simple snapshot
+      const snapshot = await fetchSnapshot(market.name, resolvedEpicForSnap);
+      if (!snapshot || snapshot.error) {
+        const errMsg = snapshot?.error ?? 'Failed to fetch market data';
+        setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'error', error:errMsg } }));
+        log('error', `${market.name}: ${errMsg}`);
+        return null;
+      }
+      const cal = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
+      direction = cal.direction; strength = cal.strength;
+      pctStr    = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
+    }
 
     const sig: StrategySignal = {
       direction, strength,
-      reason: `Daily ${pctStr} (${mType})`,
+      reason: ind
+        ? `RSI ${ind.rsi14.toFixed(0)} | EMA ${ind.emaCross} | MACD ${ind.macdCross} | Vol ${ind.volumeSurge.toFixed(1)}x | ${pctStr}`
+        : `Daily ${pctStr} (${mType})`,
       stopPoints: stopDist, targetPoints: limitDist,
       riskReward: `1:${(limitDist / stopDist).toFixed(1)}`,
-      indicators: [
-        { label:'Daily Change', value:pctStr, status: direction==='BUY'?'bullish':direction==='SELL'?'bearish':'neutral' },
-        { label:'Type',        value:mType,   status:'neutral' },
-        { label:'Stop dist',   value:`${stopDist}pt`, status:'neutral' },
-        { label:'TP dist',     value:`${limitDist}pt`, status:'neutral' },
-        { label:'Max loss',    value:`£${strat.size * stopDist}`, status:'neutral' },
+      indicators: ind ? [
+        { label:'RSI 14',    value:ind.rsi14.toFixed(1),             status:ind.rsi14<30?'bullish':ind.rsi14>70?'bearish':'neutral' },
+        { label:'EMA 20/50', value:ind.emaCross,                      status:ind.emaCross==='bullish'?'bullish':'bearish' },
+        { label:'MACD',      value:ind.macdCross,                     status:ind.macdCross==='bullish'?'bullish':'bearish' },
+        { label:'Volume',    value:`${ind.volumeSurge.toFixed(1)}x`,  status:ind.volumeSurge>=1.5?'bullish':'neutral' },
+        { label:'VWAP dev',  value:`${ind.vwapDeviation>=0?'+':''}${ind.vwapDeviation.toFixed(2)}%`, status:ind.vwapDeviation>0?'bullish':'bearish' },
+        { label:'Daily Δ',   value:pctStr,                            status:direction==='BUY'?'bullish':direction==='SELL'?'bearish':'neutral' },
+        { label:'Score',     value:`${ind.bullScore}↑ / ${ind.bearScore}↓`, status:'neutral' },
+      ] : [
+        { label:'Daily Change', value:pctStr,         status:direction==='BUY'?'bullish':direction==='SELL'?'bearish':'neutral' },
+        { label:'Type',         value:mType,           status:'neutral' },
+        { label:'Stop dist',    value:`${stopDist}pt`, status:'neutral' },
+        { label:'TP dist',      value:`${limitDist}pt`, status:'neutral' },
       ],
     };
 
+    const scanPrice  = ind?.price         ?? 0;
+    const scanChange = ind?.changePercent ?? 0;
     setScans(p => ({ ...p, [market.epic]: {
       epic:market.epic, name:market.name, signal:sig,
-      price:snapshot.price, changePercent:snapshot.changePercent,
-      source:snapshot.source, scanning:false, status:'ok', lastScanned:new Date().toISOString(),
+      price:scanPrice, changePercent:scanChange,
+      source:'yahoo', scanning:false, status:'ok', lastScanned:new Date().toISOString(),
     }}));
 
-    const effectiveMinStrength = Math.max(strat.minStrength, MIN_STRENGTH[accountType]);
+    const effectiveMinStrength = Math.max(strat.minStrength, MIN_STRENGTH[accountType]) + scanParamsRef.current.confidenceBoost;
     const forceOpen = market.forceOpen === true;
     const tradeDir: 'BUY'|'SELL'|null =
       forceOpen
-        ? (direction !== 'HOLD' ? direction : snapshot.changePercent >= 0 ? 'BUY' : 'SELL')
+        ? (direction !== 'HOLD' ? direction : scanChange >= 0 ? 'BUY' : 'SELL')
         : direction !== 'HOLD' && strength >= effectiveMinStrength ? direction
         : null;
 
@@ -871,7 +1073,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
 
     const fundsNow = igFundsRef.current;
     const available = fundsNow?.available ?? Infinity;
-    const orderSize = calcDynamicSize(strat.size, available);
+    const orderSize = calcRiskBasedSize(available, stopDist, accountType, strat.size, scanParamsRef.current.sizeMultiplier);
 
     if (orderSize === 0) {
       log('error', `${acctTag} ⚠️ Insufficient funds (£${available.toFixed(2)}) — pausing trades`);
@@ -920,6 +1122,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     const or = await placeOrder(resolvedEpic, tradeDir, orderSize, stopDist, limitDist);
 
     if (or.ok) {
+      scanCountersRef.current.traded++;
       log(tradeDir === 'BUY' ? 'buy' : 'sell',
         `${acctTag} ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · @ ${or.level ?? '?'}`);
       showToast(true, `[${accountType}] ${tradeDir} ${market.name}`);
@@ -964,27 +1167,101 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   // ── Signal scan ────────────────────────────────────────────────────────────
   const runSignalScan = useCallback(async (strat: IGSavedStrategy) => {
     if (!runningRef.current) return;
-    const markets = (strat.watchlist?.length ? strat.watchlist : defaultWatchlist).filter(m => m.enabled);
+
+    // ── Step 1: Market condition awareness ─────────────────────────────────
+    const conditions = await checkMarketConditions();
+    if (conditions.vixHigh) {
+      log('info', `🚨 VIX ${conditions.vix.toFixed(0)} > 30 — market too volatile, skipping scan cycle`);
+      saveStrategy({ ...strat, lastRunAt: new Date().toISOString(), lastRunEnv: env });
+      setStrategies(loadStrategiesForAccount());
+      return;
+    }
+    // Reset per-scan params
+    scanParamsRef.current = { sizeMultiplier: 1.0, confidenceBoost: 0, sectorAdjust: 0 };
+    scanCountersRef.current = { traded: 0, skippedVolatile: 0, skippedConditions: 0 };
+
+    if (conditions.marketStressed) {
+      scanParamsRef.current.sizeMultiplier = 0.5;
+      scanParamsRef.current.confidenceBoost = 10;
+      log('info', `⚠️ Market stress — S&P ${conditions.spChange.toFixed(1)}% FTSE ${conditions.ftseChange.toFixed(1)}% | threshold +10, size ×0.5`);
+    } else {
+      log('info', `✅ Market healthy — S&P ${conditions.spChange.toFixed(1)}% FTSE ${conditions.ftseChange.toFixed(1)}% VIX ${conditions.vix.toFixed(0)}`);
+    }
+
+    // ── Step 2: Build market list (full scan for CFD if nav loaded) ────────
+    const baseWatchlist = strat.watchlist?.length ? strat.watchlist : defaultWatchlist;
+    const markets = (accountType === 'CFD' && navLoaded && navCategories.length > 0)
+      ? buildFullScanList(baseWatchlist)
+      : baseWatchlist.filter(m => m.enabled);
+
     const funds = await fetchIGFunds();
     if (funds) log('info', `💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
-    log('info', `📡 Scan — ${markets.length} markets…`);
+    log('info', `📡 Scanning ${markets.length} markets…`);
+
+    // ── Step 3: Scan each market with sector rotation tracking ─────────────
+    const sectorBull: Record<string, number> = {};
+    const sectorBear: Record<string, number> = {};
+    let scanned = 0, signalsFound = 0;
+
     for (let i = 0; i < markets.length; i++) {
       if (!runningRef.current) break;
-      setScanProgress(`${markets[i].name} (${i+1}/${markets.length})`);
-      await scanMarket(strat, markets[i]);
-      if (i < markets.length - 1) await sleep(1500);
+      const market = markets[i];
+      setScanProgress(`${market.name} (${i + 1}/${markets.length})`);
+
+      // Sector rotation: boost confidence if ≥2 signals in this sector already
+      const sector = getSector(market.epic);
+      const sBull = sectorBull[sector] ?? 0;
+      const sBear = sectorBear[sector] ?? 0;
+      // 2+ same-direction signals in sector → confirm sector trend → +5
+      scanParamsRef.current.sectorAdjust = sBull >= 2 ? 5 : sBear >= 2 ? 5 : 0;
+
+      const sig = await scanMarket(strat, market);
+      scanned++;
+      if (sig && sig.direction !== 'HOLD') {
+        signalsFound++;
+        if (sig.direction === 'BUY')  sectorBull[sector] = (sectorBull[sector] ?? 0) + 1;
+        if (sig.direction === 'SELL') sectorBear[sector] = (sectorBear[sector] ?? 0) + 1;
+      }
+      if (i < markets.length - 1) await sleep(800);
     }
     setScanProgress('');
-    saveStrategy({ ...strat, lastRunAt:new Date().toISOString(), lastRunEnv:env });
+
+    // ── Step 4: Scan summary ───────────────────────────────────────────────
+    const openCount = positionsRef.current.length;
+    const totalPnL  = positionsRef.current.reduce((s, p) => s + (p.upl ?? 0), 0);
+    const { traded, skippedVolatile, skippedConditions } = scanCountersRef.current;
+    setScanStats({ scanned, signals: signalsFound, traded, skippedVolatile, skippedConditions, lastScanAt: new Date().toISOString() });
+    log('info', `📊 Scan done — ${scanned} scanned | ${signalsFound} signals | ${traded} traded | ${skippedVolatile} volatile | ${skippedConditions} conditions`);
+    log('info', `   Open positions: ${openCount} | Total P&L: ${totalPnL >= 0 ? '+' : ''}£${Math.abs(totalPnL).toFixed(2)}`);
+
+    saveStrategy({ ...strat, lastRunAt: new Date().toISOString(), lastRunEnv: env });
     setStrategies(loadStrategiesForAccount());
-    log('info', `Scan complete — next in ${Math.round((strat.signalScanMs ?? signalScanMs) / 60_000)}min`);
+    log('info', `   Next scan in ${Math.round((strat.signalScanMs ?? signalScanMs) / 60_000)}min`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, positions, signalScanMs]);
+  }, [session, positions, signalScanMs, navLoaded, navCategories]);
 
   // ── Position monitor ───────────────────────────────────────────────────────
+  const MAX_CFD_POSITIONS = 5;
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
     if (!runningRef.current) return;
     await loadPositions();
+    const allPos = positionsRef.current;
+
+    // Enforce max positions cap for CFD
+    if (accountType === 'CFD' && allPos.length > MAX_CFD_POSITIONS) {
+      const excess = [...allPos].sort((a, b) => (a.upl ?? 0) - (b.upl ?? 0));
+      const toClose = excess.slice(0, allPos.length - MAX_CFD_POSITIONS);
+      for (const pos of toClose) {
+        log('close', `${acctTag} ⚠️ Max ${MAX_CFD_POSITIONS} positions — closing worst: ${pos.instrumentName ?? pos.epic} (P&L: £${(pos.upl ?? 0).toFixed(2)})`);
+        const cr = await closePos(pos);
+        if (cr.ok) {
+          const exitPx = pos.direction === 'BUY' ? (pos.bid ?? pos.level) : (pos.offer ?? pos.level);
+          setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+        }
+      }
+      await loadPositions();
+    }
+
     for (const pos of positionsRef.current) {
       if (!pos.level || !pos.bid || !pos.offer) continue;
       const currentPx = pos.direction === 'BUY' ? pos.bid : pos.offer;
@@ -993,6 +1270,7 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         ? ((currentPx - entryPx) / entryPx) * 100
         : ((entryPx - currentPx) / entryPx) * 100;
 
+      // Stale position recycling (48h, < 0.5% P&L)
       if (pos.createdDate && strat.autoClose) {
         const ageMs = Date.now() - new Date(pos.createdDate).getTime();
         if (ageMs > 48 * 3_600_000 && Math.abs(pnlPct) < 0.5) {
@@ -1006,18 +1284,55 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         }
       }
 
+      // RSI reversal early exit — fetch indicators (cached 30 min, low cost)
+      if (strat.autoClose) {
+        const ind = await fetchIndicators(pos.instrumentName ?? pos.epic, pos.epic).catch(() => null);
+        if (ind) {
+          const rsiReversal =
+            (pos.direction === 'BUY'  && ind.rsi14 > 72) ||
+            (pos.direction === 'SELL' && ind.rsi14 < 28);
+          if (rsiReversal) {
+            log('close', `${acctTag} 📉 RSI reversal (${ind.rsi14.toFixed(0)}) on ${pos.instrumentName ?? pos.epic} — closing ${pos.direction}`);
+            const cr = await closePos(pos);
+            if (cr.ok) {
+              const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+            }
+            continue;
+          }
+        }
+      }
+
+      // SL management — breakeven when 50% toward take profit; lock +2% at 5% P&L
       let newStop: number|null = null, reason = '';
-      if (pnlPct >= 3 && pnlPct < 5) {
-        const be = entryPx;
-        if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < be : pos.stopLevel > be)) { newStop = be; reason = `+${pnlPct.toFixed(1)}% → SL to breakeven`; }
+
+      // Breakeven at 50% toward TP (if we have the TP level)
+      if (pos.limitLevel && entryPx) {
+        const tpDist   = Math.abs(pos.limitLevel - entryPx);
+        const curDist  = pos.direction === 'BUY' ? currentPx - entryPx : entryPx - currentPx;
+        const pctToTp  = tpDist > 0 ? curDist / tpDist : 0;
+        const be       = entryPx;
+        if (pctToTp >= 0.5) {
+          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < be : pos.stopLevel > be)) {
+            newStop = be;
+            reason  = `${(pctToTp * 100).toFixed(0)}% to TP → SL to breakeven`;
+          }
+        }
+      } else {
+        // No TP set: use P&L % thresholds
+        if (pnlPct >= 3 && pnlPct < 5) {
+          const be = entryPx;
+          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < be : pos.stopLevel > be)) { newStop = be; reason = `+${pnlPct.toFixed(1)}% → SL to breakeven`; }
+        }
+        if (pnlPct >= 5) {
+          const lock = pos.direction === 'BUY' ? entryPx * 1.02 : entryPx * 0.98;
+          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lock : pos.stopLevel > lock)) { newStop = Math.round(lock * 100) / 100; reason = `+${pnlPct.toFixed(1)}% → SL lock +2%`; }
+        }
       }
-      if (pnlPct >= 5) {
-        const lock = pos.direction === 'BUY' ? entryPx * 1.02 : entryPx * 0.98;
-        if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lock : pos.stopLevel > lock)) { newStop = Math.round(lock * 100) / 100; reason = `+${pnlPct.toFixed(1)}% → SL lock +2%`; }
-      }
+
       if (newStop !== null) {
         const r = await updatePositionSL(pos, newStop, pos.limitLevel ?? null);
-        if (r.ok) log('info', `${acctTag} ${pos.instrumentName ?? pos.epic}: ${reason}`);
+        if (r.ok) log('info', `${acctTag} 🔒 ${pos.instrumentName ?? pos.epic}: ${reason}`);
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1949,6 +2264,23 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
             </div>
           }
         />
+        {/* Scan summary strip */}
+        {scanStats && (
+          <div className="grid grid-cols-5 gap-1 px-3 py-2 bg-gray-900/60 border-b border-gray-800 text-center">
+            {([
+              ['Scanned',    scanStats.scanned,            'text-gray-400'],
+              ['Signals',    scanStats.signals,             'text-blue-400'],
+              ['Traded',     scanStats.traded,              'text-emerald-400'],
+              ['Volatile↑',  scanStats.skippedVolatile,    'text-yellow-500'],
+              ['Conditions', scanStats.skippedConditions,  'text-orange-400'],
+            ] as [string, number, string][]).map(([label, val, cls]) => (
+              <div key={label}>
+                <p className={clsx('text-sm font-bold', cls)}>{val}</p>
+                <p className="text-[9px] text-gray-600">{label}</p>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="space-y-0.5 max-h-64 overflow-y-auto font-mono">
           {runLog.length === 0
             ? <p className="text-gray-600 text-xs py-3 text-center">No activity yet</p>

@@ -158,7 +158,11 @@ export async function POST(request: NextRequest) {
         // Proceed with the switch anyway — IG may accept it even if not in the list
       }
 
-      const putRes = await fetch(`${baseUrl}/session`, {
+      // IG PUT /session only accepts { accountId } — dealingEnabled is not valid
+      const putBody_req = JSON.stringify({ accountId: targetAccountId });
+      console.log(`[ig/session] PUT /session body=${putBody_req}`);
+
+      const doPut = () => fetch(`${baseUrl}/session`, {
         method: 'PUT',
         headers: {
           'X-IG-API-KEY':     apiKey,
@@ -168,11 +172,21 @@ export async function POST(request: NextRequest) {
           'Accept':           'application/json; charset=UTF-8',
           'Version':          '1',
         },
-        body: JSON.stringify({ accountId: targetAccountId, dealingEnabled: true }),
+        body: putBody_req,
+        signal: AbortSignal.timeout(10_000),
       });
 
-      const putBody = await putRes.text().catch(() => '');
-      console.log(`[ig/session] PUT /session → ${putRes.status} | body=${putBody.slice(0, 120)}`);
+      let putRes = await doPut();
+      let putBody = await putRes.text().catch(() => '');
+      console.log(`[ig/session] PUT /session → ${putRes.status} | body=${putBody.slice(0, 200)}`);
+
+      // Retry once on transient failures (5xx / network)
+      if (putRes.status >= 500) {
+        await new Promise(r => setTimeout(r, 800));
+        putRes  = await doPut();
+        putBody = await putRes.text().catch(() => '');
+        console.log(`[ig/session] PUT /session retry → ${putRes.status} | body=${putBody.slice(0, 200)}`);
+      }
 
       if (!putRes.ok) {
         return NextResponse.json({
@@ -261,6 +275,7 @@ export async function POST(request: NextRequest) {
       accountId:     activeAccountId,
       accountType:   activeAccount?.accountType ?? null,
       accounts:      accountsWithBalance,
+      apiKey,
       spreadbetAccountId: accounts.find(a => a.accountType === 'SPREADBET')?.accountId ?? null,
     });
 

@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export async function GET(request: NextRequest) {
   const cst       = request.headers.get('x-ig-cst');
   const token     = request.headers.get('x-ig-security-token');
-  const key       = request.headers.get('x-ig-api-key');
+  const key       = request.headers.get('x-ig-api-key') || (process.env.IG_API_KEY ?? '') || null;
   const env       = request.headers.get('x-ig-env') ?? 'demo';
   const targetId  = request.headers.get('x-ig-account-id') ?? '';
 

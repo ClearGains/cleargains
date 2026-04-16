@@ -5,7 +5,7 @@ export async function GET(request: NextRequest) {
   try {
     const cst = request.headers.get('x-ig-cst') ?? '';
     const securityToken = request.headers.get('x-ig-security-token') ?? '';
-    const apiKey = request.headers.get('x-ig-api-key') ?? '';
+    const apiKey = request.headers.get('x-ig-api-key') || (process.env.IG_API_KEY ?? '');
     const env = (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live';
 
     steps.push(`[1] env=${env}, apiKey=${apiKey.slice(0, 8)}…, CST=${cst ? cst.slice(0, 10) + '…' : 'MISSING'}, SecurityToken=${securityToken ? securityToken.slice(0, 10) + '…' : 'MISSING'}`);
