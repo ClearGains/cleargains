@@ -22,6 +22,10 @@ import {
   getStopDistances, MIN_STRENGTH,
 } from '@/lib/igConfig';
 import { igQueue } from '@/lib/igApiQueue';
+import {
+  type FinnhubCategory, CATEGORY_LABELS as FINNHUB_CATEGORY_LABELS,
+  toIgEpic, toYahooSymbol,
+} from '@/lib/finnhubConfig';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -346,7 +350,6 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
   const [navSelectedEpics, setNavSelectedEpics] = useState<Set<string>>(new Set());
 
   // ── Finnhub scanner ────────────────────────────────────────────────────────
-  type FinnhubCategory = 'US_STOCK' | 'UK_STOCK' | 'FOREX' | 'CRYPTO';
   type FinnhubRow = {
     symbol: string; description: string; category: FinnhubCategory;
     price: number; changePercent: number;
@@ -358,9 +361,6 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     // analyst
     analystBullScore?: number;
     loading?: boolean; error?: string;
-  };
-  const FINNHUB_CATEGORY_LABELS: Record<FinnhubCategory, string> = {
-    US_STOCK: 'US Stocks', UK_STOCK: 'UK Stocks', FOREX: 'Forex', CRYPTO: 'Crypto',
   };
   const [finnhubCategory, setFinnhubCategory]   = useState<FinnhubCategory>('US_STOCK');
   const [finnhubRows, setFinnhubRows]           = useState<FinnhubRow[]>([]);
@@ -751,20 +751,6 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
     }
   }
 
-  // ── Resolve and validate a Finnhub instrument epic for the current account ─
-  // Returns the valid epic string or null if not available on IG.
-  async function resolveFinnhubEpic(row: FinnhubRow): Promise<string | null> {
-    const candidate = row.igEpic;
-    if (!candidate) return null;
-    // Check cache first
-    if (epicValidRef.current[candidate] !== undefined)
-      return epicValidRef.current[candidate] ? candidate : null;
-    const valid = await validateEpic(candidate);
-    if (valid) return candidate;
-    log('info', `  ⚠️ ${row.symbol} epic ${candidate} not found on IG — skipping`);
-    return null;
-  }
-
   // ── Pinned instruments helpers ─────────────────────────────────────────────
   function pinInstrument(row: FinnhubRow) {
     setPinnedInstruments(prev => {
@@ -1029,9 +1015,8 @@ export function IGAccountPanel({ accountId, accountType, env }: IGAccountPanelPr
         q.includes('BTC') || q.includes('ETH') ? 'CRYPTO' : 'US_STOCK';
 
       // Build a candidate Finnhub row
-      const { toIgEpic: tig, toYahooSymbol: tyaho } = await import('@/lib/finnhubConfig');
-      const igEpic     = tig(q, cat);
-      const yahooSymbol = tyaho(q, cat);
+      const igEpic     = toIgEpic(q, cat);
+      const yahooSymbol = toYahooSymbol(q, cat);
       const baseRow: FinnhubRow = {
         symbol: q, description: q, category: cat,
         price: 0, changePercent: 0,
