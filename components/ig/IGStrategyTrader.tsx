@@ -78,12 +78,38 @@ function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 // PERMISSION: Dynamic position sizing based on available capital.
 // Caps order size to at most 5% of available funds, minimum 0.1 £/pt.
-// Returns 0 (skip trade) if available falls below £100.
-function calcDynamicSize(requestedSize: number, available: number): number {
+// Returns 0 (skip trade) if available falls below £100 OR below 15% of starting balance.
+function calcDynamicSize(requestedSize: number, available: number, startingBalance?: number): number {
   if (available < 100) return 0;       // pause if critically low
+  if (startingBalance && available < startingBalance * 0.15) return 0; // pause at <15% of starting balance
   if (available < 500) return 0.1;     // minimum viable size when funds low
   const pctBased = Math.floor((available * 0.05) * 10) / 10; // 5% of available, rounded to 0.1 steps
   return Math.min(requestedSize, Math.max(0.1, pctBased));
+}
+
+// Correlated instrument groups for signal confirmation (+50% size boost)
+const CORRELATED_GROUPS: string[][] = [
+  ['EUR/USD', 'GBP/USD', 'AUD/USD'],          // USD-weakness cluster
+  ['USD/JPY', 'USD/CHF'],                      // USD-strength cluster
+  ['S&P 500', 'NASDAQ 100', 'Wall Street'],    // US equity cluster
+  ['FTSE 100', 'Germany 40'],                  // European equity cluster
+];
+
+function hasCorrelatedConfirmation(
+  marketName: string,
+  tradeDir: 'BUY' | 'SELL',
+  scans: Record<string, MarketScan>,
+): boolean {
+  for (const group of CORRELATED_GROUPS) {
+    if (!group.includes(marketName)) continue;
+    const peers = group.filter(n => n !== marketName);
+    const confirmed = peers.some(peerName => {
+      const peerScan = Object.values(scans).find(s => s.name === peerName);
+      return peerScan?.signal?.direction === tradeDir && (peerScan.signal.strength ?? 0) >= 60;
+    });
+    if (confirmed) return true;
+  }
+  return false;
 }
 
 // ── API helpers ───────────────────────────────────────────────────────────────
@@ -344,6 +370,8 @@ export function IGStrategyTrader() {
   // (useRef avoids stale-closure issues with React state in callbacks).
   const igFundsRef = useRef<Partial<Record<'demo'|'live', { available: number; balance: number }>>>({});
   const [igFundsDisplay, setIgFundsDisplay] = useState<Partial<Record<'demo'|'live', { available: number; balance: number }>>>({});
+  // Starting balance captured when auto-run begins — used for 15% capital floor check.
+  const startingBalanceRef = useRef<Partial<Record<'demo'|'live', number>>>({});
 
   // ── Scan frequency settings ────────────────────────────────────────────────
   const [signalScanMs, setSignalScanMs] = useState(5 * 60_000);
@@ -758,11 +786,13 @@ export function IGStrategyTrader() {
 
     // ── Decide whether to trade ───────────────────────────────────────────────
     // forceOpen = trade regardless of signal strength; always use snapshot direction
+    // 90%+ confidence = immediate entry, bypasses minStrength threshold
     const forceOpen = market.forceOpen === true;
+    const highConf  = strength >= 90;
     const tradeDir: 'BUY' | 'SELL' | null =
       forceOpen
         ? (direction !== 'HOLD' ? direction : snapshot.changePercent >= 0 ? 'BUY' : 'SELL')
-        : direction !== 'HOLD' && strength >= strat.minStrength ? direction
+        : direction !== 'HOLD' && (strength >= strat.minStrength || highConf) ? direction
         : null;
 
     if (!strat.autoTrade || !tradeDir) {
@@ -773,25 +803,37 @@ export function IGStrategyTrader() {
         const envPos = positions[env];
         const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
 
-        // Auto-close opposing positions
+        // [AUTO] Close opposing positions (signal reversal)
         if (strat.autoClose) {
           for (const opp of envPos.filter(p => p.epic === market.epic && p.direction === opposite)) {
-            log('close', `[${env.toUpperCase()}] Auto-closing ${opp.direction} ${market.name} — signal reversed`);
+            const exitPnl = opp.upl ?? 0;
+            log('close', `[AUTO] Closed ${market.name} — signal reversed to ${tradeDir} — P&L: £${exitPnl.toFixed(2)}`);
             const cr = await closePos(env, opp);
             if (cr.ok) {
-              log('close', `[${env.toUpperCase()}] ✅ Closed ${market.name}`);
               const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
-              setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, opp.upl ?? 0, 'STRATEGY', new Date().toISOString()));
+              setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, exitPnl, 'STRATEGY', new Date().toISOString()));
             } else log('error', `[${env.toUpperCase()}] Close failed: ${cr.error ?? 'unknown'}`);
           }
           await loadPositions(env);
         }
 
-        // Don't exceed max positions
-        const openCount = positions[env].filter(p => p.epic !== market.epic).length;
-        if (openCount >= strat.maxPositions) {
-          log('info', `[${env.toUpperCase()}] Max ${strat.maxPositions} positions reached — skip ${market.name}`);
-          continue;
+        // [AUTO] Override weaker positions — if current signal is 15%+ stronger than an existing position
+        if (strat.autoClose) {
+          const currentPositions = positions[env].filter(p => p.epic !== market.epic);
+          for (const weakPos of currentPositions) {
+            const weakScan = Object.values(scans).find(s => s.epic === weakPos.epic);
+            const weakStrength = weakScan?.signal?.strength ?? 100;
+            if (strength >= weakStrength + 15) {
+              const weakPnl = weakPos.upl ?? 0;
+              log('close', `[AUTO] Closed ${weakPos.instrumentName ?? weakPos.epic} (signal ${weakStrength}%) — overriding with stronger signal ${market.name} (${strength}%) — P&L: £${weakPnl.toFixed(2)}`);
+              const cr = await closePos(env, weakPos);
+              if (cr.ok) {
+                const exitPx = weakPos.direction === 'BUY' ? (weakPos.bid ?? weakPos.level) : (weakPos.offer ?? weakPos.level);
+                setTradeHistory(prev => recordTradeClose(prev, weakPos.dealId, exitPx, weakPnl, 'STRATEGY', new Date().toISOString()));
+              }
+            }
+          }
+          await loadPositions(env);
         }
 
         // Don't open if already same direction
@@ -804,15 +846,24 @@ export function IGStrategyTrader() {
         }
 
         // PERMISSION: Dynamic position sizing — cap size to 5% of available funds.
-        // Fetch latest funds from ref (populated at scan-cycle start).
+        // Pauses at <15% of starting balance (prevents over-trading on a drawdown).
         const fundsNow = igFundsRef.current[env];
         const available = fundsNow?.available ?? Infinity;
-        const orderSize = calcDynamicSize(strat.size, available);
+        const startBal  = startingBalanceRef.current[env];
+        const orderSizeRaw = calcDynamicSize(strat.size, available, startBal);
 
-        if (orderSize === 0) {
-          log('error', `[${env.toUpperCase()}] ⚠️ Insufficient funds (£${available.toFixed(2)} available) — pausing trades. Top up at ig.com.`);
+        if (orderSizeRaw === 0) {
+          const floorPct = startBal ? ` (floor: 15% of starting £${startBal.toFixed(0)})` : '';
+          log('error', `[${env.toUpperCase()}] ⚠️ Insufficient funds (£${available.toFixed(2)} available${floorPct}) — pausing trades. Top up at ig.com.`);
           showToast(false, `⚠️ Low funds in IG ${env} — skipping`);
           continue;
+        }
+
+        // [AUTO] +50% size boost when a correlated instrument confirms the signal
+        const corroborated = hasCorrelatedConfirmation(market.name, tradeDir, scans);
+        const orderSize = corroborated ? Math.round(orderSizeRaw * 1.5 * 10) / 10 : orderSizeRaw;
+        if (corroborated) {
+          log('info', `[AUTO] Increased size — correlated signal confirmation for ${market.name} → £${orderSize}/pt`);
         }
 
         // PERMISSION: Intelligent order management — if funds are tight (< £500),
@@ -824,17 +875,21 @@ export function IGStrategyTrader() {
             .sort((a, b) => a.upl - b.upl); // most negative first
           if (oldLosers.length > 0) {
             const worst = oldLosers[0];
-            log('close', `[${env.toUpperCase()}] 💡 Freeing capital: closing worst loser ${worst.instrumentName ?? worst.epic} (P&L £${worst.upl.toFixed(2)}, open >24h)`);
+            log('close', `[AUTO] Closed ${worst.instrumentName ?? worst.epic} early — capital below £500 threshold — P&L: £${worst.upl.toFixed(2)}`);
             const cr = await closePos(env, worst);
             if (cr.ok) {
-              log('close', `[${env.toUpperCase()}] ✅ Freed capital by closing ${worst.instrumentName ?? worst.epic}`);
               const exitPx = worst.direction === 'BUY' ? (worst.bid ?? worst.level) : (worst.offer ?? worst.level);
               setTradeHistory(prev => recordTradeClose(prev, worst.dealId, exitPx, worst.upl ?? 0, 'STRATEGY', new Date().toISOString()));
               await loadPositions(env);
-              // Refresh funds after close
               await fetchIGFunds(env);
             }
           }
+        }
+
+        // [AUTO] Immediate entry on 90%+ confidence signal (bypass minStrength threshold)
+        const isHighConf = strength >= 90;
+        if (isHighConf) {
+          log('info', `[AUTO] Opened ${market.name} — strong signal override — confidence ${strength}%`);
         }
 
         const maxLoss = orderSize * stopDist;
@@ -933,18 +988,34 @@ export function IGStrategyTrader() {
           ? ((currentPx - entryPx) / entryPx) * 100
           : ((entryPx - currentPx) / entryPx) * 100;
 
-        // PERMISSION: Stale position recycling — close positions open > 48h
-        // that have not moved more than ±0.5%. Frees capital for better signals.
+        // [AUTO] Stale position recycling — close positions open > 48h with <±0.5% P&L
         if (pos.createdDate && strat.autoClose) {
           const ageMs = Date.now() - new Date(pos.createdDate).getTime();
           if (ageMs > 48 * 3_600_000 && Math.abs(pnlPct) < 0.5) {
-            log('close', `[${env.toUpperCase()}] ♻️ Recycling stale position: ${pos.instrumentName ?? pos.epic} (${ageMs > 86_400_000 ? Math.floor(ageMs / 86_400_000) + 'd' : Math.floor(ageMs / 3_600_000) + 'h'} open, ${pnlPct.toFixed(2)}% P&L)`);
+            const ageLabel = ageMs > 86_400_000 ? `${Math.floor(ageMs / 86_400_000)}d` : `${Math.floor(ageMs / 3_600_000)}h`;
+            log('close', `[AUTO] Closed ${pos.instrumentName ?? pos.epic} early — stale position (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L) — P&L: £${(pos.upl ?? 0).toFixed(2)}`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
-              log('close', `[${env.toUpperCase()}] ✅ Stale position recycled — capital freed`);
               const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STALE', new Date().toISOString()));
             } else log('error', `[${env.toUpperCase()}] Recycle close failed: ${cr.error ?? 'unknown'}`);
+            continue;
+          }
+        }
+
+        // [AUTO] Early TP at 75% of target — lock gains before full reversal
+        if (strat.autoClose && pos.limitLevel) {
+          const tpTarget = pos.limitLevel;
+          const tpDist = Math.abs(tpTarget - entryPx);
+          const currentDist = Math.abs(currentPx - entryPx);
+          const isMovingTowardTP = pos.direction === 'BUY' ? currentPx > entryPx : currentPx < entryPx;
+          if (isMovingTowardTP && tpDist > 0 && currentDist >= tpDist * 0.75) {
+            const pnlStr = `£${(pos.upl ?? 0).toFixed(2)}`;
+            log('close', `[AUTO] Closed ${pos.instrumentName ?? pos.epic} early — 75% of TP target reached (${((currentDist / tpDist) * 100).toFixed(0)}%) — P&L: ${pnlStr}`);
+            const cr = await closePos(env, pos);
+            if (cr.ok) {
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, pos.upl ?? 0, 'TAKE_PROFIT', new Date().toISOString()));
+            } else log('error', `[${env.toUpperCase()}] 75% TP close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
         }
@@ -974,7 +1045,7 @@ export function IGStrategyTrader() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, positions]);
+  }, [sessions, positions, scans]);
 
   // ── Start / stop auto-run ──────────────────────────────────────────────────
   function startAutoRun(strat: IGSavedStrategy) {
@@ -990,6 +1061,19 @@ export function IGStrategyTrader() {
     const modeLabel = strat.accounts.includes('live') ? '⚠️ LIVE' : 'demo';
 
     log('info', `▶ Auto-trader started — "${strat.name}" · ${modeLabel} · signals every ${Math.round(sScanMs/60_000)}min · positions every ${Math.round(pMonMs/1000)}s`);
+
+    // Capture starting balance for 15% capital floor check
+    const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
+    for (const env of envs) {
+      const funds = igFundsRef.current[env];
+      if (funds) startingBalanceRef.current = { ...startingBalanceRef.current, [env]: funds.balance };
+      else {
+        // Fetch now if not yet available
+        fetchIGFunds(env).then(f => {
+          if (f) startingBalanceRef.current = { ...startingBalanceRef.current, [env]: f.balance };
+        });
+      }
+    }
 
     // Run immediately on start
     signalStartRef.current = Date.now();

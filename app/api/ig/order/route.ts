@@ -20,9 +20,9 @@ const VERIFIED_EPICS: Record<string, string> = {
   'USD/CHF':       'CS.D.USDCHF.TODAY.IP',
   // Commodities — spread bet  (NOT the CFD CS.D.CFDGOLD / CS.D.CRUDEOIL variants)
   'Gold':          'CS.D.GOLD.TODAY.IP',
-  'Silver':        'CS.D.SILVER.TODAY.IP',
-  'Oil (WTI)':     'CS.D.CRUDE.TODAY.IP',
-  'Natural Gas':   'CS.D.NATGAS.TODAY.IP',
+  'Silver':        'CS.D.SLVR.TODAY.IP',
+  'Oil (WTI)':     'CS.D.OILCRUD.TODAY.IP',
+  'Natural Gas':   'CS.D.NGAS.TODAY.IP',
   // Crypto — spread bet
   'Bitcoin':       'CS.D.BITCOIN.TODAY.IP',
   'Ethereum':      'CS.D.ETHUSD.TODAY.IP',
