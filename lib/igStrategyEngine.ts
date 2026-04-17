@@ -70,6 +70,8 @@ export type IGSavedStrategy = {
   lastSignal?: SignalDirection;
   signalScanMs?: number;   // override interval for signal scans (ms)
   posMonitorMs?: number;   // override interval for position monitor (ms)
+  stopPct?: number;        // stop loss as % of entry price (default 2)
+  targetPct?: number;      // take profit as % of entry price (default 4)
 };
 
 /**

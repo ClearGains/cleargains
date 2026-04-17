@@ -19,6 +19,7 @@ import { clsx } from 'clsx';
 import { sendPush } from '@/lib/pushNotifications';
 import Modal from '@/components/ui/Modal';
 import { IGStrategyTrader } from '@/components/ig/IGStrategyTrader';
+import { T212StrategyTrader } from '@/components/t212/T212StrategyTrader';
 import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 
 const SECTORS = ['All', 'Technology', 'Healthcare', 'Energy', 'Finance', 'Consumer'] as const;
@@ -866,6 +867,11 @@ function IGTrader() {
   return <IGStrategyTrader />;
 }
 
+// ── T212 Strategy Trader (full implementation in components/t212/T212StrategyTrader.tsx)
+function T212Trader() {
+  return <T212StrategyTrader />;
+}
+
 
 // ── Component ─────────────────────────────────────────────────────────────────
 function ForexTrader() {
@@ -1570,7 +1576,7 @@ export default function DemoTraderPage() {
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
-  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig'>('stocks');
+  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 't212'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [showExecAccountPicker, setShowExecAccountPicker] = useState(false);
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
@@ -2882,7 +2888,7 @@ export default function DemoTraderPage() {
 
       {/* Tab toggle */}
       <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
-        {(['stocks', 'forex', 'ig'] as const).map(tab => (
+        {(['stocks', 'forex', 'ig', 't212'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setTraderTab(tab)}
@@ -2893,7 +2899,7 @@ export default function DemoTraderPage() {
                 : 'text-gray-500 hover:text-gray-300'
             )}
           >
-            {tab === 'ig' ? 'IG Spread Bet' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+            {tab === 'ig' ? 'IG Spread Bet' : tab === 't212' ? 'T212 Strategy' : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
       </div>
@@ -2904,6 +2910,8 @@ export default function DemoTraderPage() {
         <ForexTrader />
       ) : traderTab === 'ig' ? (
         <IGTrader />
+      ) : traderTab === 't212' ? (
+        <T212Trader />
       ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: controls */}

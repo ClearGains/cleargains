@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Play, Square, Save, Trash2, Plus, RefreshCw, Search,
+  Play, Square, Pause, Save, Trash2, Plus, RefreshCw, Search,
   AlertCircle, CheckCircle2, Clock, BarChart3, Target,
   TrendingUp, TrendingDown, Minus, Wifi, X, Zap,
   ArrowUpDown, Settings, Activity, ChevronDown, ChevronUp, Edit2,
@@ -221,14 +221,22 @@ function MarketSearch({ session, env, onSelect }: {
 
 // ── Market-type helpers ───────────────────────────────────────────────────────
 
-/** Stop/limit distances in POINTS (IG spread-bet "points" = pips for forex). */
-function getStopLimitDist(mType: MarketType): { stopDist: number; limitDist: number } {
-  switch (mType) {
-    case 'INDEX':     return { stopDist: 20, limitDist: 40 };
-    case 'FOREX':     return { stopDist: 20, limitDist: 40 };
-    case 'COMMODITY': return { stopDist: 2,  limitDist: 4  };
-    case 'CRYPTO':    return { stopDist: 50, limitDist: 100 };
-  }
+/**
+ * Percentage-based stop/limit distances.
+ * Yahoo Finance quotes FOREX in decimal (1.3500) — IG spread-bet uses pip scale (×10000).
+ * All other markets use the native price (S&P 5250, Gold 2000, BTC 75000).
+ */
+function calcPctDistances(
+  price: number,
+  mType: MarketType,
+  stopPct: number,
+  limitPct: number,
+): { stopDist: number; limitDist: number } {
+  const scaledPrice = mType === 'FOREX' ? Math.round(price * 10000) : Math.round(price);
+  return {
+    stopDist:  Math.max(1, Math.round(scaledPrice * stopPct  / 100)),
+    limitDist: Math.max(1, Math.round(scaledPrice * limitPct / 100)),
+  };
 }
 
 /**
@@ -417,6 +425,8 @@ export function IGStrategyTrader() {
   const [bWatchlist, setBWatchlist]         = useState<WatchlistMarket[]>([...DEFAULT_WATCHLIST]);
   const [bSignalScanMs, setBSignalScanMs]   = useState(5 * 60_000);
   const [bPosMonitorMs, setBPosMonitorMs]   = useState(60_000);
+  const [bStopPct, setBStopPct]             = useState(2);
+  const [bTargetPct, setBTargetPct]         = useState(4);
 
   // ── Manual trade ───────────────────────────────────────────────────────────
   const [showManual, setShowManual]     = useState(false);
@@ -429,6 +439,18 @@ export function IGStrategyTrader() {
   const [manualEnv, setManualEnv]       = useState<'demo'|'live'>('demo');
   const [placingManual, setPlacingManual] = useState(false);
 
+  // ── Run state: RUNNING=full; PAUSED=monitor only (no new entries); STOPPED=idle ─
+  type RunState = 'RUNNING' | 'PAUSED' | 'STOPPED';
+  const [runState, setRunState]                   = useState<RunState>('STOPPED');
+  const runStateRef                                = useRef<RunState>('STOPPED');
+  const runtimeStartRef                            = useRef<number|null>(null);
+  const [runtimeDisplay, setRuntimeDisplay]       = useState('');
+  const completedTradesRef                         = useRef(0);
+  const [completedTrades, setCompletedTrades]     = useState(0);
+  const todayPnLRef                                = useRef(0);
+  const [todayPnL, setTodayPnL]                   = useState(0);
+  const pendingRestartRef                          = useRef<string|null>(null);
+
   // ── Log ────────────────────────────────────────────────────────────────────
   const [runLog, setRunLog] = useState<RunLog[]>([]);
 
@@ -436,7 +458,7 @@ export function IGStrategyTrader() {
   const [toast, setToast] = useState<{ok:boolean;msg:string}|null>(null);
   function showToast(ok:boolean, msg:string) { setToast({ok,msg}); setTimeout(() => setToast(null), 4000); }
   function log(type: RunLog['type'], msg: string) {
-    setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0,200));
+    setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0, 100));
   }
 
   function setActiveMode(mode: 'demo'|'live') {
@@ -472,6 +494,39 @@ export function IGStrategyTrader() {
     });
     // Always restore demo mode immediately (no credential check needed)
     if (savedMode === 'demo') setActiveModeState('demo');
+  }, []);
+
+  // ── Auto-restart: detect strategy_running_id on mount ────────────────────
+  useEffect(() => {
+    const runningId = localStorage.getItem('strategy_running_id');
+    if (runningId) pendingRestartRef.current = runningId;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Auto-restart: start strategy once sessions connect ────────────────────
+  useEffect(() => {
+    if (!pendingRestartRef.current) return;
+    if (!Object.values(sessions).some(Boolean)) return;
+    const stratId = pendingRestartRef.current;
+    const strat = loadStrategies().find(s => s.id === stratId);
+    if (!strat) { pendingRestartRef.current = null; return; }
+    pendingRestartRef.current = null;
+    log('info', `♻️ Strategy "${strat.name}" resumed — was running before page reload`);
+    setActiveStratId(stratId);
+    startAutoRun(strat);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions]);
+
+  // ── Runtime display ticker ────────────────────────────────────────────────
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (runtimeStartRef.current === null) return;
+      const ms = Date.now() - runtimeStartRef.current;
+      const h = Math.floor(ms / 3_600_000);
+      const m = Math.floor((ms % 3_600_000) / 60_000);
+      setRuntimeDisplay(`${h}h ${m}m`);
+    }, 30_000);
+    return () => clearInterval(t);
   }, []);
 
   // ── Countdown ticker ───────────────────────────────────────────────────────
@@ -755,7 +810,9 @@ export function IGStrategyTrader() {
 
     // ── Calibrated signal scoring by market type ──────────────────────────────
     const mType = market.marketType ?? getMarketType(market.epic);
-    const { stopDist, limitDist } = getStopLimitDist(mType);
+    const stopPct   = strat.stopPct   ?? 2;
+    const targetPct = strat.targetPct ?? 4;
+    const { stopDist, limitDist } = calcPctDistances(snapshot.price, mType, stopPct, targetPct);
     const { direction, strength } = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
     const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
 
@@ -839,6 +896,12 @@ export function IGStrategyTrader() {
         // Don't open if already same direction
         if (positions[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
+        // Skip new trades when paused — monitor only
+        if (runStateRef.current === 'PAUSED') {
+          log('signal', `[PAUSED] ${market.name} → ${tradeDir} ${strength}% — no new entries while paused`);
+          continue;
+        }
+
         // One-time disclaimer before first live trade
         if (env === 'live') {
           const ok = await confirmLiveTrade();
@@ -899,6 +962,8 @@ export function IGStrategyTrader() {
         const or = await placeOrder(env, market.epic, tradeDir, orderSize, stopDist, limitDist);
 
         if (or.ok) {
+          completedTradesRef.current += 1;
+          setCompletedTrades(completedTradesRef.current);
           log(tradeDir === 'BUY' ? 'buy' : 'sell',
             `[${env.toUpperCase()}] ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · filled @ ${or.level ?? '?'} · epic: ${or.epic ?? market.epic}`);
           showToast(true, `[${env}] ${tradeDir} ${market.name}`);
@@ -1014,7 +1079,11 @@ export function IGStrategyTrader() {
             log('close', `[AUTO] Closed ${pos.instrumentName ?? pos.epic} early — 75% of TP target reached (${((currentDist / tpDist) * 100).toFixed(0)}%) — P&L: ${pnlStr}`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
-              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, pos.upl ?? 0, 'TAKE_PROFIT', new Date().toISOString()));
+              const closedPnl = pos.upl ?? 0;
+              todayPnLRef.current += closedPnl;
+              setTodayPnL(todayPnLRef.current);
+              log('close', `💰 Capital redeployment: closed +${closedPnl >= 0 ? '+' : ''}£${closedPnl.toFixed(2)} — available for next signal`);
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'TAKE_PROFIT', new Date().toISOString()));
             } else log('error', `[${env.toUpperCase()}] 75% TP close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
@@ -1054,7 +1123,20 @@ export function IGStrategyTrader() {
     if (posTimerRef.current) { clearInterval(posTimerRef.current); posTimerRef.current = null; }
 
     runningRef.current = true;
+    runStateRef.current = 'RUNNING';
+    setRunState('RUNNING');
     setIsRunning(true);
+
+    // Runtime tracking
+    runtimeStartRef.current = Date.now();
+    completedTradesRef.current = 0;
+    setCompletedTrades(0);
+    todayPnLRef.current = 0;
+    setTodayPnL(0);
+    setRuntimeDisplay('0h 0m');
+
+    // Persist running state for auto-restart on page reload
+    localStorage.setItem('strategy_running_id', strat.id);
 
     const sScanMs = strat.signalScanMs ?? signalScanMs;
     const pMonMs  = strat.posMonitorMs ?? posMonitorMs;
@@ -1118,15 +1200,46 @@ export function IGStrategyTrader() {
     );
   }
 
+  function pauseAutoRun() {
+    runStateRef.current = 'PAUSED';
+    setRunState('PAUSED');
+    log('info', '⏸ Strategy PAUSED — monitoring open positions, no new entries until resumed');
+  }
+
   function stopAutoRun() {
     runningRef.current = false;
+    runStateRef.current = 'STOPPED';
+    setRunState('STOPPED');
     if (timerRef.current)    { clearInterval(timerRef.current);    timerRef.current    = null; }
     if (posTimerRef.current) { clearInterval(posTimerRef.current); posTimerRef.current = null; }
     setIsRunning(false);
     setScanProgress('');
     setSignalCountdown('');
     setPosCountdown('');
-    log('info', '⏹ Auto-trader stopped');
+    runtimeStartRef.current = null;
+    setRuntimeDisplay('');
+    localStorage.removeItem('strategy_running_id');
+    log('info', `⏹ Strategy stopped — ${completedTradesRef.current} trades completed · Today P&L: ${todayPnLRef.current >= 0 ? '+' : ''}£${todayPnLRef.current.toFixed(2)}`);
+  }
+
+  async function stopAutoRunAndCloseAll() {
+    stopAutoRun();
+    log('info', '🔴 STOP + CLOSE ALL — closing all open positions…');
+    const allPos: Array<{p: IGPosition; env: 'demo'|'live'}> = [
+      ...positions.demo.map(p => ({p, env: 'demo' as const})),
+      ...positions.live.map(p => ({p, env: 'live' as const})),
+    ];
+    for (const {p, env} of allPos) {
+      const cr = await closePos(env, p);
+      if (cr.ok) {
+        const exitPx = p.direction === 'BUY' ? (p.bid ?? p.level) : (p.offer ?? p.level);
+        log('close', `[${env.toUpperCase()}] Force-closed ${p.instrumentName ?? p.epic} — P&L: £${(p.upl??0).toFixed(2)}`);
+        setTradeHistory(prev => recordTradeClose(prev, p.dealId, exitPx, p.upl??0, 'MANUAL', new Date().toISOString()));
+      } else {
+        log('error', `[${env.toUpperCase()}] Force-close failed: ${cr.error ?? 'unknown'}`);
+      }
+    }
+    await loadPositions();
   }
 
   useEffect(() => () => {
@@ -1404,6 +1517,8 @@ export function IGStrategyTrader() {
       setBWatchlist(existing.watchlist?.length ? existing.watchlist : [...DEFAULT_WATCHLIST]);
       setBSignalScanMs(existing.signalScanMs ?? 5 * 60_000);
       setBPosMonitorMs(existing.posMonitorMs ?? 60_000);
+      setBStopPct(existing.stopPct ?? 2);
+      setBTargetPct(existing.targetPct ?? 4);
     } else {
       setEditId(null); setBName(''); setBTimeframe('daily'); setBSize(1); setBMaxPos(3);
       setBMinStrength(55);
@@ -1413,6 +1528,8 @@ export function IGStrategyTrader() {
       setBWatchlist([...DEFAULT_WATCHLIST]);
       setBSignalScanMs(5 * 60_000);
       setBPosMonitorMs(60_000);
+      setBStopPct(2);
+      setBTargetPct(4);
     }
     setShowBuilder(true);
     setShowManual(false);
@@ -1436,6 +1553,8 @@ export function IGStrategyTrader() {
       createdAt: new Date().toISOString(),
       signalScanMs: bSignalScanMs,
       posMonitorMs: bPosMonitorMs,
+      stopPct: bStopPct,
+      targetPct: bTargetPct,
     };
     saveStrategy(s);
     setStrategies(loadStrategies());
@@ -1827,6 +1946,34 @@ export function IGStrategyTrader() {
               </div>
             </div>
 
+            {/* Percentage-based stop loss and take profit */}
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-400 mb-1.5 block">Stop Loss %</label>
+                  <div className="flex items-center gap-2">
+                    <input type="range" min={0.5} max={10} step={0.5} value={bStopPct}
+                      onChange={e => setBStopPct(Number(e.target.value))}
+                      className="flex-1 accent-red-500" />
+                    <span className="text-sm font-mono text-red-400 w-10">{bStopPct}%</span>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400 mb-1.5 block">Take Profit %</label>
+                  <div className="flex items-center gap-2">
+                    <input type="range" min={1} max={20} step={0.5} value={bTargetPct}
+                      onChange={e => setBTargetPct(Number(e.target.value))}
+                      className="flex-1 accent-emerald-500" />
+                    <span className="text-sm font-mono text-emerald-400 w-10">{bTargetPct}%</span>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-800/40 rounded-lg px-3 py-2 text-[11px] space-y-0.5">
+                <p className="text-gray-300">Risk/Reward: 1:{(bTargetPct/bStopPct).toFixed(1)} — risking {bStopPct}% to gain {bTargetPct}%</p>
+                <p className="text-gray-500">At £1/pt on S&P 500 (5250): SL ≈ -£{Math.round(5250*bStopPct/100)}, TP ≈ +£{Math.round(5250*bTargetPct/100)} · Works for any market at any price</p>
+              </div>
+            </div>
+
             {/* Watchlist */}
             <div>
               {/* Header row with master checkbox + select all / deselect all */}
@@ -1970,11 +2117,29 @@ export function IGStrategyTrader() {
                   </button>
 
                   {/* Controls */}
-                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap">
                     {isActive && isRunning ? (
-                      <Button size="sm" className="bg-red-600 hover:bg-red-500 text-white" icon={<Square className="h-3.5 w-3.5" />} onClick={stopAutoRun}>
-                        Stop
-                      </Button>
+                      <>
+                        {runState === 'PAUSED' ? (
+                          <Button size="sm" variant="outline" className="text-amber-400 border-amber-500/40"
+                            icon={<Play className="h-3.5 w-3.5" />}
+                            onClick={() => { runStateRef.current = 'RUNNING'; setRunState('RUNNING'); log('info', '▶ Resumed — scanning for new entries'); }}>
+                            Resume
+                          </Button>
+                        ) : (
+                          <Button size="sm" variant="outline" icon={<Pause className="h-3.5 w-3.5" />} onClick={pauseAutoRun}>
+                            Pause
+                          </Button>
+                        )}
+                        <Button size="sm" className="bg-red-600 hover:bg-red-500 text-white" icon={<Square className="h-3.5 w-3.5" />} onClick={stopAutoRun}>
+                          Stop
+                        </Button>
+                        <button
+                          onClick={() => { if (confirm('Stop trading AND close ALL open positions immediately?')) void stopAutoRunAndCloseAll(); }}
+                          className="text-[10px] px-2 py-1 rounded border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors whitespace-nowrap">
+                          Stop+Close All
+                        </button>
+                      </>
                     ) : (
                       <Button size="sm"
                         className={strat.accounts.includes('live') ? 'bg-amber-600 hover:bg-amber-500 text-black font-bold' : 'bg-orange-600 hover:bg-orange-500 text-white'}
@@ -1991,31 +2156,45 @@ export function IGStrategyTrader() {
                         {strat.accounts.includes('live') ? '⚠️ Run Live' : (isActive ? 'Start' : 'Run')}
                       </Button>
                     )}
-                    <Button size="sm" variant="outline"
-                      loading={testRunning && isActive}
-                      disabled={isRunning || testRunning}
-                      onClick={() => { setActiveStratId(strat.id); void runTestScan(strat); }}
-                      title="Run one scan cycle — opens max 1 position">
-                      Test
-                    </Button>
-                    <button onClick={() => openBuilder(strat)} className="p-1.5 text-gray-600 hover:text-orange-400 transition-colors"><Edit2 className="h-3.5 w-3.5" /></button>
-                    <button onClick={() => { deleteStrategy(strat.id); setStrategies(loadStrategies()); if (activeStratId===strat.id) stopAutoRun(); }}
-                      className="p-1.5 text-gray-600 hover:text-red-400 transition-colors"><Trash2 className="h-3.5 w-3.5" /></button>
+                    {!isRunning && (
+                      <>
+                        <Button size="sm" variant="outline"
+                          loading={testRunning && isActive}
+                          disabled={isRunning || testRunning}
+                          onClick={() => { setActiveStratId(strat.id); void runTestScan(strat); }}
+                          title="Run one scan cycle — opens max 1 position">
+                          Test
+                        </Button>
+                        <button onClick={() => openBuilder(strat)} className="p-1.5 text-gray-600 hover:text-orange-400 transition-colors"><Edit2 className="h-3.5 w-3.5" /></button>
+                        <button onClick={() => { deleteStrategy(strat.id); setStrategies(loadStrategies()); if (activeStratId===strat.id) stopAutoRun(); }}
+                          className="p-1.5 text-gray-600 hover:text-red-400 transition-colors"><Trash2 className="h-3.5 w-3.5" /></button>
+                      </>
+                    )}
                   </div>
                 </div>
 
-                {/* Running status */}
+                {/* Running / Paused status */}
                 {isActive && isRunning && (
-                  <div className="mt-2 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-2 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <Activity className="h-3.5 w-3.5 text-orange-400 animate-pulse flex-shrink-0" />
-                      <span className="text-xs text-orange-300 font-medium">
-                        {scanProgress ? `Scanning: ${scanProgress}` : 'Running'}
+                  <div className={clsx('mt-2 rounded-lg px-3 py-2 space-y-1 border',
+                    runState === 'PAUSED'
+                      ? 'bg-amber-500/10 border-amber-500/20'
+                      : 'bg-orange-500/10 border-orange-500/20'
+                  )}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Activity className={clsx('h-3.5 w-3.5 flex-shrink-0', runState === 'PAUSED' ? 'text-amber-400' : 'text-orange-400 animate-pulse')} />
+                      <span className={clsx('text-xs font-medium', runState === 'PAUSED' ? 'text-amber-300' : 'text-orange-300')}>
+                        {runState === 'PAUSED' ? '⏸ PAUSED — monitoring positions, no new entries' : scanProgress ? `Scanning: ${scanProgress}` : 'RUNNING'}
                       </span>
+                      {runtimeDisplay && <span className="text-[10px] text-gray-500 ml-auto">Running {runtimeDisplay}</span>}
                     </div>
-                    <div className="flex items-center gap-4 text-[11px] text-gray-500 pl-5">
-                      {signalCountdown && <span>Next signal scan in: <span className="text-orange-400 font-mono">{signalCountdown}</span></span>}
-                      {posCountdown && <span>Position check in: <span className="text-blue-400 font-mono">{posCountdown}</span></span>}
+                    <div className="flex items-center gap-4 text-[11px] text-gray-500 flex-wrap">
+                      <span>Trades: <span className="text-white font-semibold">{completedTrades}</span></span>
+                      <span>Today P&L: <span className={clsx('font-semibold', todayPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>{todayPnL >= 0 ? '+' : ''}£{Math.abs(todayPnL).toFixed(2)}</span></span>
+                      {strat.accounts.map(env => igFundsDisplay[env] && (
+                        <span key={env}>Capital: <span className="text-emerald-400 font-semibold">£{igFundsDisplay[env]!.available.toFixed(0)}</span> avail ({env})</span>
+                      ))}
+                      {runState === 'RUNNING' && signalCountdown && <span>Next scan: <span className="text-orange-400 font-mono">{signalCountdown}</span></span>}
+                      {posCountdown && <span>Pos check: <span className="text-blue-400 font-mono">{posCountdown}</span></span>}
                     </div>
                   </div>
                 )}
@@ -2363,13 +2542,16 @@ export function IGStrategyTrader() {
         })()}
       </Card>
 
-      {/* ── Activity Log ────────────────────────────────────────────────── */}
+      {/* ── Live Activity Feed ──────────────────────────────────────────── */}
       {runLog.length > 0 && (
         <Card>
-          <CardHeader title="Activity Log" subtitle={`${runLog.length} entries`} icon={<Clock className="h-4 w-4" />}
+          <CardHeader
+            title="Live Activity Feed"
+            subtitle={`${runLog.length} entries · last 100 visible`}
+            icon={<Activity className="h-4 w-4" />}
             action={<button onClick={() => setRunLog([])} className="text-xs text-gray-500 hover:text-white">Clear</button>}
           />
-          <div className="space-y-0.5 max-h-64 overflow-y-auto font-mono">
+          <div className="space-y-0.5 max-h-72 overflow-y-auto font-mono">
             {runLog.map(e => (
               <div key={e.id} className="flex gap-2 text-[11px] py-0.5">
                 <span className="text-gray-600 flex-shrink-0 tabular-nums">{fmtTime(e.ts)}</span>

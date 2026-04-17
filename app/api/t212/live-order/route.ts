@@ -187,9 +187,14 @@ export async function POST(request: NextRequest) {
     if (fromLive) resolvedTicker = fromLive;
   }
 
+  // Fractional quantities: 4 decimal places, no minimum — supports percentage-based capital allocation
   const roundedQty = quantity < 0
-    ? -Math.max(1, Math.round(Math.abs(quantity) * 100) / 100)
-    : Math.max(1, Math.round(quantity * 100) / 100);
+    ? -(Math.round(Math.abs(quantity) * 10000) / 10000)
+    : Math.round(quantity * 10000) / 10000;
+
+  if (roundedQty === 0) {
+    return NextResponse.json({ ok: false, error: 'Calculated quantity is zero after rounding.' }, { status: 400 });
+  }
 
   // ── Build order payload ────────────────────────────────────────────────────
   let orderPath: string;
@@ -291,7 +296,10 @@ async function placeT212Order(
     // Retry with integer quantity on precision error
     if (res.status === 400 && msg.toLowerCase().includes('precision')) {
       const qty = body.quantity as number;
-      const intQty = qty < 0 ? -Math.max(1, Math.floor(Math.abs(qty))) : Math.max(1, Math.floor(qty));
+      // Retry with fewer decimal places: try 2dp first, then integer
+      const intQty = qty < 0
+        ? -(Math.max(0.01, Math.round(Math.abs(qty) * 100) / 100))
+        : Math.max(0.01, Math.round(qty * 100) / 100);
       const retry = await fetch(url, {
         method: 'POST',
         headers: { Authorization: 'Basic ' + encoded, 'Content-Type': 'application/json' },
