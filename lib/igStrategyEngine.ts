@@ -52,6 +52,8 @@ export function getMarketType(epic: string): MarketType {
 export type IGSavedStrategy = {
   id: string;
   name: string;
+  /** Which environment this strategy belongs to — isolated storage. Required on all new strategies. */
+  env: 'demo' | 'live';
   // legacy single-market fields (kept for back-compat)
   epic: string;
   instrumentName: string;
@@ -72,6 +74,9 @@ export type IGSavedStrategy = {
   posMonitorMs?: number;   // override interval for position monitor (ms)
   stopPct?: number;        // stop loss as % of entry price (default 2)
   targetPct?: number;      // take profit as % of entry price (default 4)
+  // copy provenance
+  copiedFrom?: 'demo' | 'live';
+  copiedAt?: string;
 };
 
 /**
@@ -518,21 +523,47 @@ export const TIMEFRAME_CONFIG: Record<Timeframe, { resolution: string; max: numb
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
 
-const LS_KEY = 'ig_strategies';
+const LEGACY_KEY = 'ig_strategies';
 
-export function loadStrategies(): IGSavedStrategy[] {
+function envKey(env: 'demo' | 'live'): string {
+  return `ig_strategies_${env}`;
+}
+
+/** One-time migration: move strategies from the legacy shared key into env-namespaced keys. */
+function migrateIfNeeded(): void {
+  if (typeof localStorage === 'undefined') return;
+  const raw = localStorage.getItem(LEGACY_KEY);
+  if (!raw) return;
+  try {
+    const all = JSON.parse(raw) as IGSavedStrategy[];
+    if (!all.length) { localStorage.removeItem(LEGACY_KEY); return; }
+    // Bucket by env; treat strategies without env as demo
+    const demo = all.filter(s => !s.env || s.env === 'demo').map(s => ({ ...s, env: 'demo' as const }));
+    const live = all.filter(s => s.env === 'live');
+    if (demo.length) localStorage.setItem(envKey('demo'), JSON.stringify(demo));
+    if (live.length) localStorage.setItem(envKey('live'), JSON.stringify(live));
+    localStorage.removeItem(LEGACY_KEY);
+  } catch {}
+}
+
+export function loadStrategies(env: 'demo' | 'live' = 'demo'): IGSavedStrategy[] {
   if (typeof localStorage === 'undefined') return [];
-  try { return JSON.parse(localStorage.getItem(LS_KEY) ?? '[]') as IGSavedStrategy[]; } catch { return []; }
+  migrateIfNeeded();
+  try {
+    return (JSON.parse(localStorage.getItem(envKey(env)) ?? '[]') as IGSavedStrategy[])
+      .map(s => ({ ...s, env })); // ensure env field is always set correctly
+  } catch { return []; }
 }
 
 export function saveStrategy(s: IGSavedStrategy): void {
-  const all = loadStrategies();
+  const env = s.env ?? 'demo';
+  const all = loadStrategies(env);
   const idx = all.findIndex(x => x.id === s.id);
   if (idx >= 0) all[idx] = s; else all.push(s);
-  try { localStorage.setItem(LS_KEY, JSON.stringify(all)); } catch {}
+  try { localStorage.setItem(envKey(env), JSON.stringify(all)); } catch {}
 }
 
-export function deleteStrategy(id: string): void {
-  const all = loadStrategies().filter(s => s.id !== id);
-  try { localStorage.setItem(LS_KEY, JSON.stringify(all)); } catch {}
+export function deleteStrategy(id: string, env: 'demo' | 'live' = 'demo'): void {
+  const all = loadStrategies(env).filter(s => s.id !== id);
+  try { localStorage.setItem(envKey(env), JSON.stringify(all)); } catch {}
 }

@@ -358,7 +358,16 @@ export function IGStrategyTrader() {
   // ── Active demo/live mode ──────────────────────────────────────────────────
   const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
   const [showLiveConfirm, setShowLiveConfirm] = useState(false);
+  const [liveConfirmSkipSession, setLiveConfirmSkipSession] = useState(false);
   const [pendingRunAction, setPendingRunAction] = useState<(() => void)|null>(null);
+  // Track the env of the currently running strategy so the live banner can show regardless of active tab
+  const [runStratEnv, setRunStratEnv] = useState<'demo'|'live'|null>(null);
+  // Copy modals
+  type CopyModal = { strat: IGSavedStrategy; direction: 'toDemo' | 'toLive' };
+  const [copyModal, setCopyModal] = useState<CopyModal|null>(null);
+  const [copyConfirmText, setCopyConfirmText] = useState('');
+  // Sync settings modal
+  const [syncModal, setSyncModal] = useState<{ demo: IGSavedStrategy; live: IGSavedStrategy }|null>(null);
 
   // ── First-live-trade disclaimer (shown once ever) ──────────────────────────
   const liveTradeAckedRef   = useRef(false);
@@ -473,6 +482,12 @@ export function IGStrategyTrader() {
     localStorage.setItem('ig_active_mode', mode);
   }
 
+  function handleSwitchToLive() {
+    const alreadyConfirmed = sessionStorage.getItem('live_confirmed_this_session') === '1';
+    if (alreadyConfirmed) { setActiveMode('live'); }
+    else { setShowLiveConfirm(true); }
+  }
+
   /** Returns true if the trade should proceed. For live, shows a one-time disclaimer first. */
   function confirmLiveTrade(): Promise<boolean> {
     if (liveTradeAckedRef.current) return Promise.resolve(true);
@@ -484,7 +499,7 @@ export function IGStrategyTrader() {
 
   // ── Connect on mount ───────────────────────────────────────────────────────
   useEffect(() => {
-    setStrategies(loadStrategies());
+    setStrategies(loadStrategies('demo')); // start with demo strategies
     setTradeHistory(loadIGTradeHistory());
     liveTradeAckedRef.current = localStorage.getItem('ig_live_first_trade_ack') === '1';
     const savedMode = localStorage.getItem('ig_active_mode') as 'demo'|'live'|null;
@@ -493,15 +508,24 @@ export function IGStrategyTrader() {
       connectIG(env).then(sess => {
         if (sess) {
           setSessions(s => ({...s,[env]:sess}));
-          // Only restore saved live mode once we confirm a live session actually exists
           if (env === 'live' && savedMode === 'live') setActiveModeState('live');
         }
         setConnecting(c => ({...c,[env]:false}));
       });
     });
-    // Always restore demo mode immediately (no credential check needed)
     if (savedMode === 'demo') setActiveModeState('demo');
   }, []);
+
+  // ── Reload env-namespaced strategies when switching Demo ↔ Live ──────────
+  useEffect(() => {
+    setStrategies(loadStrategies(activeMode));
+    // If there's an active running strategy that belongs to the other env, keep it running but deselect
+    if (activeStratId) {
+      const stillVisible = loadStrategies(activeMode).find(s => s.id === activeStratId);
+      if (!stillVisible) setActiveStratId(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMode]);
 
   // ── Auto-restart: detect strategy_running_id on mount ────────────────────
   useEffect(() => {
@@ -515,9 +539,14 @@ export function IGStrategyTrader() {
     if (!pendingRestartRef.current) return;
     if (!Object.values(sessions).some(Boolean)) return;
     const stratId = pendingRestartRef.current;
-    const strat = loadStrategies().find(s => s.id === stratId);
+    // Search both env namespaces for the running strategy
+    const strat = loadStrategies('demo').find(s => s.id === stratId)
+               ?? loadStrategies('live').find(s => s.id === stratId);
     if (!strat) { pendingRestartRef.current = null; return; }
     pendingRestartRef.current = null;
+    // Switch to correct tab so user sees the resumed strategy
+    setActiveModeState(strat.env ?? 'demo');
+    setStrategies(loadStrategies(strat.env ?? 'demo'));
     log('info', `♻️ Strategy "${strat.name}" resumed — was running before page reload`);
     setActiveStratId(stratId);
     startAutoRun(strat);
@@ -1048,10 +1077,10 @@ export function IGStrategyTrader() {
     }
 
     setScanProgress('');
-    const env: 'demo'|'live' = strat.accounts.includes('live') ? 'live' : 'demo';
-    const updated: IGSavedStrategy = { ...strat, lastRunAt: new Date().toISOString(), lastRunEnv: env };
+    const runEnv: 'demo'|'live' = strat.accounts.includes('live') ? 'live' : 'demo';
+    const updated: IGSavedStrategy = { ...strat, env: strat.env ?? runEnv, lastRunAt: new Date().toISOString(), lastRunEnv: runEnv };
     saveStrategy(updated);
-    setStrategies(loadStrategies());
+    setStrategies(loadStrategies(strat.env ?? activeMode));
     const scanMs = strat.signalScanMs ?? signalScanMs;
     lastSignalAtRef.current = Date.now();
     setLastSignalAt(Date.now());
@@ -1146,6 +1175,7 @@ export function IGStrategyTrader() {
     runStateRef.current = 'RUNNING';
     setRunState('RUNNING');
     setIsRunning(true);
+    setRunStratEnv(strat.env ?? activeMode);
 
     // Runtime tracking
     runtimeStartRef.current = Date.now();
@@ -1256,6 +1286,7 @@ export function IGStrategyTrader() {
     if (timerRef.current)    { clearInterval(timerRef.current);    timerRef.current    = null; }
     if (posTimerRef.current) { clearInterval(posTimerRef.current); posTimerRef.current = null; }
     setIsRunning(false);
+    setRunStratEnv(null);
     setScanProgress('');
     setSignalCountdown('');
     setPosCountdown('');
@@ -1593,9 +1624,11 @@ export function IGStrategyTrader() {
   function handleSave() {
     if (!bName.trim()) { showToast(false, 'Strategy name is required'); return; }
     if (bAccounts.length === 0) { showToast(false, 'Select at least one account'); return; }
+    const existingStrat = editId ? strategies.find(s => s.id === editId) : null;
     const s: IGSavedStrategy = {
       id: editId ?? uid(),
       name: bName.trim(),
+      env: existingStrat?.env ?? activeMode, // env is locked after creation
       epic: '', instrumentName: '', // legacy fields, unused in auto mode
       watchlist: bWatchlist,
       minStrength: bMinStrength,
@@ -1605,14 +1638,14 @@ export function IGStrategyTrader() {
       accounts: bAccounts,
       autoTrade: true,
       autoClose: bAutoClose,
-      createdAt: new Date().toISOString(),
+      createdAt: existingStrat?.createdAt ?? new Date().toISOString(),
       signalScanMs: bSignalScanMs,
       posMonitorMs: bPosMonitorMs,
       stopPct: bStopPct,
       targetPct: bTargetPct,
     };
     saveStrategy(s);
-    setStrategies(loadStrategies());
+    setStrategies(loadStrategies(activeMode));
     setShowBuilder(false);
     showToast(true, `Strategy "${s.name}" ${editId ? 'updated' : 'saved'}`);
   }
@@ -1621,7 +1654,8 @@ export function IGStrategyTrader() {
   const anyConnected  = Object.values(sessions).some(Boolean);
   const isConnecting  = Object.values(connecting).some(Boolean);
   const activeStrat   = strategies.find(s => s.id === activeStratId) ?? null;
-  const allPositions  = [...positions.demo, ...positions.live];
+  // Positions are filtered to the active env tab for display isolation
+  const allPositions  = positions[activeMode] ?? [];
   const totalPnL      = allPositions.reduce((acc, p) => acc + (p.upl ?? 0), 0);
   const builderSession = sessions['demo'] ?? sessions['live'];
 
@@ -1676,11 +1710,29 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── LIVE mode banner ─────────────────────────────────────────────── */}
-      {activeMode === 'live' && (
-        <div className="bg-amber-500/15 border border-amber-500/40 rounded-lg px-3 py-2.5 flex items-center gap-2 text-xs font-semibold text-amber-400">
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
-          LIVE MODE — Trades will use real money on your IG Live account
+      {/* ── Full-page fixed banner: live strategy running ────────────── */}
+      {runStratEnv === 'live' && isRunning && (
+        <div className="fixed top-0 left-0 right-0 z-[9998] bg-red-600 text-white text-center py-2 text-sm font-bold flex items-center justify-center gap-4">
+          ⚠️ LIVE STRATEGY RUNNING — Real money trades are being placed automatically
+          <button onClick={pauseAutoRun}
+            className="text-xs bg-white/20 hover:bg-white/30 px-2 py-0.5 rounded font-medium transition-colors">
+            Pause All
+          </button>
+        </div>
+      )}
+
+      {/* ── Env header badge ─────────────────────────────────────────────── */}
+      {activeMode === 'demo' ? (
+        <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2 text-xs font-semibold text-blue-300">
+          <span>🎮</span>
+          <span>Demo — Paper Money · IG Practice Account</span>
+          <span className="ml-auto text-blue-500 text-[10px] font-normal">Demo strategies are fully isolated from Live</span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs font-semibold text-red-300">
+          <span>⚠️</span>
+          <span>LIVE — Real Money · IG Live Account</span>
+          <span className="ml-auto text-red-500 text-[10px] font-normal">All trades here use real funds</span>
         </div>
       )}
 
@@ -1697,7 +1749,7 @@ export function IGStrategyTrader() {
                   disabled={isLiveNoCredentials}
                   title={isLiveNoCredentials ? 'Add IG Live credentials in Settings → Accounts first' : undefined}
                   onClick={() => {
-                    if (env === 'live') { setShowLiveConfirm(true); }
+                    if (env === 'live') { handleSwitchToLive(); }
                     else { setActiveMode('demo'); }
                   }}
                   className={clsx('flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full transition-all',
@@ -1749,25 +1801,42 @@ export function IGStrategyTrader() {
         </div>
       </div>
 
-      {/* ── Live mode confirmation modal ────────────────────────────────── */}
+      {/* ── Live mode confirmation modal (per-session) ──────────────── */}
       {showLiveConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
-          <div className="bg-gray-900 border border-amber-500/40 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center text-xl">⚠️</div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4">
+          <div className="bg-gray-900 border border-red-500/50 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center text-2xl">⚠️</div>
               <div>
-                <h3 className="text-sm font-bold text-white">Switch to LIVE Trading?</h3>
-                <p className="text-xs text-amber-400">Real money will be used</p>
+                <h3 className="text-base font-bold text-white">Switching to Live Trading</h3>
+                <p className="text-xs text-red-400 font-semibold">Real money will be used</p>
               </div>
             </div>
-            <p className="text-xs text-gray-400 mb-5">
-              You are switching to LIVE mode. Any strategies that trade on your Live IG account will open real spread-bet positions with real money. Make sure you have tested on Demo first.
-            </p>
+            <div className="space-y-2 text-xs text-gray-300 mb-5 bg-red-500/5 border border-red-500/20 rounded-lg p-3">
+              <p>• <span className="text-white font-medium">Demo strategies are NOT shown here</span></p>
+              <p>• Any strategy you run here uses <span className="text-white font-medium">real funds</span></p>
+              <p>• Losses are real and <span className="text-white font-medium">cannot be reversed</span></p>
+              <p>• Spread bets are complex, leveraged instruments</p>
+              <p className="text-gray-500 pt-1">Your demo strategies continue running safely in the background.</p>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-gray-400 mb-4 cursor-pointer">
+              <input type="checkbox" checked={liveConfirmSkipSession} onChange={e => setLiveConfirmSkipSession(e.target.checked)}
+                className="w-3.5 h-3.5 accent-amber-500" />
+              Don&apos;t show again this session
+            </label>
             <div className="flex gap-2">
-              <Button fullWidth variant="outline" onClick={() => setShowLiveConfirm(false)}>Cancel</Button>
-              <Button fullWidth className="bg-amber-500 hover:bg-amber-400 text-black font-bold"
-                onClick={() => { setActiveMode('live'); setShowLiveConfirm(false); if (pendingRunAction) { pendingRunAction(); setPendingRunAction(null); } }}>
-                Confirm — Use Live
+              <Button fullWidth variant="outline" onClick={() => { setShowLiveConfirm(false); setLiveConfirmSkipSession(false); }}>
+                Cancel — Stay on Demo
+              </Button>
+              <Button fullWidth className="bg-red-600 hover:bg-red-500 text-white font-bold"
+                onClick={() => {
+                  if (liveConfirmSkipSession) sessionStorage.setItem('live_confirmed_this_session', '1');
+                  setActiveMode('live');
+                  setShowLiveConfirm(false);
+                  setLiveConfirmSkipSession(false);
+                  if (pendingRunAction) { pendingRunAction(); setPendingRunAction(null); }
+                }}>
+                I understand — Enter Live
               </Button>
             </div>
           </div>
@@ -1815,6 +1884,152 @@ export function IGStrategyTrader() {
       <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-400">
         ⚠️ Spread bets are complex. 68% of retail accounts lose money. Use Demo first. Not financial advice.
       </div>
+
+      {/* ── Copy to Demo modal ──────────────────────────────────────────── */}
+      {copyModal?.direction === 'toDemo' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="bg-gray-900 border border-blue-500/40 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-blue-500/20 flex items-center justify-center text-xl">📋</div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Copy to Demo</h3>
+                <p className="text-xs text-blue-400">No live trades affected</p>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 mb-2">
+              A new identical strategy will be created on your <span className="text-white font-medium">Demo account</span>.
+            </p>
+            <p className="text-xs text-gray-500 mb-5">
+              Strategy: <span className="text-white">{copyModal.strat.name}</span><br />
+              New name: <span className="text-blue-300">{copyModal.strat.name} (Demo Copy)</span>
+            </p>
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" onClick={() => setCopyModal(null)}>Cancel</Button>
+              <Button fullWidth className="bg-blue-600 hover:bg-blue-500 text-white"
+                onClick={() => {
+                  const copy: IGSavedStrategy = {
+                    ...copyModal.strat,
+                    id: Date.now().toString(),
+                    name: copyModal.strat.name + ' (Demo Copy)',
+                    env: 'demo',
+                    accounts: ['demo'],
+                    copiedFrom: 'live',
+                    copiedAt: new Date().toISOString(),
+                    lastRunAt: undefined,
+                    lastRunEnv: undefined,
+                  };
+                  saveStrategy(copy);
+                  setCopyModal(null);
+                  showToast(true, 'Strategy copied to Demo tab successfully');
+                }}>
+                Copy to Demo
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Copy to Live modal ──────────────────────────────────────────── */}
+      {copyModal?.direction === 'toLive' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4">
+          <div className="bg-gray-900 border border-red-500/50 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center text-xl">⚠️</div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Copy Demo Strategy to Live?</h3>
+                <p className="text-xs text-red-400">REAL money will be used when you run it</p>
+              </div>
+            </div>
+            <div className="text-xs text-gray-400 space-y-1 mb-4 bg-red-500/5 border border-red-500/20 rounded-lg p-3">
+              <p>Strategy: <span className="text-white font-medium">{copyModal.strat.name}</span></p>
+              <p>Markets: <span className="text-white">{(copyModal.strat.watchlist?.length ? copyModal.strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled).map(m => m.name).join(', ')}</span></p>
+              <p>Stop loss: <span className="text-white">{copyModal.strat.stopPct ?? 2}%</span> · Take profit: <span className="text-white">{copyModal.strat.targetPct ?? 4}%</span></p>
+              <p className="text-gray-600 pt-1">The strategy will NOT start automatically — you must run it manually on the Live tab.</p>
+            </div>
+            <div className="mb-4">
+              <label className="text-xs text-gray-400 mb-1.5 block">Type <span className="text-white font-mono font-bold">CONFIRM</span> to proceed:</label>
+              <input
+                type="text"
+                value={copyConfirmText}
+                onChange={e => setCopyConfirmText(e.target.value)}
+                placeholder="CONFIRM"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-red-500"
+              />
+            </div>
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" onClick={() => { setCopyModal(null); setCopyConfirmText(''); }}>Cancel</Button>
+              <Button fullWidth className="bg-red-600 hover:bg-red-500 text-white font-bold"
+                disabled={copyConfirmText !== 'CONFIRM'}
+                onClick={() => {
+                  const copy: IGSavedStrategy = {
+                    ...copyModal.strat,
+                    id: Date.now().toString(),
+                    name: copyModal.strat.name + ' (Live)',
+                    env: 'live',
+                    accounts: ['live'],
+                    copiedFrom: 'demo',
+                    copiedAt: new Date().toISOString(),
+                    lastRunAt: undefined,
+                    lastRunEnv: undefined,
+                  };
+                  saveStrategy(copy);
+                  setCopyModal(null);
+                  setCopyConfirmText('');
+                  showToast(true, 'Strategy copied to Live tab — go to Live tab to run it');
+                }}>
+                I understand — Copy to Live
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Sync Settings modal ─────────────────────────────────────────── */}
+      {syncModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+            <h3 className="text-sm font-bold text-white mb-3">⟳ Sync Settings</h3>
+            <p className="text-xs text-gray-400 mb-3">The following settings from the Demo strategy will be applied to the Live copy:</p>
+            <div className="space-y-1 text-xs mb-5 bg-gray-800 rounded-lg p-3">
+              {[
+                ['Stop loss', `${syncModal.demo.stopPct ?? 2}%`, `${syncModal.live.stopPct ?? 2}%`],
+                ['Take profit', `${syncModal.demo.targetPct ?? 4}%`, `${syncModal.live.targetPct ?? 4}%`],
+                ['Size', `£${syncModal.demo.size}/pt`, `£${syncModal.live.size}/pt`],
+                ['Min signal', `${syncModal.demo.minStrength ?? 55}%`, `${syncModal.live.minStrength ?? 55}%`],
+                ['Max positions', String(syncModal.demo.maxPositions), String(syncModal.live.maxPositions)],
+              ].map(([label, demoVal, liveVal]) => (
+                <div key={label} className="flex items-center justify-between">
+                  <span className="text-gray-500">{label}</span>
+                  <span className={clsx('font-mono', demoVal !== liveVal ? 'text-amber-400' : 'text-gray-600')}>
+                    {demoVal !== liveVal ? `${liveVal} → ${demoVal}` : `${demoVal} (unchanged)`}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" onClick={() => setSyncModal(null)}>Cancel</Button>
+              <Button fullWidth onClick={() => {
+                const synced: IGSavedStrategy = {
+                  ...syncModal.live,
+                  stopPct: syncModal.demo.stopPct,
+                  targetPct: syncModal.demo.targetPct,
+                  size: syncModal.demo.size,
+                  minStrength: syncModal.demo.minStrength,
+                  maxPositions: syncModal.demo.maxPositions,
+                  watchlist: syncModal.demo.watchlist,
+                  timeframe: syncModal.demo.timeframe,
+                };
+                saveStrategy(synced);
+                setStrategies(loadStrategies(activeMode));
+                setSyncModal(null);
+                showToast(true, 'Live strategy settings synced from Demo');
+              }}>
+                Apply Sync
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Manual trade panel ─────────────────────────────────────────── */}
       {showManual && (
@@ -1900,6 +2115,15 @@ export function IGStrategyTrader() {
             action={<button onClick={() => setShowBuilder(false)}><X className="h-4 w-4 text-gray-500 hover:text-white" /></button>}
           />
           <div className="space-y-4">
+
+            {/* Env lock indicator */}
+            <div className={clsx('flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold',
+              activeMode === 'live' ? 'bg-red-500/10 border border-red-500/30 text-red-300' : 'bg-blue-500/10 border border-blue-500/20 text-blue-300'
+            )}>
+              {activeMode === 'live' ? '⚠️' : '🎮'}
+              This strategy will run on: <span className="font-bold">{activeMode === 'live' ? 'LIVE — Real Money' : 'Demo — Paper Money'}</span>
+              {editId && <span className="ml-auto text-[10px] opacity-60">(env locked after creation)</span>}
+            </div>
 
             {/* Name + timeframe */}
             <div className="grid grid-cols-2 gap-3">
@@ -2141,28 +2365,43 @@ export function IGStrategyTrader() {
         <div className="space-y-2">
           {strategies.map(strat => {
             const isActive = strat.id === activeStratId;
+            const stratEnv = strat.env ?? 'demo';
             const enabledMarkets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
             const cfg = TIMEFRAME_CONFIG[strat.timeframe];
+            const isLiveStrat = stratEnv === 'live';
+            // Cross-env guard: strategy env must match the current tab
+            const canRun = stratEnv === activeMode;
             return (
-              <Card key={strat.id} className={clsx(isActive && 'border-orange-500/40 bg-orange-500/[0.03]')}>
+              <Card key={strat.id} className={clsx(
+                isActive && (isLiveStrat ? 'border-red-500/40 bg-red-500/[0.03]' : 'border-blue-500/40 bg-blue-500/[0.03]'),
+                !isActive && (isLiveStrat ? 'border-red-900/40' : 'border-blue-900/30')
+              )}>
+                {/* Env left border accent */}
+                <div className={clsx('absolute left-0 top-0 bottom-0 w-0.5 rounded-l-xl', isLiveStrat ? 'bg-red-500/60' : 'bg-blue-500/60')} />
                 <div className="flex items-start justify-between gap-3">
                   {/* Strategy info */}
                   <button className="flex-1 text-left min-w-0" onClick={() => setActiveStratId(isActive ? null : strat.id)}>
                     <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
                       <p className="text-sm font-bold text-white">{strat.name}</p>
+                      {/* Env badge */}
+                      {isLiveStrat
+                        ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400 font-semibold">⚠️ Live</span>
+                        : <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-400 font-semibold">🎮 Demo</span>
+                      }
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300">{cfg.label}</span>
-                      {strat.accounts.map(a => (
-                        <span key={a} className={clsx('text-[10px] px-1.5 py-0.5 rounded-full',
-                          a==='demo' ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400')}>{a}</span>
-                      ))}
                       {strat.autoClose && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400">AutoClose</span>}
+                      {strat.copiedFrom && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-700 text-gray-400">
+                          📋 Copied from {strat.copiedFrom}{strat.copiedAt ? ` · ${new Date(strat.copiedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
+                        </span>
+                      )}
                     </div>
                     <p className="text-[11px] text-gray-500">
                       {enabledMarkets.length} markets · £{strat.size}/pt · max {strat.maxPositions} pos · min {strat.minStrength ?? 55}% signal
                       {strat.lastRunAt && (
                         <span> · last {fmtTime(strat.lastRunAt)}
                           {strat.lastRunEnv && (
-                            <span className={strat.lastRunEnv === 'live' ? ' text-amber-400' : ' text-blue-400'}>
+                            <span className={strat.lastRunEnv === 'live' ? ' text-red-400' : ' text-blue-400'}>
                               {' '}on {strat.lastRunEnv === 'live' ? 'LIVE' : 'demo'}
                             </span>
                           )}
@@ -2195,23 +2434,26 @@ export function IGStrategyTrader() {
                           Stop+Close All
                         </button>
                       </>
-                    ) : (
+                    ) : canRun ? (
                       <Button size="sm"
-                        className={strat.accounts.includes('live') ? 'bg-amber-600 hover:bg-amber-500 text-black font-bold' : 'bg-orange-600 hover:bg-orange-500 text-white'}
+                        className={isLiveStrat ? 'bg-red-600 hover:bg-red-500 text-white font-bold' : 'bg-blue-600 hover:bg-blue-500 text-white'}
                         icon={<Play className="h-3.5 w-3.5" />}
                         onClick={() => {
                           const doRun = () => { setActiveStratId(strat.id); startAutoRun(strat); };
-                          if (strat.accounts.includes('live')) {
-                            setPendingRunAction(() => doRun);
-                            setShowLiveConfirm(true);
+                          if (isLiveStrat) {
+                            if (confirm(`▶ Run LIVE strategy "${strat.name}" with real money? This will place real spread-bet orders.`)) doRun();
                           } else {
                             doRun();
                           }
                         }}>
-                        {strat.accounts.includes('live') ? '⚠️ Run Live' : (isActive ? 'Start' : 'Run')}
+                        {isLiveStrat ? '▶ Run LIVE — Real Money' : '▶ Run on Demo'}
                       </Button>
+                    ) : (
+                      <span className="text-[10px] text-gray-600 px-2 py-1 border border-gray-800 rounded italic">
+                        Switch to {stratEnv} tab to run
+                      </span>
                     )}
-                    {!isRunning && (
+                    {!isRunning && canRun && (
                       <>
                         <Button size="sm" variant="outline"
                           loading={testRunning && isActive}
@@ -2221,9 +2463,38 @@ export function IGStrategyTrader() {
                           Test
                         </Button>
                         <button onClick={() => openBuilder(strat)} className="p-1.5 text-gray-600 hover:text-orange-400 transition-colors"><Edit2 className="h-3.5 w-3.5" /></button>
-                        <button onClick={() => { deleteStrategy(strat.id); setStrategies(loadStrategies()); if (activeStratId===strat.id) stopAutoRun(); }}
+                        <button onClick={() => { deleteStrategy(strat.id, strat.env ?? activeMode); setStrategies(loadStrategies(activeMode)); if (activeStratId===strat.id) stopAutoRun(); }}
                           className="p-1.5 text-gray-600 hover:text-red-400 transition-colors"><Trash2 className="h-3.5 w-3.5" /></button>
                       </>
+                    )}
+                    {/* Copy buttons */}
+                    {!isRunning && (
+                      isLiveStrat ? (
+                        <button onClick={() => { setCopyModal({ strat, direction: 'toDemo' }); setCopyConfirmText(''); }}
+                          className="text-[10px] px-2 py-1 rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors whitespace-nowrap">
+                          📋 Copy to Demo
+                        </button>
+                      ) : (
+                        <button onClick={() => { setCopyModal({ strat, direction: 'toLive' }); setCopyConfirmText(''); }}
+                          className="text-[10px] px-2 py-1 rounded border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors whitespace-nowrap">
+                          🔴 Copy to Live
+                        </button>
+                      )
+                    )}
+                    {/* Sync settings button — only for copied strategies */}
+                    {!isRunning && strat.copiedFrom && (
+                      (() => {
+                        const srcEnv = strat.copiedFrom as 'demo' | 'live';
+                        const origName = strat.name.replace(/ \((Demo Copy|Live)\)$/, '');
+                        const srcStrat = loadStrategies(srcEnv).find(s => s.name === origName || s.name === origName + (srcEnv === 'live' ? ' (Live)' : ' (Demo Copy)'));
+                        if (!srcStrat) return null;
+                        return (
+                          <button onClick={() => setSyncModal(strat.env === 'live' ? { demo: srcStrat, live: strat } : { demo: strat, live: srcStrat })}
+                            className="text-[10px] px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600 transition-colors whitespace-nowrap">
+                            ⟳ Sync Settings
+                          </button>
+                        );
+                      })()
                     )}
                   </div>
                 </div>
