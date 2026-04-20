@@ -450,6 +450,13 @@ export function IGStrategyTrader() {
   const todayPnLRef                                = useRef(0);
   const [todayPnL, setTodayPnL]                   = useState(0);
   const pendingRestartRef                          = useRef<string|null>(null);
+  // ── Enhanced status tracking ──────────────────────────────────────────────
+  const lastSignalAtRef                            = useRef<number|null>(null);
+  const [lastSignalAt, setLastSignalAt]           = useState<number|null>(null);
+  const [lastSignalDisplay, setLastSignalDisplay] = useState('');
+  const [stoppedAt, setStoppedAt]                 = useState<string|null>(null);
+  const [stopError, setStopError]                 = useState<string|null>(null);
+  const [runtimeStartDisplay, setRuntimeStartDisplay] = useState<string>('');
 
   // ── Log ────────────────────────────────────────────────────────────────────
   const [runLog, setRunLog] = useState<RunLog[]>([]);
@@ -517,15 +524,26 @@ export function IGStrategyTrader() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
 
-  // ── Runtime display ticker ────────────────────────────────────────────────
+  // ── Runtime + last-signal display tickers (1s resolution) ───────────────
   useEffect(() => {
     const t = setInterval(() => {
-      if (runtimeStartRef.current === null) return;
-      const ms = Date.now() - runtimeStartRef.current;
-      const h = Math.floor(ms / 3_600_000);
-      const m = Math.floor((ms % 3_600_000) / 60_000);
-      setRuntimeDisplay(`${h}h ${m}m`);
-    }, 30_000);
+      if (runtimeStartRef.current !== null) {
+        const ms = Date.now() - runtimeStartRef.current;
+        const h = Math.floor(ms / 3_600_000);
+        const m = Math.floor((ms % 3_600_000) / 60_000);
+        const s = Math.floor((ms % 60_000) / 1000);
+        if (h > 0) setRuntimeDisplay(`${h}h ${m}m ${s}s`);
+        else if (m > 0) setRuntimeDisplay(`${m}m ${s}s`);
+        else setRuntimeDisplay(`${s}s`);
+      }
+      if (lastSignalAtRef.current !== null) {
+        const ms = Date.now() - lastSignalAtRef.current;
+        const totalSec = Math.floor(ms / 1000);
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        setLastSignalDisplay(m > 0 ? `${m}m ${s}s ago` : `${s}s ago`);
+      }
+    }, 1000);
     return () => clearInterval(t);
   }, []);
 
@@ -1035,6 +1053,8 @@ export function IGStrategyTrader() {
     saveStrategy(updated);
     setStrategies(loadStrategies());
     const scanMs = strat.signalScanMs ?? signalScanMs;
+    lastSignalAtRef.current = Date.now();
+    setLastSignalAt(Date.now());
     log('info', `Signal scan complete — next in ${Math.round(scanMs / 60_000)}min`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, positions, signalScanMs]);
@@ -1133,10 +1153,24 @@ export function IGStrategyTrader() {
     setCompletedTrades(0);
     todayPnLRef.current = 0;
     setTodayPnL(0);
-    setRuntimeDisplay('0h 0m');
+    setRuntimeDisplay('0s');
+    setStoppedAt(null);
+    setStopError(null);
+    lastSignalAtRef.current = null;
+    setLastSignalAt(null);
+    setLastSignalDisplay('');
+    setRuntimeStartDisplay(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
 
-    // Persist running state for auto-restart on page reload
+    // Persist full strategy state for restore on page reload
     localStorage.setItem('strategy_running_id', strat.id);
+    localStorage.setItem(`strategy_state_${strat.id}`, JSON.stringify({
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      lastSignalAt: null,
+      lastActivityAt: new Date().toISOString(),
+      tradesCount: 0,
+      error: null,
+    }));
 
     const sScanMs = strat.signalScanMs ?? signalScanMs;
     const pMonMs  = strat.posMonitorMs ?? posMonitorMs;
@@ -1203,10 +1237,19 @@ export function IGStrategyTrader() {
   function pauseAutoRun() {
     runStateRef.current = 'PAUSED';
     setRunState('PAUSED');
+    if (activeStratId) {
+      localStorage.setItem(`strategy_state_${activeStratId}`, JSON.stringify({
+        status: 'paused',
+        pausedAt: new Date().toISOString(),
+        lastActivityAt: new Date().toISOString(),
+        tradesCount: completedTradesRef.current,
+        error: null,
+      }));
+    }
     log('info', '⏸ Strategy PAUSED — monitoring open positions, no new entries until resumed');
   }
 
-  function stopAutoRun() {
+  function stopAutoRun(reason?: string) {
     runningRef.current = false;
     runStateRef.current = 'STOPPED';
     setRunState('STOPPED');
@@ -1218,7 +1261,19 @@ export function IGStrategyTrader() {
     setPosCountdown('');
     runtimeStartRef.current = null;
     setRuntimeDisplay('');
+    const now = new Date().toISOString();
+    setStoppedAt(now);
+    if (reason) setStopError(reason);
     localStorage.removeItem('strategy_running_id');
+    if (activeStratId) {
+      localStorage.setItem(`strategy_state_${activeStratId}`, JSON.stringify({
+        status: 'stopped',
+        stoppedAt: now,
+        lastActivityAt: now,
+        tradesCount: completedTradesRef.current,
+        error: reason ?? null,
+      }));
+    }
     log('info', `⏹ Strategy stopped — ${completedTradesRef.current} trades completed · Today P&L: ${todayPnLRef.current >= 0 ? '+' : ''}£${todayPnLRef.current.toFixed(2)}`);
   }
 
@@ -2131,7 +2186,7 @@ export function IGStrategyTrader() {
                             Pause
                           </Button>
                         )}
-                        <Button size="sm" className="bg-red-600 hover:bg-red-500 text-white" icon={<Square className="h-3.5 w-3.5" />} onClick={stopAutoRun}>
+                        <Button size="sm" className="bg-red-600 hover:bg-red-500 text-white" icon={<Square className="h-3.5 w-3.5" />} onClick={() => stopAutoRun()}>
                           Stop
                         </Button>
                         <button
@@ -2173,29 +2228,80 @@ export function IGStrategyTrader() {
                   </div>
                 </div>
 
-                {/* Running / Paused status */}
-                {isActive && isRunning && (
-                  <div className={clsx('mt-2 rounded-lg px-3 py-2 space-y-1 border',
-                    runState === 'PAUSED'
-                      ? 'bg-amber-500/10 border-amber-500/20'
-                      : 'bg-orange-500/10 border-orange-500/20'
-                  )}>
+                {/* ── Status display (RUNNING / PAUSED / STOPPED / not-started) ── */}
+                {isActive && isRunning && runState === 'RUNNING' && (
+                  <div className="mt-2 rounded-lg px-3 py-2.5 space-y-2 border bg-emerald-500/[0.06] border-emerald-500/25">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <Activity className={clsx('h-3.5 w-3.5 flex-shrink-0', runState === 'PAUSED' ? 'text-amber-400' : 'text-orange-400 animate-pulse')} />
-                      <span className={clsx('text-xs font-medium', runState === 'PAUSED' ? 'text-amber-300' : 'text-orange-300')}>
-                        {runState === 'PAUSED' ? '⏸ PAUSED — monitoring positions, no new entries' : scanProgress ? `Scanning: ${scanProgress}` : 'RUNNING'}
+                      <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
                       </span>
-                      {runtimeDisplay && <span className="text-[10px] text-gray-500 ml-auto">Running {runtimeDisplay}</span>}
+                      <span className="text-xs font-bold text-emerald-300">
+                        ● LIVE — {scanProgress ? `Scanning: ${scanProgress}` : 'Running'}
+                      </span>
+                      {runtimeDisplay && <span className="text-[10px] text-gray-500 ml-auto font-mono">Runtime: {runtimeDisplay}</span>}
                     </div>
-                    <div className="flex items-center gap-4 text-[11px] text-gray-500 flex-wrap">
-                      <span>Trades: <span className="text-white font-semibold">{completedTrades}</span></span>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-gray-500">
+                      {runtimeStartDisplay && <span>Running since <span className="text-gray-300 font-mono">{runtimeStartDisplay}</span></span>}
+                      {lastSignalDisplay ? <span>Last signal: <span className="text-amber-400 font-mono">{lastSignalDisplay}</span></span>
+                        : <span className="text-gray-600">Last signal: awaiting…</span>}
+                      <span>Trades today: <span className="text-white font-semibold">{completedTrades}</span></span>
                       <span>Today P&L: <span className={clsx('font-semibold', todayPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>{todayPnL >= 0 ? '+' : ''}£{Math.abs(todayPnL).toFixed(2)}</span></span>
                       {strat.accounts.map(env => igFundsDisplay[env] && (
-                        <span key={env}>Capital: <span className="text-emerald-400 font-semibold">£{igFundsDisplay[env]!.available.toFixed(0)}</span> avail ({env})</span>
+                        <span key={env}>Deployed: <span className="text-emerald-400 font-semibold">£{(igFundsDisplay[env]!.balance - igFundsDisplay[env]!.available).toFixed(0)} / £{igFundsDisplay[env]!.balance.toFixed(0)}</span></span>
                       ))}
-                      {runState === 'RUNNING' && signalCountdown && <span>Next scan: <span className="text-orange-400 font-mono">{signalCountdown}</span></span>}
+                      {signalCountdown && <span>Next scan: <span className="text-emerald-400 font-mono">{signalCountdown}</span></span>}
                       {posCountdown && <span>Pos check: <span className="text-blue-400 font-mono">{posCountdown}</span></span>}
                     </div>
+                    {/* Mini activity log — last 5 entries */}
+                    {runLog.slice(0, 5).length > 0 && (
+                      <div className="pt-1.5 border-t border-emerald-500/10 space-y-0.5">
+                        {runLog.slice(0, 5).map(entry => (
+                          <p key={entry.id} className={clsx('text-[10px] leading-tight truncate',
+                            entry.type === 'buy' ? 'text-emerald-400' :
+                            entry.type === 'sell' || entry.type === 'close' ? 'text-red-400' :
+                            entry.type === 'error' ? 'text-red-500' :
+                            entry.type === 'signal' ? 'text-amber-400' :
+                            'text-gray-600'
+                          )}>
+                            <span className="text-gray-700">{fmtTime(entry.ts)} </span>{entry.msg}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {isActive && isRunning && runState === 'PAUSED' && (
+                  <div className="mt-2 rounded-lg px-3 py-2.5 space-y-1.5 border bg-amber-500/[0.06] border-amber-500/25">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500" />
+                      </span>
+                      <span className="text-xs font-bold text-amber-300">● PAUSED — monitoring only, no new entries</span>
+                      {runtimeDisplay && <span className="text-[10px] text-gray-500 ml-auto font-mono">Runtime: {runtimeDisplay}</span>}
+                    </div>
+                    <div className="flex gap-4 text-[11px] text-gray-500 flex-wrap">
+                      <span>{(positions.demo.length + positions.live.length)} position(s) still open and monitored</span>
+                      <span>Trades: <span className="text-white font-semibold">{completedTrades}</span></span>
+                    </div>
+                  </div>
+                )}
+                {isActive && !isRunning && stoppedAt && (
+                  <div className="mt-2 rounded-lg px-3 py-2.5 space-y-1.5 border bg-red-500/[0.06] border-red-500/25">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
+                      </span>
+                      <span className="text-xs font-bold text-red-300">● STOPPED</span>
+                      <span className="text-[10px] text-gray-500">Last run: {fmtTime(stoppedAt)}</span>
+                    </div>
+                    {stopError && <p className="text-[11px] text-red-400">Error: {stopError}</p>}
+                    {!stopError && <p className="text-[11px] text-gray-500">Stopped by user · {completedTrades} trades · P&L: {todayPnL >= 0 ? '+' : ''}£{Math.abs(todayPnL).toFixed(2)} today</p>}
+                  </div>
+                )}
+                {!strat.lastRunAt && !isRunning && (
+                  <div className="mt-2 rounded-lg px-3 py-2 border border-gray-800/60 bg-gray-800/20">
+                    <span className="text-[11px] text-gray-600">○ Not started — click Start to begin scanning</span>
                   </div>
                 )}
               </Card>
