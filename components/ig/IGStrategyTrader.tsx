@@ -222,20 +222,37 @@ function MarketSearch({ session, env, onSelect }: {
 // ── Market-type helpers ───────────────────────────────────────────────────────
 
 /**
- * Fixed £ stop/limit distances.
- * Given a max loss in £ and a target gain in £, derive the point distances
- * based on the position size (£/pt).  Works for any market type.
+ * Auto-sizing: derive sensible stop distance from market type + live price,
+ * then back-calculate size so that hitting the stop costs exactly stopLoss £.
+ * limitDist is set so that hitting the target gains exactly takeProfit £.
  */
-function calcGBPDistances(
+function calcAutoSizing(
+  price: number,
+  mType: MarketType,
   stopLoss: number,
   takeProfit: number,
-  size: number,
-): { stopDist: number; limitDist: number } {
-  const s = Math.max(0.1, size);
-  return {
-    stopDist:  Math.max(1, Math.round(stopLoss  / s)),
-    limitDist: Math.max(1, Math.round(takeProfit / s)),
-  };
+): { stopDist: number; limitDist: number; size: number } {
+  let stopDist: number;
+  switch (mType) {
+    case 'INDEX':
+      stopDist = Math.max(10, Math.round(price * 0.003)); // 0.3% — e.g. FTSE 8000 → 24pt
+      break;
+    case 'FOREX':
+      stopDist = Math.max(20, Math.round(price * 10000 * 0.003)); // ~30 pips
+      break;
+    case 'COMMODITY':
+      stopDist = Math.max(5, Math.round(price * 0.005)); // 0.5% — e.g. Gold 3300 → 17pt
+      break;
+    case 'CRYPTO':
+      stopDist = Math.max(200, Math.round(price * 0.015)); // 1.5%
+      break;
+    default:
+      stopDist = Math.max(5, Math.round(price * 0.005));
+  }
+  const rawSize = stopLoss / stopDist;
+  const size    = Math.max(0.1, Math.round(rawSize * 10) / 10);
+  const limitDist = Math.max(1, Math.round(takeProfit / size));
+  return { stopDist, limitDist, size };
 }
 
 /**
@@ -353,7 +370,8 @@ export function IGStrategyTrader() {
   const timerRef    = useRef<ReturnType<typeof setInterval>|null>(null);
   const posTimerRef = useRef<ReturnType<typeof setInterval>|null>(null);
   const runningRef  = useRef(false);
-  const newsSignalsRef = useRef<Map<string, 'BUY'|'SELL'>>(new Map());
+  const newsSignalsRef     = useRef<Map<string, 'BUY'|'SELL'>>(new Map());
+  const recentlyClosedRef  = useRef<Map<string, number>>(new Map());
 
   // ── Active demo/live mode ──────────────────────────────────────────────────
   const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
@@ -904,7 +922,7 @@ export function IGStrategyTrader() {
     const mType = market.marketType ?? getMarketType(market.epic);
     const stopLoss   = strat.stopLoss   ?? strat.stopPct   ?? 5;
     const takeProfit = strat.takeProfit ?? strat.targetPct ?? 30;
-    const { stopDist, limitDist } = calcGBPDistances(stopLoss, takeProfit, strat.size);
+    const { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, takeProfit);
     const { direction, strength } = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
     const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
 
@@ -920,7 +938,8 @@ export function IGStrategyTrader() {
         { label: 'Type',        value: mType,                     status: 'neutral' },
         { label: 'Stop dist',   value: `${stopDist}pt`,           status: 'neutral' },
         { label: 'TP dist',     value: `${limitDist}pt`,          status: 'neutral' },
-        { label: 'Max loss',    value: `£${stopLoss}`, status: 'neutral' },
+        { label: 'Size',        value: `£${autoSize}/pt`,                      status: 'neutral' },
+        { label: 'Max loss',    value: `£${(autoSize * stopDist).toFixed(2)}`, status: 'neutral' },
       ],
     };
 
@@ -963,6 +982,7 @@ export function IGStrategyTrader() {
             if (cr.ok) {
               const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
               setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, exitPnl, 'STRATEGY', new Date().toISOString()));
+              recentlyClosedRef.current.set(`${market.epic}:${opp.direction}`, Date.now());
             } else log('error', `[${env.toUpperCase()}] Close failed: ${cr.error ?? 'unknown'}`);
           }
           await loadPositions(env);
@@ -990,6 +1010,18 @@ export function IGStrategyTrader() {
         // Don't open if already same direction
         if (positions[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
+        // Re-entry guard: require news confirmation if this epic+direction was recently closed (<2h)
+        const recentlyClosedAt = recentlyClosedRef.current.get(`${market.epic}:${tradeDir}`);
+        const TWO_HOURS = 2 * 60 * 60_000;
+        if (recentlyClosedAt && Date.now() - recentlyClosedAt < TWO_HOURS) {
+          const newsConf = newsSignalsRef.current.get(market.name);
+          if (!newsConf || newsConf !== tradeDir) {
+            log('signal', `[SKIP] ${market.name} ${tradeDir} — recently closed, waiting for ≥70% news confirmation before re-entry`);
+            continue;
+          }
+          log('info', `[RE-ENTRY] ${market.name} ${tradeDir} — news confirms direction after recent close`);
+        }
+
         // Skip new trades when paused — monitor only
         if (runStateRef.current === 'PAUSED') {
           log('signal', `[PAUSED] ${market.name} → ${tradeDir} ${strength}% — no new entries while paused`);
@@ -1007,7 +1039,7 @@ export function IGStrategyTrader() {
         const fundsNow = igFundsRef.current[env];
         const available = fundsNow?.available ?? Infinity;
         const startBal  = startingBalanceRef.current[env];
-        const orderSizeRaw = calcDynamicSize(strat.size, available, startBal);
+        const orderSizeRaw = calcDynamicSize(autoSize, available, startBal);
 
         if (orderSizeRaw === 0) {
           const floorPct = startBal ? ` (floor: 15% of starting £${startBal.toFixed(0)})` : '';
@@ -1160,6 +1192,7 @@ export function IGStrategyTrader() {
             if (cr.ok) {
               const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STALE', new Date().toISOString()));
+              recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
             } else log('error', `[${env.toUpperCase()}] Recycle close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
@@ -1181,6 +1214,7 @@ export function IGStrategyTrader() {
               setTodayPnL(todayPnLRef.current);
               log('close', `💰 Capital redeployment: closed +${closedPnl >= 0 ? '+' : ''}£${closedPnl.toFixed(2)} — available for next signal`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'TAKE_PROFIT', new Date().toISOString()));
+              recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
             } else log('error', `[${env.toUpperCase()}] 75% TP close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
@@ -2297,7 +2331,7 @@ export function IGStrategyTrader() {
               </div>
               <div className="bg-gray-800/40 rounded-lg px-3 py-2 text-[11px] space-y-0.5">
                 <p className="text-gray-300">Risk/Reward: 1:{(bTakeProfit/bStopLoss).toFixed(1)} — risking £{bStopLoss} to gain £{bTakeProfit}</p>
-                <p className="text-gray-500">At £{bSize}/pt: SL = {Math.max(1,Math.round(bStopLoss/bSize))}pt · TP = {Math.max(1,Math.round(bTakeProfit/bSize))}pt · Works for any market</p>
+                <p className="text-gray-500">Position size auto-calculated per market (e.g. FTSE stop ~24pt → £{(bStopLoss/24).toFixed(2)}/pt). IG sets SL/TP immediately after fill.</p>
               </div>
             </div>
 
