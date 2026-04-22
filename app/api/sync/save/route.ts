@@ -33,6 +33,7 @@ export async function POST(request: NextRequest) {
     const blob = await put(path, JSON.stringify(backup), {
       access: 'public',
       addRandomSuffix: false,
+      allowOverwrite: true,
     });
     return NextResponse.json({ ok: true, syncUrl: blob.url });
   } catch (err) {
