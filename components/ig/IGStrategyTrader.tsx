@@ -2234,8 +2234,10 @@ export function IGStrategyTrader() {
             <div className="grid grid-cols-3 gap-3">
               <div>
                 <label className="text-xs text-gray-400 mb-1.5 block">Size £/point</label>
-                <input type="number" min={0.5} step={0.5} value={bSize} onChange={e => setBSize(Number(e.target.value))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+                <div className="w-full bg-gray-800/60 border border-orange-500/30 rounded-lg px-3 py-2 text-sm text-orange-300 font-mono cursor-default" title="Auto-calculated per market from your £ stop loss">
+                  Auto
+                </div>
+                <p className="text-[10px] text-gray-600 mt-1">£{bStopLoss} ÷ stop pts</p>
               </div>
               <div>
                 <label className="text-xs text-gray-400 mb-1.5 block">Max positions</label>
