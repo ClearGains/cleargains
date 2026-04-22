@@ -222,20 +222,19 @@ function MarketSearch({ session, env, onSelect }: {
 // ── Market-type helpers ───────────────────────────────────────────────────────
 
 /**
- * Percentage-based stop/limit distances.
- * Yahoo Finance quotes FOREX in decimal (1.3500) — IG spread-bet uses pip scale (×10000).
- * All other markets use the native price (S&P 5250, Gold 2000, BTC 75000).
+ * Fixed £ stop/limit distances.
+ * Given a max loss in £ and a target gain in £, derive the point distances
+ * based on the position size (£/pt).  Works for any market type.
  */
-function calcPctDistances(
-  price: number,
-  mType: MarketType,
-  stopPct: number,
-  limitPct: number,
+function calcGBPDistances(
+  stopLoss: number,
+  takeProfit: number,
+  size: number,
 ): { stopDist: number; limitDist: number } {
-  const scaledPrice = mType === 'FOREX' ? Math.round(price * 10000) : Math.round(price);
+  const s = Math.max(0.1, size);
   return {
-    stopDist:  Math.max(1, Math.round(scaledPrice * stopPct  / 100)),
-    limitDist: Math.max(1, Math.round(scaledPrice * limitPct / 100)),
+    stopDist:  Math.max(1, Math.round(stopLoss  / s)),
+    limitDist: Math.max(1, Math.round(takeProfit / s)),
   };
 }
 
@@ -354,6 +353,7 @@ export function IGStrategyTrader() {
   const timerRef    = useRef<ReturnType<typeof setInterval>|null>(null);
   const posTimerRef = useRef<ReturnType<typeof setInterval>|null>(null);
   const runningRef  = useRef(false);
+  const newsSignalsRef = useRef<Map<string, 'BUY'|'SELL'>>(new Map());
 
   // ── Active demo/live mode ──────────────────────────────────────────────────
   const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
@@ -434,8 +434,8 @@ export function IGStrategyTrader() {
   const [bWatchlist, setBWatchlist]         = useState<WatchlistMarket[]>([...DEFAULT_WATCHLIST]);
   const [bSignalScanMs, setBSignalScanMs]   = useState(5 * 60_000);
   const [bPosMonitorMs, setBPosMonitorMs]   = useState(60_000);
-  const [bStopPct, setBStopPct]             = useState(2);
-  const [bTargetPct, setBTargetPct]         = useState(4);
+  const [bStopLoss, setBStopLoss]           = useState(5);
+  const [bTakeProfit, setBTakeProfit]       = useState(30);
 
   // ── Manual trade ───────────────────────────────────────────────────────────
   const [showManual, setShowManual]     = useState(false);
@@ -841,6 +841,51 @@ export function IGStrategyTrader() {
     } catch (e) { return { price:0, changePercent:0, signal:'NEUTRAL', source:'yahoo', error: e instanceof Error ? e.message : 'Fetch failed' }; }
   }
 
+  // ── Fetch news signals once per scan cycle ────────────────────────────────
+  async function fetchNewsSignals(markets: WatchlistMarket[], envPositions: Record<string, IGPosition[]>) {
+    try {
+      const r = await fetch('/api/news/finnhub?category=general');
+      if (!r.ok) return;
+      const { articles } = await r.json() as { articles?: Array<{ headline: string; source: string; datetime: number }> };
+      if (!articles?.length) return;
+
+      const allPositions = Object.entries(envPositions).flatMap(([env, ps]) =>
+        ps.map(p => ({ symbol: p.instrumentName ?? p.epic, direction: p.direction, size: p.size, env }))
+      );
+      const watchlistNames = markets.map(m => m.name);
+
+      const ar = await fetch('/api/news/analyse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          headlines: articles.slice(0, 30).map(a => ({ headline: a.headline, source: a.source, datetime: a.datetime })),
+          openPositions: allPositions,
+          watchlist: watchlistNames,
+        }),
+      });
+      if (!ar.ok) return;
+      const { analysis } = await ar.json() as { analysis?: Array<{ action: string; confidence: number; affectedAssets: string[]; reasoning: string }> };
+      if (!analysis?.length) return;
+
+      const newMap = new Map<string, 'BUY'|'SELL'>();
+      for (const sig of analysis) {
+        if (sig.confidence < 70) continue;
+        const dir: 'BUY'|'SELL'|null =
+          sig.action === 'OPEN_LONG'  ? 'BUY'  :
+          sig.action === 'OPEN_SHORT' ? 'SELL' : null;
+        if (!dir) continue;
+        for (const asset of sig.affectedAssets) {
+          const match = watchlistNames.find(n => n.toLowerCase().includes(asset.toLowerCase()) || asset.toLowerCase().includes(n.toLowerCase()));
+          if (match) {
+            newMap.set(match, dir);
+            log('signal', `[NEWS] ${match} → ${dir} (${sig.confidence}%) — ${sig.reasoning}`);
+          }
+        }
+      }
+      newsSignalsRef.current = newMap;
+    } catch {}
+  }
+
   // ── Scan one market + execute ──────────────────────────────────────────────
   async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
@@ -857,9 +902,9 @@ export function IGStrategyTrader() {
 
     // ── Calibrated signal scoring by market type ──────────────────────────────
     const mType = market.marketType ?? getMarketType(market.epic);
-    const stopPct   = strat.stopPct   ?? 2;
-    const targetPct = strat.targetPct ?? 4;
-    const { stopDist, limitDist } = calcPctDistances(snapshot.price, mType, stopPct, targetPct);
+    const stopLoss   = strat.stopLoss   ?? strat.stopPct   ?? 5;
+    const takeProfit = strat.takeProfit ?? strat.targetPct ?? 30;
+    const { stopDist, limitDist } = calcGBPDistances(stopLoss, takeProfit, strat.size);
     const { direction, strength } = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
     const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
 
@@ -875,7 +920,7 @@ export function IGStrategyTrader() {
         { label: 'Type',        value: mType,                     status: 'neutral' },
         { label: 'Stop dist',   value: `${stopDist}pt`,           status: 'neutral' },
         { label: 'TP dist',     value: `${limitDist}pt`,          status: 'neutral' },
-        { label: 'Max loss',    value: `£${strat.size * stopDist}`, status: 'neutral' },
+        { label: 'Max loss',    value: `£${stopLoss}`, status: 'neutral' },
       ],
     };
 
@@ -889,15 +934,17 @@ export function IGStrategyTrader() {
     }));
 
     // ── Decide whether to trade ───────────────────────────────────────────────
-    // forceOpen = trade regardless of signal strength; always use snapshot direction
-    // 90%+ confidence = immediate entry, bypasses minStrength threshold
+    // News signal takes priority when present; EMA/MACD used as fallback.
+    const newsDir = newsSignalsRef.current.get(market.name) ?? null;
     const forceOpen = market.forceOpen === true;
     const highConf  = strength >= 90;
     const tradeDir: 'BUY' | 'SELL' | null =
-      forceOpen
-        ? (direction !== 'HOLD' ? direction : snapshot.changePercent >= 0 ? 'BUY' : 'SELL')
-        : direction !== 'HOLD' && (strength >= strat.minStrength || highConf) ? direction
-        : null;
+      newsDir
+        ? newsDir
+        : forceOpen
+          ? (direction !== 'HOLD' ? direction : snapshot.changePercent >= 0 ? 'BUY' : 'SELL')
+          : direction !== 'HOLD' && (strength >= strat.minStrength || highConf) ? direction
+          : null;
 
     if (!strat.autoTrade || !tradeDir) {
       if (direction !== 'HOLD' && !forceOpen)
@@ -1066,7 +1113,8 @@ export function IGStrategyTrader() {
       if (funds) log('info', `[${env.toUpperCase()}] 💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
     }
 
-    log('info', `📡 Signal scan — ${markets.length} markets…`);
+    log('info', `📡 Signal scan — ${markets.length} markets… (fetching news)`);
+    await fetchNewsSignals(markets, positions);
 
     for (let i = 0; i < markets.length; i++) {
       if (!runningRef.current) break;
@@ -1603,8 +1651,8 @@ export function IGStrategyTrader() {
       setBWatchlist(existing.watchlist?.length ? existing.watchlist : [...DEFAULT_WATCHLIST]);
       setBSignalScanMs(existing.signalScanMs ?? 5 * 60_000);
       setBPosMonitorMs(existing.posMonitorMs ?? 60_000);
-      setBStopPct(existing.stopPct ?? 2);
-      setBTargetPct(existing.targetPct ?? 4);
+      setBStopLoss(existing.stopLoss ?? (existing.stopPct ?? 5));
+      setBTakeProfit(existing.takeProfit ?? (existing.targetPct ?? 30));
     } else {
       setEditId(null); setBName(''); setBTimeframe('daily'); setBSize(1); setBMaxPos(3);
       setBMinStrength(55);
@@ -1614,8 +1662,8 @@ export function IGStrategyTrader() {
       setBWatchlist([...DEFAULT_WATCHLIST]);
       setBSignalScanMs(5 * 60_000);
       setBPosMonitorMs(60_000);
-      setBStopPct(2);
-      setBTargetPct(4);
+      setBStopLoss(5);
+      setBTakeProfit(30);
     }
     setShowBuilder(true);
     setShowManual(false);
@@ -1641,8 +1689,8 @@ export function IGStrategyTrader() {
       createdAt: existingStrat?.createdAt ?? new Date().toISOString(),
       signalScanMs: bSignalScanMs,
       posMonitorMs: bPosMonitorMs,
-      stopPct: bStopPct,
-      targetPct: bTargetPct,
+      stopLoss: bStopLoss,
+      takeProfit: bTakeProfit,
     };
     saveStrategy(s);
     setStrategies(loadStrategies(activeMode));
@@ -1943,7 +1991,7 @@ export function IGStrategyTrader() {
             <div className="text-xs text-gray-400 space-y-1 mb-4 bg-red-500/5 border border-red-500/20 rounded-lg p-3">
               <p>Strategy: <span className="text-white font-medium">{copyModal.strat.name}</span></p>
               <p>Markets: <span className="text-white">{(copyModal.strat.watchlist?.length ? copyModal.strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled).map(m => m.name).join(', ')}</span></p>
-              <p>Stop loss: <span className="text-white">{copyModal.strat.stopPct ?? 2}%</span> · Take profit: <span className="text-white">{copyModal.strat.targetPct ?? 4}%</span></p>
+              <p>Max loss: <span className="text-white">£{copyModal.strat.stopLoss ?? copyModal.strat.stopPct ?? 5}</span> · Target gain: <span className="text-white">£{copyModal.strat.takeProfit ?? copyModal.strat.targetPct ?? 30}</span></p>
               <p className="text-gray-600 pt-1">The strategy will NOT start automatically — you must run it manually on the Live tab.</p>
             </div>
             <div className="mb-4">
@@ -1992,8 +2040,8 @@ export function IGStrategyTrader() {
             <p className="text-xs text-gray-400 mb-3">The following settings from the Demo strategy will be applied to the Live copy:</p>
             <div className="space-y-1 text-xs mb-5 bg-gray-800 rounded-lg p-3">
               {[
-                ['Stop loss', `${syncModal.demo.stopPct ?? 2}%`, `${syncModal.live.stopPct ?? 2}%`],
-                ['Take profit', `${syncModal.demo.targetPct ?? 4}%`, `${syncModal.live.targetPct ?? 4}%`],
+                ['Max loss', `£${syncModal.demo.stopLoss ?? syncModal.demo.stopPct ?? 5}`, `£${syncModal.live.stopLoss ?? syncModal.live.stopPct ?? 5}`],
+                ['Target gain', `£${syncModal.demo.takeProfit ?? syncModal.demo.targetPct ?? 30}`, `£${syncModal.live.takeProfit ?? syncModal.live.targetPct ?? 30}`],
                 ['Size', `£${syncModal.demo.size}/pt`, `£${syncModal.live.size}/pt`],
                 ['Min signal', `${syncModal.demo.minStrength ?? 55}%`, `${syncModal.live.minStrength ?? 55}%`],
                 ['Max positions', String(syncModal.demo.maxPositions), String(syncModal.live.maxPositions)],
@@ -2011,8 +2059,8 @@ export function IGStrategyTrader() {
               <Button fullWidth onClick={() => {
                 const synced: IGSavedStrategy = {
                   ...syncModal.live,
-                  stopPct: syncModal.demo.stopPct,
-                  targetPct: syncModal.demo.targetPct,
+                  stopLoss: syncModal.demo.stopLoss ?? syncModal.demo.stopPct ?? 5,
+                  takeProfit: syncModal.demo.takeProfit ?? syncModal.demo.targetPct ?? 30,
                   size: syncModal.demo.size,
                   minStrength: syncModal.demo.minStrength,
                   maxPositions: syncModal.demo.maxPositions,
@@ -2225,31 +2273,31 @@ export function IGStrategyTrader() {
               </div>
             </div>
 
-            {/* Percentage-based stop loss and take profit */}
+            {/* Fixed £ stop loss and take profit */}
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs text-gray-400 mb-1.5 block">Stop Loss %</label>
+                  <label className="text-xs text-gray-400 mb-1.5 block">Max Loss (£)</label>
                   <div className="flex items-center gap-2">
-                    <input type="range" min={0.5} max={10} step={0.5} value={bStopPct}
-                      onChange={e => setBStopPct(Number(e.target.value))}
+                    <input type="range" min={1} max={50} step={1} value={bStopLoss}
+                      onChange={e => setBStopLoss(Number(e.target.value))}
                       className="flex-1 accent-red-500" />
-                    <span className="text-sm font-mono text-red-400 w-10">{bStopPct}%</span>
+                    <span className="text-sm font-mono text-red-400 w-10">£{bStopLoss}</span>
                   </div>
                 </div>
                 <div>
-                  <label className="text-xs text-gray-400 mb-1.5 block">Take Profit %</label>
+                  <label className="text-xs text-gray-400 mb-1.5 block">Target Gain (£)</label>
                   <div className="flex items-center gap-2">
-                    <input type="range" min={1} max={20} step={0.5} value={bTargetPct}
-                      onChange={e => setBTargetPct(Number(e.target.value))}
+                    <input type="range" min={5} max={200} step={5} value={bTakeProfit}
+                      onChange={e => setBTakeProfit(Number(e.target.value))}
                       className="flex-1 accent-emerald-500" />
-                    <span className="text-sm font-mono text-emerald-400 w-10">{bTargetPct}%</span>
+                    <span className="text-sm font-mono text-emerald-400 w-10">£{bTakeProfit}</span>
                   </div>
                 </div>
               </div>
               <div className="bg-gray-800/40 rounded-lg px-3 py-2 text-[11px] space-y-0.5">
-                <p className="text-gray-300">Risk/Reward: 1:{(bTargetPct/bStopPct).toFixed(1)} — risking {bStopPct}% to gain {bTargetPct}%</p>
-                <p className="text-gray-500">At £1/pt on S&P 500 (5250): SL ≈ -£{Math.round(5250*bStopPct/100)}, TP ≈ +£{Math.round(5250*bTargetPct/100)} · Works for any market at any price</p>
+                <p className="text-gray-300">Risk/Reward: 1:{(bTakeProfit/bStopLoss).toFixed(1)} — risking £{bStopLoss} to gain £{bTakeProfit}</p>
+                <p className="text-gray-500">At £{bSize}/pt: SL = {Math.max(1,Math.round(bStopLoss/bSize))}pt · TP = {Math.max(1,Math.round(bTakeProfit/bSize))}pt · Works for any market</p>
               </div>
             </div>
 

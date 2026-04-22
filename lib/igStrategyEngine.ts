@@ -72,8 +72,10 @@ export type IGSavedStrategy = {
   lastSignal?: SignalDirection;
   signalScanMs?: number;   // override interval for signal scans (ms)
   posMonitorMs?: number;   // override interval for position monitor (ms)
-  stopPct?: number;        // stop loss as % of entry price (default 2)
-  targetPct?: number;      // take profit as % of entry price (default 4)
+  stopPct?: number;        // legacy — kept for back-compat only
+  targetPct?: number;      // legacy — kept for back-compat only
+  stopLoss?: number;       // max loss in £ (default 5)
+  takeProfit?: number;     // target gain in £ (default 30)
   // copy provenance
   copiedFrom?: 'demo' | 'live';
   copiedAt?: string;
