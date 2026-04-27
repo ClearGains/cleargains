@@ -11,6 +11,7 @@ import { clsx } from 'clsx';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useClearGainsStore } from '@/lib/store';
+import { T212ManualTrading } from './T212ManualTrading';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -540,8 +541,14 @@ export function T212StrategyTrader() {
     );
   }
 
+  // Default amount for manual trades: high-confidence tier of available capital
+  const manualDefaultAmount = Math.max(1, availableCapital * Math.min(10, settings.maxPerTradePct) / 100);
+
   return (
     <div className="space-y-4 max-w-3xl">
+
+      {/* ── Manual Trade Opportunities + Managed Positions ──────────────────── */}
+      <T212ManualTrading defaultTradeAmount={manualDefaultAmount} />
 
       {/* Toast */}
       {toast && (
