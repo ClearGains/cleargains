@@ -16,6 +16,7 @@ import {
   loadStrategies, saveStrategy, deleteStrategy,
   TIMEFRAME_CONFIG, DEFAULT_WATCHLIST, getMarketType,
 } from '@/lib/igStrategyEngine';
+import { IGStockOpportunities } from './IGStockOpportunities';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -1817,6 +1818,13 @@ export function IGStrategyTrader() {
           <span className="ml-auto text-red-500 text-[10px] font-normal">All trades here use real funds</span>
         </div>
       )}
+
+      {/* ── Stock Spread Bet Opportunities ──────────────────────────────── */}
+      <IGStockOpportunities
+        session={sessions[activeMode] ?? null}
+        env={activeMode}
+        availableCapital={igFundsDisplay[activeMode]?.available ?? 1000}
+      />
 
       {/* ── Connection status bar ───────────────────────────────────────── */}
       <div className="flex items-center justify-between flex-wrap gap-2">
