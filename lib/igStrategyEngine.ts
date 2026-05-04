@@ -29,7 +29,7 @@ export type StrategySignal = {
 
 export type Timeframe = 'hourly' | 'daily' | 'longterm' | 'rsi2';
 
-export type MarketType = 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO';
+export type MarketType = 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO' | 'SHARES';
 
 export type WatchlistMarket = {
   epic: string;
@@ -43,9 +43,10 @@ export type WatchlistMarket = {
 export function getMarketType(epic: string): MarketType {
   if (epic.startsWith('IX.D.')) return 'INDEX';
   if (epic.includes('BITCOIN') || epic.includes('ETHUSD') || epic.includes('CRYPTO')) return 'CRYPTO';
-  // Exclude known commodity epics before testing for forex currency patterns
   if (epic.includes('GOLD') || epic.includes('SILVER') || epic.includes('CRUDE') || epic.includes('NATGAS') || epic.includes('OIL')) return 'COMMODITY';
-  if (epic.startsWith('CS.D.') && /USD|EUR|GBP|JPY|CHF|AUD|NZD|CAD/.test(epic)) return 'FOREX';
+  if (epic.startsWith('CS.D.') && /USD|EUR|GBP|JPY|CHF|AUD|NZD|CAD/.test(epic) && epic.includes('USD')) return 'FOREX';
+  // CS.D.{TICKER}.TODAY.IP or CS.D.{TICKER}.CFD.IP = shares spread bet
+  if (epic.startsWith('CS.D.') && (epic.includes('.TODAY.') || epic.includes('.CFD.'))) return 'SHARES';
   return 'COMMODITY';
 }
 

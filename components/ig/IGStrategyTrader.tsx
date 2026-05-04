@@ -284,6 +284,10 @@ function calibrateSignal(
     case 'CRYPTO':
       strength = pct >= 3.0 ? 85 : pct >= 2.0 ? 75 : pct >= 1.0 ? 65 : Math.round((pct / 1.0) * 60);
       break;
+    case 'SHARES':
+    default:
+      strength = pct >= 2.0 ? 85 : pct >= 1.0 ? 75 : pct >= 0.5 ? 65 : Math.round((pct / 0.5) * 60);
+      break;
   }
   return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
 }
