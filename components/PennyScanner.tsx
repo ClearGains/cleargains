@@ -4,8 +4,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Search, RefreshCw, BarChart3, BookmarkPlus, BookmarkCheck,
   Trash2, AlertTriangle, X, Plus, ChevronDown, ChevronUp,
-  TrendingUp, TrendingDown, Minus,
+  TrendingUp, TrendingDown, Minus, Flame, Zap,
 } from 'lucide-react';
+import type { VolatilePick } from '@/app/api/market/volatile-picks/route';
 import { clsx } from 'clsx';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -293,9 +294,139 @@ function AnalysisPanel({ stock, onClose }: { stock: QuoteResult; onClose: () => 
   );
 }
 
+// ── Signal badge ──────────────────────────────────────────────────────────────
+
+const SIGNAL_STYLES: Record<VolatilePick['signal'], string> = {
+  BREAKOUT:     'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
+  VOLUME_SPIKE: 'bg-blue-500/20    text-blue-400    border-blue-500/30',
+  MOMENTUM:     'bg-amber-500/20   text-amber-400   border-amber-500/30',
+  RECOVERY:     'bg-purple-500/20  text-purple-400  border-purple-500/30',
+};
+
+// ── Volatile Picks table ──────────────────────────────────────────────────────
+
+function VolatilePicksPanel({
+  picks, loading, error, onSelect, onRefresh,
+}: {
+  picks: VolatilePick[];
+  loading: boolean;
+  error: string | null;
+  onSelect: (sym: string, name: string, price: number, currency: string, changePercent: number) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <Card>
+      <CardHeader
+        title="Volatile Picks"
+        subtitle={picks.length > 0 ? `${picks.length} high-volatility penny stocks · updated hourly` : 'Daily screener for 20%+ move candidates'}
+        icon={<Flame className="h-4 w-4 text-orange-400" />}
+        action={
+          <button onClick={onRefresh} disabled={loading}
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={clsx('h-3.5 w-3.5', loading && 'animate-spin')} />
+            Refresh
+          </button>
+        }
+      />
+
+      {error && (
+        <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-3">
+          <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" /> {error}
+        </div>
+      )}
+
+      {loading && picks.length === 0 && (
+        <div className="flex items-center justify-center gap-3 py-10">
+          <RefreshCw className="h-5 w-5 text-emerald-400 animate-spin" />
+          <span className="text-sm text-gray-400">Scanning screeners for volatile penny stocks…</span>
+        </div>
+      )}
+
+      {picks.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-gray-500 border-b border-gray-800">
+                <th className="text-left py-2 pr-2 font-medium">#</th>
+                <th className="text-left py-2 pr-2 font-medium">Stock</th>
+                <th className="text-left py-2 px-2 font-medium">Signal</th>
+                <th className="text-right py-2 px-2 font-medium">Price</th>
+                <th className="text-right py-2 px-2 font-medium">% Chg</th>
+                <th className="text-right py-2 px-2 font-medium hidden sm:table-cell">Day Range</th>
+                <th className="text-right py-2 px-2 font-medium hidden sm:table-cell">Vol Surge</th>
+                <th className="text-right py-2 px-2 font-medium">Score</th>
+                <th className="py-2 pl-2"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800/60">
+              {picks.map((p, i) => (
+                <tr key={p.symbol} className="hover:bg-gray-800/30 transition-colors">
+                  <td className="py-2 pr-2 text-xs text-gray-600 font-mono">{i + 1}</td>
+                  <td className="py-2 pr-2">
+                    <div className="font-semibold text-white text-xs font-mono">{p.symbol}</div>
+                    <div className="text-gray-500 text-xs truncate max-w-[130px]">{p.name}</div>
+                  </td>
+                  <td className="py-2 px-2">
+                    <span className={clsx('text-[10px] font-bold px-1.5 py-0.5 rounded border', SIGNAL_STYLES[p.signal])}>
+                      {p.signal.replace('_', ' ')}
+                    </span>
+                  </td>
+                  <td className="text-right py-2 px-2 font-mono text-sm text-white">
+                    {p.currency === 'GBp' ? `${p.price.toFixed(2)}p` : `$${p.price.toFixed(p.price < 1 ? 4 : 2)}`}
+                  </td>
+                  <td className={clsx('text-right py-2 px-2 font-mono text-sm font-semibold', p.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    {p.changePercent >= 0 ? '+' : ''}{p.changePercent.toFixed(2)}%
+                  </td>
+                  <td className="text-right py-2 px-2 text-gray-400 text-xs hidden sm:table-cell">
+                    {p.dayRangePct.toFixed(1)}%
+                  </td>
+                  <td className="text-right py-2 px-2 text-xs hidden sm:table-cell">
+                    <span className={clsx('font-mono font-semibold', p.volumeSurge >= 5 ? 'text-emerald-400' : p.volumeSurge >= 2 ? 'text-amber-400' : 'text-gray-400')}>
+                      {p.volumeSurge.toFixed(1)}×
+                    </span>
+                  </td>
+                  <td className="text-right py-2 px-2">
+                    <div className="flex items-center justify-end gap-1">
+                      <div className="w-12 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full"
+                          style={{ width: `${Math.min(p.volatilityScore, 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-xs font-bold text-orange-400 w-6 text-right">{p.volatilityScore}</span>
+                    </div>
+                  </td>
+                  <td className="py-2 pl-2">
+                    <button
+                      onClick={() => onSelect(p.symbol, p.name, p.price, p.currency, p.changePercent)}
+                      className="text-xs px-2 py-1 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 text-purple-400 rounded transition-colors flex items-center gap-1"
+                    >
+                      <BarChart3 className="h-3 w-3" /> Analyse
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!loading && picks.length === 0 && !error && (
+        <div className="py-10 text-center text-gray-600 text-sm space-y-1">
+          <Zap className="h-7 w-7 mx-auto mb-2 opacity-30" />
+          <p>No penny stocks found in today's volatile screeners</p>
+          <p className="text-xs text-gray-700">Markets may be closed or screeners temporarily unavailable</p>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function PennyScanner() {
+  const [activeTab, setActiveTab]       = useState<'volatile' | 'scan'>('volatile');
   const [market, setMarket]             = useState<'US' | 'UK'>('US');
   const [quotes, setQuotes]             = useState<QuoteResult[]>([]);
   const [scanning, setScanning]         = useState(false);
@@ -308,6 +439,29 @@ export default function PennyScanner() {
   const [filterPrice,  setFilterPrice]  = useState({ min: '', max: '' });
   const [onlyPenny, setOnlyPenny]       = useState(true);
   const refreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Volatile picks state
+  const [volatilePicks,   setVolatilePicks]   = useState<VolatilePick[]>([]);
+  const [loadingPicks,    setLoadingPicks]     = useState(false);
+  const [picksError,      setPicksError]       = useState<string | null>(null);
+
+  const fetchVolatilePicks = useCallback(async () => {
+    setLoadingPicks(true); setPicksError(null);
+    try {
+      const r = await fetch('/api/market/volatile-picks?market=US');
+      if (!r.ok) throw new Error(`Failed to load volatile picks (${r.status})`);
+      const data = await r.json() as VolatilePick[];
+      setVolatilePicks(Array.isArray(data) ? data : []);
+    } catch (e) {
+      setPicksError(e instanceof Error ? e.message : 'Failed to load picks');
+    } finally { setLoadingPicks(false); }
+  }, []);
+
+  useEffect(() => { fetchVolatilePicks(); }, [fetchVolatilePicks]);
+
+  function openPickAnalysis(sym: string, name: string, price: number, currency: string, changePercent: number) {
+    setSelected({ symbol: sym, name, price, currency, changePercent, bid: price, ask: price, volume: 0, change: 0, exchange: '' } as unknown as QuoteResult);
+  }
 
   // Load watchlist
   useEffect(() => {
@@ -374,6 +528,41 @@ export default function PennyScanner() {
     <div className="space-y-4">
       {selected && <AnalysisPanel stock={selected} onClose={() => setSelected(null)} />}
 
+      {/* Tab switcher */}
+      <div className="flex gap-1.5">
+        {([['volatile', 'Volatile Picks', Flame], ['scan', 'Market Scan', Search]] as const).map(([tab, label, Icon]) => (
+          <button key={tab} onClick={() => setActiveTab(tab)}
+            className={clsx('flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold border transition-all',
+              activeTab === tab
+                ? 'bg-emerald-600/15 text-emerald-400 border-emerald-600/30'
+                : 'text-gray-500 border-gray-700 hover:text-gray-300 hover:border-gray-600'
+            )}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Volatile Picks tab */}
+      {activeTab === 'volatile' && (
+        <>
+          <VolatilePicksPanel
+            picks={volatilePicks}
+            loading={loadingPicks}
+            error={picksError}
+            onSelect={openPickAnalysis}
+            onRefresh={fetchVolatilePicks}
+          />
+          <p className="text-[10px] text-gray-700 text-center px-4">
+            Sourced from Yahoo Finance screeners (day gainers, small-cap gainers, most active). Penny stocks only (&lt;$5). Volatility score ranks by % change, day range, and volume surge. Not financial advice.
+          </p>
+        </>
+      )}
+
+      {/* Market Scan tab */}
+      {activeTab === 'scan' && (
+      <>
       {/* Controls */}
       <Card>
         <div className="flex flex-wrap items-center gap-3">
@@ -557,6 +746,8 @@ export default function PennyScanner() {
           </Card>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }
