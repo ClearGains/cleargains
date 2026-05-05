@@ -155,33 +155,6 @@ export async function fetchYahooHistory(symbol: string): Promise<YahooCandle[]> 
   }
 }
 
-// Resolution-aware fetch for Graph Analysis
-export type ChartResolution = '1D' | '1W' | '1M' | '3M' | '6M' | '1Y';
-
-const RESOLUTION_MAP: Record<ChartResolution, { interval: string; range: string; intraday: boolean }> = {
-  '1D': { interval: '5m',  range: '1d',  intraday: true  },
-  '1W': { interval: '60m', range: '5d',  intraday: true  },
-  '1M': { interval: '1d',  range: '1mo', intraday: false },
-  '3M': { interval: '1d',  range: '3mo', intraday: false },
-  '6M': { interval: '1d',  range: '6mo', intraday: false },
-  '1Y': { interval: '1d',  range: '1y',  intraday: false },
-};
-
-export async function fetchYahooHistoryByResolution(
-  symbol: string,
-  resolution: ChartResolution,
-): Promise<YahooCandle[]> {
-  const cfg = RESOLUTION_MAP[resolution];
-  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${cfg.interval}&range=${cfg.range}`;
-  try {
-    const res = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!res.ok) return [];
-    return parseYahooChart(await res.json() as YahooChartRaw, cfg.intraday);
-  } catch {
-    return [];
-  }
-}
-
 // Ticker search (browser-side)
 export type TickerSearchResult = {
   symbol: string;

@@ -4,14 +4,14 @@ import { Search, RefreshCw, TrendingUp, ChevronDown } from 'lucide-react';
 import type { LWCandle } from '@/lib/chartIndicators';
 import type { SRZone } from '@/lib/supportResistance';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
-import { fetchYahooHistoryByResolution, searchYahooTickers, type ChartResolution, type TickerSearchResult } from '@/lib/yahooClient';
+import { searchYahooTickers, type TickerSearchResult } from '@/lib/yahooClient';
 import { ChartPanel, type Overlay } from '@/components/ChartPanel';
 import { TradeCard } from '@/components/TradeCard';
 import { ProAnalysis } from '@/components/ProAnalysis';
 
-type Resolution = ChartResolution;
+type Resolution = '5D' | '1M' | '3M' | '6M' | '1Y' | '2Y';
 
-const RESOLUTIONS: Resolution[] = ['1D', '1W', '1M', '3M', '6M', '1Y'];
+const RESOLUTIONS: Resolution[] = ['5D', '1M', '3M', '6M', '1Y', '2Y'];
 
 const POPULAR = ['AAPL', 'TSLA', 'NVDA', 'META', 'MSFT', 'AMZN', 'SPY', 'QQQ', 'GOOGL', 'AMD'];
 
@@ -29,25 +29,24 @@ function saveRecent(ticker: string, prev: string[]) {
 }
 
 export function GraphAnalysis() {
-  const [ticker,     setTicker]     = useState('');
-  const [activeTicker, setActiveTicker] = useState('');
-  const [resolution, setResolution] = useState<Resolution>('3M');
-  const [candles,    setCandles]    = useState<LWCandle[]>([]);
-  const [srZones,    setSrZones]    = useState<SRZone[]>([]);
-  const [overlays,   setOverlays]   = useState<Set<Overlay>>(new Set(DEFAULT_OVERLAYS));
-  const [analysis,   setAnalysis]   = useState<AnalysisResult | null>(null);
-  const [chartLoading,  setChartLoading]  = useState(false);
+  const [ticker,          setTicker]          = useState('');
+  const [activeTicker,    setActiveTicker]    = useState('');
+  const [resolution,      setResolution]      = useState<Resolution>('3M');
+  const [candles,         setCandles]         = useState<LWCandle[]>([]);
+  const [srZones,         setSrZones]         = useState<SRZone[]>([]);
+  const [overlays,        setOverlays]        = useState<Set<Overlay>>(new Set(DEFAULT_OVERLAYS));
+  const [analysis,        setAnalysis]        = useState<AnalysisResult | null>(null);
+  const [chartLoading,    setChartLoading]    = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
-  const [chartError,  setChartError]  = useState('');
-  const [searchResults, setSearchResults] = useState<TickerSearchResult[]>([]);
-  const [searchOpen,    setSearchOpen]    = useState(false);
-  const [recent,     setRecent]     = useState<string[]>([]);
-  const searchRef = useRef<HTMLDivElement>(null);
+  const [chartError,      setChartError]      = useState('');
+  const [searchResults,   setSearchResults]   = useState<TickerSearchResult[]>([]);
+  const [searchOpen,      setSearchOpen]      = useState(false);
+  const [recent,          setRecent]          = useState<string[]>([]);
+  const searchRef   = useRef<HTMLDivElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => { setRecent(loadRecent()); }, []);
 
-  // Close dropdown on outside click
   useEffect(() => {
     function handler(e: MouseEvent) {
       if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
@@ -64,12 +63,14 @@ export function GraphAnalysis() {
     setChartError('');
     setAnalysis(null);
     try {
-      const raw = await fetchYahooHistoryByResolution(sym, res);
-      if (!raw.length) throw new Error(`No data returned for ${sym} — check the ticker symbol`);
-      const lwCandles: LWCandle[] = raw.map(c => ({ ...c }));
-      setCandles(lwCandles);
+      const r = await fetch(`/api/chart/history?symbol=${encodeURIComponent(sym)}&resolution=${res}`);
+      const data = await r.json() as { candles?: LWCandle[]; error?: string };
+      if (!r.ok || data.error) throw new Error(data.error ?? `HTTP ${r.status}`);
+      if (!data.candles?.length) throw new Error(`No data found for "${sym}" — check the ticker symbol`);
+
+      setCandles(data.candles);
       const { calcSupportResistance } = await import('@/lib/supportResistance');
-      setSrZones(calcSupportResistance(lwCandles));
+      setSrZones(calcSupportResistance(data.candles));
     } catch (e) {
       setChartError(e instanceof Error ? e.message : 'Failed to load chart data');
       setCandles([]);
@@ -145,21 +146,21 @@ export function GraphAnalysis() {
 
   return (
     <div className="space-y-4">
-      {/* Search bar */}
+      {/* Search + resolution */}
       <div className="flex gap-3 flex-wrap">
         <div ref={searchRef} className="relative flex-1 min-w-48">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500 pointer-events-none" />
             <input
               className="w-full bg-gray-900 border border-gray-700 rounded-lg pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500 uppercase"
-              placeholder="Search ticker — e.g. AAPL, NVDA, SPY"
+              placeholder="Search ticker — e.g. AAPL, NVDA, SPY, LLOY.L"
               value={ticker}
               onChange={e => handleSearchInput(e.target.value)}
               onFocus={() => { if (ticker.length > 0) setSearchOpen(true); }}
               onKeyDown={e => { if (e.key === 'Enter' && ticker.trim()) selectTicker(ticker.trim()); }}
             />
           </div>
-          {searchOpen && (searchResults.length > 0) && (
+          {searchOpen && searchResults.length > 0 && (
             <div className="absolute z-50 top-full mt-1 w-full bg-gray-900 border border-gray-700 rounded-lg shadow-2xl overflow-hidden">
               {searchResults.map(r => (
                 <button
@@ -167,9 +168,9 @@ export function GraphAnalysis() {
                   className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-gray-800 text-left"
                   onClick={() => selectTicker(r.symbol)}
                 >
-                  <div>
-                    <span className="text-sm font-bold text-white font-mono">{r.symbol}</span>
-                    <span className="ml-2 text-xs text-gray-400 truncate max-w-[180px]">{r.name}</span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-sm font-bold text-white font-mono shrink-0">{r.symbol}</span>
+                    <span className="text-xs text-gray-400 truncate">{r.name}</span>
                   </div>
                   <span className="text-[10px] text-gray-600 ml-2 shrink-0">{r.exchange}</span>
                 </button>
@@ -178,16 +179,13 @@ export function GraphAnalysis() {
           )}
         </div>
 
-        {/* Resolution tabs */}
         <div className="flex bg-gray-900 border border-gray-700 rounded-lg p-0.5 gap-0.5">
           {RESOLUTIONS.map(r => (
             <button
               key={r}
               onClick={() => handleResolutionChange(r)}
               className={`px-3 py-1.5 rounded text-xs font-mono font-semibold transition-all ${
-                resolution === r
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-gray-500 hover:text-gray-300'
+                resolution === r ? 'bg-emerald-600 text-white' : 'text-gray-500 hover:text-gray-300'
               }`}
             >
               {r}
@@ -196,7 +194,7 @@ export function GraphAnalysis() {
         </div>
       </div>
 
-      {/* Recent / Popular tickers */}
+      {/* Popular / recent tickers */}
       <div className="flex gap-2 flex-wrap">
         {(recent.length > 0 ? recent : POPULAR).map(sym => (
           <button
@@ -220,9 +218,7 @@ export function GraphAnalysis() {
             key={key}
             onClick={() => toggleOverlay(key)}
             className={`px-2.5 py-1 rounded border text-xs font-semibold transition-all ${
-              overlays.has(key)
-                ? color
-                : 'text-gray-600 border-gray-800 hover:border-gray-700 hover:text-gray-500'
+              overlays.has(key) ? color : 'text-gray-600 border-gray-800 hover:border-gray-700 hover:text-gray-500'
             }`}
           >
             {label}
@@ -230,14 +226,14 @@ export function GraphAnalysis() {
         ))}
       </div>
 
-      {/* Chart area */}
+      {/* Chart */}
       {chartLoading && (
-        <div className="bg-gray-900 rounded-xl border border-gray-800 h-60 flex items-center justify-center">
+        <div className="bg-gray-900 rounded-xl border border-gray-800 h-60 flex items-center justify-center gap-2">
           <RefreshCw className="h-5 w-5 text-emerald-500 animate-spin" />
-          <span className="ml-2 text-sm text-gray-500">Loading chart data…</span>
+          <span className="text-sm text-gray-500">Loading chart data…</span>
         </div>
       )}
-      {chartError && (
+      {!chartLoading && chartError && (
         <div className="bg-red-950/20 border border-red-900/40 rounded-xl p-4 text-sm text-red-400">{chartError}</div>
       )}
       {!chartLoading && !chartError && !activeTicker && (
@@ -259,9 +255,9 @@ export function GraphAnalysis() {
             className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-white transition-all"
           >
             {analysisLoading ? (
-              <><RefreshCw className="h-4 w-4 animate-spin" /> Analysing…</>
+              <><RefreshCw className="h-4 w-4 animate-spin" />Analysing…</>
             ) : (
-              <><ChevronDown className="h-4 w-4" /> Run AI Analysis</>
+              <><ChevronDown className="h-4 w-4" />Run AI Analysis</>
             )}
           </button>
         </div>
@@ -270,13 +266,10 @@ export function GraphAnalysis() {
       {/* Analysis results */}
       {analysis && (
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-          {/* Left: overview */}
           <div className="xl:col-span-1 bg-gray-900 rounded-xl border border-gray-800 p-4">
             <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">Market Analysis</h3>
             <ProAnalysis analysis={analysis} />
           </div>
-
-          {/* Right: trade cards */}
           <div className="xl:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Scalp Setup</h3>
