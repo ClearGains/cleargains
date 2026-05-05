@@ -4,6 +4,7 @@ import { Search, RefreshCw, TrendingUp, Sparkles, AlertCircle } from 'lucide-rea
 import type { LWCandle } from '@/lib/chartIndicators';
 import type { SRZone } from '@/lib/supportResistance';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
 import { ChartPanel, type Overlay } from '@/components/ChartPanel';
 import { TradeCard } from '@/components/TradeCard';
 import { ProAnalysis } from '@/components/ProAnalysis';
@@ -37,6 +38,7 @@ export function GraphAnalysis() {
   const [srZones,         setSrZones]         = useState<SRZone[]>([]);
   const [overlays,        setOverlays]        = useState<Set<Overlay>>(new Set(DEFAULT_OVERLAYS));
   const [analysis,        setAnalysis]        = useState<AnalysisResult | null>(null);
+  const [analysisMode,    setAnalysisMode]    = useState<'ai' | 'rules' | null>(null);
   const [chartLoading,    setChartLoading]    = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [chartError,      setChartError]      = useState('');
@@ -87,15 +89,26 @@ export function GraphAnalysis() {
     setAnalysisLoading(true);
     setAnalysisError('');
     setAnalysis(null);
+    setAnalysisMode(null);
     try {
-      const r = await fetch('/api/analyse/chart', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticker: activeTicker, candles, resolution }),
-      });
-      const data = await r.json() as AnalysisResult & { error?: string };
-      if (!r.ok || data.error) throw new Error(data.error ?? `HTTP ${r.status}`);
-      setAnalysis(data);
+      // Try AI analysis first; fall back to rule-based instantly on any failure
+      let result: AnalysisResult | null = null;
+      let mode: 'ai' | 'rules' = 'rules';
+      try {
+        const r = await fetch('/api/analyse/chart', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticker: activeTicker, candles, resolution }),
+        });
+        const data = await r.json() as AnalysisResult & { error?: string };
+        if (r.ok && !data.error && data.bias) { result = data; mode = 'ai'; }
+      } catch { /* fall through to rule-based */ }
+
+      // Rule-based fallback — runs client-side, zero API calls
+      if (!result) result = ruleBasedAnalysis(activeTicker, candles);
+
+      setAnalysis(result);
+      setAnalysisMode(mode);
     } catch (e) {
       setAnalysisError(e instanceof Error ? e.message : 'Analysis failed — try again');
     } finally {
@@ -303,7 +316,15 @@ export function GraphAnalysis() {
       {analysis && (
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
           <div className="xl:col-span-1 bg-gray-900 rounded-xl border border-gray-800 p-4">
-            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">Market Analysis</h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Market Analysis</h3>
+              {analysisMode === 'ai' && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 font-semibold">AI</span>
+              )}
+              {analysisMode === 'rules' && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/25 font-semibold">Rule-based</span>
+              )}
+            </div>
             <ProAnalysis analysis={analysis} />
           </div>
           <div className="xl:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
