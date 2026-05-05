@@ -26,6 +26,7 @@ const MARKETS: MarketDef[] = [
   { name: 'NASDAQ 100',  yahooSymbol: '^IXIC',     igEpic: 'IX.D.NASDAQ.DAILY.IP',   type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 1   },
   { name: 'Germany 40',  yahooSymbol: '^GDAXI',    igEpic: 'IX.D.DAX.DAILY.IP',      type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 1   },
   { name: 'Wall Street', yahooSymbol: '^DJI',      igEpic: 'IX.D.DOW.DAILY.IP',      type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 2   },
+  { name: 'Japan 225',   yahooSymbol: '^N225',     igEpic: 'IX.D.NIKKEI.DAILY.IP',   type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 6   },
   // Forex
   { name: 'GBP/USD',     yahooSymbol: 'GBPUSD=X',  igEpic: 'CS.D.GBPUSD.TODAY.IP',  type: 'FOREX',     priceFactor: 10000, marginPct: 0.03,  spread: 0.9 },
   { name: 'EUR/USD',     yahooSymbol: 'EURUSD=X',  igEpic: 'CS.D.EURUSD.TODAY.IP',  type: 'FOREX',     priceFactor: 10000, marginPct: 0.03,  spread: 0.8 },
