@@ -99,17 +99,17 @@ Return ONLY valid JSON with this exact shape (no markdown, no extra text):
 }`;
 
     const msg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1800,
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2000,
       messages: [{ role: 'user', content: prompt }],
     });
 
     const text = msg.content[0].type === 'text' ? msg.content[0].text : '';
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('No JSON in Claude response');
+    if (!match) throw new Error(`Claude returned no JSON. Raw response: ${text.slice(0, 200)}`);
     const parsed = JSON.parse(match[0]) as Omit<AnalysisResult, 'ticker' | 'price'>;
 
-    return NextResponse.json({ ticker: ticker.toUpperCase(), price, ...parsed } satisfies AnalysisResult);
+    return NextResponse.json({ ticker: ticker.toUpperCase(), price, ...parsed });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }

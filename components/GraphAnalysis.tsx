@@ -1,15 +1,16 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, RefreshCw, TrendingUp, ChevronDown } from 'lucide-react';
+import { Search, RefreshCw, TrendingUp, Sparkles, AlertCircle } from 'lucide-react';
 import type { LWCandle } from '@/lib/chartIndicators';
 import type { SRZone } from '@/lib/supportResistance';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
-import { searchYahooTickers, type TickerSearchResult } from '@/lib/yahooClient';
 import { ChartPanel, type Overlay } from '@/components/ChartPanel';
 import { TradeCard } from '@/components/TradeCard';
 import { ProAnalysis } from '@/components/ProAnalysis';
 
 type Resolution = '5D' | '1M' | '3M' | '6M' | '1Y' | '2Y';
+
+type SearchResult = { symbol: string; name: string; exchange: string; type: string };
 
 const RESOLUTIONS: Resolution[] = ['5D', '1M', '3M', '6M', '1Y', '2Y'];
 
@@ -29,7 +30,7 @@ function saveRecent(ticker: string, prev: string[]) {
 }
 
 export function GraphAnalysis() {
-  const [ticker,          setTicker]          = useState('');
+  const [searchText,      setSearchText]      = useState('');
   const [activeTicker,    setActiveTicker]    = useState('');
   const [resolution,      setResolution]      = useState<Resolution>('3M');
   const [candles,         setCandles]         = useState<LWCandle[]>([]);
@@ -39,7 +40,8 @@ export function GraphAnalysis() {
   const [chartLoading,    setChartLoading]    = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [chartError,      setChartError]      = useState('');
-  const [searchResults,   setSearchResults]   = useState<TickerSearchResult[]>([]);
+  const [analysisError,   setAnalysisError]   = useState('');
+  const [searchResults,   setSearchResults]   = useState<SearchResult[]>([]);
   const [searchOpen,      setSearchOpen]      = useState(false);
   const [recent,          setRecent]          = useState<string[]>([]);
   const searchRef   = useRef<HTMLDivElement>(null);
@@ -62,12 +64,12 @@ export function GraphAnalysis() {
     setChartLoading(true);
     setChartError('');
     setAnalysis(null);
+    setAnalysisError('');
     try {
       const r = await fetch(`/api/chart/history?symbol=${encodeURIComponent(sym)}&resolution=${res}`);
       const data = await r.json() as { candles?: LWCandle[]; error?: string };
       if (!r.ok || data.error) throw new Error(data.error ?? `HTTP ${r.status}`);
       if (!data.candles?.length) throw new Error(`No data found for "${sym}" — check the ticker symbol`);
-
       setCandles(data.candles);
       const { calcSupportResistance } = await import('@/lib/supportResistance');
       setSrZones(calcSupportResistance(data.candles));
@@ -83,17 +85,19 @@ export function GraphAnalysis() {
   const runAnalysis = useCallback(async () => {
     if (!candles.length || !activeTicker) return;
     setAnalysisLoading(true);
+    setAnalysisError('');
+    setAnalysis(null);
     try {
       const r = await fetch('/api/analyse/chart', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ticker: activeTicker, candles, resolution }),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json() as AnalysisResult;
+      const data = await r.json() as AnalysisResult & { error?: string };
+      if (!r.ok || data.error) throw new Error(data.error ?? `HTTP ${r.status}`);
       setAnalysis(data);
     } catch (e) {
-      console.error('[analyse]', e);
+      setAnalysisError(e instanceof Error ? e.message : 'Analysis failed — try again');
     } finally {
       setAnalysisLoading(false);
     }
@@ -101,7 +105,7 @@ export function GraphAnalysis() {
 
   function selectTicker(sym: string) {
     const upper = sym.toUpperCase();
-    setTicker(upper);
+    setSearchText(upper);
     setActiveTicker(upper);
     setRecent(prev => saveRecent(upper, prev));
     setSearchOpen(false);
@@ -110,14 +114,18 @@ export function GraphAnalysis() {
   }
 
   function handleSearchInput(val: string) {
-    setTicker(val);
+    setSearchText(val);
     if (searchTimer.current) clearTimeout(searchTimer.current);
     if (!val.trim()) { setSearchResults([]); setSearchOpen(false); return; }
     setSearchOpen(true);
     searchTimer.current = setTimeout(async () => {
-      const results = await searchYahooTickers(val);
-      setSearchResults(results.slice(0, 8));
-    }, 300);
+      try {
+        const r = await fetch(`/api/chart/search?q=${encodeURIComponent(val)}`);
+        if (!r.ok) return;
+        const data = await r.json() as SearchResult[];
+        setSearchResults(Array.isArray(data) ? data : []);
+      } catch { /* ignore */ }
+    }, 280);
   }
 
   function handleResolutionChange(res: Resolution) {
@@ -128,7 +136,7 @@ export function GraphAnalysis() {
   function toggleOverlay(o: Overlay) {
     setOverlays(prev => {
       const next = new Set(prev);
-      if (next.has(o)) next.delete(o); else next.add(o);
+      next.has(o) ? next.delete(o) : next.add(o);
       return next;
     });
   }
@@ -148,31 +156,49 @@ export function GraphAnalysis() {
     <div className="space-y-4">
       {/* Search + resolution */}
       <div className="flex gap-3 flex-wrap">
-        <div ref={searchRef} className="relative flex-1 min-w-48">
+        <div ref={searchRef} className="relative flex-1 min-w-64">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500 pointer-events-none" />
             <input
-              className="w-full bg-gray-900 border border-gray-700 rounded-lg pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500 uppercase"
-              placeholder="Search ticker — e.g. AAPL, NVDA, SPY, LLOY.L"
-              value={ticker}
+              className="w-full bg-gray-900 border border-gray-700 rounded-lg pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500 tracking-wide"
+              placeholder="Search by name or ticker — Apple, NVDA, Tesla, SPY…"
+              value={searchText}
               onChange={e => handleSearchInput(e.target.value)}
-              onFocus={() => { if (ticker.length > 0) setSearchOpen(true); }}
-              onKeyDown={e => { if (e.key === 'Enter' && ticker.trim()) selectTicker(ticker.trim()); }}
+              onFocus={() => { if (searchText.length > 0) setSearchOpen(true); }}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && searchText.trim()) {
+                  // If there's a top result, use its symbol; otherwise treat input as ticker
+                  if (searchResults.length > 0) {
+                    selectTicker(searchResults[0].symbol);
+                  } else {
+                    selectTicker(searchText.trim());
+                  }
+                }
+                if (e.key === 'Escape') setSearchOpen(false);
+              }}
+              autoComplete="off"
+              spellCheck={false}
             />
           </div>
+
           {searchOpen && searchResults.length > 0 && (
-            <div className="absolute z-50 top-full mt-1 w-full bg-gray-900 border border-gray-700 rounded-lg shadow-2xl overflow-hidden">
-              {searchResults.map(r => (
+            <div className="absolute z-50 top-full mt-1 w-full bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden">
+              {searchResults.map((r, idx) => (
                 <button
-                  key={r.symbol}
-                  className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-gray-800 text-left"
+                  key={`${r.symbol}-${idx}`}
+                  className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-gray-800 text-left transition-colors"
                   onClick={() => selectTicker(r.symbol)}
                 >
-                  <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex items-center gap-3 min-w-0">
                     <span className="text-sm font-bold text-white font-mono shrink-0">{r.symbol}</span>
                     <span className="text-xs text-gray-400 truncate">{r.name}</span>
                   </div>
-                  <span className="text-[10px] text-gray-600 ml-2 shrink-0">{r.exchange}</span>
+                  <div className="flex items-center gap-2 ml-2 shrink-0">
+                    {r.type && (
+                      <span className="text-[10px] text-gray-600 bg-gray-800 px-1.5 py-0.5 rounded">{r.type}</span>
+                    )}
+                    <span className="text-[10px] text-gray-600">{r.exchange}</span>
+                  </div>
                 </button>
               ))}
             </div>
@@ -194,8 +220,9 @@ export function GraphAnalysis() {
         </div>
       </div>
 
-      {/* Popular / recent tickers */}
-      <div className="flex gap-2 flex-wrap">
+      {/* Popular / recent chips */}
+      <div className="flex gap-2 flex-wrap items-center">
+        <span className="text-[10px] text-gray-600 uppercase tracking-wider">{recent.length > 0 ? 'Recent' : 'Popular'}</span>
         {(recent.length > 0 ? recent : POPULAR).map(sym => (
           <button
             key={sym}
@@ -228,36 +255,45 @@ export function GraphAnalysis() {
 
       {/* Chart */}
       {chartLoading && (
-        <div className="bg-gray-900 rounded-xl border border-gray-800 h-60 flex items-center justify-center gap-2">
+        <div className="bg-gray-900 rounded-xl border border-gray-800 h-64 flex items-center justify-center gap-2">
           <RefreshCw className="h-5 w-5 text-emerald-500 animate-spin" />
           <span className="text-sm text-gray-500">Loading chart data…</span>
         </div>
       )}
       {!chartLoading && chartError && (
-        <div className="bg-red-950/20 border border-red-900/40 rounded-xl p-4 text-sm text-red-400">{chartError}</div>
+        <div className="flex items-start gap-2 bg-red-950/20 border border-red-900/40 rounded-xl p-4">
+          <AlertCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
+          <p className="text-sm text-red-400">{chartError}</p>
+        </div>
       )}
       {!chartLoading && !chartError && !activeTicker && (
-        <div className="bg-gray-900 rounded-xl border border-gray-800 h-60 flex flex-col items-center justify-center gap-2 text-gray-600">
-          <TrendingUp className="h-8 w-8" />
-          <p className="text-sm">Search for a ticker or click a symbol above to load the chart</p>
+        <div className="bg-gray-900 rounded-xl border border-gray-800 h-64 flex flex-col items-center justify-center gap-3 text-gray-600">
+          <TrendingUp className="h-9 w-9" />
+          <p className="text-sm">Search by name or ticker above, or click a symbol to load the chart</p>
         </div>
       )}
       {!chartLoading && !chartError && activeTicker && candles.length > 0 && (
         <ChartPanel candles={candles} overlays={overlays} srZones={srZones} />
       )}
 
-      {/* Analyse button */}
+      {/* Analyse button + error */}
       {candles.length > 0 && (
-        <div className="flex justify-end">
+        <div className="flex flex-col items-end gap-2">
+          {analysisError && (
+            <div className="flex items-start gap-2 w-full bg-red-950/20 border border-red-900/40 rounded-lg px-3 py-2">
+              <AlertCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
+              <p className="text-xs text-red-400">{analysisError}</p>
+            </div>
+          )}
           <button
             onClick={runAnalysis}
             disabled={analysisLoading}
             className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-white transition-all"
           >
             {analysisLoading ? (
-              <><RefreshCw className="h-4 w-4 animate-spin" />Analysing…</>
+              <><RefreshCw className="h-4 w-4 animate-spin" />Analysing with AI…</>
             ) : (
-              <><ChevronDown className="h-4 w-4" />Run AI Analysis</>
+              <><Sparkles className="h-4 w-4" />Run AI Analysis</>
             )}
           </button>
         </div>
