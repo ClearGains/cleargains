@@ -58,18 +58,29 @@ export async function POST(request: NextRequest) {
     if (!res.ok) {
       const text = await res.text();
       let errMsg = `IG API error ${res.status}`;
+      let errorCode = '';
       try {
         const j = JSON.parse(text) as { errorCode?: string };
-        if (j.errorCode) {
-          if (j.errorCode.includes('authenticationRequest.identifier') || j.errorCode.includes('invalid.identifier')) {
-            errMsg = 'IG rejected the username. Please use your IG username/account number — NOT your email address. Find it in the IG app → My Account → Account details.';
-          } else if (j.errorCode.includes('invalid.password') || j.errorCode.includes('authentication')) {
-            errMsg = 'IG authentication failed. Check your username and password are correct.';
-          } else {
-            errMsg = `IG: ${j.errorCode}`;
-          }
-        }
-      } catch {}
+        errorCode = j.errorCode ?? '';
+      } catch { /* plain-text or HTML response */ }
+
+      if (errorCode.includes('authenticationRequest.identifier') || errorCode.includes('invalid.identifier')) {
+        errMsg = 'IG rejected the username. Use your IG account number (e.g. Z12345), not your email. Find it in the IG app → My Account → Account details.';
+      } else if (errorCode.includes('invalid.password') || errorCode.includes('authentication')) {
+        errMsg = 'IG authentication failed — check your username and password are correct.';
+      } else if (errorCode.includes('exceed-login-session-limit') || errorCode.includes('session-limit')) {
+        errMsg = 'IG session limit reached. Log out of the IG web platform or other devices, wait a minute, then try again.';
+      } else if (res.status === 500) {
+        errMsg = errorCode
+          ? `IG server error: ${errorCode}`
+          : 'IG demo server returned 500. This is usually temporary — the demo environment is less stable than live. Wait 1–2 minutes and try again, or check status.ig.com.';
+      } else if (errorCode) {
+        errMsg = `IG: ${errorCode}`;
+      }
+
+      // Clear any cached token so the next attempt hits IG fresh
+      tokenCache.delete(`${env}:${username}:${apiKey}`);
+
       return NextResponse.json({ ok: false, error: errMsg }, { status: res.status });
     }
 
