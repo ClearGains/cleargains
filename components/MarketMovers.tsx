@@ -337,7 +337,12 @@ export function MarketMovers() {
                 ))}
               </div>
               <p className="text-xs text-gray-600 mt-2">
-                Signals computed from volume, 52-week range, SMA structure and day momentum — updated in real-time.
+                Signals computed from volume, 52-week range, SMA structure and momentum.
+                Scan runs once daily at 00:00 UTC
+                {predicted.length > 0 && predicted[0].scannedAt
+                  ? ` — last scan ${new Date(predicted[0].scannedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ${new Date(predicted[0].scannedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} UTC`
+                  : ''}
+                .
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-[10px]">
@@ -350,7 +355,7 @@ export function MarketMovers() {
           {predLoading && (
             <div className="flex items-center justify-center gap-2 py-16 text-gray-500">
               <RefreshCw className="h-4 w-4 animate-spin" />
-              <span className="text-sm">Scanning {predMarket} universe…</span>
+              <span className="text-sm">Loading today&apos;s {predMarket} predictions…</span>
             </div>
           )}
           {predError && !predLoading && (

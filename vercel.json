@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/market/predicted?market=US",
+      "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/market/predicted?market=UK",
+      "schedule": "5 0 * * *"
+    }
+  ]
+}

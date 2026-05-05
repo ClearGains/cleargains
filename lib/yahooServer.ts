@@ -1,6 +1,6 @@
 /**
  * Shared server-side Yahoo Finance authentication helper.
- * Fetches and caches the A1 consent cookie + crumb token.
+ * Tries multiple strategies to obtain a valid crumb + cookie pair.
  * Import only from API routes (server-side), never from client components.
  */
 
@@ -9,29 +9,78 @@ export const YF_UA =
 
 let crumbCache: { crumb: string; cookie: string; ts: number } | null = null;
 
-export async function getYahooCrumb(): Promise<{ crumb: string; cookie: string } | null> {
-  if (crumbCache && Date.now() - crumbCache.ts < 25 * 60_000) return crumbCache;
+const COOKIE_NAMES = ['A1', 'A1S', 'A3'];
+
+function extractYahooCookie(header: string): string {
+  for (const name of COOKIE_NAMES) {
+    const m = new RegExp(`\\b${name}=([^;,\\s]+)`).exec(header);
+    if (m) return `${name}=${m[1]}`;
+  }
+  return '';
+}
+
+async function tryGetCrumb(cookie: string): Promise<string | null> {
   try {
-    const r1 = await fetch('https://fc.yahoo.com', {
-      headers: { 'User-Agent': YF_UA, Accept: 'text/html' },
-      redirect: 'manual',
-    });
-    const setCookie = r1.headers.get('set-cookie') ?? '';
-    const a1 = setCookie.match(/A1=([^;]+)/)?.[1];
-    const cookie = a1 ? `A1=${a1}` : '';
-
-    const r2 = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
-      headers: { 'User-Agent': YF_UA, Accept: 'text/plain', Cookie: cookie },
-    });
-    if (!r2.ok) return null;
-    const crumb = (await r2.text()).trim();
-    if (!crumb || crumb.length > 30 || crumb.includes('<')) return null;
-
-    crumbCache = { crumb, cookie, ts: Date.now() };
-    return crumbCache;
+    const headers: HeadersInit = { 'User-Agent': YF_UA, Accept: 'text/plain' };
+    if (cookie) (headers as Record<string, string>)['Cookie'] = cookie;
+    const r = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', { headers });
+    if (!r.ok) return null;
+    const crumb = (await r.text()).trim();
+    if (!crumb || crumb.length > 50 || crumb.includes('<')) return null;
+    return crumb;
   } catch {
     return null;
   }
+}
+
+async function strategy1(): Promise<{ crumb: string; cookie: string } | null> {
+  // fc.yahoo.com redirect — original approach
+  const r = await fetch('https://fc.yahoo.com', {
+    headers: { 'User-Agent': YF_UA, Accept: 'text/html' },
+    redirect: 'manual',
+  });
+  const cookie = extractYahooCookie(r.headers.get('set-cookie') ?? '');
+  const crumb = await tryGetCrumb(cookie);
+  return crumb ? { crumb, cookie } : null;
+}
+
+async function strategy2(): Promise<{ crumb: string; cookie: string } | null> {
+  // finance.yahoo.com follow redirects — picks up cookies after consent flow
+  const r = await fetch('https://finance.yahoo.com', {
+    headers: {
+      'User-Agent': YF_UA,
+      Accept: 'text/html,application/xhtml+xml',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+    redirect: 'follow',
+  });
+  const cookie = extractYahooCookie(r.headers.get('set-cookie') ?? '');
+  const crumb = await tryGetCrumb(cookie);
+  return crumb ? { crumb, cookie } : null;
+}
+
+async function strategy3(): Promise<{ crumb: string; cookie: string } | null> {
+  // No cookie — some endpoints still respond without one
+  const crumb = await tryGetCrumb('');
+  return crumb ? { crumb, cookie: '' } : null;
+}
+
+export async function getYahooCrumb(): Promise<{ crumb: string; cookie: string } | null> {
+  if (crumbCache && Date.now() - crumbCache.ts < 25 * 60_000) return crumbCache;
+
+  for (const strategy of [strategy1, strategy2, strategy3]) {
+    try {
+      const result = await strategy();
+      if (result) {
+        crumbCache = { ...result, ts: Date.now() };
+        return crumbCache;
+      }
+    } catch {
+      // try next
+    }
+  }
+
+  return null;
 }
 
 export function yfHeaders(cookie?: string): HeadersInit {
