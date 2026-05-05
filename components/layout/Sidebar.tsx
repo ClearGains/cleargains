@@ -22,6 +22,7 @@ import {
   ScanLine,
   LineChart,
   TrendingUp,
+  Target,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -33,6 +34,7 @@ const navLinks = [
   { href: '/penny-scanner',    label: 'Penny Scanner',    icon: ScanLine   },
   { href: '/graph-analysis',   label: 'Graph Analysis',   icon: LineChart  },
   { href: '/market-movers',    label: 'Market Movers',    icon: TrendingUp },
+  { href: '/daily-brief',      label: 'Daily Brief',      icon: Target     },
   { href: '/watchlist', label: 'Watchlist', icon: Bookmark },
   { href: '/world-affairs', label: 'World Affairs', icon: Newspaper },
   { href: '/trading-guide', label: 'Trading Guide', icon: BookOpen },
