@@ -13,7 +13,8 @@ import SignalCard from '@/components/SignalCard';
 import { calcIndicators } from '@/lib/indicators';
 import type { Candle, IndicatorResult } from '@/lib/indicators';
 import type { AISignal } from '@/lib/claudeSignal';
-import type { QuoteResult } from '@/app/api/market/scan/route';
+import { fetchYahooQuotes, fetchYahooHistory } from '@/lib/yahooClient';
+import type { QuoteResult } from '@/lib/yahooClient';
 
 // ── Stock universe ────────────────────────────────────────────────────────────
 
@@ -61,11 +62,10 @@ function AnalysisPanel({ stock, onClose }: { stock: QuoteResult; onClose: () => 
     (async () => {
       setLoading(true); setError(null);
       try {
-        const res = await fetch(`/api/market/history?symbol=${encodeURIComponent(stock.symbol)}`);
-        const data = await res.json() as { ok: boolean; candles?: Candle[]; error?: string };
-        if (!data.ok || !data.candles) throw new Error(data.error ?? 'No data');
-        setCandles(data.candles);
-        if (data.candles.length >= 20) setInd(calcIndicators(data.candles));
+        const candles = await fetchYahooHistory(stock.symbol);
+        if (!candles.length) throw new Error('No historical data from Yahoo Finance');
+        setCandles(candles);
+        if (candles.length >= 20) setInd(calcIndicators(candles));
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load chart');
       } finally { setLoading(false); }
@@ -211,14 +211,9 @@ export default function PennyScanner() {
     const universe = symbols ?? (market === 'US' ? US_UNIVERSE : UK_UNIVERSE);
     setScanning(true); setError(null);
     try {
-      const res = await fetch('/api/market/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols: universe }),
-      });
-      const data = await res.json() as { ok: boolean; quotes?: QuoteResult[]; error?: string };
-      if (!data.ok || !data.quotes) throw new Error(data.error ?? 'Scan failed');
-      setQuotes(data.quotes);
+      const quotes = await fetchYahooQuotes(universe);
+      if (!quotes.length) throw new Error('No data returned from Yahoo Finance. Try again.');
+      setQuotes(quotes);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Scan failed');
     } finally { setScanning(false); }
@@ -230,13 +225,8 @@ export default function PennyScanner() {
     refreshRef.current = setInterval(async () => {
       if (watchlist.length === 0) return;
       try {
-        const res = await fetch('/api/market/scan', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbols: watchlist.map(w => w.symbol) }),
-        });
-        const data = await res.json() as { ok: boolean; quotes?: QuoteResult[] };
-        if (data.ok && data.quotes) saveWl(data.quotes);
+        const updated = await fetchYahooQuotes(watchlist.map(w => w.symbol));
+        if (updated.length) saveWl(updated);
       } catch { /* ignore */ }
     }, 30_000);
     return () => { if (refreshRef.current) clearInterval(refreshRef.current); };
@@ -247,15 +237,9 @@ export default function PennyScanner() {
     if (!sym) return;
     setScanning(true);
     try {
-      const res = await fetch('/api/market/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols: [sym] }),
-      });
-      const data = await res.json() as { ok: boolean; quotes?: QuoteResult[] };
-      if (data.ok && data.quotes?.[0]) {
-        const q = data.quotes[0];
-        setQuotes(prev => [q, ...prev.filter(p => p.symbol !== q.symbol)]);
+      const results = await fetchYahooQuotes([sym]);
+      if (results[0]) {
+        setQuotes(prev => [results[0], ...prev.filter(p => p.symbol !== results[0].symbol)]);
         setSearchTicker('');
       }
     } catch { /* ignore */ }

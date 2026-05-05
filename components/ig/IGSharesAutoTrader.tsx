@@ -12,7 +12,8 @@ import { Button } from '@/components/ui/Button';
 import { calcIndicators } from '@/lib/indicators';
 import type { Candle } from '@/lib/indicators';
 import type { AISignal } from '@/lib/claudeSignal';
-import type { QuoteResult } from '@/app/api/market/scan/route';
+import { fetchYahooQuotes, fetchYahooHistory } from '@/lib/yahooClient';
+import type { QuoteResult } from '@/lib/yahooClient';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -283,16 +284,10 @@ export default function IGSharesAutoTrader() {
 
     addLog({ type: 'info', symbol: 'SYS', message: `Starting scan cycle — ${stockList.length} stocks to evaluate…` });
 
-    // Batch quote fetch first (one call for all symbols)
+    // Batch quote fetch directly from browser (avoids Vercel server-side blocking)
     let quotes: QuoteResult[] = [];
     try {
-      const res = await fetch('/api/market/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols: stockList }),
-      });
-      const data = await res.json() as { ok: boolean; quotes?: QuoteResult[] };
-      quotes = data.quotes ?? [];
+      quotes = await fetchYahooQuotes(stockList);
     } catch {
       addLog({ type: 'error', symbol: 'SYS', message: 'Failed to fetch batch quotes from Yahoo Finance.' });
       return;
@@ -309,12 +304,10 @@ export default function IGSharesAutoTrader() {
 
       addLog({ type: 'scan', symbol, message: `Price: ${quote.price.toFixed(4)} · ${quote.changePercent >= 0 ? '+' : ''}${quote.changePercent.toFixed(2)}%` });
 
-      // Fetch historical candles
+      // Fetch historical candles directly from browser
       let candles: Candle[] = [];
       try {
-        const res = await fetch(`/api/market/history?symbol=${encodeURIComponent(symbol)}`);
-        const data = await res.json() as { ok: boolean; candles?: Candle[] };
-        candles = data.candles ?? [];
+        candles = await fetchYahooHistory(symbol);
       } catch {
         addLog({ type: 'skip', symbol, message: 'Failed to fetch price history.' });
         continue;

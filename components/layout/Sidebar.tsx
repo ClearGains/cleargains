@@ -20,6 +20,7 @@ import {
   Newspaper,
   BarChart3,
   ScanLine,
+  LineChart,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -28,7 +29,8 @@ const navLinks = [
   { href: '/dashboard',  label: 'Dashboard',      icon: LayoutDashboard },
   { href: '/positions',  label: 'Live Positions',  icon: BarChart3 },
   { href: '/scanner',       label: 'AI Scanner',      icon: Search },
-  { href: '/penny-scanner', label: 'Penny Scanner',   icon: ScanLine },
+  { href: '/penny-scanner',    label: 'Penny Scanner',    icon: ScanLine   },
+  { href: '/graph-analysis',   label: 'Graph Analysis',   icon: LineChart  },
   { href: '/watchlist', label: 'Watchlist', icon: Bookmark },
   { href: '/world-affairs', label: 'World Affairs', icon: Newspaper },
   { href: '/trading-guide', label: 'Trading Guide', icon: BookOpen },

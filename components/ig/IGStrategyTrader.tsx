@@ -854,14 +854,10 @@ export function IGStrategyTrader() {
     return null;
   }
 
-  // ── Fetch market snapshot via Yahoo Finance (no IG historical data used) ───
+  // ── Fetch market snapshot directly from Yahoo Finance (browser-side, avoids server blocking) ───
   async function fetchSnapshot(name: string): Promise<{price:number;changePercent:number;signal:'BUY'|'SELL'|'NEUTRAL';source:string;error?:string}|null> {
-    try {
-      const r = await fetch(`/api/ig/candles?name=${encodeURIComponent(name)}`);
-      const d = await r.json() as { ok:boolean; price?:number; changePercent?:number; signal?:'BUY'|'SELL'|'NEUTRAL'; source?:string; error?:string };
-      if (!d.ok) return { price:0, changePercent:0, signal:'NEUTRAL', source:'yahoo', error: d.error ?? `HTTP ${r.status}` };
-      return { price: d.price ?? 0, changePercent: d.changePercent ?? 0, signal: d.signal ?? 'NEUTRAL', source: d.source ?? 'yahoo' };
-    } catch (e) { return { price:0, changePercent:0, signal:'NEUTRAL', source:'yahoo', error: e instanceof Error ? e.message : 'Fetch failed' }; }
+    const { fetchMarketSnapshot } = await import('@/lib/yahooClient');
+    return fetchMarketSnapshot(name);
   }
 
   // ── Fetch news signals once per scan cycle ────────────────────────────────
