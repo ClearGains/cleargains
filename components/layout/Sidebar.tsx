@@ -23,6 +23,7 @@ import {
   LineChart,
   TrendingUp,
   Target,
+  Hash,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -41,6 +42,7 @@ const navLinks = [
   { href: '/demo-trader', label: 'Demo Trader', icon: FlaskConical },
   { href: '/ledger', label: 'Trade Ledger', icon: BookOpen },
   { href: '/tax-monitor', label: 'Tax Monitor', icon: ShieldCheck },
+  { href: '/calculator',     label: 'Calculator',       icon: Hash       },
   { href: '/cgt', label: 'CGT Calculator', icon: Calculator },
   { href: '/tax-calculator', label: 'Tax Calculator', icon: Receipt },
   { href: '/risk', label: 'Risk Engine', icon: ShieldCheck },
