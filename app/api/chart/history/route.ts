@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getYahooCrumb, yfHeaders } from '@/lib/yahooServer';
 
 type Resolution = '5D' | '1M' | '3M' | '6M' | '1Y' | '2Y';
 
@@ -10,41 +11,6 @@ const RESOLUTION_MAP: Record<Resolution, { interval: string; range: string }> = 
   '1Y': { interval: '1d', range: '1y'  },
   '2Y': { interval: '1d', range: '2y'  },
 };
-
-// Realistic browser User-Agent — avoids Yahoo's bot detection
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
-
-// Module-level crumb cache — reused across invocations of the same serverless instance
-let crumbCache: { crumb: string; cookie: string; ts: number } | null = null;
-
-async function getYahooCrumb(): Promise<{ crumb: string; cookie: string } | null> {
-  if (crumbCache && Date.now() - crumbCache.ts < 30 * 60_000) return crumbCache;
-  try {
-    // Step 1: get A1 consent cookie from Yahoo's FC domain
-    const r1 = await fetch('https://fc.yahoo.com', {
-      headers: { 'User-Agent': UA, Accept: 'text/html' },
-      redirect: 'manual',
-    });
-    const setCookie = r1.headers.get('set-cookie') ?? '';
-    const a1Match  = setCookie.match(/A1=([^;]+)/);
-    const cookie   = a1Match ? `A1=${a1Match[1]}` : '';
-
-    // Step 2: exchange the cookie for a crumb string
-    const r2 = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
-      headers: { 'User-Agent': UA, Accept: 'text/plain', Cookie: cookie },
-    });
-    if (!r2.ok) return null;
-    const crumb = (await r2.text()).trim();
-    // Sanity-check: crumbs are short alphanumeric strings, not HTML pages
-    if (!crumb || crumb.length > 30 || crumb.includes('<')) return null;
-
-    crumbCache = { crumb, cookie, ts: Date.now() };
-    return crumbCache;
-  } catch {
-    return null;
-  }
-}
 
 type YahooRaw = {
   chart?: {
@@ -78,13 +44,7 @@ export async function GET(req: NextRequest) {
   const url = auth?.crumb ? `${baseUrl}&crumb=${encodeURIComponent(auth.crumb)}` : baseUrl;
 
   try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': UA,
-        Accept: 'application/json',
-        ...(auth?.cookie ? { Cookie: auth.cookie } : {}),
-      },
-    });
+    const res = await fetch(url, { headers: yfHeaders(auth?.cookie) });
 
     if (!res.ok) {
       return NextResponse.json({ error: `Yahoo Finance returned HTTP ${res.status}` }, { status: 502 });

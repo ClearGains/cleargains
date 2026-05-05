@@ -13,8 +13,27 @@ import SignalCard from '@/components/SignalCard';
 import { calcIndicators } from '@/lib/indicators';
 import type { Candle, IndicatorResult } from '@/lib/indicators';
 import type { AISignal } from '@/lib/claudeSignal';
-import { fetchYahooQuotes, fetchYahooHistory } from '@/lib/yahooClient';
 import type { QuoteResult } from '@/lib/yahooClient';
+
+// Server-side proxied quote and history fetchers
+async function fetchQuotes(symbols: string[]): Promise<QuoteResult[]> {
+  if (!symbols.length) return [];
+  try {
+    const r = await fetch(`/api/market/quotes?symbols=${encodeURIComponent(symbols.join(','))}`);
+    if (!r.ok) return [];
+    const data = await r.json() as QuoteResult[];
+    return Array.isArray(data) ? data : [];
+  } catch { return []; }
+}
+
+async function fetchHistory(symbol: string) {
+  try {
+    const r = await fetch(`/api/chart/history?symbol=${encodeURIComponent(symbol)}&resolution=3M`);
+    if (!r.ok) return [];
+    const data = await r.json() as { candles?: { time: string; open: number; high: number; low: number; close: number; volume: number }[] };
+    return data.candles ?? [];
+  } catch { return []; }
+}
 
 // ── Stock universe ────────────────────────────────────────────────────────────
 
@@ -62,7 +81,7 @@ function AnalysisPanel({ stock, onClose }: { stock: QuoteResult; onClose: () => 
     (async () => {
       setLoading(true); setError(null);
       try {
-        const candles = await fetchYahooHistory(stock.symbol);
+        const candles = await fetchHistory(stock.symbol);
         if (!candles.length) throw new Error('No historical data from Yahoo Finance');
         setCandles(candles);
         if (candles.length >= 20) setInd(calcIndicators(candles));
@@ -211,8 +230,8 @@ export default function PennyScanner() {
     const universe = symbols ?? (market === 'US' ? US_UNIVERSE : UK_UNIVERSE);
     setScanning(true); setError(null);
     try {
-      const quotes = await fetchYahooQuotes(universe);
-      if (!quotes.length) throw new Error('No data returned from Yahoo Finance. Try again.');
+      const quotes = await fetchQuotes(universe);
+      if (!quotes.length) throw new Error('Could not load market data — please try again in a moment.');
       setQuotes(quotes);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Scan failed');
@@ -225,7 +244,7 @@ export default function PennyScanner() {
     refreshRef.current = setInterval(async () => {
       if (watchlist.length === 0) return;
       try {
-        const updated = await fetchYahooQuotes(watchlist.map(w => w.symbol));
+        const updated = await fetchQuotes(watchlist.map(w => w.symbol));
         if (updated.length) saveWl(updated);
       } catch { /* ignore */ }
     }, 30_000);
@@ -237,7 +256,7 @@ export default function PennyScanner() {
     if (!sym) return;
     setScanning(true);
     try {
-      const results = await fetchYahooQuotes([sym]);
+      const results = await fetchQuotes([sym]);
       if (results[0]) {
         setQuotes(prev => [results[0], ...prev.filter(p => p.symbol !== results[0].symbol)]);
         setSearchTicker('');
