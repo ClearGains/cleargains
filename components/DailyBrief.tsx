@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertCircle, ChevronDown, ChevronUp, Zap } from 'lucide-react';
+import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertCircle, ChevronDown, ChevronUp, Zap, AlertTriangle } from 'lucide-react';
 import { clsx } from 'clsx';
 import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
@@ -160,12 +160,27 @@ function QuoteCard({ row }: { row: QuoteRow }) {
 
 // ── Trade Idea card ───────────────────────────────────────────────────────────
 
-function IdeaCard({ idea }: { idea: TradeIdea }) {
+type IdeaSettings = { riskPerTrade: number; availableFunds: number; marginOverride: number | null };
+
+function IdeaCard({ idea, settings }: { idea: TradeIdea; settings: IdeaSettings }) {
   const [expanded, setExpanded] = useState(false);
   const isBuy = idea.direction === 'BUY';
   const borderColor = isBuy ? 'border-emerald-600/30' : 'border-red-600/30';
   const accentColor = isBuy ? 'text-emerald-400' : 'text-red-400';
   const badgeBg     = isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400';
+
+  // ── Live size calculation ──────────────────────────────────────────────────
+  const { riskPerTrade, availableFunds, marginOverride } = settings;
+  const effectiveMarginPct = marginOverride !== null ? marginOverride / 100 : idea.market.marginPct;
+  const idealSize          = idea.stopDistance > 0 ? riskPerTrade / idea.stopDistance : idea.suggestedSize;
+  const maxByFunds         = availableFunds > 0 && idea.igEntry > 0
+    ? availableFunds / (idea.igEntry * effectiveMarginPct)
+    : Infinity;
+  const actualSize         = Math.max(0.01, Math.min(idealSize, maxByFunds));
+  const actualMargin       = actualSize * idea.igEntry * effectiveMarginPct;
+  const fundsCapped        = isFinite(maxByFunds) && maxByFunds < idealSize;
+  const maxRisk            = actualSize * idea.stopDistance;
+  // ──────────────────────────────────────────────────────────────────────────
 
   const pctSlippage = (idea.market.spread / idea.igEntry) * 100;
 
@@ -205,20 +220,35 @@ function IdeaCard({ idea }: { idea: TradeIdea }) {
         </div>
       </div>
 
-      {/* Suggested size + margin — always visible */}
-      <div className="px-4 pb-3 flex items-center gap-4 border-t border-gray-800/60 pt-2">
-        <div>
-          <span className="text-[10px] text-gray-500 uppercase tracking-wide mr-1">Size</span>
-          <span className="text-sm font-bold text-white font-mono">{fmtSize(idea.suggestedSize)}</span>
+      {/* Size + margin — always visible, live-computed from settings */}
+      <div className="px-4 pb-3 border-t border-gray-800/60 pt-2 space-y-2">
+        <div className="flex items-center gap-4 flex-wrap">
+          <div>
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide mr-1">Size</span>
+            <span className="text-sm font-bold text-white font-mono">{fmtSize(actualSize)}</span>
+            {fundsCapped && (
+              <span className="text-[10px] text-amber-400 ml-1">(ideal {fmtSize(idealSize)})</span>
+            )}
+          </div>
+          <div>
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide mr-1">Margin ~</span>
+            <span className="text-sm font-semibold text-amber-400">£{actualMargin.toFixed(0)}</span>
+          </div>
+          <div>
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide mr-1">Max loss</span>
+            <span className="text-sm font-semibold text-red-400">£{maxRisk.toFixed(2)}</span>
+          </div>
+          <div>
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide mr-1">Slippage</span>
+            <span className="text-[10px] text-gray-400">{pctSlippage.toFixed(3)}%</span>
+          </div>
         </div>
-        <div>
-          <span className="text-[10px] text-gray-500 uppercase tracking-wide mr-1">Margin ~</span>
-          <span className="text-sm font-semibold text-amber-400">£{idea.estimatedMargin.toFixed(0)}</span>
-        </div>
-        <div>
-          <span className="text-[10px] text-gray-500 uppercase tracking-wide mr-1">Slippage</span>
-          <span className="text-[10px] text-gray-400">{pctSlippage.toFixed(3)}%</span>
-        </div>
+        {fundsCapped && (
+          <div className="flex items-start gap-1.5 bg-amber-950/30 border border-amber-700/30 rounded-lg px-3 py-2 text-xs text-amber-400">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+            <span>Size scaled down from {fmtSize(idealSize)} to {fmtSize(actualSize)} — insufficient funds for full margin. Add more capital or reduce margin rate.</span>
+          </div>
+        )}
       </div>
 
       {/* Expanded: full detail */}
@@ -228,7 +258,7 @@ function IdeaCard({ idea }: { idea: TradeIdea }) {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
               { label: 'Entry Level',    val: fmtIGPrice(idea.igEntry,       idea.market.type), sub: 'Place limit order here',      col: accentColor },
-              { label: 'Stop Loss',      val: fmtIGPrice(idea.igStopLoss,    idea.market.type), sub: `${idea.stopDistance.toFixed(1)} pts · max risk £${(idea.stopDistance * idea.suggestedSize).toFixed(2)}`, col: 'text-red-400' },
+              { label: 'Stop Loss',      val: fmtIGPrice(idea.igStopLoss,    idea.market.type), sub: `${idea.stopDistance.toFixed(1)} pts · max risk £${(idea.stopDistance * actualSize).toFixed(2)}`, col: 'text-red-400' },
               { label: 'Target 1',       val: fmtIGPrice(idea.igTakeProfit1, idea.market.type), sub: `${idea.tp1Distance.toFixed(1)} pts — take ½ position`, col: 'text-emerald-400' },
               { label: 'Target 2',       val: fmtIGPrice(idea.igTakeProfit2, idea.market.type), sub: 'Trail stop for remainder',     col: 'text-emerald-300' },
             ].map(({ label, val, sub, col }) => (
@@ -245,8 +275,8 @@ function IdeaCard({ idea }: { idea: TradeIdea }) {
             <div className="font-semibold text-gray-300 mb-2">How to place this trade on IG</div>
             <div className="text-gray-400">1. Search <span className="font-mono text-white">{idea.market.igEpic}</span> on IG or search &quot;{idea.market.name}&quot;</div>
             <div className="text-gray-400">2. Choose <span className={clsx('font-semibold', accentColor)}>{idea.direction}</span> · set order type: <span className="text-white">Limit</span> at <span className="font-mono text-white">{fmtIGPrice(idea.igEntry, idea.market.type)}</span></div>
-            <div className="text-gray-400">3. Size: <span className="text-white font-semibold">{fmtSize(idea.suggestedSize)}</span> · Stop: <span className="text-red-400 font-mono">{fmtIGPrice(idea.igStopLoss, idea.market.type)}</span> · Limit: <span className="text-emerald-400 font-mono">{fmtIGPrice(idea.igTakeProfit1, idea.market.type)}</span></div>
-            <div className="text-gray-400">4. Estimated margin required: <span className="text-amber-400 font-semibold">£{idea.estimatedMargin.toFixed(0)}</span></div>
+            <div className="text-gray-400">3. Size: <span className="text-white font-semibold">{fmtSize(actualSize)}</span> · Stop: <span className="text-red-400 font-mono">{fmtIGPrice(idea.igStopLoss, idea.market.type)}</span> · Limit: <span className="text-emerald-400 font-mono">{fmtIGPrice(idea.igTakeProfit1, idea.market.type)}</span></div>
+            <div className="text-gray-400">4. Estimated margin required: <span className="text-amber-400 font-semibold">£{actualMargin.toFixed(0)}</span> · Max loss: <span className="text-red-400 font-semibold">£{maxRisk.toFixed(2)}</span></div>
           </div>
 
           {/* Key levels */}
@@ -392,9 +422,17 @@ export function DailyBrief() {
   const [progress,     setProgress]     = useState('');
   const [error,        setError]        = useState('');
   const [lastRefresh,  setLastRefresh]  = useState<Date | null>(null);
-  const [riskPerTrade, setRiskPerTrade] = useState(100);
-  const [filter,       setFilter]       = useState<string>('ALL');
-  const [minConf,      setMinConf]      = useState(5);
+  const [riskPerTrade,    setRiskPerTrade]    = useState(100);
+  const [availableFunds,  setAvailableFunds]  = useState(0);
+  const [marginOverride,  setMarginOverride]  = useState('');
+  const [filter,          setFilter]          = useState<string>('ALL');
+  const [minConf,         setMinConf]         = useState(5);
+
+  const ideaSettings: IdeaSettings = {
+    riskPerTrade,
+    availableFunds,
+    marginOverride: marginOverride !== '' ? parseFloat(marginOverride) : null,
+  };
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -518,6 +556,28 @@ export function DailyBrief() {
             />
             <span className="text-xs text-gray-500">/10</span>
           </div>
+          <div className="flex items-center gap-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5">
+            <span className="text-xs text-gray-500">Available funds</span>
+            <span className="text-white font-semibold">£</span>
+            <input
+              type="number" min={0} step={50}
+              value={availableFunds || ''}
+              placeholder="0"
+              onChange={e => setAvailableFunds(Number(e.target.value))}
+              className="w-20 bg-transparent text-white text-sm font-mono focus:outline-none placeholder-gray-600"
+            />
+          </div>
+          <div className="flex items-center gap-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5">
+            <span className="text-xs text-gray-500">Margin %</span>
+            <input
+              type="number" min={0} max={100} step={0.5}
+              value={marginOverride}
+              placeholder="auto"
+              onChange={e => setMarginOverride(e.target.value)}
+              className="w-14 bg-transparent text-white text-sm font-mono focus:outline-none placeholder-gray-600"
+            />
+            {marginOverride === '' && <span className="text-[10px] text-gray-600">per market</span>}
+          </div>
           {lastRefresh && (
             <span className="text-xs text-gray-600">Updated {lastRefresh.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
           )}
@@ -582,7 +642,7 @@ export function DailyBrief() {
       {(buyIdeas.length > 0 || sellIdeas.length > 0) && (
         <section className="space-y-6">
           <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-            Trade Ideas — {filteredIdeas.length} setup{filteredIdeas.length !== 1 ? 's' : ''} · size calculated for £{riskPerTrade} max risk
+            Trade Ideas — {filteredIdeas.length} setup{filteredIdeas.length !== 1 ? 's' : ''} · £{riskPerTrade} risk/trade{availableFunds > 0 ? ` · £${availableFunds} funds` : ''}
           </h2>
 
           {buyIdeas.length > 0 && (
@@ -591,7 +651,7 @@ export function DailyBrief() {
                 <TrendingUp className="h-3.5 w-3.5" /> BUY setups ({buyIdeas.length})
               </h3>
               <div className="space-y-2">
-                {buyIdeas.map(i => <IdeaCard key={i.market.yahooSymbol + i.direction} idea={i} />)}
+                {buyIdeas.map(i => <IdeaCard key={i.market.yahooSymbol + i.direction} idea={i} settings={ideaSettings} />)}
               </div>
             </div>
           )}
@@ -602,7 +662,7 @@ export function DailyBrief() {
                 <TrendingDown className="h-3.5 w-3.5" /> SELL setups ({sellIdeas.length})
               </h3>
               <div className="space-y-2">
-                {sellIdeas.map(i => <IdeaCard key={i.market.yahooSymbol + i.direction} idea={i} />)}
+                {sellIdeas.map(i => <IdeaCard key={i.market.yahooSymbol + i.direction} idea={i} settings={ideaSettings} />)}
               </div>
             </div>
           )}
