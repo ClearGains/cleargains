@@ -11,8 +11,9 @@ import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { calcIndicators } from '@/lib/indicators';
 import type { Candle } from '@/lib/indicators';
-import type { AISignal } from '@/lib/claudeSignal';
-import { fetchYahooQuotes, fetchYahooHistory } from '@/lib/yahooClient';
+import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
+import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import type { LWCandle } from '@/lib/chartIndicators';
 import type { QuoteResult } from '@/lib/yahooClient';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -48,11 +49,37 @@ type PlacedTrade = {
 
 type AutoConfig = {
   stakePerTrade:  number;
-  minConfidence:  number;   // 1-10 from Claude
+  minConfidence:  number;   // 1-10 minimum to open a position
   maxPositions:   number;
   scanInterval:   number;   // minutes
   accounts:       ('demo' | 'live')[];
-  preFilterRsi:   boolean;  // only call Claude if RSI/MACD pre-filters pass
+  preFilterRsi:   boolean;  // only analyse if RSI/MACD pre-filters pass
+};
+
+// Scored candidate before deciding to open
+type Candidate = {
+  symbol:         string;
+  quote:          QuoteResult;
+  analysis:       AnalysisResult;
+  direction:      'BUY' | 'SELL';
+  compositeScore: number; // confidence × riskReward — higher = stronger setup
+  stake:          number; // adjusted stake based on conviction
+  marginNeeded:   number; // estimated margin cost
+};
+
+// Live IG position (from /api/ig/positions)
+type IGPosition = {
+  dealId:      string;
+  direction:   string;
+  size:        number;
+  level:       number;     // entry price in points
+  upl:         number;     // unrealised P&L in account currency
+  stopLevel?:  number;
+  limitLevel?: number;     // take-profit level
+  epic:        string;
+  bid:         number;
+  offer:       number;
+  createdDate?: string;
 };
 
 // ── Stock universe ────────────────────────────────────────────────────────────
@@ -76,6 +103,83 @@ function uid() { return Math.random().toString(36).slice(2, 9); }
 function yahooToEpic(symbol: string): string {
   const ticker = symbol.replace('.L', '').replace('-', '.');
   return `CS.D.${ticker}.TODAY.IP`;
+}
+
+// ── Server-side proxied data fetchers ────────────────────────────────────────
+
+async function fetchQuotesBatch(symbols: string[]): Promise<QuoteResult[]> {
+  if (!symbols.length) return [];
+  try {
+    const r = await fetch(`/api/market/quotes?symbols=${encodeURIComponent(symbols.join(','))}`);
+    if (!r.ok) return [];
+    const d = await r.json() as QuoteResult[];
+    return Array.isArray(d) ? d : [];
+  } catch { return []; }
+}
+
+async function fetchCandleHistory(symbol: string): Promise<Candle[]> {
+  try {
+    const r = await fetch(`/api/chart/history?symbol=${encodeURIComponent(symbol)}&resolution=3M`);
+    if (!r.ok) return [];
+    const d = await r.json() as { candles?: Candle[] };
+    return d.candles ?? [];
+  } catch { return []; }
+}
+
+async function fetchAccountMargin(session: IGSession, env: 'demo' | 'live'): Promise<number> {
+  try {
+    const r = await fetch('/api/ig/account', { headers: igHeaders(session, env) });
+    if (!r.ok) return 0;
+    const d = await r.json() as { ok: boolean; available?: number };
+    return d.ok ? (d.available ?? 0) : 0;
+  } catch { return 0; }
+}
+
+async function fetchLivePositions(session: IGSession, env: 'demo' | 'live'): Promise<IGPosition[]> {
+  try {
+    const r = await fetch('/api/ig/positions', { headers: igHeaders(session, env) });
+    if (!r.ok) return [];
+    const d = await r.json() as { ok: boolean; positions?: IGPosition[] };
+    return d.ok ? (d.positions ?? []) : [];
+  } catch { return []; }
+}
+
+// ── Scoring ───────────────────────────────────────────────────────────────────
+
+function scoreCandidate(
+  symbol: string,
+  quote: QuoteResult,
+  analysis: AnalysisResult,
+  baseStake: number,
+  availableMargin: number,
+): Candidate | null {
+  if (analysis.bias === 'NEUTRAL') return null;
+  const direction = analysis.bias === 'BULLISH' ? 'BUY' : 'SELL';
+  const scalp = analysis.scalp;
+
+  // Don't open FLAT or low R:R setups
+  if (scalp.direction === 'FLAT' || scalp.riskReward < 0.8) return null;
+
+  // compositeScore: higher = stronger conviction + better reward
+  const compositeScore = scalp.confidence * scalp.riskReward;
+
+  // Scale stake with conviction — stay within margin budget
+  let stake = baseStake;
+  if (compositeScore >= scalp.confidence * 2.0) stake = baseStake * 1.5;  // good R:R
+  if (compositeScore >= scalp.confidence * 2.5) stake = baseStake * 2.0;  // exceptional
+  stake = Math.max(baseStake * 0.5, Math.round(stake * 2) / 2); // round to 0.5, floor at half
+
+  // Estimated margin: spread bet stake × price × 20% (conservative share margin)
+  const price = quote.price;
+  const priceFactor = isUKStock(symbol) ? 1 : 1; // price already in relevant unit
+  const marginNeeded = stake * price * priceFactor * 0.25;
+
+  // Don't take trade if it would use more than 40% of available margin
+  if (availableMargin > 0 && marginNeeded > availableMargin * 0.4) {
+    stake = baseStake * 0.5; // scale back to minimum if margin is tight
+  }
+
+  return { symbol, quote, analysis, direction, compositeScore, stake, marginNeeded };
 }
 
 function isUKStock(symbol: string): boolean {
@@ -192,7 +296,7 @@ function PlacedTradeCard({ trade, onRemove }: { trade: PlacedTrade; onRemove: ()
         <div><div className="text-gray-500">Stop</div><div className="font-mono text-red-400">{trade.stopLoss}</div></div>
         <div><div className="text-gray-500">Target</div><div className="font-mono text-emerald-400">{trade.takeProfit}</div></div>
         <div><div className="text-gray-500">Size</div><div className="font-mono text-white">£{trade.size}/pt</div></div>
-        <div><div className="text-gray-500">AI Confidence</div><div className="font-mono text-purple-400">{trade.confidence}/10</div></div>
+        <div><div className="text-gray-500">Confidence</div><div className="font-mono text-purple-400">{trade.confidence}/10</div></div>
         <div><div className="text-gray-500">Deal Ref</div><div className="font-mono text-gray-400 text-xs truncate">{trade.dealRef.slice(0, 10)}</div></div>
       </div>
       <div className="text-xs text-gray-600 mt-1.5">{new Date(trade.placedAt).toLocaleString('en-GB')}</div>
@@ -276,116 +380,207 @@ export default function IGSharesAutoTrader() {
       return;
     }
 
+    // ── Phase 0: account margin ─────────────────────────────────────────────
+    const availableMargin: Record<string, number> = {};
+    for (const env of activeAccounts) {
+      const session = sessions[env];
+      if (!session) continue;
+      const margin = await fetchAccountMargin(session, env);
+      availableMargin[env] = margin;
+      addLog({ type: 'info', symbol: 'SYS', message: `${env.toUpperCase()} available margin: £${margin.toFixed(2)}` });
+    }
+
+    // ── Phase 1: profit-taking on existing positions ─────────────────────────
+    for (const env of activeAccounts) {
+      if (abortRef.current) break;
+      const session = sessions[env];
+      if (!session) continue;
+
+      const livePositions = await fetchLivePositions(session, env);
+      if (!livePositions.length) continue;
+
+      addLog({ type: 'info', symbol: 'SYS', message: `${env.toUpperCase()} — reviewing ${livePositions.length} live position(s)…` });
+
+      for (const pos of livePositions) {
+        if (abortRef.current) break;
+        if (!pos.limitLevel || !pos.stopLevel) continue;
+
+        const targetRange  = Math.abs(pos.limitLevel - pos.level); // points
+        const targetProfit = targetRange * pos.size;               // £
+        const slRange      = Math.abs(pos.level - pos.stopLevel);
+        const pctOfTarget  = targetRange > 0 ? pos.upl / targetProfit : 0;
+
+        // Time in trade (hours)
+        const hoursOpen = pos.createdDate
+          ? (Date.now() - new Date(pos.createdDate).getTime()) / 3_600_000
+          : 0;
+
+        // Snag quick profit: ≥60% of target captured
+        const takeFullProfit = pctOfTarget >= 0.60;
+        // Quick snag: ≥40% of target AND position has been alive ≥4h (risk of reversal)
+        const snagQuickProfit = pctOfTarget >= 0.40 && hoursOpen >= 4;
+        // Cut early: signal likely reversed — check if RSI/price has swung opposite
+        // (simple proxy: if upl is positive but > half SL range away from breakeven, protect profit)
+        const protectProfit = pos.upl > 0 && pctOfTarget >= 0.30 && pctOfTarget < 0.60 && hoursOpen >= 8;
+
+        if (takeFullProfit || snagQuickProfit || protectProfit) {
+          const reason = takeFullProfit ? '≥60% of target — full profit take'
+                       : snagQuickProfit ? '≥40% of target + open 4h+ — quick snag'
+                       : 'protecting profit at 30%+ after 8h';
+
+          addLog({ type: 'signal', symbol: pos.epic, message: `${env.toUpperCase()} closing ${pos.direction} — UPL £${pos.upl.toFixed(2)} (${(pctOfTarget * 100).toFixed(0)}% of target). Reason: ${reason}` });
+
+          try {
+            const closeRes = await fetch('/api/ig/positions/close', {
+              method: 'POST',
+              headers: { ...igHeaders(session, env), 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                dealId:    pos.dealId,
+                direction: pos.direction === 'BUY' ? 'SELL' : 'BUY',
+                size:      pos.size,
+              }),
+            });
+            const closeData = await closeRes.json() as { ok: boolean; dealReference?: string; error?: string };
+            if (closeData.ok) {
+              addLog({ type: 'trade', symbol: pos.epic, message: `${env.toUpperCase()} CLOSED · profit £${pos.upl.toFixed(2)} · ref: ${closeData.dealReference}` });
+              // Remove from placed trades log
+              saveTrades(placedTrades.filter(t => t.dealRef !== pos.dealId));
+            } else {
+              addLog({ type: 'error', symbol: pos.epic, message: `Close failed: ${closeData.error}` });
+            }
+          } catch (e) {
+            addLog({ type: 'error', symbol: pos.epic, message: `Close error: ${e instanceof Error ? e.message : String(e)}` });
+          }
+          await new Promise(r => setTimeout(r, 1_000));
+        } else if (pos.upl > 0) {
+          addLog({ type: 'info', symbol: pos.epic, message: `${env.toUpperCase()} ${pos.direction} UPL £${pos.upl.toFixed(2)} (${(pctOfTarget * 100).toFixed(0)}% of target) — holding` });
+        }
+      }
+    }
+
+    if (abortRef.current) return;
+
+    // ── Phase 2: count open positions ───────────────────────────────────────
     const currentPositions = placedTrades.filter(t => activeAccounts.includes(t.env));
-    if (currentPositions.length >= config.maxPositions) {
-      addLog({ type: 'info', symbol: 'SYS', message: `Max positions (${config.maxPositions}) reached — skipping scan cycle.` });
+    const slotsAvailable   = config.maxPositions - currentPositions.length;
+
+    if (slotsAvailable <= 0) {
+      addLog({ type: 'info', symbol: 'SYS', message: `Max positions (${config.maxPositions}) reached — skipping new entries.` });
       return;
     }
 
-    addLog({ type: 'info', symbol: 'SYS', message: `Starting scan cycle — ${stockList.length} stocks to evaluate…` });
+    addLog({ type: 'info', symbol: 'SYS', message: `Scanning ${stockList.length} stocks — ${slotsAvailable} slot(s) available…` });
 
-    // Batch quote fetch directly from browser (avoids Vercel server-side blocking)
-    let quotes: QuoteResult[] = [];
-    try {
-      quotes = await fetchYahooQuotes(stockList);
-    } catch {
-      addLog({ type: 'error', symbol: 'SYS', message: 'Failed to fetch batch quotes from Yahoo Finance.' });
+    // ── Phase 3: batch quote + analysis for all symbols ─────────────────────
+    const quotes = await fetchQuotesBatch(stockList);
+    if (!quotes.length) {
+      addLog({ type: 'error', symbol: 'SYS', message: 'Failed to fetch batch quotes.' });
       return;
     }
+
+    const candidates: Candidate[] = [];
 
     for (const symbol of stockList) {
       if (abortRef.current) break;
 
       const quote = quotes.find(q => q.symbol === symbol);
-      if (!quote || quote.price === 0) {
-        addLog({ type: 'skip', symbol, message: 'No price data available.' });
-        continue;
-      }
+      if (!quote || quote.price === 0) continue;
 
-      addLog({ type: 'scan', symbol, message: `Price: ${quote.price.toFixed(4)} · ${quote.changePercent >= 0 ? '+' : ''}${quote.changePercent.toFixed(2)}%` });
+      // Skip if already holding this symbol
+      if (placedTrades.some(t => t.symbol === symbol && activeAccounts.includes(t.env))) continue;
 
-      // Fetch historical candles directly from browser
-      let candles: Candle[] = [];
-      try {
-        candles = await fetchYahooHistory(symbol);
-      } catch {
-        addLog({ type: 'skip', symbol, message: 'Failed to fetch price history.' });
-        continue;
-      }
-
-      if (candles.length < 26) {
-        addLog({ type: 'skip', symbol, message: `Insufficient history (${candles.length} days).` });
-        continue;
-      }
-
-      // Pre-filter (saves Claude API calls)
+      // Pre-filter: only analyse if indicators suggest a setup worth considering
       if (config.preFilterRsi) {
-        const { passes, reason } = passesPreFilter(symbol, candles);
-        if (!passes) {
-          addLog({ type: 'skip', symbol, message: `Pre-filter: ${reason}` });
-          await new Promise(r => setTimeout(r, 500));
+        const tmpCandles = await fetchCandleHistory(symbol);
+        if (tmpCandles.length < 26) {
+          addLog({ type: 'skip', symbol, message: `Insufficient history (${tmpCandles.length} days).` });
           continue;
         }
-        addLog({ type: 'signal', symbol, message: `Pre-filter passed — ${reason}` });
-      }
+        const { passes, reason } = passesPreFilter(symbol, tmpCandles);
+        if (!passes) {
+          addLog({ type: 'skip', symbol, message: `Pre-filter: ${reason}` });
+          await new Promise(r => setTimeout(r, 300));
+          continue;
+        }
+        addLog({ type: 'scan', symbol, message: `Pre-filter OK — ${reason} · analysing…` });
 
-      // Call Claude AI for signal
-      let aiSignal: AISignal | null = null;
-      try {
-        const res = await fetch('/api/ig/claude-signal', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            epic:           yahooToEpic(symbol),
-            instrumentName: quote.name,
-            candles,
-            bid:            quote.bid,
-            offer:          quote.ask,
-            percentageChange: quote.changePercent,
-            currency:       isUKStock(symbol) ? 'GBP' : 'USD',
-          }),
+        // Full rule-based analysis
+        const analysis = ruleBasedAnalysis(symbol, tmpCandles as unknown as LWCandle[]);
+
+        // Score against margin budget (use first env's margin as reference)
+        const margin = availableMargin[activeAccounts[0]] ?? 0;
+        const candidate = scoreCandidate(symbol, quote, analysis, config.stakePerTrade, margin);
+
+        if (!candidate) {
+          addLog({ type: 'skip', symbol, message: `Analysis: ${analysis.bias} bias but no valid setup (R:R too low or FLAT).` });
+          continue;
+        }
+
+        // Must pass minimum confidence threshold
+        if (analysis.scalp.confidence < config.minConfidence) {
+          addLog({ type: 'skip', symbol, message: `Confidence ${analysis.scalp.confidence}/10 below threshold ${config.minConfidence} — not worth opening.` });
+          continue;
+        }
+
+        addLog({
+          type: 'signal', symbol,
+          message: `${analysis.bias} · confidence ${analysis.scalp.confidence}/10 · R:R ${analysis.scalp.riskReward} · score ${candidate.compositeScore.toFixed(1)} · ${analysis.scalp.direction} · ${analysis.summary.slice(0, 70)}…`,
+          signal: analysis.scalp.direction, confidence: analysis.scalp.confidence,
         });
-        const data = await res.json() as { ok: boolean; signal?: AISignal; error?: string };
-        if (data.ok && data.signal) aiSignal = data.signal;
-        else { addLog({ type: 'error', symbol, message: `AI error: ${data.error ?? 'unknown'}` }); continue; }
-      } catch {
-        addLog({ type: 'error', symbol, message: 'Claude API call failed.' });
-        continue;
+
+        candidates.push(candidate);
+      } else {
+        // Without pre-filter: fetch and analyse everything
+        const candles = await fetchCandleHistory(symbol);
+        if (candles.length < 26) continue;
+        const analysis = ruleBasedAnalysis(symbol, candles as unknown as LWCandle[]);
+        if (analysis.bias === 'NEUTRAL' || analysis.scalp.confidence < config.minConfidence) continue;
+        const margin = availableMargin[activeAccounts[0]] ?? 0;
+        const candidate = scoreCandidate(symbol, quote, analysis, config.stakePerTrade, margin);
+        if (candidate) candidates.push(candidate);
       }
 
-      addLog({
-        type: 'signal', symbol,
-        message: `AI: ${aiSignal.signal} · confidence ${aiSignal.confidence}/10 · ${aiSignal.risk_level} risk · ${aiSignal.reasoning.slice(0, 80)}…`,
-        signal: aiSignal.signal, confidence: aiSignal.confidence,
-      });
+      await new Promise(r => setTimeout(r, 400)); // rate limit between fetches
+    }
 
-      // Decision: trade?
-      const actionable = (aiSignal.signal === 'BUY' || aiSignal.signal === 'SELL') && aiSignal.confidence >= config.minConfidence;
-      if (!actionable) {
-        addLog({ type: 'skip', symbol, message: `Signal ${aiSignal.signal} confidence ${aiSignal.confidence} < threshold ${config.minConfidence} — skip.` });
-        await new Promise(r => setTimeout(r, 1_000));
-        continue;
-      }
+    // ── Phase 4: rank candidates — best score first ──────────────────────────
+    candidates.sort((a, b) => b.compositeScore - a.compositeScore);
 
-      // Already have a position on this?
-      const already = placedTrades.some(t => t.symbol === symbol && activeAccounts.includes(t.env));
-      if (already) {
-        addLog({ type: 'skip', symbol, message: 'Already have an open position — skip.' });
-        continue;
-      }
+    // Only take as many as slots available — don't force-open weak positions
+    const toOpen = candidates.slice(0, slotsAvailable);
 
-      // Place trade on each active account
-      const epic = yahooToEpic(symbol);
-      const currency = isUKStock(symbol) ? 'GBP' : 'USD';
-      const priceFactor = isUKStock(symbol) ? 100 : 1; // Yahoo gives GBP, IG needs pence
+    if (!toOpen.length) {
+      addLog({ type: 'info', symbol: 'SYS', message: `No profitable setups found this cycle (${candidates.length} candidates, ${slotsAvailable} slots). Standing aside.` });
+      addLog({ type: 'info', symbol: 'SYS', message: `Scan cycle complete. Next in ${config.scanInterval} min.` });
+      return;
+    }
 
-      const stopLossIg   = aiSignal.stop_loss   * priceFactor;
-      const takeProfitIg = aiSignal.take_profit  * priceFactor;
+    addLog({ type: 'info', symbol: 'SYS', message: `${candidates.length} candidates ranked — opening top ${toOpen.length}: ${toOpen.map(c => c.symbol).join(', ')}` });
+
+    // ── Phase 5: open ranked positions ──────────────────────────────────────
+    for (const candidate of toOpen) {
+      if (abortRef.current) break;
+
+      const { symbol, quote, analysis, direction, stake } = candidate;
+      const epic        = yahooToEpic(symbol);
+      const currency    = isUKStock(symbol) ? 'GBP' : 'USD';
+      const priceFactor = isUKStock(symbol) ? 100 : 1;
+
+      const stopLossIg   = analysis.scalp.stopLoss    * priceFactor;
+      const takeProfitIg = analysis.scalp.takeProfit1 * priceFactor;
+
+      addLog({ type: 'info', symbol, message: `Opening ${direction} £${stake}/pt · SL: ${stopLossIg.toFixed(2)} · TP: ${takeProfitIg.toFixed(2)} · conviction score: ${candidate.compositeScore.toFixed(1)}` });
 
       for (const env of activeAccounts) {
         if (abortRef.current) break;
         const session = sessions[env];
         if (!session) continue;
+
+        // Final margin guard
+        if ((availableMargin[env] ?? 0) > 0 && candidate.marginNeeded > (availableMargin[env] ?? Infinity) * 0.4) {
+          addLog({ type: 'skip', symbol, message: `${env.toUpperCase()} margin too tight — estimated £${candidate.marginNeeded.toFixed(0)} needed, £${(availableMargin[env] ?? 0).toFixed(0)} available.` });
+          continue;
+        }
 
         try {
           const res = await fetch('/api/ig/order', {
@@ -394,8 +589,8 @@ export default function IGSharesAutoTrader() {
             body: JSON.stringify({
               epic,
               expiry:       'DFB',
-              direction:    aiSignal.signal,
-              size:         config.stakePerTrade,
+              direction,
+              size:         stake,
               orderType:    'MARKET',
               currencyCode: currency,
               stopLevel:    stopLossIg,
@@ -411,18 +606,20 @@ export default function IGSharesAutoTrader() {
               symbol,
               name:        quote.name,
               epic,
-              direction:   aiSignal.signal as 'BUY' | 'SELL',
-              size:        config.stakePerTrade,
-              entryPrice:  data.level ?? (aiSignal.entry_point * priceFactor),
+              direction,
+              size:        stake,
+              entryPrice:  data.level ?? (analysis.scalp.entry * priceFactor),
               stopLoss:    stopLossIg,
               takeProfit:  takeProfitIg,
               dealRef:     data.dealReference ?? '—',
               placedAt:    new Date().toISOString(),
               env,
-              confidence:  aiSignal.confidence,
+              confidence:  analysis.scalp.confidence,
             };
             saveTrades([...placedTrades, trade]);
-            addLog({ type: 'trade', symbol, message: `${env.toUpperCase()} ${aiSignal.signal} opened · deal: ${data.dealReference} · status: ${data.dealStatus}` });
+            addLog({ type: 'trade', symbol, message: `${env.toUpperCase()} ${direction} £${stake}/pt opened · deal: ${data.dealReference} · status: ${data.dealStatus}` });
+            // Deduct estimated margin for subsequent trades this cycle
+            if (availableMargin[env] !== undefined) availableMargin[env] -= candidate.marginNeeded;
           } else {
             addLog({ type: 'error', symbol, message: `${env.toUpperCase()} order failed: ${data.error}` });
           }
@@ -430,13 +627,13 @@ export default function IGSharesAutoTrader() {
           addLog({ type: 'error', symbol, message: `${env.toUpperCase()} order exception: ${e instanceof Error ? e.message : String(e)}` });
         }
 
-        await new Promise(r => setTimeout(r, 1_500)); // rate limit guard
+        await new Promise(r => setTimeout(r, 1_500));
       }
 
-      await new Promise(r => setTimeout(r, 2_000)); // between stocks
+      await new Promise(r => setTimeout(r, 2_000));
     }
 
-    addLog({ type: 'info', symbol: 'SYS', message: `Scan cycle complete. Next in ${config.scanInterval} min.` });
+    addLog({ type: 'info', symbol: 'SYS', message: `Cycle complete — opened ${toOpen.length} position(s). Next scan in ${config.scanInterval} min.` });
   }, [config, sessions, stockList, placedTrades]); // eslint-disable-line
 
   const startTrader = useCallback(() => {
