@@ -3,16 +3,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Search, RefreshCw, BarChart3, BookmarkPlus, BookmarkCheck,
-  Trash2, Zap, AlertTriangle, X, Plus, ChevronDown, ChevronUp,
+  Trash2, AlertTriangle, X, Plus, ChevronDown, ChevronUp,
+  TrendingUp, TrendingDown, Minus,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import CandlestickChart from '@/components/CandlestickChart';
-import SignalCard from '@/components/SignalCard';
 import { calcIndicators } from '@/lib/indicators';
+import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
 import type { Candle, IndicatorResult } from '@/lib/indicators';
-import type { AISignal } from '@/lib/claudeSignal';
+import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import type { LWCandle } from '@/lib/chartIndicators';
 import type { QuoteResult } from '@/lib/yahooClient';
 
 // Server-side proxied quote and history fetchers
@@ -69,63 +71,113 @@ function spreadPct(q: QuoteResult) {
 
 // ── Analysis overlay ──────────────────────────────────────────────────────────
 
+function pct(a: number, b: number) {
+  return ((b - a) / Math.abs(a) * 100).toFixed(1);
+}
+
+function fmt(price: number, currency: string) {
+  if (currency === 'GBp') return `${price.toFixed(price < 1 ? 2 : 1)}p`;
+  const d = price < 1 ? 4 : price < 10 ? 3 : 2;
+  return `$${price.toFixed(d)}`;
+}
+
+function TradeSetup({
+  label, rec, price, currency, color,
+}: {
+  label: string;
+  rec: AnalysisResult['scalp'];
+  price: number;
+  currency: string;
+  color: string;
+}) {
+  const isLong = rec.direction === 'LONG';
+  const isFlat = rec.direction === 'FLAT';
+  return (
+    <div className={clsx('rounded-xl border p-4 space-y-3', color)}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-bold uppercase tracking-wider text-gray-400">{label}</span>
+        {!isFlat && (
+          <span className={clsx('text-xs font-bold px-2 py-0.5 rounded-full', isLong ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400')}>
+            {rec.direction}
+          </span>
+        )}
+      </div>
+      {isFlat ? (
+        <p className="text-sm text-gray-500 italic">No clear directional bias — stand aside.</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Entry</div>
+              <div className="font-mono font-bold text-white">{fmt(rec.entry, currency)}</div>
+              <div className="text-[10px] text-gray-600">Limit order at market</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Stop Loss</div>
+              <div className="font-mono font-bold text-red-400">{fmt(rec.stopLoss, currency)}</div>
+              <div className="text-[10px] text-gray-600">{pct(rec.entry, rec.stopLoss)}% from entry</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Target 1</div>
+              <div className="font-mono font-bold text-emerald-400">{fmt(rec.takeProfit1, currency)}</div>
+              <div className="text-[10px] text-gray-600">+{pct(rec.entry, rec.takeProfit1)}% · take ½ here</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Target 2</div>
+              <div className="font-mono font-bold text-emerald-300">{fmt(rec.takeProfit2, currency)}</div>
+              <div className="text-[10px] text-gray-600">+{pct(rec.entry, rec.takeProfit2)}% · trail stop</div>
+            </div>
+          </div>
+          <div className="flex items-center justify-between pt-1 border-t border-gray-700/50">
+            <span className="text-xs text-gray-500">R:R <span className="text-white font-mono font-semibold">{rec.riskReward}:1</span></span>
+            <span className="text-xs text-gray-500">Confidence <span className="text-white font-semibold">{rec.confidence}/10</span></span>
+          </div>
+          <p className="text-[11px] text-gray-500 leading-relaxed border-t border-gray-700/50 pt-2">{rec.invalidation}</p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function AnalysisPanel({ stock, onClose }: { stock: QuoteResult; onClose: () => void }) {
-  const [candles, setCandles]     = useState<Candle[] | null>(null);
-  const [indicators, setInd]      = useState<IndicatorResult | null>(null);
-  const [aiSignal, setAiSignal]   = useState<AISignal | null>(null);
-  const [loading, setLoading]     = useState(true);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [error, setError]         = useState<string | null>(null);
+  const [candles,    setCandles]    = useState<Candle[] | null>(null);
+  const [indicators, setInd]        = useState<IndicatorResult | null>(null);
+  const [tradeRec,   setTradeRec]   = useState<AnalysisResult | null>(null);
+  const [loading,    setLoading]    = useState(true);
+  const [error,      setError]      = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       setLoading(true); setError(null);
       try {
-        const candles = await fetchHistory(stock.symbol);
-        if (!candles.length) throw new Error('No historical data from Yahoo Finance');
-        setCandles(candles);
-        if (candles.length >= 20) setInd(calcIndicators(candles));
+        const raw = await fetchHistory(stock.symbol);
+        if (!raw.length) throw new Error('No historical data available');
+        setCandles(raw);
+        if (raw.length >= 20) {
+          setInd(calcIndicators(raw));
+          setTradeRec(ruleBasedAnalysis(stock.symbol, raw as unknown as LWCandle[]));
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load chart');
       } finally { setLoading(false); }
     })();
   }, [stock.symbol]);
 
-  // Auto-run AI after candles load
-  useEffect(() => {
-    if (candles && indicators && !aiSignal && !aiLoading) runAI();
-  }, [candles, indicators]); // eslint-disable-line
-
-  async function runAI() {
-    if (!candles || candles.length < 20) return;
-    setAiLoading(true);
-    try {
-      const res = await fetch('/api/ig/claude-signal', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          epic:           stock.symbol,
-          instrumentName: stock.name,
-          candles,
-          bid:            stock.bid,
-          offer:          stock.ask,
-          percentageChange: stock.changePercent,
-          currency:       stock.currency,
-        }),
-      });
-      const data = await res.json() as { ok: boolean; signal?: AISignal; error?: string };
-      if (data.ok && data.signal) setAiSignal(data.signal);
-      else setError(data.error ?? 'AI signal failed');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'AI error');
-    } finally { setAiLoading(false); }
-  }
-
   const ind = indicators?.latest;
+
+  const biasColor =
+    tradeRec?.bias === 'BULLISH' ? 'text-emerald-400' :
+    tradeRec?.bias === 'BEARISH' ? 'text-red-400' : 'text-amber-400';
+
+  const BiasIcon =
+    tradeRec?.bias === 'BULLISH' ? TrendingUp :
+    tradeRec?.bias === 'BEARISH' ? TrendingDown : Minus;
 
   return (
     <div className="fixed inset-0 z-40 bg-gray-950/96 overflow-y-auto">
       <div className="max-w-5xl mx-auto p-4 sm:p-6">
+
+        {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div>
             <div className="flex items-center gap-3">
@@ -134,7 +186,7 @@ function AnalysisPanel({ stock, onClose }: { stock: QuoteResult; onClose: () => 
                 {stock.changePercent >= 0 ? '+' : ''}{stock.changePercent.toFixed(2)}%
               </span>
             </div>
-            <p className="text-sm text-gray-500 font-mono">{stock.symbol} · {stock.currency} · {stock.price.toFixed(stock.price < 1 ? 4 : 2)}</p>
+            <p className="text-sm text-gray-500 font-mono">{stock.symbol} · {stock.currency} · {fmt(stock.price, stock.currency)}</p>
           </div>
           <button onClick={onClose} className="p-2 text-gray-400 hover:text-white bg-gray-800 rounded-lg transition-colors">
             <X className="h-5 w-5" />
@@ -160,9 +212,9 @@ function AnalysisPanel({ stock, onClose }: { stock: QuoteResult; onClose: () => 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               {[
                 { label: 'RSI(14)', value: ind?.rsi?.toFixed(1) ?? '—', sub: ind?.rsiZone ?? '', col: ind?.rsiZone === 'oversold' ? 'text-emerald-400' : ind?.rsiZone === 'overbought' ? 'text-red-400' : 'text-gray-300' },
-                { label: 'MACD', value: ind?.macdHist?.toFixed(3) ?? '—', sub: ind?.macdZone ?? '', col: ind?.macdZone === 'bullish' ? 'text-emerald-400' : ind?.macdZone === 'bearish' ? 'text-red-400' : 'text-gray-300' },
+                { label: 'MACD',    value: ind?.macdHist?.toFixed(3) ?? '—', sub: ind?.macdZone ?? '', col: ind?.macdZone === 'bullish' ? 'text-emerald-400' : ind?.macdZone === 'bearish' ? 'text-red-400' : 'text-gray-300' },
                 { label: 'SMA Cross', value: ind?.smaCross ?? '—', sub: '', col: ind?.smaCross === 'bullish' ? 'text-emerald-400' : ind?.smaCross === 'bearish' ? 'text-red-400' : 'text-gray-400' },
-                { label: 'BB', value: ind?.bbPosition ?? '—', sub: '', col: ind?.bbPosition === 'below' ? 'text-emerald-400' : ind?.bbPosition === 'above' ? 'text-red-400' : 'text-gray-300' },
+                { label: 'BB',     value: ind?.bbPosition ?? '—', sub: '', col: ind?.bbPosition === 'below' ? 'text-emerald-400' : ind?.bbPosition === 'above' ? 'text-red-400' : 'text-gray-300' },
               ].map(({ label, value, sub, col }) => (
                 <div key={label} className="bg-gray-800/50 rounded-lg p-3 text-center">
                   <div className="text-xs text-gray-500 mb-1">{label}</div>
@@ -172,17 +224,61 @@ function AnalysisPanel({ stock, onClose }: { stock: QuoteResult; onClose: () => 
               ))}
             </div>
 
-            {aiLoading && (
-              <div className="flex items-center justify-center gap-3 py-8">
-                <Zap className="h-5 w-5 text-purple-400 animate-pulse" />
-                <span className="text-gray-400 text-sm">Generating AI signal via Claude…</span>
+            {/* Trade recommendations */}
+            {tradeRec && (
+              <div className="space-y-3">
+                {/* Bias banner */}
+                <div className={clsx('flex items-center gap-3 px-4 py-3 rounded-xl border',
+                  tradeRec.bias === 'BULLISH' ? 'bg-emerald-500/10 border-emerald-500/25' :
+                  tradeRec.bias === 'BEARISH' ? 'bg-red-500/10    border-red-500/25'    :
+                  'bg-amber-500/10 border-amber-500/25'
+                )}>
+                  <BiasIcon className={clsx('h-5 w-5 shrink-0', biasColor)} />
+                  <div className="flex-1 min-w-0">
+                    <span className={clsx('text-sm font-bold', biasColor)}>{tradeRec.bias}</span>
+                    <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{tradeRec.summary}</p>
+                  </div>
+                </div>
+
+                {/* Scalp + Swing side by side */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <TradeSetup
+                    label="Scalp Setup (1–3 days)"
+                    rec={tradeRec.scalp}
+                    price={stock.price}
+                    currency={stock.currency}
+                    color="bg-gray-900 border-gray-800"
+                  />
+                  <TradeSetup
+                    label="Swing Setup (1–3 weeks)"
+                    rec={tradeRec.swing}
+                    price={stock.price}
+                    currency={stock.currency}
+                    color="bg-gray-900 border-gray-800"
+                  />
+                </div>
+
+                {/* Key levels */}
+                {tradeRec.keyLevels.length > 0 && (
+                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                    <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Key Levels</div>
+                    <div className="flex flex-wrap gap-2">
+                      {tradeRec.keyLevels.map((lvl, i) => (
+                        <span key={i} className={clsx('text-xs px-2.5 py-1 rounded-lg border font-mono',
+                          lvl.type === 'support'    ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400' :
+                                                      'bg-red-500/10     border-red-500/25     text-red-400'
+                        )}>
+                          {lvl.label}: {fmt(lvl.price, stock.currency)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <p className="text-[10px] text-gray-600 text-center px-4">
+                  Rule-based analysis — not financial advice. Always confirm with your own research before trading.
+                </p>
               </div>
-            )}
-            {aiSignal && !aiLoading && (
-              <SignalCard signal={aiSignal} instrumentName={stock.name} epic={stock.symbol} />
-            )}
-            {!aiSignal && !aiLoading && candles.length >= 20 && (
-              <Button onClick={runAI} icon={<Zap className="h-4 w-4" />}>Re-run AI Analysis</Button>
             )}
           </div>
         )}

@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, RefreshCw, TrendingUp, Sparkles, AlertCircle } from 'lucide-react';
+import { Search, RefreshCw, TrendingUp, AlertCircle } from 'lucide-react';
 import type { LWCandle } from '@/lib/chartIndicators';
 import type { SRZone } from '@/lib/supportResistance';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
@@ -84,37 +84,22 @@ export function GraphAnalysis() {
     }
   }, []);
 
-  const runAnalysis = useCallback(async () => {
+  const runAnalysis = useCallback(() => {
     if (!candles.length || !activeTicker) return;
     setAnalysisLoading(true);
     setAnalysisError('');
     setAnalysis(null);
     setAnalysisMode(null);
     try {
-      // Try AI analysis first; fall back to rule-based instantly on any failure
-      let result: AnalysisResult | null = null;
-      let mode: 'ai' | 'rules' = 'rules';
-      try {
-        const r = await fetch('/api/analyse/chart', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ticker: activeTicker, candles, resolution }),
-        });
-        const data = await r.json() as AnalysisResult & { error?: string };
-        if (r.ok && !data.error && data.bias) { result = data; mode = 'ai'; }
-      } catch { /* fall through to rule-based */ }
-
-      // Rule-based fallback — runs client-side, zero API calls
-      if (!result) result = ruleBasedAnalysis(activeTicker, candles);
-
+      const result = ruleBasedAnalysis(activeTicker, candles);
       setAnalysis(result);
-      setAnalysisMode(mode);
+      setAnalysisMode('rules');
     } catch (e) {
       setAnalysisError(e instanceof Error ? e.message : 'Analysis failed — try again');
     } finally {
       setAnalysisLoading(false);
     }
-  }, [candles, activeTicker, resolution]);
+  }, [candles, activeTicker]);
 
   function selectTicker(sym: string) {
     const upper = sym.toUpperCase();
@@ -304,9 +289,9 @@ export function GraphAnalysis() {
             className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-white transition-all"
           >
             {analysisLoading ? (
-              <><RefreshCw className="h-4 w-4 animate-spin" />Analysing with AI…</>
+              <><RefreshCw className="h-4 w-4 animate-spin" />Analysing…</>
             ) : (
-              <><Sparkles className="h-4 w-4" />Run AI Analysis</>
+              <><TrendingUp className="h-4 w-4" />Run Analysis</>
             )}
           </button>
         </div>
