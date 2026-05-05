@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getYahooCrumb, yfHeaders } from '@/lib/yahooServer';
 import type { Mover } from '../movers/route';
 
-// CDN cache for 24 hours — predicted movers are a daily scan, not real-time
-export const revalidate = 86400;
+// Always dynamic — Cache-Control headers drive CDN caching per chosen interval
+export const revalidate = 0;
 
 // Curated universe for prediction scanning
 const US_UNIVERSE = [
@@ -76,12 +76,13 @@ type RawQuote = {
   fiftyDayAverage?: number; twoHundredDayAverage?: number;
 };
 
-// Module-level daily cache: persists across warm serverless invocations
-// Key: "YYYY-MM-DD-{market}"
-const dailyCache = new Map<string, PredictedMover[]>();
+// Module-level cache keyed by time-bucket + market
+// Bucket = Math.floor(epoch_minutes / interval_minutes) so it resets on the interval boundary
+const scanCache = new Map<string, PredictedMover[]>();
 
-function todayKey(market: string) {
-  return `${new Date().toISOString().slice(0, 10)}-${market}`;
+function bucketKey(market: string, intervalMins: number) {
+  const bucket = Math.floor(Date.now() / (intervalMins * 60 * 1000));
+  return `${market}-${intervalMins}-${bucket}`;
 }
 
 async function fetchAndScore(universe: string[]): Promise<PredictedMover[]> {
@@ -136,16 +137,24 @@ async function fetchAndScore(universe: string[]): Promise<PredictedMover[]> {
   return predicted;
 }
 
-export async function GET(req: NextRequest) {
-  const market = (req.nextUrl.searchParams.get('market') ?? 'US').toUpperCase();
-  const universe = market === 'UK' ? UK_UNIVERSE : US_UNIVERSE;
-  const key = todayKey(market);
+// Valid intervals in minutes
+const VALID_INTERVALS = [30, 60, 1440] as const;
+type Interval = typeof VALID_INTERVALS[number];
 
-  // Serve from daily cache if we already scanned today
-  if (dailyCache.has(key)) {
-    return NextResponse.json(dailyCache.get(key)!, {
+export async function GET(req: NextRequest) {
+  const market   = (req.nextUrl.searchParams.get('market') ?? 'US').toUpperCase();
+  const rawInt   = parseInt(req.nextUrl.searchParams.get('interval') ?? '1440', 10);
+  const interval: Interval = (VALID_INTERVALS as readonly number[]).includes(rawInt)
+    ? rawInt as Interval
+    : 1440;
+
+  const universe = market === 'UK' ? UK_UNIVERSE : US_UNIVERSE;
+  const key      = bucketKey(market, interval);
+
+  if (scanCache.has(key)) {
+    return NextResponse.json(scanCache.get(key)!, {
       headers: {
-        'Cache-Control': 's-maxage=86400, stale-while-revalidate=3600',
+        'Cache-Control': `s-maxage=${interval * 60}, stale-while-revalidate=${Math.round(interval * 60 * 0.2)}`,
         'X-Cache': 'HIT',
       },
     });
@@ -154,15 +163,15 @@ export async function GET(req: NextRequest) {
   try {
     const predicted = await fetchAndScore(universe);
 
-    // Store in module-level cache and evict yesterday's entries
-    dailyCache.set(key, predicted);
-    for (const k of dailyCache.keys()) {
-      if (k !== key) dailyCache.delete(k);
+    scanCache.set(key, predicted);
+    // Evict entries from different buckets/intervals to keep memory tidy
+    for (const k of scanCache.keys()) {
+      if (k !== key) scanCache.delete(k);
     }
 
     return NextResponse.json(predicted, {
       headers: {
-        'Cache-Control': 's-maxage=86400, stale-while-revalidate=3600',
+        'Cache-Control': `s-maxage=${interval * 60}, stale-while-revalidate=${Math.round(interval * 60 * 0.2)}`,
         'X-Cache': 'MISS',
       },
     });

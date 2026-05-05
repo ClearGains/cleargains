@@ -1,6 +1,6 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, TrendingUp, TrendingDown, Zap, AlertCircle, BarChart2 } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { RefreshCw, TrendingUp, TrendingDown, Zap, AlertCircle, BarChart2, Clock } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { Mover } from '@/app/api/market/movers/route';
 import type { PredictedMover } from '@/app/api/market/predicted/route';
@@ -204,11 +204,15 @@ function PredictedCard({ q }: { q: PredictedMover }) {
 type Tab = 'daily' | 'predicted';
 type MoverType = 'gainers' | 'losers' | 'active';
 type Market = 'US' | 'UK';
+type Interval = 30 | 60 | 1440;
+
+const INTERVAL_LABELS: Record<Interval, string> = { 30: '30 min', 60: '1 hour', 1440: 'Daily' };
 
 export function MarketMovers() {
   const [tab,          setTab]          = useState<Tab>('daily');
   const [moverType,    setMoverType]    = useState<MoverType>('gainers');
   const [predMarket,   setPredMarket]   = useState<Market>('US');
+  const [interval,     setScanInterval] = useState<Interval>(1440);
   const [dailyRows,    setDailyRows]    = useState<Mover[]>([]);
   const [predicted,    setPredicted]    = useState<PredictedMover[]>([]);
   const [dailyLoading, setDailyLoading] = useState(false);
@@ -216,6 +220,9 @@ export function MarketMovers() {
   const [dailyError,   setDailyError]   = useState('');
   const [predError,    setPredError]    = useState('');
   const [lastRefresh,  setLastRefresh]  = useState<Date | null>(null);
+  const [countdown,    setCountdown]    = useState<number | null>(null);
+  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownRef   = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadDaily = useCallback(async (type: MoverType) => {
     setDailyLoading(true);
@@ -233,11 +240,11 @@ export function MarketMovers() {
     }
   }, []);
 
-  const loadPredicted = useCallback(async (market: Market) => {
+  const loadPredicted = useCallback(async (market: Market, iv: Interval) => {
     setPredLoading(true);
     setPredError('');
     try {
-      const r = await fetch(`/api/market/predicted?market=${market}`);
+      const r = await fetch(`/api/market/predicted?market=${market}&interval=${iv}`);
       const data = await r.json() as PredictedMover[] | { error: string };
       if (!r.ok || 'error' in data) throw new Error('error' in data ? data.error : `HTTP ${r.status}`);
       setPredicted(data as PredictedMover[]);
@@ -249,9 +256,35 @@ export function MarketMovers() {
     }
   }, []);
 
+  // Auto-refresh for predicted tab when interval < daily
+  useEffect(() => {
+    if (tab !== 'predicted' || interval === 1440) {
+      if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
+      if (countdownRef.current)   clearInterval(countdownRef.current);
+      setCountdown(null);
+      return;
+    }
+    const intervalMs = interval * 60 * 1000;
+    setCountdown(interval * 60);
+
+    autoRefreshRef.current = setInterval(() => {
+      loadPredicted(predMarket, interval);
+      setCountdown(interval * 60);
+    }, intervalMs);
+
+    countdownRef.current = setInterval(() => {
+      setCountdown(c => (c !== null && c > 0 ? c - 1 : 0));
+    }, 1000);
+
+    return () => {
+      if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
+      if (countdownRef.current)   clearInterval(countdownRef.current);
+    };
+  }, [tab, interval, predMarket, loadPredicted]);
+
   useEffect(() => {
     if (tab === 'daily') loadDaily(moverType);
-    else loadPredicted(predMarket);
+    else loadPredicted(predMarket, interval);
   }, [tab]); // eslint-disable-line
 
   return (
@@ -266,7 +299,7 @@ export function MarketMovers() {
             <TrendingUp className="h-4 w-4" /> Daily Movers
           </button>
           <button
-            onClick={() => { setTab('predicted'); loadPredicted(predMarket); }}
+            onClick={() => { setTab('predicted'); loadPredicted(predMarket, interval); }}
             className={clsx('flex items-center gap-2 px-4 py-2 rounded text-sm font-semibold transition-all', tab === 'predicted' ? 'bg-purple-600 text-white' : 'text-gray-500 hover:text-gray-300')}
           >
             <Zap className="h-4 w-4" /> Predicted Movers
@@ -277,7 +310,7 @@ export function MarketMovers() {
             <span className="text-xs text-gray-600">Updated {lastRefresh.toLocaleTimeString()}</span>
           )}
           <button
-            onClick={() => tab === 'daily' ? loadDaily(moverType) : loadPredicted(predMarket)}
+            onClick={() => tab === 'daily' ? loadDaily(moverType) : loadPredicted(predMarket, interval)}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-xs text-gray-400 transition-colors"
           >
             <RefreshCw className="h-3.5 w-3.5" /> Refresh
@@ -325,7 +358,7 @@ export function MarketMovers() {
               <div className="flex gap-1.5">
                 {(['US', 'UK'] as const).map(m => (
                   <button key={m}
-                    onClick={() => { setPredMarket(m); loadPredicted(m); }}
+                    onClick={() => { setPredMarket(m); loadPredicted(m, interval); }}
                     className={clsx('px-3 py-1.5 rounded-lg text-sm font-semibold border transition-all',
                       predMarket === m
                         ? 'bg-purple-600/20 text-purple-400 border-purple-600/40'
@@ -336,13 +369,33 @@ export function MarketMovers() {
                   </button>
                 ))}
               </div>
-              <p className="text-xs text-gray-600 mt-2">
-                Signals computed from volume, 52-week range, SMA structure and momentum.
-                Scan runs once daily at 00:00 UTC
+              {/* Interval selector */}
+              <div className="flex items-center gap-1.5 mt-2">
+                <Clock className="h-3 w-3 text-gray-600" />
+                <span className="text-xs text-gray-600">Refresh every</span>
+                {([30, 60, 1440] as Interval[]).map(iv => (
+                  <button key={iv}
+                    onClick={() => { setScanInterval(iv); loadPredicted(predMarket, iv); }}
+                    className={clsx('text-xs px-2 py-0.5 rounded border transition-all',
+                      interval === iv
+                        ? 'bg-purple-600/20 text-purple-400 border-purple-600/40'
+                        : 'text-gray-500 border-gray-700 hover:border-gray-600'
+                    )}
+                  >
+                    {INTERVAL_LABELS[iv]}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-gray-600 mt-1.5">
+                Signals from volume, 52-week range, SMA structure and momentum.
                 {predicted.length > 0 && predicted[0].scannedAt
-                  ? ` — last scan ${new Date(predicted[0].scannedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ${new Date(predicted[0].scannedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} UTC`
+                  ? ` Last scan: ${new Date(predicted[0].scannedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`
                   : ''}
-                .
+                {countdown !== null && interval < 1440 && (
+                  <span className="ml-2 text-purple-500">
+                    · next refresh in {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
+                  </span>
+                )}
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-[10px]">
