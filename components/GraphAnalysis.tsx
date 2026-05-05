@@ -4,13 +4,12 @@ import { Search, RefreshCw, TrendingUp, ChevronDown } from 'lucide-react';
 import type { LWCandle } from '@/lib/chartIndicators';
 import type { SRZone } from '@/lib/supportResistance';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import { fetchYahooHistoryByResolution, searchYahooTickers, type ChartResolution, type TickerSearchResult } from '@/lib/yahooClient';
 import { ChartPanel, type Overlay } from '@/components/ChartPanel';
 import { TradeCard } from '@/components/TradeCard';
 import { ProAnalysis } from '@/components/ProAnalysis';
 
-type Resolution = '1D' | '1W' | '1M' | '3M' | '6M' | '1Y';
-
-type SearchResult = { symbol: string; name: string; stockExchange: string; exchangeShortName: string };
+type Resolution = ChartResolution;
 
 const RESOLUTIONS: Resolution[] = ['1D', '1W', '1M', '3M', '6M', '1Y'];
 
@@ -40,7 +39,7 @@ export function GraphAnalysis() {
   const [chartLoading,  setChartLoading]  = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [chartError,  setChartError]  = useState('');
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchResults, setSearchResults] = useState<TickerSearchResult[]>([]);
   const [searchOpen,    setSearchOpen]    = useState(false);
   const [recent,     setRecent]     = useState<string[]>([]);
   const searchRef = useRef<HTMLDivElement>(null);
@@ -65,17 +64,12 @@ export function GraphAnalysis() {
     setChartError('');
     setAnalysis(null);
     try {
-      const r = await fetch(`/api/chart/${encodeURIComponent(sym)}?resolution=${res}`);
-      if (!r.ok) {
-        const err = await r.json() as { error?: string };
-        throw new Error(err.error ?? `HTTP ${r.status}`);
-      }
-      const data = await r.json() as { candles: LWCandle[] };
-      setCandles(data.candles);
-
-      // Compute S/R client-side
+      const raw = await fetchYahooHistoryByResolution(sym, res);
+      if (!raw.length) throw new Error(`No data returned for ${sym} — check the ticker symbol`);
+      const lwCandles: LWCandle[] = raw.map(c => ({ ...c }));
+      setCandles(lwCandles);
       const { calcSupportResistance } = await import('@/lib/supportResistance');
-      setSrZones(calcSupportResistance(data.candles));
+      setSrZones(calcSupportResistance(lwCandles));
     } catch (e) {
       setChartError(e instanceof Error ? e.message : 'Failed to load chart data');
       setCandles([]);
@@ -120,12 +114,8 @@ export function GraphAnalysis() {
     if (!val.trim()) { setSearchResults([]); setSearchOpen(false); return; }
     setSearchOpen(true);
     searchTimer.current = setTimeout(async () => {
-      try {
-        const r = await fetch(`/api/chart/search?q=${encodeURIComponent(val)}`);
-        if (!r.ok) return;
-        const data = await r.json() as SearchResult[];
-        setSearchResults(data.slice(0, 8));
-      } catch { /* ignore */ }
+      const results = await searchYahooTickers(val);
+      setSearchResults(results.slice(0, 8));
     }, 300);
   }
 
@@ -179,9 +169,9 @@ export function GraphAnalysis() {
                 >
                   <div>
                     <span className="text-sm font-bold text-white font-mono">{r.symbol}</span>
-                    <span className="ml-2 text-xs text-gray-400">{r.name}</span>
+                    <span className="ml-2 text-xs text-gray-400 truncate max-w-[180px]">{r.name}</span>
                   </div>
-                  <span className="text-[10px] text-gray-600">{r.exchangeShortName}</span>
+                  <span className="text-[10px] text-gray-600 ml-2 shrink-0">{r.exchange}</span>
                 </button>
               ))}
             </div>
