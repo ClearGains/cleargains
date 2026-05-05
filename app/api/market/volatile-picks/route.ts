@@ -23,7 +23,6 @@ type ScreenerRaw = {
   };
 };
 
-// Hourly module-level cache
 const cache = new Map<string, { data: VolatilePick[]; fetchedAt: number }>();
 const CACHE_TTL = 30 * 60 * 1000;
 
@@ -36,6 +35,8 @@ export type VolatilePick = {
   avgVolume:       number;
   volumeSurge:     number;
   dayRangePct:     number;
+  dayHigh:         number;
+  dayLow:          number;
   marketCap:       number | null;
   week52High:      number;
   week52Low:       number;
@@ -44,7 +45,63 @@ export type VolatilePick = {
   exchange:        string;
   volatilityScore: number;
   signal:          'BREAKOUT' | 'MOMENTUM' | 'VOLUME_SPIKE' | 'RECOVERY';
+  // Trade levels
+  direction:       'BUY' | 'SELL';
+  entry:           number;
+  stopLoss:        number;
+  takeProfit1:     number;
+  takeProfit2:     number;
+  stopPct:         number;  // stop distance as % of entry
+  tp1Pct:          number;
+  tp2Pct:          number;
+  riskReward:      number;
 };
+
+function round(n: number, dp: number) {
+  return Math.round(n * 10 ** dp) / 10 ** dp;
+}
+
+function computeLevels(price: number, dayHigh: number, dayLow: number, changePercent: number, w52l: number, signal: VolatilePick['signal']) {
+  // Direction: follow momentum
+  const direction: 'BUY' | 'SELL' = changePercent >= 0 ? 'BUY' : 'SELL';
+
+  // Stop distance = larger of: 60% of today's range, or 5% of price (penny stocks need room)
+  const dayRange     = dayHigh - dayLow;
+  const minStop      = price * 0.05;
+  const stopDistance = Math.max(dayRange * 0.6, minStop);
+
+  // For BREAKOUTs add a small buffer above current price as entry
+  const entryBuffer  = signal === 'BREAKOUT' ? price * 0.005 : 0;
+  const entry        = round(direction === 'BUY' ? price + entryBuffer : price - entryBuffer, price < 1 ? 4 : 2);
+
+  // R multiples: 1.5R and 2.5R
+  const tp1Distance  = stopDistance * 1.5;
+  const tp2Distance  = stopDistance * 2.5;
+
+  const stopLoss    = round(direction === 'BUY' ? entry - stopDistance  : entry + stopDistance,  price < 1 ? 4 : 2);
+  const takeProfit1 = round(direction === 'BUY' ? entry + tp1Distance   : entry - tp1Distance,   price < 1 ? 4 : 2);
+  const takeProfit2 = round(direction === 'BUY' ? entry + tp2Distance   : entry - tp2Distance,   price < 1 ? 4 : 2);
+
+  // For BUY, ensure SL never drops below 52w low (use whichever is higher)
+  const effectiveSL = direction === 'BUY' && w52l > 0
+    ? Math.max(stopLoss, round(w52l * 0.98, price < 1 ? 4 : 2))
+    : stopLoss;
+
+  const actualStopDist = Math.abs(entry - effectiveSL);
+  const riskReward     = actualStopDist > 0 ? round(tp1Distance / actualStopDist, 2) : 1.5;
+
+  return {
+    direction,
+    entry,
+    stopLoss:    effectiveSL,
+    takeProfit1,
+    takeProfit2,
+    stopPct:     round((Math.abs(entry - effectiveSL) / entry) * 100, 2),
+    tp1Pct:      round((Math.abs(takeProfit1 - entry) / entry) * 100, 2),
+    tp2Pct:      round((Math.abs(takeProfit2 - entry) / entry) * 100, 2),
+    riskReward,
+  };
+}
 
 function scoreQuote(q: RawQuote): VolatilePick | null {
   const price    = q.regularMarketPrice ?? 0;
@@ -61,31 +118,35 @@ function scoreQuote(q: RawQuote): VolatilePick | null {
   if (price <= 0) return null;
   if (vol < 100_000) return null;
 
-  const volumeSurge = avgVol > 0 ? vol / avgVol : 1;
-  const dayRangePct = price > 0 ? ((dayHigh - dayLow) / price) * 100 : 0;
-  const fromLow     = w52l > 0 ? ((price - w52l) / w52l) * 100 : 0;
-  const changeAbs   = Math.abs(change);
+  const volumeSurge  = avgVol > 0 ? vol / avgVol : 1;
+  const dayRangePct  = price > 0 ? ((dayHigh - dayLow) / price) * 100 : 0;
+  const fromLow      = w52l > 0 ? ((price - w52l) / w52l) * 100 : 0;
+  const changeAbs    = Math.abs(change);
 
   const volatilityScore = Math.round(
-    Math.min(changeAbs / 30, 1) * 40 +           // up to 40 pts for 30%+ move
-    Math.min(dayRangePct / 20, 1) * 20 +          // up to 20 pts for 20%+ day range
-    Math.min((volumeSurge - 1) / 9, 1) * 25 +     // up to 25 pts for 10× volume
-    (fromLow > 0 && fromLow < 100 ? 15 : 0)        // 15 pts if recovering from 52w low
+    Math.min(changeAbs / 30, 1)        * 40 +
+    Math.min(dayRangePct / 20, 1)      * 20 +
+    Math.min((volumeSurge - 1) / 9, 1) * 25 +
+    (fromLow > 0 && fromLow < 100 ? 15 : 0)
   );
 
   let signal: VolatilePick['signal'] = 'MOMENTUM';
   if (volumeSurge >= 5 && changeAbs >= 15) signal = 'BREAKOUT';
   else if (volumeSurge >= 3)               signal = 'VOLUME_SPIKE';
-  else if (fromLow < 50 && change > 5)    signal = 'RECOVERY';
+  else if (fromLow < 50 && change > 5)     signal = 'RECOVERY';
+
+  const levels = computeLevels(price, dayHigh, dayLow, change, w52l, signal);
 
   return {
     symbol: q.symbol,
     name:   q.shortName ?? q.longName ?? q.symbol,
     price, changePercent: change, volume: vol, avgVolume: avgVol,
-    volumeSurge, dayRangePct, marketCap: q.marketCap ?? null,
+    volumeSurge, dayRangePct, dayHigh, dayLow,
+    marketCap: q.marketCap ?? null,
     week52High: w52h, week52Low: w52l, fromLow,
     currency: q.currency ?? 'USD', exchange: q.fullExchangeName ?? '',
     volatilityScore, signal,
+    ...levels,
   };
 }
 

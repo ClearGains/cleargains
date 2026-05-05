@@ -305,6 +305,118 @@ const SIGNAL_STYLES: Record<VolatilePick['signal'], string> = {
 
 // ── Volatile Picks table ──────────────────────────────────────────────────────
 
+function fmtPick(price: number, currency: string) {
+  if (currency === 'GBp') return `${price.toFixed(price < 1 ? 2 : 1)}p`;
+  return `$${price.toFixed(price < 1 ? 4 : price < 10 ? 3 : 2)}`;
+}
+
+function PickRow({ p, rank, onSelect }: { p: VolatilePick; rank: number; onSelect: () => void }) {
+  const [open, setOpen] = useState(false);
+  const isBuy = p.direction === 'BUY';
+
+  return (
+    <>
+      <tr
+        className="hover:bg-gray-800/30 transition-colors cursor-pointer"
+        onClick={() => setOpen(v => !v)}
+      >
+        <td className="py-2.5 pr-2 text-xs text-gray-600 font-mono pl-1">{rank}</td>
+        <td className="py-2.5 pr-2">
+          <div className="font-semibold text-white text-xs font-mono">{p.symbol}</div>
+          <div className="text-gray-500 text-[11px] truncate max-w-[120px]">{p.name}</div>
+        </td>
+        <td className="py-2.5 px-2">
+          <span className={clsx('text-[10px] font-bold px-1.5 py-0.5 rounded border', SIGNAL_STYLES[p.signal])}>
+            {p.signal.replace('_', ' ')}
+          </span>
+        </td>
+        <td className="text-right py-2.5 px-2 font-mono text-sm text-white">
+          {fmtPick(p.price, p.currency)}
+        </td>
+        <td className={clsx('text-right py-2.5 px-2 font-mono text-sm font-semibold', p.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+          {p.changePercent >= 0 ? '+' : ''}{p.changePercent.toFixed(2)}%
+        </td>
+        <td className="text-right py-2.5 px-2 text-xs hidden sm:table-cell">
+          <span className={clsx('font-mono font-semibold', p.volumeSurge >= 5 ? 'text-emerald-400' : p.volumeSurge >= 2 ? 'text-amber-400' : 'text-gray-400')}>
+            {p.volumeSurge.toFixed(1)}×
+          </span>
+        </td>
+        <td className="text-right py-2.5 px-2 hidden md:table-cell">
+          <div className="flex items-center justify-end gap-1">
+            <div className="w-10 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full" style={{ width: `${Math.min(p.volatilityScore, 100)}%` }} />
+            </div>
+            <span className="text-xs font-bold text-orange-400 w-5 text-right">{p.volatilityScore}</span>
+          </div>
+        </td>
+        <td className="py-2.5 pl-2 pr-1">
+          <div className="flex items-center gap-1 justify-end">
+            <button
+              onClick={e => { e.stopPropagation(); onSelect(); }}
+              className="text-[10px] px-1.5 py-0.5 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 text-purple-400 rounded transition-colors flex items-center gap-0.5"
+            >
+              <BarChart3 className="h-2.5 w-2.5" /> Chart
+            </button>
+            {open ? <ChevronUp className="h-3.5 w-3.5 text-gray-500" /> : <ChevronDown className="h-3.5 w-3.5 text-gray-500" />}
+          </div>
+        </td>
+      </tr>
+
+      {open && (
+        <tr>
+          <td colSpan={8} className="pb-3 pt-0 px-1">
+            <div className={clsx(
+              'rounded-xl border p-4 mt-1',
+              isBuy ? 'bg-emerald-950/20 border-emerald-800/30' : 'bg-red-950/20 border-red-800/30'
+            )}>
+              {/* Direction badge */}
+              <div className="flex items-center justify-between mb-3">
+                <span className={clsx('text-xs font-bold px-2 py-0.5 rounded-full', isBuy ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400')}>
+                  {p.direction} SETUP
+                </span>
+                <span className="text-[10px] text-gray-500">Stop: {p.stopPct}% · R:R {p.riskReward}:1</span>
+              </div>
+
+              {/* Levels grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Entry</div>
+                  <div className="font-mono font-bold text-white text-sm">{fmtPick(p.entry, p.currency)}</div>
+                  <div className="text-[10px] text-gray-600">Market / limit order</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Stop Loss</div>
+                  <div className="font-mono font-bold text-red-400 text-sm">{fmtPick(p.stopLoss, p.currency)}</div>
+                  <div className="text-[10px] text-gray-600">−{p.stopPct}% from entry</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Take Profit 1</div>
+                  <div className="font-mono font-bold text-emerald-400 text-sm">{fmtPick(p.takeProfit1, p.currency)}</div>
+                  <div className="text-[10px] text-gray-600">+{p.tp1Pct}% · take ½ here</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Take Profit 2</div>
+                  <div className="font-mono font-bold text-emerald-300 text-sm">{fmtPick(p.takeProfit2, p.currency)}</div>
+                  <div className="text-[10px] text-gray-600">+{p.tp2Pct}% · trail stop</div>
+                </div>
+              </div>
+
+              {/* Day range context */}
+              <div className="mt-3 pt-3 border-t border-gray-700/40 flex flex-wrap gap-4 text-[11px] text-gray-500">
+                <span>Day range <span className="text-gray-300 font-mono">{fmtPick(p.dayLow, p.currency)} – {fmtPick(p.dayHigh, p.currency)}</span></span>
+                <span>52w low <span className="text-gray-300 font-mono">{fmtPick(p.week52Low, p.currency)}</span></span>
+                <span>52w high <span className="text-gray-300 font-mono">{fmtPick(p.week52High, p.currency)}</span></span>
+                <span>Vol surge <span className={clsx('font-mono font-semibold', p.volumeSurge >= 5 ? 'text-emerald-400' : 'text-amber-400')}>{p.volumeSurge.toFixed(1)}×</span></span>
+              </div>
+              <p className="text-[10px] text-gray-700 mt-2">Levels based on intraday range. Not financial advice — confirm with chart analysis before trading.</p>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 function VolatilePicksPanel({
   picks, loading, error, onSelect, onRefresh,
 }: {
@@ -318,7 +430,7 @@ function VolatilePicksPanel({
     <Card>
       <CardHeader
         title="Volatile Picks"
-        subtitle={picks.length > 0 ? `${picks.length} high-volatility penny stocks · updated hourly` : 'Daily screener for 20%+ move candidates'}
+        subtitle={picks.length > 0 ? `${picks.length} high-volatility penny stocks · click row for entry/SL/TP` : 'Daily screener for 20%+ move candidates'}
         icon={<Flame className="h-4 w-4 text-orange-400" />}
         action={
           <button onClick={onRefresh} disabled={loading}
@@ -348,64 +460,24 @@ function VolatilePicksPanel({
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-gray-500 border-b border-gray-800">
-                <th className="text-left py-2 pr-2 font-medium">#</th>
+                <th className="text-left py-2 pr-2 font-medium pl-1">#</th>
                 <th className="text-left py-2 pr-2 font-medium">Stock</th>
                 <th className="text-left py-2 px-2 font-medium">Signal</th>
                 <th className="text-right py-2 px-2 font-medium">Price</th>
                 <th className="text-right py-2 px-2 font-medium">% Chg</th>
-                <th className="text-right py-2 px-2 font-medium hidden sm:table-cell">Day Range</th>
                 <th className="text-right py-2 px-2 font-medium hidden sm:table-cell">Vol Surge</th>
-                <th className="text-right py-2 px-2 font-medium">Score</th>
-                <th className="py-2 pl-2"></th>
+                <th className="text-right py-2 px-2 font-medium hidden md:table-cell">Score</th>
+                <th className="py-2 pl-2 pr-1 text-right font-medium">Levels</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800/60">
               {picks.map((p, i) => (
-                <tr key={p.symbol} className="hover:bg-gray-800/30 transition-colors">
-                  <td className="py-2 pr-2 text-xs text-gray-600 font-mono">{i + 1}</td>
-                  <td className="py-2 pr-2">
-                    <div className="font-semibold text-white text-xs font-mono">{p.symbol}</div>
-                    <div className="text-gray-500 text-xs truncate max-w-[130px]">{p.name}</div>
-                  </td>
-                  <td className="py-2 px-2">
-                    <span className={clsx('text-[10px] font-bold px-1.5 py-0.5 rounded border', SIGNAL_STYLES[p.signal])}>
-                      {p.signal.replace('_', ' ')}
-                    </span>
-                  </td>
-                  <td className="text-right py-2 px-2 font-mono text-sm text-white">
-                    {p.currency === 'GBp' ? `${p.price.toFixed(2)}p` : `$${p.price.toFixed(p.price < 1 ? 4 : 2)}`}
-                  </td>
-                  <td className={clsx('text-right py-2 px-2 font-mono text-sm font-semibold', p.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                    {p.changePercent >= 0 ? '+' : ''}{p.changePercent.toFixed(2)}%
-                  </td>
-                  <td className="text-right py-2 px-2 text-gray-400 text-xs hidden sm:table-cell">
-                    {p.dayRangePct.toFixed(1)}%
-                  </td>
-                  <td className="text-right py-2 px-2 text-xs hidden sm:table-cell">
-                    <span className={clsx('font-mono font-semibold', p.volumeSurge >= 5 ? 'text-emerald-400' : p.volumeSurge >= 2 ? 'text-amber-400' : 'text-gray-400')}>
-                      {p.volumeSurge.toFixed(1)}×
-                    </span>
-                  </td>
-                  <td className="text-right py-2 px-2">
-                    <div className="flex items-center justify-end gap-1">
-                      <div className="w-12 h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full"
-                          style={{ width: `${Math.min(p.volatilityScore, 100)}%` }}
-                        />
-                      </div>
-                      <span className="text-xs font-bold text-orange-400 w-6 text-right">{p.volatilityScore}</span>
-                    </div>
-                  </td>
-                  <td className="py-2 pl-2">
-                    <button
-                      onClick={() => onSelect(p.symbol, p.name, p.price, p.currency, p.changePercent)}
-                      className="text-xs px-2 py-1 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 text-purple-400 rounded transition-colors flex items-center gap-1"
-                    >
-                      <BarChart3 className="h-3 w-3" /> Analyse
-                    </button>
-                  </td>
-                </tr>
+                <PickRow
+                  key={p.symbol}
+                  p={p}
+                  rank={i + 1}
+                  onSelect={() => onSelect(p.symbol, p.name, p.price, p.currency, p.changePercent)}
+                />
               ))}
             </tbody>
           </table>
