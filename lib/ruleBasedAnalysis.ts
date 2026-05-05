@@ -62,7 +62,21 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
     bull > bear + 2 ? 'BULLISH' : bear > bull + 2 ? 'BEARISH' : 'NEUTRAL';
 
   const scoreDiff = Math.abs(bull - bear);
-  const confidence = (base: number) => Math.min(10, Math.max(1, base + scoreDiff));
+
+  // Confidence scales from how one-sided the signals are:
+  //   purity=0  (50/50 split) → core=1  (no conviction)
+  //   purity=1  (all agree)   → core=7  (strong conviction)
+  // Plus bonuses for high-quality signals (MACD cross, RSI extremes, signal count)
+  function confidence(isScalp: boolean): number {
+    const total  = bull + bear;
+    const purity = total > 0 ? scoreDiff / total : 0;          // 0–1
+    const core   = Math.round(1 + purity * 6);                 // 1–7
+    const macdBonus  = ind.macdCross !== 'none' ? 2 : 0;
+    const rsiBonus   = ind.rsi !== null && (ind.rsi < 35 || ind.rsi > 65) ? 1 : 0;
+    const countBonus = signals.length >= 3 ? 1 : 0;
+    const scalpBonus = isScalp ? 1 : 0;
+    return Math.min(10, Math.max(1, core + macdBonus + rsiBonus + countBonus + scalpBonus));
+  }
 
   // ── S/R levels ────────────────────────────────────────────────────────────
   const supports    = sr.filter(z => z.type === 'support').sort((a, b) => b.price - a.price);
@@ -104,7 +118,7 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
       entry: round(entry, price),
       stopLoss: sl, takeProfit1: tp1, takeProfit2: tp2,
       riskReward: parseFloat((reward / risk).toFixed(2)),
-      confidence: confidence(4),
+      confidence: confidence(true),
       reasoning: `${bias} bias: ${signals.slice(0, 2).join('; ')}. Scalp targets ${dir === 'LONG' ? 'nearest resistance' : 'nearest support'} within 1–2 ATR.`,
       invalidation: dir === 'LONG'
         ? `Hourly close below ${sl} negates setup.`
@@ -144,7 +158,7 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
       entry: round(entry, price),
       stopLoss: sl, takeProfit1: tp1, takeProfit2: tp2,
       riskReward: parseFloat((reward / risk).toFixed(2)),
-      confidence: confidence(3),
+      confidence: confidence(false),
       reasoning: `Swing trade targets ${dir === 'LONG' ? 'upper S/R cluster' : 'lower S/R cluster'} over days–weeks. ${signals[0] ?? 'Mixed signals'} supports the ${bias.toLowerCase()} bias.`,
       invalidation: dir === 'LONG'
         ? `Daily close below ${sl} and loss of SMA20 invalidates.`
