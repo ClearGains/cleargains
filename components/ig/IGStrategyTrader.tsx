@@ -854,10 +854,22 @@ export function IGStrategyTrader() {
     return null;
   }
 
-  // ── Fetch market snapshot directly from Yahoo Finance (browser-side, avoids server blocking) ───
+  // ── Fetch market snapshot via server-side proxy (handles crumb auth for forex/crypto) ──
   async function fetchSnapshot(name: string): Promise<{price:number;changePercent:number;signal:'BUY'|'SELL'|'NEUTRAL';source:string;error?:string}|null> {
-    const { fetchMarketSnapshot } = await import('@/lib/yahooClient');
-    return fetchMarketSnapshot(name);
+    const { YAHOO_SYMBOL_MAP } = await import('@/lib/yahooClient');
+    const symbol = YAHOO_SYMBOL_MAP[name];
+    if (!symbol) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'proxy', error: `No symbol mapping for "${name}"` };
+    try {
+      const r = await fetch(`/api/market/quotes?symbols=${encodeURIComponent(symbol)}`);
+      if (!r.ok) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'proxy', error: `Quotes API ${r.status}` };
+      const data = await r.json() as Array<{ symbol: string; price: number; changePercent: number }>;
+      if (!Array.isArray(data) || !data.length) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'proxy', error: 'No data returned' };
+      const q = data[0];
+      const signal: 'BUY' | 'SELL' | 'NEUTRAL' = q.changePercent > 0.3 ? 'BUY' : q.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
+      return { price: q.price, changePercent: q.changePercent, signal, source: 'proxy' };
+    } catch (e) {
+      return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'proxy', error: e instanceof Error ? e.message : 'Failed to fetch' };
+    }
   }
 
   // ── Fetch news signals once per scan cycle ────────────────────────────────
