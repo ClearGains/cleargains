@@ -76,9 +76,10 @@ type RawQuote = {
   fiftyDayAverage?: number; twoHundredDayAverage?: number;
 };
 
-// Module-level cache keyed by time-bucket + market
-// Bucket = Math.floor(epoch_minutes / interval_minutes) so it resets on the interval boundary
-const scanCache = new Map<string, PredictedMover[]>();
+// Module-level cache — max 5 min TTL so data never freezes mid-session
+// regardless of the chosen interval. CDN headers handle longer caching.
+const MODULE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const scanCache = new Map<string, { data: PredictedMover[]; ts: number }>();
 
 function bucketKey(market: string, intervalMins: number) {
   const bucket = Math.floor(Date.now() / (intervalMins * 60 * 1000));
@@ -138,7 +139,7 @@ async function fetchAndScore(universe: string[]): Promise<PredictedMover[]> {
 }
 
 // Valid intervals in minutes
-const VALID_INTERVALS = [30, 60, 1440] as const;
+const VALID_INTERVALS = [15, 30, 60, 1440] as const;
 type Interval = typeof VALID_INTERVALS[number];
 
 export async function GET(req: NextRequest) {
@@ -151,11 +152,16 @@ export async function GET(req: NextRequest) {
   const universe = market === 'UK' ? UK_UNIVERSE : US_UNIVERSE;
   const key      = bucketKey(market, interval);
 
-  if (scanCache.has(key)) {
-    return NextResponse.json(scanCache.get(key)!, {
+  // Cap CDN cache at 15 min so data is never more than 15 min stale on CDN
+  const cdnMaxAge = Math.min(interval * 60, 900);
+
+  const cached = scanCache.get(key);
+  if (cached && Date.now() - cached.ts < MODULE_CACHE_TTL) {
+    return NextResponse.json(cached.data, {
       headers: {
-        'Cache-Control': `s-maxage=${interval * 60}, stale-while-revalidate=${Math.round(interval * 60 * 0.2)}`,
+        'Cache-Control': `s-maxage=${cdnMaxAge}, stale-while-revalidate=30`,
         'X-Cache': 'HIT',
+        'X-Data-Age': String(Math.round((Date.now() - cached.ts) / 1000)) + 's',
       },
     });
   }
@@ -163,15 +169,12 @@ export async function GET(req: NextRequest) {
   try {
     const predicted = await fetchAndScore(universe);
 
-    scanCache.set(key, predicted);
-    // Evict entries from different buckets/intervals to keep memory tidy
-    for (const k of scanCache.keys()) {
-      if (k !== key) scanCache.delete(k);
-    }
+    for (const k of scanCache.keys()) scanCache.delete(k);
+    scanCache.set(key, { data: predicted, ts: Date.now() });
 
     return NextResponse.json(predicted, {
       headers: {
-        'Cache-Control': `s-maxage=${interval * 60}, stale-while-revalidate=${Math.round(interval * 60 * 0.2)}`,
+        'Cache-Control': `s-maxage=${cdnMaxAge}, stale-while-revalidate=30`,
         'X-Cache': 'MISS',
       },
     });

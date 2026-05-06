@@ -84,7 +84,7 @@ export async function GET(req: NextRequest) {
     const movers = quotes.map(mapQuote);
 
     return NextResponse.json(movers, {
-      headers: { 'Cache-Control': 's-maxage=60, stale-while-revalidate=120' },
+      headers: { 'Cache-Control': 's-maxage=15, stale-while-revalidate=10' },
     });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
