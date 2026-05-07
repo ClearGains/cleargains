@@ -221,7 +221,8 @@ async function resolveEpic(ticker: string, companyName: string, sess: IGSession,
       const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(query)}`, { headers: igH(sess, env) });
       if (!res.ok) return null;
       const data = await res.json() as { ok: boolean; markets?: Array<{ epic: string; dealingEnabled?: boolean }> };
-      const hit = (data.markets ?? []).find(m => m.epic.startsWith('CS.D.') && m.dealingEnabled !== false);
+      // Require dealingEnabled === true — null/undefined means IG hasn't confirmed it's tradeable
+      const hit = (data.markets ?? []).find(m => m.epic.startsWith('CS.D.') && m.dealingEnabled === true);
       return hit?.epic ?? null;
     } catch { return null; }
   }
@@ -401,6 +402,8 @@ async function runCycle(p: CycleParams): Promise<CycleResult> {
       const d = await r.json() as { ok: boolean; dealId?: string; level?: number; error?: string };
 
       if (d.ok) {
+        // Clear any stale null cache entry so future valid searches aren't blocked
+        epicCache.delete(cleanSym);
         slotsFilled++;
         const entry: TradeLogEntry = {
           id: newId(), ts: nowTs(),
@@ -424,9 +427,14 @@ async function runCycle(p: CycleParams): Promise<CycleResult> {
         };
         entries.push(entry);
       } else {
+        const reason = d.error ?? 'Order rejected';
+        // If IG says the instrument is invalid, blacklist it so we stop retrying
+        if (reason.includes('instrument.invalid') || reason.includes('instrument_invalid')) {
+          epicCache.set(cleanSym, null);
+        }
         entries.push({
           id: newId(), ts: nowTs(), action: 'ERROR', symbol: sig.symbol, env: p.env,
-          reason: d.error ?? 'Order rejected',
+          reason,
           signal: sig.signal, score: sig.score,
         });
       }
