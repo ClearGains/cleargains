@@ -201,7 +201,7 @@ function nowTs() { return new Date().toISOString(); }
 // Module-level epic cache: ticker → epic string, or null if not on IG spread bets
 const epicCache = new Map<string, string | null>();
 
-async function resolveEpic(ticker: string, sess: IGSession, env: 'demo' | 'live'): Promise<string | null> {
+async function resolveEpic(ticker: string, companyName: string, sess: IGSession, env: 'demo' | 'live'): Promise<string | null> {
   // 1. Static map first (fastest, most reliable)
   const known = IG_STOCK_EPICS[ticker];
   if (known) return known.epic;
@@ -209,24 +209,30 @@ async function resolveEpic(ticker: string, sess: IGSession, env: 'demo' | 'live'
   // 2. In-memory cache
   if (epicCache.has(ticker)) return epicCache.get(ticker)!;
 
-  // 3. Search IG markets API
-  try {
-    const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(ticker)}`, {
-      headers: igH(sess, env),
-    });
-    if (!res.ok) { epicCache.set(ticker, null); return null; }
-    const data = await res.json() as { ok: boolean; markets?: Array<{ epic: string; dealingEnabled?: boolean; instrumentType?: string }> };
-    // Find a spread-bet daily-funded-bet epic: CS.D.{TICKER}.TODAY.IP or CS.D.{TICKER}.*.IP
-    const match = (data.markets ?? []).find(
-      m => m.epic.startsWith('CS.D.') && m.epic.toUpperCase().includes(ticker.toUpperCase()) && m.dealingEnabled !== false
-    );
-    const epic = match?.epic ?? null;
-    epicCache.set(ticker, epic);
-    return epic;
-  } catch {
-    epicCache.set(ticker, null);
-    return null;
+  // Helper: call the IG market search and return the first CS.D.* spread-bet epic.
+  // IG's internal epic codes often don't match the stock ticker (e.g. WKHS → CS.D.WORKHR.TODAY.IP)
+  // so we don't filter on the ticker appearing in the epic — just take the first spread-bet result.
+  async function igSearch(query: string): Promise<string | null> {
+    try {
+      const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(query)}`, { headers: igH(sess, env) });
+      if (!res.ok) return null;
+      const data = await res.json() as { ok: boolean; markets?: Array<{ epic: string; dealingEnabled?: boolean }> };
+      const hit = (data.markets ?? []).find(m => m.epic.startsWith('CS.D.') && m.dealingEnabled !== false);
+      return hit?.epic ?? null;
+    } catch { return null; }
   }
+
+  // 3. Search by ticker symbol
+  let epic = await igSearch(ticker);
+
+  // 4. Fallback: search by company name (strip legal suffixes so search is cleaner)
+  if (!epic && companyName) {
+    const cleanName = companyName.replace(/\s+(Inc\.?|Corp\.?|Ltd\.?|LLC|plc|Group|Holdings?)$/i, '').trim();
+    epic = await igSearch(cleanName);
+  }
+
+  epicCache.set(ticker, epic);
+  return epic;
 }
 
 // ── Core trading cycle ────────────────────────────────────────────────────────
@@ -366,7 +372,7 @@ async function runCycle(p: CycleParams): Promise<CycleResult> {
     }
 
     p.onAction(`Resolving epic for ${sig.symbol}…`);
-    const epic = await resolveEpic(cleanSym, sess, p.env);
+    const epic = await resolveEpic(cleanSym, sig.name, sess, p.env);
     if (!epic) {
       entries.push({ id: newId(), ts: nowTs(), action: 'SKIP', symbol: sig.symbol, env: p.env, reason: 'Not available for spread betting on IG — skipped' });
       continue;
