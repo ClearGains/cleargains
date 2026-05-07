@@ -223,36 +223,57 @@ function MarketSearch({ session, env, onSelect }: {
 // ── Market-type helpers ───────────────────────────────────────────────────────
 
 /**
- * Auto-sizing: derive sensible stop distance from market type + live price,
- * then back-calculate size so that hitting the stop costs exactly stopLoss £.
- * limitDist is set so that hitting the target gains exactly takeProfit £.
+ * Auto-sizing: stop distance is derived from BOTH market type AND timeframe.
+ * Size is back-calculated so hitting the stop costs exactly stopLoss £.
+ * limitDist uses the timeframe's R:R ratio so the target is realistic to hit
+ * within the chosen holding period (hours vs days vs weeks vs long-term).
+ *
+ * Timeframe multipliers vs daily baseline:
+ *   hourly   → 0.5× stop, 1.5:1 R:R  (tight, same-session exits)
+ *   daily    → 1.0× stop, 2.0:1 R:R  (intraday / end-of-day exits)
+ *   weekly   → 2.5× stop, 2.5:1 R:R  (swing, multi-day holds)
+ *   longterm → 5.0× stop, 3.0:1 R:R  (trend following, weeks/months)
+ *   rsi2     → 1.2× stop, 2.0:1 R:R  (mean reversion, 1–5 days)
  */
 function calcAutoSizing(
   price: number,
   mType: MarketType,
   stopLoss: number,
-  takeProfit: number,
+  timeframe: Timeframe = 'daily',
 ): { stopDist: number; limitDist: number; size: number } {
-  let stopDist: number;
+  // Per-timeframe: how much wider than the daily baseline, and target R:R
+  const TF_PROFILE: Record<string, { mult: number; rr: number }> = {
+    hourly:   { mult: 0.5,  rr: 1.5 },
+    daily:    { mult: 1.0,  rr: 2.0 },
+    weekly:   { mult: 2.5,  rr: 2.5 },
+    longterm: { mult: 5.0,  rr: 3.0 },
+    rsi2:     { mult: 1.2,  rr: 2.0 },
+  };
+  const { mult, rr } = TF_PROFILE[timeframe] ?? TF_PROFILE.daily;
+
+  // Daily baseline stop distance per market type
+  let baseStop: number;
   switch (mType) {
     case 'INDEX':
-      stopDist = Math.max(10, Math.round(price * 0.003)); // 0.3% — e.g. FTSE 8000 → 24pt
+      baseStop = Math.max(8, Math.round(price * 0.003));    // 0.3% e.g. FTSE 8500 → 26pt
       break;
     case 'FOREX':
-      stopDist = Math.max(20, Math.round(price * 10000 * 0.003)); // ~30 pips
+      baseStop = 25;                                         // 25 pips baseline
       break;
     case 'COMMODITY':
-      stopDist = Math.max(5, Math.round(price * 0.005)); // 0.5% — e.g. Gold 3300 → 17pt
+      baseStop = Math.max(5, Math.round(price * 0.005));    // 0.5% e.g. Gold $3300 → 17pt
       break;
     case 'CRYPTO':
-      stopDist = Math.max(200, Math.round(price * 0.015)); // 1.5%
+      baseStop = Math.max(200, Math.round(price * 0.015));  // 1.5%
       break;
-    default:
-      stopDist = Math.max(5, Math.round(price * 0.005));
+    default:                                                 // SHARES
+      baseStop = Math.max(5, Math.round(price * 0.005));    // 0.5%
   }
-  const rawSize = stopLoss / stopDist;
-  const size    = Math.max(0.1, Math.round(rawSize * 10) / 10);
-  const limitDist = Math.max(1, Math.round(takeProfit / size));
+
+  const stopDist  = Math.max(1, Math.round(baseStop * mult));
+  const rawSize   = stopLoss / stopDist;
+  const size      = Math.max(0.1, Math.round(rawSize * 10) / 10);
+  const limitDist = Math.max(1, Math.round(stopDist * rr));   // R:R from timeframe, not £ target
   return { stopDist, limitDist, size };
 }
 
@@ -934,8 +955,7 @@ export function IGStrategyTrader() {
     // ── Calibrated signal scoring by market type ──────────────────────────────
     const mType = market.marketType ?? getMarketType(market.epic);
     const stopLoss   = strat.stopLoss   ?? strat.stopPct   ?? 5;
-    const takeProfit = strat.takeProfit ?? strat.targetPct ?? 30;
-    const { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, takeProfit);
+    const { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, strat.timeframe);
     const { direction, strength } = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
     const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
 
@@ -2241,19 +2261,22 @@ export function IGStrategyTrader() {
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
               </div>
               <div>
-                <label className="text-xs text-gray-400 mb-1.5 block">Timeframe</label>
+                <label className="text-xs text-gray-400 mb-1.5 block">Trading Timeframe</label>
                 <select value={bTimeframe} onChange={e => setBTimeframe(e.target.value as Timeframe)}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
-                  <option value="rsi2">⭐ RSI(2) Mean Reversion — lowest API usage · scans once/day</option>
-                  <option value="daily">Daily Swing — EMA20/50 + MACD · scans every 4hr</option>
-                  <option value="longterm">Long-term — Golden/Death Cross · scans every 12hr</option>
-                  <option value="hourly">Hourly Scalp — EMA9/21 + RSI · high API usage</option>
+                  <option value="hourly">⚡ Intraday (Hours) — tight stops, exit same session</option>
+                  <option value="daily">📅 Day Trade — sized for daily range, exit same day</option>
+                  <option value="weekly">📆 Swing (Days–Weeks) — wider stops, hold several days</option>
+                  <option value="longterm">📈 Long-term Trend — very wide stops, hold weeks/months</option>
+                  <option value="rsi2">⭐ RSI(2) Mean Reversion — lowest API usage</option>
                 </select>
               </div>
             </div>
 
-            <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2 text-xs text-blue-300">
-              {TIMEFRAME_CONFIG[bTimeframe].description} — Stop loss and take profit are set automatically from the signal.
+            <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 px-3 py-2.5 space-y-1">
+              <p className="text-xs text-orange-300 font-semibold">{TIMEFRAME_CONFIG[bTimeframe].label} — stop &amp; TP sizing</p>
+              <p className="text-[11px] text-orange-300/70">{TIMEFRAME_CONFIG[bTimeframe].stopNote}</p>
+              <p className="text-[10px] text-gray-500">{TIMEFRAME_CONFIG[bTimeframe].description}</p>
             </div>
 
             {/* Risk per trade + max positions */}
@@ -2507,7 +2530,7 @@ export function IGStrategyTrader() {
                       )}
                     </div>
                     <p className="text-[11px] text-gray-500">
-                      {enabledMarkets.length} markets · £{strat.size}/pt · max {strat.maxPositions} pos · min {strat.minStrength ?? 55}% signal
+                      {enabledMarkets.length} markets · max {strat.maxPositions} pos · min {strat.minStrength ?? 55}% signal · {cfg.stopNote}
                       {strat.lastRunAt && (
                         <span> · last {fmtTime(strat.lastRunAt)}
                           {strat.lastRunEnv && (

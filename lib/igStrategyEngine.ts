@@ -27,7 +27,7 @@ export type StrategySignal = {
   riskReward: string;
 };
 
-export type Timeframe = 'hourly' | 'daily' | 'longterm' | 'rsi2';
+export type Timeframe = 'hourly' | 'daily' | 'weekly' | 'longterm' | 'rsi2';
 
 export type MarketType = 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO' | 'SHARES';
 
@@ -494,6 +494,7 @@ export function rsi2Signal(candles: Candle[]): StrategySignal {
 export function getSignal(timeframe: Timeframe, candles: Candle[]): StrategySignal {
   if (timeframe === 'hourly')   return hourlySignal(candles);
   if (timeframe === 'daily')    return dailySignal(candles);
+  if (timeframe === 'weekly')   return dailySignal(candles);  // same indicators, wider stops applied in sizing
   if (timeframe === 'rsi2')     return rsi2Signal(candles);
   return longtermSignal(candles);
 }
@@ -517,11 +518,12 @@ export function getSignal(timeframe: Timeframe, candles: Candle[]): StrategySign
  *  daily    : 60 × 4 × (7*6)    =  10 080 ← within allowance
  *  longterm : 205 × 4 × (7*2)   =  11 480 ← just within allowance
  */
-export const TIMEFRAME_CONFIG: Record<Timeframe, { resolution: string; max: number; label: string; pollMs: number; description: string }> = {
-  hourly:   { resolution: 'MINUTE_5', max: 30,  label: 'Hourly (Scalp)',      pollMs: 15 * 60_000,        description: '5-min candles · EMA9/21 + RSI · 2:1 R:R · polls every 15 min' },
-  daily:    { resolution: 'HOUR',     max: 60,  label: 'Daily (Swing)',        pollMs:  4 * 60 * 60_000,   description: '1-hr candles · EMA20/50 + MACD · 3:1 R:R · polls every 4 hrs' },
-  longterm: { resolution: 'DAY',      max: 205, label: 'Long-term Trend',      pollMs: 12 * 60 * 60_000,   description: 'Daily candles · Golden/Death Cross EMA50/200 · 3:1 R:R · polls every 12 hrs' },
-  rsi2:     { resolution: 'DAY',      max: 215, label: 'RSI(2) Mean Reversion', pollMs: 24 * 60 * 60_000,  description: 'Daily candles · RSI(2) + EMA200 trend filter · ATR stops · polls once per day · lowest allowance usage' },
+export const TIMEFRAME_CONFIG: Record<Timeframe, { resolution: string; max: number; label: string; pollMs: number; description: string; stopNote: string }> = {
+  hourly:   { resolution: 'MINUTE_5', max: 30,  label: 'Intraday (Hours)',     pollMs: 15 * 60_000,       description: '5-min candles · EMA9/21 + RSI · tight stops for same-session exits · polls every 15 min',  stopNote: 'Tight stops (≈0.15% index / 12 pips forex) · 1.5:1 R:R · target hit within hours' },
+  daily:    { resolution: 'HOUR',     max: 60,  label: 'Day Trade',            pollMs:  4 * 60 * 60_000,  description: '1-hr candles · EMA20/50 + MACD · sized for daily range · polls every 4 hrs',               stopNote: 'Medium stops (≈0.3% index / 25 pips forex) · 2:1 R:R · target hit within the day' },
+  weekly:   { resolution: 'DAY',      max: 60,  label: 'Swing (Days–Weeks)',   pollMs: 24 * 60 * 60_000,  description: 'Daily candles · EMA20/50 + MACD · wider stops for multi-day swings · polls once per day',   stopNote: 'Wide stops (≈0.8% index / 55 pips forex) · 2.5:1 R:R · target hit within days or weeks' },
+  longterm: { resolution: 'DAY',      max: 205, label: 'Long-term Trend',      pollMs: 12 * 60 * 60_000,  description: 'Daily candles · Golden/Death Cross EMA50/200 · very wide stops · polls every 12 hrs',        stopNote: 'Very wide stops (≈1.8% index / 120 pips forex) · 3:1 R:R · held weeks to months' },
+  rsi2:     { resolution: 'DAY',      max: 215, label: 'RSI(2) Mean Reversion', pollMs: 24 * 60 * 60_000, description: 'Daily candles · RSI(2) + EMA200 trend filter · ATR stops · polls once per day',             stopNote: 'ATR-based stops (similar to day trade) · 2:1 R:R · mean reversion over 1–5 days' },
 };
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
