@@ -16,6 +16,7 @@ import {
   TaxTrade,
   CGTAlert,
   TradeLogEntry,
+  IGInstrument,
 } from './types';
 import { DEFAULT_COUNTRY } from './countries';
 
@@ -128,6 +129,11 @@ interface ClearGainsState {
   autoTraderTotalPnL: number;
   autoTraderWins: number;
   autoTraderLosses: number;
+
+  // Auto-trader saved instruments (ticker → IG epic mapping)
+  igInstruments: IGInstrument[];
+  addIGInstrument: (inst: IGInstrument) => void;
+  removeIGInstrument: (epic: string) => void;
 
   // Actions
   setCountry: (country: Country) => void;
@@ -263,6 +269,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
       autoTraderTotalPnL: 0,
       autoTraderWins: 0,
       autoTraderLosses: 0,
+      igInstruments: [],
 
       setCountry: (country) => set({ selectedCountry: country }),
       setHasOnboarded: (v) => set({ hasOnboarded: v }),
@@ -448,6 +455,14 @@ export const useClearGainsStore = create<ClearGainsState>()(
       addAutoTradeLogEntry: (entry) =>
         set((state) => ({ autoTraderLog: [entry, ...state.autoTraderLog].slice(0, 500) })),
       clearAutoTradeLog: () => set({ autoTraderLog: [] }),
+      addIGInstrument: (inst) => set((state) => ({
+        igInstruments: state.igInstruments.some(i => i.epic === inst.epic)
+          ? state.igInstruments
+          : [...state.igInstruments, inst],
+      })),
+      removeIGInstrument: (epic) => set((state) => ({
+        igInstruments: state.igInstruments.filter(i => i.epic !== epic),
+      })),
       resetAutoTraderDailyPnL: (date) => set({ autoTraderDailyPnL: 0, autoTraderDailyDate: date }),
       addAutoTraderPnL: (delta, isClose, isWin) =>
         set((state) => ({
@@ -569,6 +584,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
         autoTraderTotalPnL: state.autoTraderTotalPnL,
         autoTraderWins: state.autoTraderWins,
         autoTraderLosses: state.autoTraderLosses,
+        igInstruments: state.igInstruments,
       }),
     }
   )

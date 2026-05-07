@@ -244,6 +244,15 @@ export type S104PoolEnriched = Section104Pool & {
   estimatedCGT?: number;       // unrealisedGain × 0.24 (worst-case, before AEA)
 };
 
+export type IGInstrument = {
+  ticker: string;
+  name: string;
+  epic: string;
+  expiry: string;
+  available24h: boolean;
+  addedAt: string;
+};
+
 export type TradeLogAction =
   | 'OPEN_LONG'
   | 'OPEN_SHORT'

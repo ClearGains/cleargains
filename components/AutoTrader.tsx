@@ -5,14 +5,14 @@ import {
   Power, AlertTriangle, CheckCircle2, XCircle, RefreshCw, Settings,
   Activity, ShieldAlert, TrendingUp, TrendingDown, Clock, Zap,
   ToggleLeft, ToggleRight, Info, ChevronDown, ChevronUp,
-  Wifi, WifiOff, Key,
+  Wifi, WifiOff, Key, Search,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { IG_STOCK_EPICS } from '@/lib/ig-stock-epics';
-import type { TradeLogEntry } from '@/lib/types';
+import type { TradeLogEntry, IGInstrument } from '@/lib/types';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -201,12 +201,16 @@ function nowTs() { return new Date().toISOString(); }
 // Module-level epic cache: ticker → epic string, or null if not on IG spread bets
 const epicCache = new Map<string, string | null>();
 
-async function resolveEpic(ticker: string, companyName: string, sess: IGSession, env: 'demo' | 'live'): Promise<string | null> {
-  // 1. Static map first (fastest, most reliable)
+async function resolveEpic(ticker: string, companyName: string, sess: IGSession, env: 'demo' | 'live', saved?: IGInstrument[]): Promise<string | null> {
+  // 1. User-saved instruments list (highest priority — pre-verified by user)
+  const savedMatch = saved?.find(i => i.ticker.toUpperCase() === ticker.toUpperCase());
+  if (savedMatch) return savedMatch.epic;
+
+  // 2. Static map
   const known = IG_STOCK_EPICS[ticker];
   if (known) return known.epic;
 
-  // 2. In-memory cache
+  // 3. In-memory cache
   if (epicCache.has(ticker)) return epicCache.get(ticker)!;
 
   // Helper: call the IG market search and return the first CS.D.* spread-bet epic.
@@ -247,6 +251,7 @@ type CycleParams = {
   useShorts: boolean;
   dailyPnL: number;
   trackedSymbols: Set<string>;
+  savedInstruments: IGInstrument[];
   onAction: (msg: string) => void;
 };
 
@@ -372,7 +377,7 @@ async function runCycle(p: CycleParams): Promise<CycleResult> {
     }
 
     p.onAction(`Resolving epic for ${sig.symbol}…`);
-    const epic = await resolveEpic(cleanSym, sig.name, sess, p.env);
+    const epic = await resolveEpic(cleanSym, sig.name, sess, p.env, p.savedInstruments);
     if (!epic) {
       entries.push({ id: newId(), ts: nowTs(), action: 'SKIP', symbol: sig.symbol, env: p.env, reason: 'Not available for spread betting on IG — skipped' });
       continue;
@@ -515,6 +520,129 @@ function ActionBadge({ action }: { action: TradeLogEntry['action'] }) {
   );
 }
 
+// ── Saved Instruments card ────────────────────────────────────────────────────
+
+function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }: {
+  instruments: IGInstrument[];
+  onAdd: (inst: IGInstrument) => void;
+  onRemove: (epic: string) => void;
+  env: 'demo' | 'live';
+  engineRunning: boolean;
+}) {
+  const [query, setQuery]     = useState('');
+  const [results, setResults] = useState<IGInstrument[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchMsg, setSearchMsg] = useState('');
+
+  async function handleSearch() {
+    if (!query.trim()) return;
+    setSearching(true); setResults([]); setSearchMsg('');
+    try {
+      const sess = await getIGSession(env);
+      if (!sess) { setSearchMsg('No IG session — connect in Settings → Accounts first.'); setSearching(false); return; }
+      const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(query.trim())}`, { headers: igH(sess, env) });
+      const data = await res.json() as { ok: boolean; markets?: Array<{ epic: string; instrumentName?: string; expiry?: string; dealingEnabled?: boolean }> };
+      const hits = (data.markets ?? [])
+        .filter(m => m.epic.startsWith('CS.D.') && m.dealingEnabled !== false)
+        .map(m => ({
+          ticker: query.trim().toUpperCase(),
+          name: m.instrumentName ?? query.trim().toUpperCase(),
+          epic: m.epic,
+          expiry: m.expiry ?? '-',
+          available24h: (m.expiry ?? '').toUpperCase().includes('CASH') || (m.instrumentName ?? '').toLowerCase().includes('24'),
+          addedAt: new Date().toISOString(),
+        } satisfies IGInstrument));
+      setResults(hits);
+      if (!hits.length) setSearchMsg(`No spread-bet instruments found for "${query.trim()}"`);
+    } catch (e) {
+      setSearchMsg(e instanceof Error ? e.message : 'Search failed');
+    }
+    setSearching(false);
+  }
+
+  const savedEpics = new Set(instruments.map(i => i.epic));
+
+  return (
+    <Card className="p-0">
+      <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm font-semibold text-white">
+          <Zap className="h-4 w-4 text-orange-400" /> Tradeable Instruments
+        </div>
+        <span className="text-[10px] text-gray-500">{instruments.length} saved — engine uses these first</span>
+      </div>
+
+      {/* Search */}
+      <div className="px-4 py-3 border-b border-gray-800">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') void handleSearch(); }}
+            placeholder="Search by ticker or company name (e.g. BYND, Beyond Meat)"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
+          />
+          <Button size="sm" loading={searching} onClick={() => void handleSearch()} icon={<Search className="h-3.5 w-3.5" />}>
+            Search IG
+          </Button>
+        </div>
+        {searchMsg && <p className="text-[11px] text-gray-500 mt-2">{searchMsg}</p>}
+
+        {/* Search results */}
+        {results.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {results.map(r => (
+              <div key={r.epic} className="flex items-center justify-between bg-gray-800/60 rounded-lg px-3 py-2">
+                <div>
+                  <span className="text-xs font-semibold text-white">{r.epic}</span>
+                  <span className="text-[11px] text-gray-400 ml-2">{r.name}</span>
+                  {r.available24h && <span className="ml-2 text-[9px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1 py-0.5 rounded">24h</span>}
+                </div>
+                {savedEpics.has(r.epic) ? (
+                  <span className="text-[10px] text-gray-500">Saved</span>
+                ) : (
+                  <Button size="sm" onClick={() => { onAdd(r); setResults(rs => rs.filter(x => x.epic !== r.epic)); }}>
+                    Add
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Saved list */}
+      {instruments.length === 0 ? (
+        <div className="py-8 text-center">
+          <p className="text-xs text-gray-500">No instruments saved yet</p>
+          <p className="text-[11px] text-gray-600 mt-1">Search above to find stocks and add them — the engine will use your saved list to place trades reliably without live API lookups</p>
+        </div>
+      ) : (
+        <div className="divide-y divide-gray-800/60 max-h-64 overflow-y-auto">
+          {instruments.map(inst => (
+            <div key={inst.epic} className="flex items-center justify-between px-4 py-2.5 hover:bg-gray-800/20 transition-colors">
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="text-xs font-bold text-white w-14 flex-shrink-0">{inst.ticker}</span>
+                <div className="min-w-0">
+                  <p className="text-[11px] text-gray-400 truncate">{inst.name}</p>
+                  <p className="text-[10px] text-gray-600 font-mono">{inst.epic}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0 ml-3">
+                {inst.available24h && <span className="text-[9px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded">24h</span>}
+                <button onClick={() => onRemove(inst.epic)} disabled={engineRunning}
+                  className="text-gray-600 hover:text-red-400 transition-colors disabled:opacity-30">
+                  <XCircle className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function AutoTrader() {
@@ -524,6 +652,7 @@ export function AutoTrader() {
     autoTraderMaxDailyLoss, autoTraderMinScore, autoTraderUseLongs, autoTraderUseShorts,
     autoTraderIntervalMin, autoTraderLog, autoTraderDailyPnL, autoTraderDailyDate,
     autoTraderTotalPnL, autoTraderWins, autoTraderLosses,
+    igInstruments, addIGInstrument, removeIGInstrument,
     setAutoTraderEnabled, setAutoTraderEnv, setAutoTraderConfig,
     addAutoTradeLogEntry, resetAutoTraderDailyPnL,
   } = store;
@@ -568,6 +697,7 @@ export function AutoTrader() {
         useShorts:    s.autoTraderUseShorts,
         dailyPnL:     s.autoTraderDailyPnL,
         trackedSymbols: trackedOpenSymbols(s.autoTraderLog, s.autoTraderEnv),
+        savedInstruments: s.igInstruments,
         onAction:     setCurrentAction,
       });
 
@@ -882,8 +1012,17 @@ export function AutoTrader() {
           </Card>
         </div>
 
-        {/* Stats + recent log */}
+        {/* Stats + recent log + instruments */}
         <div className="lg:col-span-2 space-y-3">
+
+          {/* Saved Instruments */}
+          <IGInstrumentsCard
+            instruments={igInstruments}
+            onAdd={addIGInstrument}
+            onRemove={removeIGInstrument}
+            env={autoTraderEnv}
+            engineRunning={autoTraderEnabled}
+          />
 
           {/* Stats grid */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
