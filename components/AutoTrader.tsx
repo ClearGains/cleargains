@@ -522,6 +522,9 @@ function ActionBadge({ action }: { action: TradeLogEntry['action'] }) {
 
 // ── Saved Instruments card ────────────────────────────────────────────────────
 
+type NavNode = { id: string; name: string };
+type NavMarket = { epic: string; instrumentName: string; expiry?: string; dealingEnabled?: boolean };
+
 function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }: {
   instruments: IGInstrument[];
   onAdd: (inst: IGInstrument) => void;
@@ -529,50 +532,41 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
   env: 'demo' | 'live';
   engineRunning: boolean;
 }) {
-  const [ticker, setTicker]   = useState('');
+  const [ticker, setTicker]         = useState('');
   const [manualEpic, setManualEpic] = useState('');
   const [manualName, setManualName] = useState('');
-  const [mode, setMode]       = useState<'suggest' | 'manual'>('suggest');
-  const [checking, setChecking] = useState(false);
+  const [mode, setMode]             = useState<'lookup' | 'manual' | 'import'>('lookup');
+  const [checking, setChecking]     = useState(false);
   const [suggestions, setSuggestions] = useState<IGInstrument[]>([]);
-  const [msg, setMsg]         = useState('');
+  const [msg, setMsg]               = useState('');
+  const [importing, setImporting]   = useState(false);
+  const [importProgress, setImportProgress] = useState('');
+  const [importFound, setImportFound] = useState(0);
+  const importCancelRef = useRef(false);
 
   const savedEpics = new Set(instruments.map(i => i.epic));
 
-  // Auto-suggest both common epic formats when user enters a ticker
   async function handleLookup() {
     const t = ticker.trim().toUpperCase();
     if (!t) return;
     setChecking(true); setSuggestions([]); setMsg('');
     const sess = await getIGSession(env);
     if (!sess) { setMsg('No IG session — connect in Settings → Accounts first.'); setChecking(false); return; }
-
-    // Try CASH.IP (24h) and TODAY.IP (market hours) formats
     const candidates: IGInstrument[] = [
       { ticker: t, name: `${t} (24 Hours)`,     epic: `CS.D.${t}.CASH.IP`,  expiry: 'CASH',  available24h: true,  addedAt: new Date().toISOString() },
       { ticker: t, name: `${t} (Market Hours)`, epic: `CS.D.${t}.TODAY.IP`, expiry: 'TODAY', available24h: false, addedAt: new Date().toISOString() },
     ];
-
-    // Verify each candidate via IG market search — keep whichever IG recognises
     const verified: IGInstrument[] = [];
     for (const c of candidates) {
       try {
-        const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(c.epic)}`, { headers: igH(sess, env) });
+        const res  = await fetch(`/api/ig/markets?q=${encodeURIComponent(c.epic)}`, { headers: igH(sess, env) });
         const data = await res.json() as { ok: boolean; markets?: Array<{ epic: string; instrumentName?: string; dealingEnabled?: boolean }> };
-        const hit = (data.markets ?? []).find(m => m.epic === c.epic && m.dealingEnabled !== false);
+        const hit  = (data.markets ?? []).find(m => m.epic === c.epic && m.dealingEnabled !== false);
         if (hit) verified.push({ ...c, name: hit.instrumentName ?? c.name });
       } catch { /* skip */ }
     }
-
-    if (verified.length) {
-      setSuggestions(verified);
-    } else {
-      // Nothing found — pre-fill manual entry so user can add from IG app
-      setManualEpic(`CS.D.${t}.CASH.IP`);
-      setManualName(`${t} (24 Hours)`);
-      setMode('manual');
-      setMsg(`IG search couldn't verify epics for "${t}" automatically. Check the IG app for the exact epic and enter it below.`);
-    }
+    if (verified.length) { setSuggestions(verified); }
+    else { setManualEpic(`CS.D.${t}.CASH.IP`); setManualName(`${t} (24 Hours)`); setMode('manual'); setMsg(`Could not auto-verify "${t}" — enter the epic from your IG app below.`); }
     setChecking(false);
   }
 
@@ -580,15 +574,63 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
     const t = ticker.trim().toUpperCase();
     const e = manualEpic.trim().toUpperCase();
     if (!t || !e) return;
-    onAdd({
-      ticker: t,
-      name: manualName.trim() || t,
-      epic: e,
+    onAdd({ ticker: t, name: manualName.trim() || t, epic: e,
       expiry: e.includes('CASH') ? 'CASH' : e.includes('TODAY') ? 'TODAY' : '-',
       available24h: e.includes('CASH') || manualName.toLowerCase().includes('24'),
-      addedAt: new Date().toISOString(),
-    });
-    setTicker(''); setManualEpic(''); setManualName(''); setMode('suggest'); setMsg(''); setSuggestions([]);
+      addedAt: new Date().toISOString() });
+    setTicker(''); setManualEpic(''); setManualName(''); setMode('lookup'); setMsg(''); setSuggestions([]);
+  }
+
+  async function handleImport() {
+    const sess = await getIGSession(env);
+    if (!sess) { setMsg('No IG session.'); return; }
+    setImporting(true); setImportFound(0); importCancelRef.current = false;
+    const h = igH(sess, env);
+
+    async function fetchNode(nodeId: string): Promise<{ nodes: NavNode[]; markets: NavMarket[] }> {
+      const res  = await fetch(`/api/ig/navigation?nodeId=${encodeURIComponent(nodeId)}`, { headers: h });
+      const data = await res.json() as { ok: boolean; nodes?: NavNode[]; markets?: NavMarket[] };
+      return { nodes: data.nodes ?? [], markets: data.markets ?? [] };
+    }
+
+    // Walk the navigation tree — collect all spread-bet (CS.D.*) stock markets
+    async function walk(nodeId: string, depth: number, label: string) {
+      if (importCancelRef.current || depth > 5) return;
+      setImportProgress(`Scanning ${label}…`);
+      const { nodes, markets } = await fetchNode(nodeId);
+
+      for (const m of markets) {
+        if (!m.epic.startsWith('CS.D.') || m.dealingEnabled === false) continue;
+        const parts   = m.epic.split('.');          // CS . D . TICKER . EXPIRY . IP
+        const tkr     = parts[2] ?? m.epic;
+        const expiry  = parts[3] ?? '-';
+        const is24h   = expiry === 'CASH' || m.instrumentName.toLowerCase().includes('24');
+        const inst: IGInstrument = { ticker: tkr, name: m.instrumentName, epic: m.epic, expiry, available24h: is24h, addedAt: new Date().toISOString() };
+        onAdd(inst);
+        setImportFound(n => n + 1);
+      }
+
+      for (const node of nodes) {
+        if (importCancelRef.current) break;
+        // Only recurse into share-related nodes
+        const nameLower = node.name.toLowerCase();
+        if (depth === 0 && !nameLower.includes('share') && !nameLower.includes('stock') && !nameLower.includes('equity')) continue;
+        await walk(node.id, depth + 1, node.name);
+      }
+    }
+
+    try {
+      // Start from root
+      const root = await fetchNode('');
+      for (const node of root.nodes) {
+        if (importCancelRef.current) break;
+        await walk(node.id, 0, node.name);
+      }
+      setImportProgress('');
+    } catch (e) {
+      setImportProgress(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setImporting(false);
   }
 
   return (
@@ -600,34 +642,31 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
         <span className="text-[10px] text-gray-500">{instruments.length} saved — engine uses these first</span>
       </div>
 
-      {/* Add form */}
-      <div className="px-4 py-3 border-b border-gray-800 space-y-2">
-
-        {/* Mode toggle */}
+      {/* Mode tabs */}
+      <div className="px-4 pt-3 pb-0">
         <div className="flex gap-1 bg-gray-800/50 rounded-lg p-0.5 w-fit">
-          {(['suggest', 'manual'] as const).map(m => (
+          {(['lookup', 'manual', 'import'] as const).map(m => (
             <button key={m} onClick={() => { setMode(m); setMsg(''); setSuggestions([]); }}
               className={clsx('px-3 py-1 rounded-md text-[10px] font-medium transition-all',
                 mode === m ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
               )}>
-              {m === 'suggest' ? 'Auto-lookup' : 'Manual entry'}
+              {m === 'lookup' ? 'Ticker lookup' : m === 'manual' ? 'Manual entry' : 'Import from IG'}
             </button>
           ))}
         </div>
+      </div>
 
-        {mode === 'suggest' ? (
+      <div className="px-4 py-3 border-b border-gray-800 space-y-2">
+        {mode === 'lookup' && (
           <>
             <div className="flex gap-2">
-              <input
-                type="text" value={ticker}
+              <input type="text" value={ticker}
                 onChange={e => { setTicker(e.target.value); setSuggestions([]); setMsg(''); }}
                 onKeyDown={e => { if (e.key === 'Enter') void handleLookup(); }}
-                placeholder="Ticker symbol, e.g. BYND"
+                placeholder="Enter ticker, e.g. BYND"
                 className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
               />
-              <Button size="sm" loading={checking} onClick={() => void handleLookup()} icon={<Search className="h-3.5 w-3.5" />}>
-                Look up
-              </Button>
+              <Button size="sm" loading={checking} onClick={() => void handleLookup()} icon={<Search className="h-3.5 w-3.5" />}>Look up</Button>
             </div>
             {msg && <p className="text-[11px] text-amber-400/80">{msg}</p>}
             {suggestions.map(s => (
@@ -639,14 +678,15 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
                 </div>
                 {savedEpics.has(s.epic)
                   ? <span className="text-[10px] text-gray-500 ml-3">Saved</span>
-                  : <Button size="sm" onClick={() => { onAdd(s); setSuggestions(ss => ss.filter(x => x.epic !== s.epic)); }}>Add</Button>
-                }
+                  : <Button size="sm" onClick={() => { onAdd(s); setSuggestions(ss => ss.filter(x => x.epic !== s.epic)); }}>Add</Button>}
               </div>
             ))}
           </>
-        ) : (
+        )}
+
+        {mode === 'manual' && (
           <div className="space-y-2">
-            <p className="text-[10px] text-gray-500">Find the instrument in the IG app, then enter its details:</p>
+            <p className="text-[10px] text-gray-500">Copy the epic from the IG spread bet app and paste it here.</p>
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="text-[10px] text-gray-500 mb-1 block">Ticker</label>
@@ -660,14 +700,42 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
               </div>
             </div>
             <div>
-              <label className="text-[10px] text-gray-500 mb-1 block">IG Epic — format: <span className="text-gray-300 font-mono">CS.D.BYND.CASH.IP</span> (24h) or <span className="text-gray-300 font-mono">CS.D.BYND.TODAY.IP</span> (market hours)</label>
+              <label className="text-[10px] text-gray-500 mb-1 block">
+                Epic — <span className="text-gray-400 font-mono">CS.D.BYND.CASH.IP</span> = 24h · <span className="text-gray-400 font-mono">CS.D.BYND.TODAY.IP</span> = market hours
+              </label>
               <input type="text" value={manualEpic} onChange={e => setManualEpic(e.target.value.toUpperCase())} placeholder="CS.D.BYND.CASH.IP"
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono placeholder-gray-600 focus:outline-none focus:border-orange-500" />
             </div>
             {msg && <p className="text-[11px] text-amber-400/80">{msg}</p>}
-            <Button size="sm" onClick={handleManualAdd} disabled={!ticker.trim() || !manualEpic.trim()}>
-              Add instrument
-            </Button>
+            <Button size="sm" onClick={handleManualAdd} disabled={!ticker.trim() || !manualEpic.trim()}>Add instrument</Button>
+          </div>
+        )}
+
+        {mode === 'import' && (
+          <div className="space-y-3">
+            <p className="text-[11px] text-gray-400 leading-relaxed">
+              Walks IG's full market navigation tree and saves every spread-bet stock your account has access to. Takes 1–3 minutes. Run once — results are saved permanently.
+            </p>
+            {importing ? (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs text-blue-400">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin flex-shrink-0" />
+                  <span>{importProgress || 'Scanning…'}</span>
+                </div>
+                <p className="text-[11px] text-gray-500">{importFound} instruments found so far</p>
+                <Button size="sm" variant="outline" onClick={() => { importCancelRef.current = true; }}
+                  className="border-red-500/30 text-red-400 hover:border-red-500/60">
+                  Stop import
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {importFound > 0 && <p className="text-[11px] text-emerald-400">{importFound} instruments imported successfully.</p>}
+                <Button size="sm" onClick={() => void handleImport()} icon={<RefreshCw className="h-3.5 w-3.5" />}>
+                  Import all from IG
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -676,7 +744,7 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
       {instruments.length === 0 ? (
         <div className="py-8 text-center">
           <p className="text-xs text-gray-500">No instruments saved yet</p>
-          <p className="text-[11px] text-gray-600 mt-1 px-4">Add stocks above — the engine uses this list to place trades without live API lookups each cycle</p>
+          <p className="text-[11px] text-gray-600 mt-1 px-4">Use Import from IG to pull your full list automatically, or add tickers one by one above</p>
         </div>
       ) : (
         <div className="divide-y divide-gray-800/60 max-h-64 overflow-y-auto">
