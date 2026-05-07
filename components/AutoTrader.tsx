@@ -10,6 +10,16 @@ import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { NewsStrip } from '@/components/ui/NewsStrip';
+
+function RankBadge({ rank }: { rank: number }) {
+  const cls =
+    rank === 1 ? 'text-yellow-400 border-yellow-500/50 bg-yellow-500/10' :
+    rank === 2 ? 'text-slate-300  border-slate-400/50  bg-slate-500/10'  :
+    rank === 3 ? 'text-orange-400 border-orange-500/50 bg-orange-600/10' :
+                 'text-gray-600   border-gray-700/50   bg-gray-800/40';
+  return <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded border shrink-0 tabular-nums', cls)}>#{rank}</span>;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -179,7 +189,7 @@ function NumInput({
 
 // ── Recommendation card ───────────────────────────────────────────────────────
 
-function RecommendationCard({ rec, stake }: { rec: Recommendation; stake: number }) {
+function RecommendationCard({ rec, stake, rank, total }: { rec: Recommendation; stake: number; rank?: number; total?: number }) {
   const isBuy = rec.direction === 'BUY';
   const [showReasons, setShowReasons] = useState(false);
 
@@ -196,6 +206,7 @@ function RecommendationCard({ rec, stake }: { rec: Recommendation; stake: number
             : <TrendingDown className="h-4 w-4 text-red-400 flex-shrink-0" />}
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
+              {rank !== undefined && <RankBadge rank={rank} />}
               <span className="text-sm font-bold text-white">{rec.symbol}</span>
               <span className={clsx(
                 'text-[9px] font-bold px-1.5 py-0.5 rounded border',
@@ -203,7 +214,7 @@ function RecommendationCard({ rec, stake }: { rec: Recommendation; stake: number
                        : 'bg-red-500/20 text-red-400 border-red-500/30',
               )}>{rec.direction}</span>
               <span className="text-[9px] text-gray-500 font-mono">{rec.signal}</span>
-              <span className="text-[9px] text-gray-600">score {rec.score}</span>
+              <span className="text-[9px] text-gray-600">score {rec.score}{total !== undefined ? ` · #${rank} of ${total}` : ''}</span>
             </div>
             <p className="text-[11px] text-gray-500 truncate mt-0.5">{rec.name}</p>
           </div>
@@ -265,6 +276,10 @@ function RecommendationCard({ rec, stake }: { rec: Recommendation; stake: number
           ))}
         </div>
       )}
+
+      <div className="border-t border-gray-800/60 pt-2">
+        <NewsStrip symbol={rec.symbol} />
+      </div>
     </div>
   );
 }
@@ -517,8 +532,8 @@ export function AutoTrader() {
                 </span>
               </div>
 
-              {recommendations.map(rec => (
-                <RecommendationCard key={rec.id} rec={rec} stake={autoTraderStake} />
+              {recommendations.map((rec, i) => (
+                <RecommendationCard key={rec.id} rec={rec} stake={autoTraderStake} rank={i + 1} total={recommendations.length} />
               ))}
             </>
           )}

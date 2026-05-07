@@ -3,6 +3,16 @@ import { useState, useCallback } from 'react';
 import { RefreshCw, AlertTriangle, AlertCircle, TrendingDown, Zap, Search } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { ShortCandidate, ShortsApiResponse } from '@/app/api/market/shorts/route';
+import { NewsStrip } from '@/components/ui/NewsStrip';
+
+function RankBadge({ rank }: { rank: number }) {
+  const cls =
+    rank === 1 ? 'text-yellow-400 border-yellow-500/50 bg-yellow-500/10' :
+    rank === 2 ? 'text-slate-300  border-slate-400/50  bg-slate-500/10'  :
+    rank === 3 ? 'text-orange-400 border-orange-500/50 bg-orange-600/10' :
+                 'text-gray-600   border-gray-700/50   bg-gray-800/40';
+  return <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded border shrink-0 tabular-nums', cls)}>#{rank}</span>;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -100,7 +110,7 @@ const SIG_STYLE = {
 
 // ── Short card ────────────────────────────────────────────────────────────────
 
-function ShortCard({ q }: { q: ShortCandidate }) {
+function ShortCard({ q, rank, total }: { q: ShortCandidate; rank?: number; total?: number }) {
   const sig       = SIG_STYLE[q.shortSignal];
   const overnight = q.extendedChangePercent;
   const isDayTrade  = q.category === 'daytrade';
@@ -118,6 +128,7 @@ function ShortCard({ q }: { q: ShortCandidate }) {
       <div className="flex items-start justify-between gap-2">
         <div>
           <div className="flex items-center gap-2 flex-wrap">
+            {rank !== undefined && <RankBadge rank={rank} />}
             <span className="font-bold text-white font-mono">{q.symbol}</span>
             {isDayTrade  && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">⚡ INTRADAY</span>}
             {isSmallCap  && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 border border-purple-500/30">🔬 SMALL CAP</span>}
@@ -210,6 +221,13 @@ function ShortCard({ q }: { q: ShortCandidate }) {
         </span>
         <span>· SMA50: {q.aboveSma50 ? 'above' : 'below'}</span>
         <span>· SMA200: {q.aboveSma200 ? 'above' : 'below'}</span>
+        {rank !== undefined && total !== undefined && (
+          <span className="ml-auto text-gray-700">#{rank} of {total} · score {q.shortScore}</span>
+        )}
+      </div>
+
+      <div className="border-t border-gray-800/60 pt-2">
+        <NewsStrip symbol={q.symbol} />
       </div>
     </div>
   );
@@ -239,7 +257,9 @@ function Section({
 
       {(strong.length > 0 || regular.length > 0) && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {[...strong, ...regular].map(q => <ShortCard key={`${q.symbol}-${q.category}`} q={q} />)}
+          {[...strong, ...regular].map((q, i) => (
+            <ShortCard key={`${q.symbol}-${q.category}`} q={q} rank={i + 1} total={strong.length + regular.length} />
+          ))}
         </div>
       )}
 

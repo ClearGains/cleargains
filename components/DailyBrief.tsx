@@ -7,6 +7,16 @@ import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
 import { TIMEFRAME_CONFIG, type Timeframe } from '@/lib/igStrategyEngine';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
 import type { LWCandle } from '@/lib/chartIndicators';
+import { NewsStrip } from '@/components/ui/NewsStrip';
+
+function RankBadge({ rank }: { rank: number }) {
+  const cls =
+    rank === 1 ? 'text-yellow-400 border-yellow-500/50 bg-yellow-500/10' :
+    rank === 2 ? 'text-slate-300  border-slate-400/50  bg-slate-500/10'  :
+    rank === 3 ? 'text-orange-400 border-orange-500/50 bg-orange-600/10' :
+                 'text-gray-600   border-gray-700/50   bg-gray-800/40';
+  return <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded border shrink-0 tabular-nums', cls)}>#{rank}</span>;
+}
 
 // ── Market universe ───────────────────────────────────────────────────────────
 
@@ -197,7 +207,7 @@ function QuoteCard({ row }: { row: QuoteRow }) {
 
 type IdeaSettings = { riskPerTrade: number; availableFunds: number; marginOverride: number | null };
 
-function IdeaCard({ idea, settings }: { idea: TradeIdea; settings: IdeaSettings }) {
+function IdeaCard({ idea, settings, rank, total }: { idea: TradeIdea; settings: IdeaSettings; rank?: number; total?: number }) {
   const [expanded, setExpanded] = useState(false);
   const isBuy = idea.direction === 'BUY';
   const borderColor = isBuy ? 'border-emerald-600/30' : 'border-red-600/30';
@@ -225,11 +235,15 @@ function IdeaCard({ idea, settings }: { idea: TradeIdea; settings: IdeaSettings 
       <button className="w-full text-left px-4 py-3" onClick={() => setExpanded(v => !v)}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 flex-wrap">
+            {rank !== undefined && <RankBadge rank={rank} />}
             <span className="font-bold text-white">{idea.market.name}</span>
             <span className={clsx('text-xs font-bold px-2 py-0.5 rounded-full', badgeBg)}>{idea.direction}</span>
             <span className={clsx('text-[10px] px-1.5 py-0.5 rounded border font-medium', typeColor(idea.market.type))}>{typeLabel(idea.market.type)}</span>
             <span className="text-xs text-gray-500">Confidence <span className={clsx('font-semibold', accentColor)}>{idea.confidence}/10</span></span>
             <span className="text-xs text-gray-500">R:R <span className="text-white font-semibold">{idea.riskReward.toFixed(1)}:1</span></span>
+            {rank !== undefined && total !== undefined && (
+              <span className="text-[10px] text-gray-600">#{rank} of {total}</span>
+            )}
           </div>
           {expanded ? <ChevronUp className="h-4 w-4 text-gray-500 shrink-0" /> : <ChevronDown className="h-4 w-4 text-gray-500 shrink-0" />}
         </div>
@@ -340,6 +354,10 @@ function IdeaCard({ idea, settings }: { idea: TradeIdea; settings: IdeaSettings 
           <div className="bg-red-950/20 border border-red-900/30 rounded-lg px-3 py-2">
             <div className="text-[10px] text-red-500 uppercase tracking-wide mb-0.5">Invalidation</div>
             <p className="text-xs text-red-400">{idea.setupUsed === 'swing' ? idea.analysis.swing.invalidation : idea.analysis.scalp.invalidation}</p>
+          </div>
+
+          <div className="border-t border-gray-800/60 pt-2">
+            <NewsStrip symbol={idea.market.yahooSymbol} />
           </div>
 
           <p className="text-[10px] text-gray-600">Rule-based analysis — not financial advice. Verify before trading. Spread betting involves significant risk of loss.</p>
@@ -541,6 +559,7 @@ export function DailyBrief() {
 
   const buyIdeas  = filteredIdeas.filter(i => i.direction === 'BUY');
   const sellIdeas = filteredIdeas.filter(i => i.direction === 'SELL');
+  const rankMap   = new Map(filteredIdeas.map((idea, i) => [`${idea.market.yahooSymbol}|${idea.direction}`, i + 1]));
 
   return (
     <div className="space-y-6">
@@ -675,7 +694,7 @@ export function DailyBrief() {
                 <TrendingUp className="h-3.5 w-3.5" /> BUY setups ({buyIdeas.length})
               </h3>
               <div className="space-y-2">
-                {buyIdeas.map(i => <IdeaCard key={i.market.yahooSymbol + i.direction} idea={i} settings={ideaSettings} />)}
+                {buyIdeas.map(i => <IdeaCard key={i.market.yahooSymbol + i.direction} idea={i} settings={ideaSettings} rank={rankMap.get(`${i.market.yahooSymbol}|${i.direction}`)} total={filteredIdeas.length} />)}
               </div>
             </div>
           )}
@@ -686,7 +705,7 @@ export function DailyBrief() {
                 <TrendingDown className="h-3.5 w-3.5" /> SELL setups ({sellIdeas.length})
               </h3>
               <div className="space-y-2">
-                {sellIdeas.map(i => <IdeaCard key={i.market.yahooSymbol + i.direction} idea={i} settings={ideaSettings} />)}
+                {sellIdeas.map(i => <IdeaCard key={i.market.yahooSymbol + i.direction} idea={i} settings={ideaSettings} rank={rankMap.get(`${i.market.yahooSymbol}|${i.direction}`)} total={filteredIdeas.length} />)}
               </div>
             </div>
           )}

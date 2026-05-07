@@ -4,6 +4,16 @@ import { RefreshCw, TrendingUp, TrendingDown, Zap, AlertCircle, BarChart2, Chevr
 import { clsx } from 'clsx';
 import type { Mover } from '@/app/api/market/movers/route';
 import type { PredictedMover } from '@/app/api/market/predicted/route';
+import { NewsStrip } from '@/components/ui/NewsStrip';
+
+function RankBadge({ rank }: { rank: number }) {
+  const cls =
+    rank === 1 ? 'text-yellow-400 border-yellow-500/50 bg-yellow-500/10' :
+    rank === 2 ? 'text-slate-300  border-slate-400/50  bg-slate-500/10'  :
+    rank === 3 ? 'text-orange-400 border-orange-500/50 bg-orange-600/10' :
+                 'text-gray-600   border-gray-700/50   bg-gray-800/40';
+  return <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded border shrink-0 tabular-nums', cls)}>#{rank}</span>;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -137,10 +147,11 @@ const SIGNAL_STYLE: Record<string, { bg: string; text: string; label: string }> 
 
 // ── Mover row ─────────────────────────────────────────────────────────────────
 
-function MoverRow({ q, showSignal, showExtended }: {
+function MoverRow({ q, showSignal, showExtended, rank }: {
   q: Mover & Partial<PredictedMover>;
   showSignal?: boolean;
   showExtended?: boolean;
+  rank?: number;
 }) {
   const [open, setOpen] = useState(false);
   const sig       = showSignal && q.signal ? SIGNAL_STYLE[q.signal] : null;
@@ -159,7 +170,10 @@ function MoverRow({ q, showSignal, showExtended }: {
         onClick={() => setOpen(o => !o)}
       >
         <td className="py-3 pr-3">
-          <div className="font-bold text-white text-sm font-mono">{q.symbol}</div>
+          <div className="flex items-center gap-1.5 mb-0.5">
+            {rank !== undefined && <RankBadge rank={rank} />}
+            <div className="font-bold text-white text-sm font-mono">{q.symbol}</div>
+          </div>
           <div className="text-gray-500 text-xs truncate max-w-[160px]">{q.name}</div>
         </td>
         <td className="py-3 px-2 text-right font-mono text-sm text-white">
@@ -219,8 +233,11 @@ function MoverRow({ q, showSignal, showExtended }: {
       </tr>
       {open && (
         <tr className="border-b border-gray-800/30 bg-gray-900/60">
-          <td colSpan={99} className="px-4 pb-3">
+          <td colSpan={99} className="px-4 pb-4 space-y-3">
             <TradeLevelsPanel q={q} direction={direction} />
+            <div className="border-t border-gray-800 pt-3">
+              <NewsStrip symbol={q.symbol} />
+            </div>
           </td>
         </tr>
       )}
@@ -270,7 +287,7 @@ function MoverTable({ rows, showSignal, showExtended, loading, error }: {
           </tr>
         </thead>
         <tbody>
-          {rows.map(q => <MoverRow key={q.symbol} q={q} showSignal={showSignal} showExtended={showExtended} />)}
+          {rows.map((q, i) => <MoverRow key={q.symbol} q={q} showSignal={showSignal} showExtended={showExtended} rank={i + 1} />)}
         </tbody>
       </table>
     </div>
@@ -279,7 +296,7 @@ function MoverTable({ rows, showSignal, showExtended, loading, error }: {
 
 // ── Predicted mover card ──────────────────────────────────────────────────────
 
-function PredictedCard({ q }: { q: PredictedMover }) {
+function PredictedCard({ q, rank, total }: { q: PredictedMover; rank?: number; total?: number }) {
   const sig      = SIGNAL_STYLE[q.signal];
   const overnight = q.extendedChangePercent;
   const hasLargeOvernight = overnight != null && Math.abs(overnight) > 4;
@@ -292,6 +309,7 @@ function PredictedCard({ q }: { q: PredictedMover }) {
       <div className="flex items-start justify-between gap-2">
         <div>
           <div className="flex items-center gap-2 flex-wrap">
+            {rank !== undefined && <RankBadge rank={rank} />}
             <span className="font-bold text-white font-mono">{q.symbol}</span>
             <span className={clsx('text-xs font-semibold', q.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
               {q.changePercent >= 0 ? '+' : ''}{q.changePercent.toFixed(2)}% close
@@ -378,6 +396,13 @@ function PredictedCard({ q }: { q: PredictedMover }) {
         <span>SMA50: {q.aboveSma50 ? 'above' : 'below'}</span>
         <span>·</span>
         <span>SMA200: {q.aboveSma200 ? 'above' : 'below'}</span>
+        {rank !== undefined && total !== undefined && (
+          <span className="ml-auto text-gray-700">Ranked #{rank} of {total} · score {q.score ?? '—'}</span>
+        )}
+      </div>
+
+      <div className="border-t border-gray-800/60 pt-2">
+        <NewsStrip symbol={q.symbol} />
       </div>
     </div>
   );
@@ -578,7 +603,7 @@ export function MarketMovers() {
                   </h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                     {predicted.filter(q => q.signal === 'STRONG_BUY' || q.signal === 'STRONG_SELL').map(q => (
-                      <PredictedCard key={q.symbol} q={q} />
+                      <PredictedCard key={q.symbol} q={q} rank={predicted.indexOf(q) + 1} total={predicted.length} />
                     ))}
                   </div>
                 </div>
