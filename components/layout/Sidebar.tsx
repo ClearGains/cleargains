@@ -27,6 +27,7 @@ import {
   Hash,
   Bot,
   FileText,
+  Star,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -40,6 +41,7 @@ const navLinks = [
   { href: '/market-movers',    label: 'Market Movers',    icon: TrendingUp  },
   { href: '/short-scanner',    label: 'Short Scanner',    icon: TrendingDown },
   { href: '/auto-trader',      label: 'Auto Trader',      icon: Bot         },
+  { href: '/reputable-stocks', label: 'Reputable Stocks',  icon: Star        },
   { href: '/trade-log',        label: 'Trade Log',        icon: FileText    },
   { href: '/daily-brief',      label: 'Daily Brief',      icon: Target      },
   { href: '/watchlist', label: 'Watchlist', icon: Bookmark },
