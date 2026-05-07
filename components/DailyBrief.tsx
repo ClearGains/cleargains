@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertCircle, ChevronDown, ChevronUp, Zap, AlertTriangle } from 'lucide-react';
 import { clsx } from 'clsx';
 import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
+import { TIMEFRAME_CONFIG, type Timeframe } from '@/lib/igStrategyEngine';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
 import type { LWCandle } from '@/lib/chartIndicators';
 
@@ -84,7 +85,41 @@ type TradeIdea = {
   riskReward:      number;
   confidence:      number;
   compositeScore:  number;
+  setupUsed:       'scalp' | 'swing';
 };
+
+type RawAnalysis = { market: MarketDef; row: QuoteRow; analysis: AnalysisResult };
+
+function buildIdeas(raws: RawAnalysis[], tf: Timeframe, riskPerTrade: number, minConf: number): TradeIdea[] {
+  const useSwing = tf === 'weekly' || tf === 'longterm';
+  const ideas: TradeIdea[] = [];
+  for (const { market, analysis } of raws) {
+    const setup = useSwing ? analysis.swing : analysis.scalp;
+    if (setup.direction === 'FLAT') continue;
+    if (setup.confidence < minConf) continue;
+    const direction = setup.direction === 'LONG' ? 'BUY' : 'SELL';
+    const pf           = market.priceFactor;
+    const igEntry      = setup.entry       * pf;
+    const igStopLoss   = setup.stopLoss    * pf;
+    const igTP1        = setup.takeProfit1 * pf;
+    const igTP2        = setup.takeProfit2 * pf;
+    const stopDistance = Math.abs(igEntry - igStopLoss);
+    const tp1Distance  = Math.abs(igTP1 - igEntry);
+    if (stopDistance < 0.001) continue;
+    const suggestedSize   = Math.max(0.01, riskPerTrade / stopDistance);
+    const estimatedMargin = suggestedSize * igEntry * market.marginPct;
+    ideas.push({
+      market, analysis, direction,
+      igEntry, igStopLoss, igTakeProfit1: igTP1, igTakeProfit2: igTP2,
+      stopDistance, tp1Distance, suggestedSize, estimatedMargin,
+      riskReward:     setup.riskReward,
+      confidence:     setup.confidence,
+      compositeScore: setup.confidence * setup.riskReward,
+      setupUsed:      useSwing ? 'swing' : 'scalp',
+    });
+  }
+  return ideas.sort((a, b) => b.compositeScore - a.compositeScore);
+}
 
 type IGLivePosition = {
   dealId:      string;
@@ -304,7 +339,7 @@ function IdeaCard({ idea, settings }: { idea: TradeIdea; settings: IdeaSettings 
           {/* Invalidation */}
           <div className="bg-red-950/20 border border-red-900/30 rounded-lg px-3 py-2">
             <div className="text-[10px] text-red-500 uppercase tracking-wide mb-0.5">Invalidation</div>
-            <p className="text-xs text-red-400">{idea.direction === 'BUY' ? idea.analysis.scalp.invalidation : idea.analysis.swing.invalidation}</p>
+            <p className="text-xs text-red-400">{idea.setupUsed === 'swing' ? idea.analysis.swing.invalidation : idea.analysis.scalp.invalidation}</p>
           </div>
 
           <p className="text-[10px] text-gray-600">Rule-based analysis — not financial advice. Verify before trading. Spread betting involves significant risk of loss.</p>
@@ -427,12 +462,18 @@ export function DailyBrief() {
   const [marginOverride,  setMarginOverride]  = useState('');
   const [filter,          setFilter]          = useState<string>('ALL');
   const [minConf,         setMinConf]         = useState(5);
+  const [timeframe,       setTimeframe]       = useState<Timeframe>('daily');
+  const [rawAnalyses,     setRawAnalyses]     = useState<RawAnalysis[]>([]);
 
   const ideaSettings: IdeaSettings = {
     riskPerTrade,
     availableFunds,
     marginOverride: marginOverride !== '' ? parseFloat(marginOverride) : null,
   };
+
+  useEffect(() => {
+    setTradeIdeas(buildIdeas(rawAnalyses, timeframe, riskPerTrade, minConf));
+  }, [rawAnalyses, timeframe, riskPerTrade, minConf]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -463,55 +504,26 @@ export function DailyBrief() {
       setQuotes(rows);
 
       // 2. Fetch candle history + run analysis for each market
-      const ideas: TradeIdea[] = [];
+      const raws: RawAnalysis[] = [];
       let done = 0;
 
       for (const row of rows) {
         setProgress(`Analysing ${row.market.name}… (${++done}/${rows.length})`);
-
         try {
           const hRes = await fetch(`/api/chart/history?symbol=${encodeURIComponent(row.market.yahooSymbol)}&resolution=3M`);
           if (!hRes.ok) continue;
           const hData = await hRes.json() as { candles?: LWCandle[] };
           const candles = hData.candles ?? [];
           if (candles.length < 20) continue;
-
           const analysis = ruleBasedAnalysis(row.market.yahooSymbol, candles);
           if (analysis.bias === 'NEUTRAL') continue;
-          if (analysis.scalp.direction === 'FLAT') continue;
-          if (analysis.scalp.confidence < minConf) continue;
-
-          const direction = analysis.bias === 'BULLISH' ? 'BUY' : 'SELL';
-          const pf        = row.market.priceFactor;
-
-          const igEntry      = analysis.scalp.entry      * pf;
-          const igStopLoss   = analysis.scalp.stopLoss   * pf;
-          const igTP1        = analysis.scalp.takeProfit1 * pf;
-          const igTP2        = analysis.scalp.takeProfit2 * pf;
-
-          const stopDistance = Math.abs(igEntry - igStopLoss);
-          const tp1Distance  = Math.abs(igTP1 - igEntry);
-          if (stopDistance < 0.001) continue;
-
-          const suggestedSize    = Math.max(0.01, riskPerTrade / stopDistance);
-          const estimatedMargin  = suggestedSize * igEntry * row.market.marginPct;
-          const compositeScore   = analysis.scalp.confidence * analysis.scalp.riskReward;
-
-          ideas.push({
-            market: row.market, analysis, direction,
-            igEntry, igStopLoss, igTakeProfit1: igTP1, igTakeProfit2: igTP2,
-            stopDistance, tp1Distance, suggestedSize, estimatedMargin,
-            riskReward: analysis.scalp.riskReward,
-            confidence: analysis.scalp.confidence,
-            compositeScore,
-          });
+          if (analysis.scalp.direction === 'FLAT' && analysis.swing.direction === 'FLAT') continue;
+          raws.push({ market: row.market, row, analysis });
         } catch { /* skip market */ }
-
         await new Promise(r => setTimeout(r, 150));
       }
 
-      ideas.sort((a, b) => b.compositeScore - a.compositeScore);
-      setTradeIdeas(ideas);
+      setRawAnalyses(raws);
       setLastRefresh(new Date());
       setProgress('');
     } catch (e) {
@@ -520,7 +532,7 @@ export function DailyBrief() {
     } finally {
       setLoading(false);
     }
-  }, [riskPerTrade, minConf]);
+  }, []);
 
   useEffect(() => { refresh(); }, []); // eslint-disable-line
 
@@ -555,6 +567,18 @@ export function DailyBrief() {
               className="w-8 bg-transparent text-white text-sm font-mono focus:outline-none"
             />
             <span className="text-xs text-gray-500">/10</span>
+          </div>
+          <div className="flex items-center gap-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5">
+            <span className="text-xs text-gray-500">Timeframe</span>
+            <select
+              value={timeframe}
+              onChange={e => setTimeframe(e.target.value as Timeframe)}
+              className="bg-transparent text-white text-xs font-medium focus:outline-none cursor-pointer"
+            >
+              {(Object.keys(TIMEFRAME_CONFIG) as Timeframe[]).map(tf => (
+                <option key={tf} value={tf} className="bg-gray-900 text-white">{TIMEFRAME_CONFIG[tf].label}</option>
+              ))}
+            </select>
           </div>
           <div className="flex items-center gap-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5">
             <span className="text-xs text-gray-500">Available funds</span>
@@ -642,7 +666,7 @@ export function DailyBrief() {
       {(buyIdeas.length > 0 || sellIdeas.length > 0) && (
         <section className="space-y-6">
           <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-            Trade Ideas — {filteredIdeas.length} setup{filteredIdeas.length !== 1 ? 's' : ''} · £{riskPerTrade} risk/trade{availableFunds > 0 ? ` · £${availableFunds} funds` : ''}
+            Trade Ideas — {filteredIdeas.length} setup{filteredIdeas.length !== 1 ? 's' : ''} · {TIMEFRAME_CONFIG[timeframe].label} · £{riskPerTrade} risk/trade{availableFunds > 0 ? ` · £${availableFunds} funds` : ''}
           </h2>
 
           {buyIdeas.length > 0 && (
