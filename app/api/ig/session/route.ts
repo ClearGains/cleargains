@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { publicEncrypt, constants } from 'crypto';
 
 /** In-memory token cache: { cacheKey → { cst, securityToken, accountId, accounts, expiresAt } } */
 const tokenCache = new Map<string, {
@@ -10,6 +11,18 @@ const tokenCache = new Map<string, {
 }>();
 
 const TOKEN_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours (IG tokens last 6h; refresh before expiry)
+
+// IG migrated-account auth: fetch RSA key then encrypt password|timestamp
+async function getEncryptedPassword(baseUrl: string, apiKey: string, password: string): Promise<string> {
+  const keyRes = await fetch(`${baseUrl}/session/encryptionKey`, {
+    headers: { 'X-IG-API-KEY': apiKey, 'Version': '1', 'Accept': 'application/json; charset=UTF-8' },
+  });
+  if (!keyRes.ok) throw new Error(`IG encryption key fetch failed (${keyRes.status})`);
+  const { encryptionKey, timeStamp } = await keyRes.json() as { encryptionKey: string; timeStamp: string };
+  const pem = `-----BEGIN PUBLIC KEY-----\n${encryptionKey}\n-----END PUBLIC KEY-----`;
+  const encrypted = publicEncrypt({ key: pem, padding: constants.RSA_PKCS1_PADDING }, Buffer.from(`${password}|${timeStamp}`));
+  return encrypted.toString('base64');
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -44,7 +57,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const res = await fetch(`${baseUrl}/session`, {
+    let res = await fetch(`${baseUrl}/session`, {
       method: 'POST',
       headers: {
         'X-IG-API-KEY': apiKey,
@@ -54,6 +67,32 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({ identifier: username, password }),
     });
+
+    // Migrated accounts require RSA-encrypted password — retry automatically
+    if (!res.ok) {
+      const text = await res.text();
+      let errorCode = '';
+      try { errorCode = (JSON.parse(text) as { errorCode?: string }).errorCode ?? ''; } catch { /* noop */ }
+
+      if (errorCode.includes('account-migrated')) {
+        try {
+          const encPwd = await getEncryptedPassword(baseUrl, apiKey, password);
+          res = await fetch(`${baseUrl}/session`, {
+            method: 'POST',
+            headers: {
+              'X-IG-API-KEY': apiKey,
+              'Content-Type': 'application/json',
+              'Accept': 'application/json; charset=UTF-8',
+              'Version': '2',
+            },
+            body: JSON.stringify({ identifier: username, password: encPwd, encryptedPassword: true }),
+          });
+        } catch (encErr) {
+          tokenCache.delete(`${env}:${username}:${apiKey}`);
+          return NextResponse.json({ ok: false, error: `IG account migrated — encrypted auth failed: ${encErr instanceof Error ? encErr.message : String(encErr)}` }, { status: 401 });
+        }
+      }
+    }
 
     if (!res.ok) {
       const text = await res.text();
