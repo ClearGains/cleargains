@@ -8,7 +8,7 @@ import { NewsStrip } from '@/components/ui/NewsStrip';
 // ── Universe ──────────────────────────────────────────────────────────────────
 
 type Volatility = 'LOW' | 'MEDIUM' | 'HIGH';
-type Market     = 'US_TECH' | 'US_FINANCE' | 'US_DEFENSIVE' | 'US_ENERGY' | 'UK' | 'ETF';
+type Market     = 'US_TECH' | 'US_SEMI' | 'US_FINANCE' | 'US_DEFENSIVE' | 'US_ENERGY' | 'UK' | 'ETF';
 
 type StockDef = {
   symbol:     string;
@@ -26,8 +26,19 @@ const UNIVERSE: StockDef[] = [
   { symbol: 'GOOGL', name: 'Alphabet',         market: 'US_TECH',       volatility: 'MEDIUM', sector: 'Technology',  why: 'Search monopoly + YouTube + Google Cloud — cash-generative at scale' },
   { symbol: 'AMZN',  name: 'Amazon',           market: 'US_TECH',       volatility: 'MEDIUM', sector: 'Technology',  why: 'AWS provides 60%+ of operating profit; e-commerce moat worldwide' },
   { symbol: 'META',  name: 'Meta Platforms',   market: 'US_TECH',       volatility: 'MEDIUM', sector: 'Technology',  why: '3.3B daily active users across Facebook/Instagram/WhatsApp' },
-  { symbol: 'NVDA',  name: 'NVIDIA',           market: 'US_TECH',       volatility: 'HIGH',   sector: 'Technology',  why: 'Dominant AI/GPU chip maker; data-centre demand surging multi-year' },
+  { symbol: 'NVDA',  name: 'NVIDIA',           market: 'US_SEMI',       volatility: 'HIGH',   sector: 'AI / GPU',    why: 'Dominant AI/GPU chip maker; H100/H200 data-centre demand surging multi-year' },
   { symbol: 'TSLA',  name: 'Tesla',            market: 'US_TECH',       volatility: 'HIGH',   sector: 'Automotive',  why: 'EV and energy storage market leader; expanding into FSD and robotics' },
+  // AI, Semiconductors & Storage
+  { symbol: 'AMD',   name: 'Advanced Micro Devices', market: 'US_SEMI', volatility: 'HIGH',   sector: 'AI / GPU',    why: 'MI300 AI GPU challenging NVIDIA; dominant PC and server CPU share gains' },
+  { symbol: 'MU',    name: 'Micron Technology', market: 'US_SEMI',      volatility: 'HIGH',   sector: 'Memory / AI', why: 'HBM3e memory essential for AI inference; cycle recovery + pricing power' },
+  { symbol: 'STX',   name: 'Seagate Technology',market: 'US_SEMI',      volatility: 'MEDIUM', sector: 'Storage',     why: 'Hard-drive market leader; mass-capacity storage demand driven by AI data lakes' },
+  { symbol: 'WDC',   name: 'Western Digital',   market: 'US_SEMI',      volatility: 'HIGH',   sector: 'Storage',     why: 'HDD + NAND flash; AI cloud build-out is a multi-year tailwind for capacity demand' },
+  { symbol: 'AVGO',  name: 'Broadcom',          market: 'US_SEMI',      volatility: 'MEDIUM', sector: 'AI Networking',why: 'Custom AI chips (XPUs) for Google/Meta + dominant networking silicon' },
+  { symbol: 'QCOM',  name: 'Qualcomm',          market: 'US_SEMI',      volatility: 'MEDIUM', sector: 'Mobile / Edge AI', why: 'Snapdragon on-device AI leader; licensing moat + auto/IoT diversification' },
+  { symbol: 'INTC',  name: 'Intel',             market: 'US_SEMI',      volatility: 'MEDIUM', sector: 'Semiconductors', why: 'Deep discount to peers; foundry strategy + Panther Lake recovery catalyst' },
+  { symbol: 'ASML',  name: 'ASML Holding',      market: 'US_SEMI',      volatility: 'MEDIUM', sector: 'Chip Equipment', why: 'Monopoly on EUV lithography — every advanced chip on earth needs ASML machines' },
+  { symbol: 'AMAT',  name: 'Applied Materials', market: 'US_SEMI',      volatility: 'MEDIUM', sector: 'Chip Equipment', why: 'Largest semiconductor equipment maker; benefits from every new fab built globally' },
+  { symbol: 'PLTR',  name: 'Palantir',          market: 'US_SEMI',      volatility: 'HIGH',   sector: 'AI Software',  why: 'AIP AI platform winning enterprise and US government contracts at scale' },
   // US Finance
   { symbol: 'JPM',   name: 'JPMorgan Chase',   market: 'US_FINANCE',    volatility: 'MEDIUM', sector: 'Finance',     why: "World's largest bank by assets; best-in-class capital allocation" },
   { symbol: 'GS',    name: 'Goldman Sachs',    market: 'US_FINANCE',    volatility: 'MEDIUM', sector: 'Finance',     why: 'Premier investment bank; benefits from high-rate trading and M&A' },
@@ -103,6 +114,7 @@ type StockRow = StockDef & QuoteData & {
 
 const MARKET_LABELS: Record<Market, string> = {
   US_TECH:      'US Tech',
+  US_SEMI:      'AI & Semis',
   US_FINANCE:   'US Finance',
   US_DEFENSIVE: 'US Defensive',
   US_ENERGY:    'US Energy',
@@ -258,6 +270,7 @@ type MarketFilter = 'ALL' | Market;
 
 const FILTER_TABS: { value: MarketFilter; label: string }[] = [
   { value: 'ALL',          label: 'All' },
+  { value: 'US_SEMI',      label: 'AI & Semis' },
   { value: 'US_TECH',      label: 'US Tech' },
   { value: 'US_FINANCE',   label: 'US Finance' },
   { value: 'US_DEFENSIVE', label: 'US Defensive' },
