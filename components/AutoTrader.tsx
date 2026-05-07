@@ -11,7 +11,7 @@ import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { IG_STOCK_EPICS, tickerToEpic } from '@/lib/ig-stock-epics';
+import { IG_STOCK_EPICS } from '@/lib/ig-stock-epics';
 import type { TradeLogEntry } from '@/lib/types';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -198,6 +198,37 @@ function trackedOpenSymbols(log: TradeLogEntry[], env: 'demo' | 'live'): Set<str
 function newId() { return `at_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`; }
 function nowTs() { return new Date().toISOString(); }
 
+// Module-level epic cache: ticker → epic string, or null if not on IG spread bets
+const epicCache = new Map<string, string | null>();
+
+async function resolveEpic(ticker: string, sess: IGSession, env: 'demo' | 'live'): Promise<string | null> {
+  // 1. Static map first (fastest, most reliable)
+  const known = IG_STOCK_EPICS[ticker];
+  if (known) return known.epic;
+
+  // 2. In-memory cache
+  if (epicCache.has(ticker)) return epicCache.get(ticker)!;
+
+  // 3. Search IG markets API
+  try {
+    const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(ticker)}`, {
+      headers: igH(sess, env),
+    });
+    if (!res.ok) { epicCache.set(ticker, null); return null; }
+    const data = await res.json() as { ok: boolean; markets?: Array<{ epic: string; dealingEnabled?: boolean; instrumentType?: string }> };
+    // Find a spread-bet daily-funded-bet epic: CS.D.{TICKER}.TODAY.IP or CS.D.{TICKER}.*.IP
+    const match = (data.markets ?? []).find(
+      m => m.epic.startsWith('CS.D.') && m.epic.toUpperCase().includes(ticker.toUpperCase()) && m.dealingEnabled !== false
+    );
+    const epic = match?.epic ?? null;
+    epicCache.set(ticker, epic);
+    return epic;
+  } catch {
+    epicCache.set(ticker, null);
+    return null;
+  }
+}
+
 // ── Core trading cycle ────────────────────────────────────────────────────────
 
 type CycleParams = {
@@ -334,10 +365,14 @@ async function runCycle(p: CycleParams): Promise<CycleResult> {
       continue;
     }
 
-    const info = IG_STOCK_EPICS[cleanSym];
-    const epic = info?.epic ?? tickerToEpic(cleanSym);
-    const levels = calcLevels(sig.price, sig.dayHigh, sig.dayLow, sig.direction);
+    p.onAction(`Resolving epic for ${sig.symbol}…`);
+    const epic = await resolveEpic(cleanSym, sess, p.env);
+    if (!epic) {
+      entries.push({ id: newId(), ts: nowTs(), action: 'SKIP', symbol: sig.symbol, env: p.env, reason: 'Not available for spread betting on IG — skipped' });
+      continue;
+    }
 
+    const levels = calcLevels(sig.price, sig.dayHigh, sig.dayLow, sig.direction);
     p.onAction(`Placing ${sig.direction === 'BUY' ? 'LONG' : 'SHORT'}: ${sig.symbol} @ ${sig.price.toFixed(2)}…`);
 
     try {
