@@ -529,38 +529,67 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
   env: 'demo' | 'live';
   engineRunning: boolean;
 }) {
-  const [query, setQuery]     = useState('');
-  const [results, setResults] = useState<IGInstrument[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [searchMsg, setSearchMsg] = useState('');
-
-  async function handleSearch() {
-    if (!query.trim()) return;
-    setSearching(true); setResults([]); setSearchMsg('');
-    try {
-      const sess = await getIGSession(env);
-      if (!sess) { setSearchMsg('No IG session — connect in Settings → Accounts first.'); setSearching(false); return; }
-      const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(query.trim())}`, { headers: igH(sess, env) });
-      const data = await res.json() as { ok: boolean; markets?: Array<{ epic: string; instrumentName?: string; expiry?: string; dealingEnabled?: boolean }> };
-      const hits = (data.markets ?? [])
-        .filter(m => m.epic.startsWith('CS.D.') && m.dealingEnabled !== false)
-        .map(m => ({
-          ticker: query.trim().toUpperCase(),
-          name: m.instrumentName ?? query.trim().toUpperCase(),
-          epic: m.epic,
-          expiry: m.expiry ?? '-',
-          available24h: (m.expiry ?? '').toUpperCase().includes('CASH') || (m.instrumentName ?? '').toLowerCase().includes('24'),
-          addedAt: new Date().toISOString(),
-        } satisfies IGInstrument));
-      setResults(hits);
-      if (!hits.length) setSearchMsg(`No spread-bet instruments found for "${query.trim()}"`);
-    } catch (e) {
-      setSearchMsg(e instanceof Error ? e.message : 'Search failed');
-    }
-    setSearching(false);
-  }
+  const [ticker, setTicker]   = useState('');
+  const [manualEpic, setManualEpic] = useState('');
+  const [manualName, setManualName] = useState('');
+  const [mode, setMode]       = useState<'suggest' | 'manual'>('suggest');
+  const [checking, setChecking] = useState(false);
+  const [suggestions, setSuggestions] = useState<IGInstrument[]>([]);
+  const [msg, setMsg]         = useState('');
 
   const savedEpics = new Set(instruments.map(i => i.epic));
+
+  // Auto-suggest both common epic formats when user enters a ticker
+  async function handleLookup() {
+    const t = ticker.trim().toUpperCase();
+    if (!t) return;
+    setChecking(true); setSuggestions([]); setMsg('');
+    const sess = await getIGSession(env);
+    if (!sess) { setMsg('No IG session — connect in Settings → Accounts first.'); setChecking(false); return; }
+
+    // Try CASH.IP (24h) and TODAY.IP (market hours) formats
+    const candidates: IGInstrument[] = [
+      { ticker: t, name: `${t} (24 Hours)`,     epic: `CS.D.${t}.CASH.IP`,  expiry: 'CASH',  available24h: true,  addedAt: new Date().toISOString() },
+      { ticker: t, name: `${t} (Market Hours)`, epic: `CS.D.${t}.TODAY.IP`, expiry: 'TODAY', available24h: false, addedAt: new Date().toISOString() },
+    ];
+
+    // Verify each candidate via IG market search — keep whichever IG recognises
+    const verified: IGInstrument[] = [];
+    for (const c of candidates) {
+      try {
+        const res = await fetch(`/api/ig/markets?q=${encodeURIComponent(c.epic)}`, { headers: igH(sess, env) });
+        const data = await res.json() as { ok: boolean; markets?: Array<{ epic: string; instrumentName?: string; dealingEnabled?: boolean }> };
+        const hit = (data.markets ?? []).find(m => m.epic === c.epic && m.dealingEnabled !== false);
+        if (hit) verified.push({ ...c, name: hit.instrumentName ?? c.name });
+      } catch { /* skip */ }
+    }
+
+    if (verified.length) {
+      setSuggestions(verified);
+    } else {
+      // Nothing found — pre-fill manual entry so user can add from IG app
+      setManualEpic(`CS.D.${t}.CASH.IP`);
+      setManualName(`${t} (24 Hours)`);
+      setMode('manual');
+      setMsg(`IG search couldn't verify epics for "${t}" automatically. Check the IG app for the exact epic and enter it below.`);
+    }
+    setChecking(false);
+  }
+
+  function handleManualAdd() {
+    const t = ticker.trim().toUpperCase();
+    const e = manualEpic.trim().toUpperCase();
+    if (!t || !e) return;
+    onAdd({
+      ticker: t,
+      name: manualName.trim() || t,
+      epic: e,
+      expiry: e.includes('CASH') ? 'CASH' : e.includes('TODAY') ? 'TODAY' : '-',
+      available24h: e.includes('CASH') || manualName.toLowerCase().includes('24'),
+      addedAt: new Date().toISOString(),
+    });
+    setTicker(''); setManualEpic(''); setManualName(''); setMode('suggest'); setMsg(''); setSuggestions([]);
+  }
 
   return (
     <Card className="p-0">
@@ -571,42 +600,74 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
         <span className="text-[10px] text-gray-500">{instruments.length} saved — engine uses these first</span>
       </div>
 
-      {/* Search */}
-      <div className="px-4 py-3 border-b border-gray-800">
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') void handleSearch(); }}
-            placeholder="Search by ticker or company name (e.g. BYND, Beyond Meat)"
-            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
-          />
-          <Button size="sm" loading={searching} onClick={() => void handleSearch()} icon={<Search className="h-3.5 w-3.5" />}>
-            Search IG
-          </Button>
-        </div>
-        {searchMsg && <p className="text-[11px] text-gray-500 mt-2">{searchMsg}</p>}
+      {/* Add form */}
+      <div className="px-4 py-3 border-b border-gray-800 space-y-2">
 
-        {/* Search results */}
-        {results.length > 0 && (
-          <div className="mt-2 space-y-1">
-            {results.map(r => (
-              <div key={r.epic} className="flex items-center justify-between bg-gray-800/60 rounded-lg px-3 py-2">
+        {/* Mode toggle */}
+        <div className="flex gap-1 bg-gray-800/50 rounded-lg p-0.5 w-fit">
+          {(['suggest', 'manual'] as const).map(m => (
+            <button key={m} onClick={() => { setMode(m); setMsg(''); setSuggestions([]); }}
+              className={clsx('px-3 py-1 rounded-md text-[10px] font-medium transition-all',
+                mode === m ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
+              )}>
+              {m === 'suggest' ? 'Auto-lookup' : 'Manual entry'}
+            </button>
+          ))}
+        </div>
+
+        {mode === 'suggest' ? (
+          <>
+            <div className="flex gap-2">
+              <input
+                type="text" value={ticker}
+                onChange={e => { setTicker(e.target.value); setSuggestions([]); setMsg(''); }}
+                onKeyDown={e => { if (e.key === 'Enter') void handleLookup(); }}
+                placeholder="Ticker symbol, e.g. BYND"
+                className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
+              />
+              <Button size="sm" loading={checking} onClick={() => void handleLookup()} icon={<Search className="h-3.5 w-3.5" />}>
+                Look up
+              </Button>
+            </div>
+            {msg && <p className="text-[11px] text-amber-400/80">{msg}</p>}
+            {suggestions.map(s => (
+              <div key={s.epic} className="flex items-center justify-between bg-gray-800/60 rounded-lg px-3 py-2">
                 <div>
-                  <span className="text-xs font-semibold text-white">{r.epic}</span>
-                  <span className="text-[11px] text-gray-400 ml-2">{r.name}</span>
-                  {r.available24h && <span className="ml-2 text-[9px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1 py-0.5 rounded">24h</span>}
+                  <span className="text-xs font-semibold text-white font-mono">{s.epic}</span>
+                  <span className="text-[11px] text-gray-400 ml-2">{s.name}</span>
+                  {s.available24h && <span className="ml-2 text-[9px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded">24h</span>}
                 </div>
-                {savedEpics.has(r.epic) ? (
-                  <span className="text-[10px] text-gray-500">Saved</span>
-                ) : (
-                  <Button size="sm" onClick={() => { onAdd(r); setResults(rs => rs.filter(x => x.epic !== r.epic)); }}>
-                    Add
-                  </Button>
-                )}
+                {savedEpics.has(s.epic)
+                  ? <span className="text-[10px] text-gray-500 ml-3">Saved</span>
+                  : <Button size="sm" onClick={() => { onAdd(s); setSuggestions(ss => ss.filter(x => x.epic !== s.epic)); }}>Add</Button>
+                }
               </div>
             ))}
+          </>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-[10px] text-gray-500">Find the instrument in the IG app, then enter its details:</p>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-[10px] text-gray-500 mb-1 block">Ticker</label>
+                <input type="text" value={ticker} onChange={e => setTicker(e.target.value.toUpperCase())} placeholder="BYND"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
+              </div>
+              <div>
+                <label className="text-[10px] text-gray-500 mb-1 block">Display name</label>
+                <input type="text" value={manualName} onChange={e => setManualName(e.target.value)} placeholder="Beyond Meat Inc"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] text-gray-500 mb-1 block">IG Epic — format: <span className="text-gray-300 font-mono">CS.D.BYND.CASH.IP</span> (24h) or <span className="text-gray-300 font-mono">CS.D.BYND.TODAY.IP</span> (market hours)</label>
+              <input type="text" value={manualEpic} onChange={e => setManualEpic(e.target.value.toUpperCase())} placeholder="CS.D.BYND.CASH.IP"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono placeholder-gray-600 focus:outline-none focus:border-orange-500" />
+            </div>
+            {msg && <p className="text-[11px] text-amber-400/80">{msg}</p>}
+            <Button size="sm" onClick={handleManualAdd} disabled={!ticker.trim() || !manualEpic.trim()}>
+              Add instrument
+            </Button>
           </div>
         )}
       </div>
@@ -615,12 +676,12 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
       {instruments.length === 0 ? (
         <div className="py-8 text-center">
           <p className="text-xs text-gray-500">No instruments saved yet</p>
-          <p className="text-[11px] text-gray-600 mt-1">Search above to find stocks and add them — the engine will use your saved list to place trades reliably without live API lookups</p>
+          <p className="text-[11px] text-gray-600 mt-1 px-4">Add stocks above — the engine uses this list to place trades without live API lookups each cycle</p>
         </div>
       ) : (
         <div className="divide-y divide-gray-800/60 max-h-64 overflow-y-auto">
           {instruments.map(inst => (
-            <div key={inst.epic} className="flex items-center justify-between px-4 py-2.5 hover:bg-gray-800/20 transition-colors">
+            <div key={inst.epic} className="flex items-center justify-between px-4 py-2.5 hover:bg-gray-800/20">
               <div className="flex items-center gap-3 min-w-0">
                 <span className="text-xs font-bold text-white w-14 flex-shrink-0">{inst.ticker}</span>
                 <div className="min-w-0">
