@@ -59,97 +59,77 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    console.log(`[ig/session] ${env} login attempt for identifier="${username}" baseUrl=${baseUrl}`);
-
-    let res = await fetch(`${baseUrl}/session`, {
-      method: 'POST',
-      headers: {
-        'X-IG-API-KEY': apiKey,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json; charset=UTF-8',
-        'Version': '2',
-      },
-      body: JSON.stringify({ identifier: username, password }),
-    });
-
-    // Migrated accounts require RSA-encrypted password — retry automatically
-    if (!res.ok) {
-      const text = await res.text();
-      let errorCode = '';
-      try { errorCode = (JSON.parse(text) as { errorCode?: string }).errorCode ?? ''; } catch { /* noop */ }
-      console.log(`[ig/session] plain-password attempt failed: status=${res.status} errorCode="${errorCode}" body=${text.slice(0, 300)}`);
-
-      if (errorCode.includes('account-migrated')) {
-        console.log(`[ig/session] account-migrated detected — attempting encrypted-password retry`);
-        try {
-          const encPwd = await getEncryptedPassword(baseUrl, apiKey, password);
-          console.log(`[ig/session] encrypted password obtained (length=${encPwd.length}), retrying session`);
-          const encRes = await fetch(`${baseUrl}/session`, {
-            method: 'POST',
-            headers: {
-              'X-IG-API-KEY': apiKey,
-              'Content-Type': 'application/json',
-              'Accept': 'application/json; charset=UTF-8',
-              'Version': '2',
-            },
-            body: JSON.stringify({ identifier: username, password: encPwd, encryptedPassword: true }),
-          });
-          const encText = await encRes.text();
-          console.log(`[ig/session] encrypted-password retry: status=${encRes.status} body=${encText.slice(0, 300)}`);
-          if (!encRes.ok) {
-            let encCode = '';
-            try { encCode = (JSON.parse(encText) as { errorCode?: string }).errorCode ?? ''; } catch { /* noop */ }
-            tokenCache.delete(`${env}:${username}:${apiKey}`);
-            return NextResponse.json({
-              ok: false,
-              error: `IG encrypted auth failed (${encRes.status}): ${encCode || encText.slice(0, 120)}`,
-            }, { status: encRes.status });
-          }
-          // Reconstruct a Response object from the already-read body so the rest of the handler can parse it
-          res = new Response(encText, { status: encRes.status, headers: encRes.headers });
-        } catch (encErr) {
-          console.error(`[ig/session] encrypted auth exception:`, encErr);
-          tokenCache.delete(`${env}:${username}:${apiKey}`);
-          return NextResponse.json({ ok: false, error: `IG account migrated — encrypted auth exception: ${encErr instanceof Error ? encErr.message : String(encErr)}` }, { status: 401 });
-        }
-      }
+    function parseCode(text: string) {
+      try { return (JSON.parse(text) as { errorCode?: string }).errorCode ?? ''; } catch { return ''; }
+    }
+    function igErrMsg(code: string, status: number) {
+      if (code.includes('authenticationRequest.identifier') || code.includes('invalid.identifier'))
+        return 'IG rejected the username. Use your IG account number (e.g. Z12345), not your email. Find it in the IG app → My Account → Account details.';
+      if (code.includes('invalid.password') || code.includes('authentication'))
+        return 'IG authentication failed — check your username and password are correct.';
+      if (code.includes('exceed-login-session-limit') || code.includes('session-limit'))
+        return 'IG session limit reached. Log out of the IG web platform or other devices, wait a minute, then try again.';
+      if (status === 500)
+        return code ? `IG server error: ${code}` : 'IG server returned 500 — usually temporary. Try again in 1–2 minutes.';
+      return code ? `IG: ${code}` : `IG API error ${status}`;
     }
 
-    if (!res.ok) {
-      const text = await res.text();
-      let errMsg = `IG API error ${res.status}`;
-      let errorCode = '';
-      try {
-        const j = JSON.parse(text) as { errorCode?: string };
-        errorCode = j.errorCode ?? '';
-      } catch { /* plain-text or HTML response */ }
+    console.log(`[ig/session] ${env} login attempt identifier="${username}"`);
 
-      if (errorCode.includes('authenticationRequest.identifier') || errorCode.includes('invalid.identifier')) {
-        errMsg = 'IG rejected the username. Use your IG account number (e.g. Z12345), not your email. Find it in the IG app → My Account → Account details.';
-      } else if (errorCode.includes('invalid.password') || errorCode.includes('authentication')) {
-        errMsg = 'IG authentication failed — check your username and password are correct.';
-      } else if (errorCode.includes('exceed-login-session-limit') || errorCode.includes('session-limit')) {
-        errMsg = 'IG session limit reached. Log out of the IG web platform or other devices, wait a minute, then try again.';
-      } else if (res.status === 500) {
-        errMsg = errorCode
-          ? `IG server error: ${errorCode}`
-          : 'IG demo server returned 500. This is usually temporary — the demo environment is less stable than live. Wait 1–2 minutes and try again, or check status.ig.com.';
-      } else if (errorCode) {
-        errMsg = `IG: ${errorCode}`;
+    // Step 1: plain-password attempt — read body exactly once
+    const plainRes  = await fetch(`${baseUrl}/session`, {
+      method: 'POST',
+      headers: { 'X-IG-API-KEY': apiKey, 'Content-Type': 'application/json', 'Accept': 'application/json; charset=UTF-8', 'Version': '2' },
+      body: JSON.stringify({ identifier: username, password }),
+    });
+    const plainText = await plainRes.text();
+    const plainCode = parseCode(plainText);
+    console.log(`[ig/session] plain: status=${plainRes.status} code="${plainCode}"`);
+
+    // sessionText / sessionHeaders point to whichever attempt succeeded
+    let sessionText: string;
+    let sessionHeaders: Headers;
+
+    if (!plainRes.ok) {
+      if (plainCode.includes('account-migrated')) {
+        // Step 2: encrypted-password retry — body read exactly once
+        let encPwd: string;
+        try {
+          encPwd = await getEncryptedPassword(baseUrl, apiKey, password);
+          console.log(`[ig/session] encrypted pwd obtained length=${encPwd.length}`);
+        } catch (e) {
+          tokenCache.delete(cacheKey);
+          return NextResponse.json({ ok: false, error: `IG encrypted auth exception: ${e instanceof Error ? e.message : String(e)}` }, { status: 401 });
+        }
+        const encRes  = await fetch(`${baseUrl}/session`, {
+          method: 'POST',
+          headers: { 'X-IG-API-KEY': apiKey, 'Content-Type': 'application/json', 'Accept': 'application/json; charset=UTF-8', 'Version': '2' },
+          body: JSON.stringify({ identifier: username, password: encPwd, encryptedPassword: true }),
+        });
+        const encText = await encRes.text();
+        const encCode = parseCode(encText);
+        console.log(`[ig/session] encrypted: status=${encRes.status} code="${encCode}"`);
+        if (!encRes.ok) {
+          tokenCache.delete(cacheKey);
+          return NextResponse.json({ ok: false, error: igErrMsg(encCode, encRes.status) }, { status: encRes.status });
+        }
+        sessionText    = encText;
+        sessionHeaders = encRes.headers;
+      } else {
+        tokenCache.delete(cacheKey);
+        return NextResponse.json({ ok: false, error: igErrMsg(plainCode, plainRes.status) }, { status: plainRes.status });
       }
-
-      // Clear any cached token so the next attempt hits IG fresh
-      tokenCache.delete(`${env}:${username}:${apiKey}`);
-
-      return NextResponse.json({ ok: false, error: errMsg }, { status: res.status });
+    } else {
+      sessionText    = plainText;
+      sessionHeaders = plainRes.headers;
     }
 
     // IG returns session tokens in RESPONSE HEADERS (not body)
-    let cst           = res.headers.get('CST') ?? '';
-    let securityToken = res.headers.get('X-SECURITY-TOKEN') ?? '';
+    let cst           = sessionHeaders.get('CST') ?? '';
+    let securityToken = sessionHeaders.get('X-SECURITY-TOKEN') ?? '';
 
     type AccountEntry = { accountId: string; accountName: string; accountType: string; preferred: boolean; status: string };
-    const data = await res.json() as {
+    const data = JSON.parse(sessionText) as {
       accountType?: string;
       accountId?: string;
       accounts?: AccountEntry[];
