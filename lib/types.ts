@@ -243,3 +243,31 @@ export type S104PoolEnriched = Section104Pool & {
   unrealisedGainGBP?: number;  // currentValue - totalCost
   estimatedCGT?: number;       // unrealisedGain × 0.24 (worst-case, before AEA)
 };
+
+export type TradeLogAction =
+  | 'OPEN_LONG'
+  | 'OPEN_SHORT'
+  | 'CLOSE'
+  | 'SKIP'
+  | 'CIRCUIT_BREAKER'
+  | 'ERROR'
+  | 'SESSION';
+
+export type TradeLogEntry = {
+  id: string;
+  ts: string;
+  action: TradeLogAction;
+  symbol: string;
+  instrumentName?: string;
+  direction?: 'BUY' | 'SELL';
+  size?: number;
+  entryPrice?: number;
+  stopLevel?: number;
+  limitLevel?: number;
+  closePnL?: number;
+  reason: string;
+  signal?: string;
+  score?: number;
+  env: 'demo' | 'live';
+  dealId?: string;
+};

@@ -15,6 +15,7 @@ import {
   FxTrade,
   TaxTrade,
   CGTAlert,
+  TradeLogEntry,
 } from './types';
 import { DEFAULT_COUNTRY } from './countries';
 
@@ -109,6 +110,25 @@ interface ClearGainsState {
   syncLastSaved: string | null;
   autoSaveEnabled: boolean;
 
+  // Auto-trader config
+  autoTraderEnabled: boolean;
+  autoTraderEnv: 'demo' | 'live';
+  autoTraderStake: number;
+  autoTraderMaxPositions: number;
+  autoTraderMaxDailyLoss: number;
+  autoTraderMinScore: number;
+  autoTraderUseLongs: boolean;
+  autoTraderUseShorts: boolean;
+  autoTraderIntervalMin: number;
+
+  // Auto-trader runtime stats
+  autoTraderLog: TradeLogEntry[];
+  autoTraderDailyPnL: number;
+  autoTraderDailyDate: string | null;
+  autoTraderTotalPnL: number;
+  autoTraderWins: number;
+  autoTraderLosses: number;
+
   // Actions
   setCountry: (country: Country) => void;
   setHasOnboarded: (v: boolean) => void;
@@ -169,6 +189,17 @@ interface ClearGainsState {
   setSyncLastSaved: (ts: string | null) => void;
   setAutoSaveEnabled: (v: boolean) => void;
 
+  setAutoTraderEnabled: (v: boolean) => void;
+  setAutoTraderEnv: (env: 'demo' | 'live') => void;
+  setAutoTraderConfig: (cfg: Partial<{
+    stake: number; maxPositions: number; maxDailyLoss: number;
+    minScore: number; useLongs: boolean; useShorts: boolean; intervalMin: number;
+  }>) => void;
+  addAutoTradeLogEntry: (entry: TradeLogEntry) => void;
+  clearAutoTradeLog: () => void;
+  resetAutoTraderDailyPnL: (date: string) => void;
+  addAutoTraderPnL: (delta: number, isClose?: boolean, isWin?: boolean) => void;
+
   reset: () => void;
 }
 
@@ -216,6 +247,22 @@ export const useClearGainsStore = create<ClearGainsState>()(
       carriedForwardLosses: 0,
       taxMonitorLastPoll: null,
       taxMonitorLivePositions: [],
+
+      autoTraderEnabled: false,
+      autoTraderEnv: 'demo' as 'demo' | 'live',
+      autoTraderStake: 1,
+      autoTraderMaxPositions: 3,
+      autoTraderMaxDailyLoss: 50,
+      autoTraderMinScore: 6,
+      autoTraderUseLongs: true,
+      autoTraderUseShorts: false,
+      autoTraderIntervalMin: 5,
+      autoTraderLog: [],
+      autoTraderDailyPnL: 0,
+      autoTraderDailyDate: null,
+      autoTraderTotalPnL: 0,
+      autoTraderWins: 0,
+      autoTraderLosses: 0,
 
       setCountry: (country) => set({ selectedCountry: country }),
       setHasOnboarded: (v) => set({ hasOnboarded: v }),
@@ -387,6 +434,29 @@ export const useClearGainsStore = create<ClearGainsState>()(
       setSyncLastSaved: (ts) => set({ syncLastSaved: ts }),
       setAutoSaveEnabled: (v) => set({ autoSaveEnabled: v }),
 
+      setAutoTraderEnabled: (v) => set({ autoTraderEnabled: v }),
+      setAutoTraderEnv: (env) => set({ autoTraderEnv: env }),
+      setAutoTraderConfig: (cfg) => set({
+        ...(cfg.stake !== undefined && { autoTraderStake: cfg.stake }),
+        ...(cfg.maxPositions !== undefined && { autoTraderMaxPositions: cfg.maxPositions }),
+        ...(cfg.maxDailyLoss !== undefined && { autoTraderMaxDailyLoss: cfg.maxDailyLoss }),
+        ...(cfg.minScore !== undefined && { autoTraderMinScore: cfg.minScore }),
+        ...(cfg.useLongs !== undefined && { autoTraderUseLongs: cfg.useLongs }),
+        ...(cfg.useShorts !== undefined && { autoTraderUseShorts: cfg.useShorts }),
+        ...(cfg.intervalMin !== undefined && { autoTraderIntervalMin: cfg.intervalMin }),
+      }),
+      addAutoTradeLogEntry: (entry) =>
+        set((state) => ({ autoTraderLog: [entry, ...state.autoTraderLog].slice(0, 500) })),
+      clearAutoTradeLog: () => set({ autoTraderLog: [] }),
+      resetAutoTraderDailyPnL: (date) => set({ autoTraderDailyPnL: 0, autoTraderDailyDate: date }),
+      addAutoTraderPnL: (delta, isClose, isWin) =>
+        set((state) => ({
+          autoTraderDailyPnL: Math.round((state.autoTraderDailyPnL + delta) * 100) / 100,
+          autoTraderTotalPnL: Math.round((state.autoTraderTotalPnL + delta) * 100) / 100,
+          ...(isClose && isWin === true  && { autoTraderWins:   state.autoTraderWins + 1 }),
+          ...(isClose && isWin === false && { autoTraderLosses: state.autoTraderLosses + 1 }),
+        })),
+
       setLinkedAccountId: (accountType, keyHashPrefix) =>
         set((state) => ({
           linkedAccountIds: { ...state.linkedAccountIds, [accountType]: keyHashPrefix },
@@ -484,6 +554,21 @@ export const useClearGainsStore = create<ClearGainsState>()(
         cgtAlerts: state.cgtAlerts,
         carriedForwardLosses: state.carriedForwardLosses,
         taxMonitorLivePositions: state.taxMonitorLivePositions,
+        autoTraderEnabled: state.autoTraderEnabled,
+        autoTraderEnv: state.autoTraderEnv,
+        autoTraderStake: state.autoTraderStake,
+        autoTraderMaxPositions: state.autoTraderMaxPositions,
+        autoTraderMaxDailyLoss: state.autoTraderMaxDailyLoss,
+        autoTraderMinScore: state.autoTraderMinScore,
+        autoTraderUseLongs: state.autoTraderUseLongs,
+        autoTraderUseShorts: state.autoTraderUseShorts,
+        autoTraderIntervalMin: state.autoTraderIntervalMin,
+        autoTraderLog: state.autoTraderLog,
+        autoTraderDailyPnL: state.autoTraderDailyPnL,
+        autoTraderDailyDate: state.autoTraderDailyDate,
+        autoTraderTotalPnL: state.autoTraderTotalPnL,
+        autoTraderWins: state.autoTraderWins,
+        autoTraderLosses: state.autoTraderLosses,
       }),
     }
   )
