@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { publicEncrypt, constants } from 'crypto';
+import { publicEncrypt, constants, createPublicKey } from 'crypto';
 
 /** In-memory token cache: { cacheKey → { cst, securityToken, accountId, accounts, expiresAt } } */
 const tokenCache = new Map<string, {
@@ -13,14 +13,16 @@ const tokenCache = new Map<string, {
 const TOKEN_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours (IG tokens last 6h; refresh before expiry)
 
 // IG migrated-account auth: fetch RSA key then encrypt password|timestamp
+// Key comes back as raw base64-encoded DER (SPKI format) — load it directly
+// rather than wrapping in PEM, which requires 64-char line breaks to parse.
 async function getEncryptedPassword(baseUrl: string, apiKey: string, password: string): Promise<string> {
   const keyRes = await fetch(`${baseUrl}/session/encryptionKey`, {
     headers: { 'X-IG-API-KEY': apiKey, 'Version': '1', 'Accept': 'application/json; charset=UTF-8' },
   });
   if (!keyRes.ok) throw new Error(`IG encryption key fetch failed (${keyRes.status})`);
-  const { encryptionKey, timeStamp } = await keyRes.json() as { encryptionKey: string; timeStamp: string };
-  const pem = `-----BEGIN PUBLIC KEY-----\n${encryptionKey}\n-----END PUBLIC KEY-----`;
-  const encrypted = publicEncrypt({ key: pem, padding: constants.RSA_PKCS1_PADDING }, Buffer.from(`${password}|${timeStamp}`));
+  const { encryptionKey, timeStamp } = await keyRes.json() as { encryptionKey: string; timeStamp: string | number };
+  const publicKey = createPublicKey({ key: Buffer.from(encryptionKey, 'base64'), format: 'der', type: 'spki' });
+  const encrypted = publicEncrypt({ key: publicKey, padding: constants.RSA_PKCS1_PADDING }, Buffer.from(`${password}|${timeStamp}`));
   return encrypted.toString('base64');
 }
 
