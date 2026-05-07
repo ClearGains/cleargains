@@ -1023,6 +1023,12 @@ export function IGStrategyTrader() {
         // Don't open if already same direction
         if (positions[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
+        // Enforce max positions cap
+        if (positions[env].length >= strat.maxPositions) {
+          log('signal', `[SKIP] ${market.name} — max positions (${strat.maxPositions}) reached on ${env.toUpperCase()}`);
+          continue;
+        }
+
         // Re-entry guard: require news confirmation if this epic+direction was recently closed (<2h)
         const recentlyClosedAt = recentlyClosedRef.current.get(`${market.epic}:${tradeDir}`);
         const TWO_HOURS = 2 * 60 * 60_000;
