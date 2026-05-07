@@ -685,6 +685,34 @@ export function AutoTrader() {
   return (
     <div className="space-y-4">
 
+      {/* Demo / Live tab bar */}
+      <div className="flex border-b border-gray-800">
+        {(['demo', 'live'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => { if (!autoTraderEnabled) setAutoTraderEnv(tab); }}
+            disabled={autoTraderEnabled}
+            className={clsx(
+              'relative px-6 py-3 text-sm font-semibold transition-all disabled:cursor-not-allowed',
+              autoTraderEnv === tab
+                ? tab === 'live'
+                  ? 'text-red-300 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-red-400'
+                  : 'text-orange-300 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-orange-400'
+                : 'text-gray-500 hover:text-gray-300'
+            )}
+          >
+            {tab === 'live' ? (
+              <span className="flex items-center gap-2">
+                Live
+                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30">
+                  REAL MONEY
+                </span>
+              </span>
+            ) : 'Demo'}
+          </button>
+        ))}
+      </div>
+
       {/* Live mode confirmation */}
       {liveConfirm && (
         <div className="border border-red-500/40 bg-red-500/10 rounded-xl p-4 space-y-3">
@@ -785,12 +813,8 @@ export function AutoTrader() {
         {/* Config panel */}
         <div className="lg:col-span-1 space-y-3">
 
-          {/* IG Connections */}
-          <div className="space-y-2">
-            <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider px-1">IG Connections</p>
-            <IGConnectPanel env="demo" />
-            <IGConnectPanel env="live" />
-          </div>
+          {/* IG Connection for active tab */}
+          <IGConnectPanel env={autoTraderEnv} />
 
           <Card>
             <button
@@ -805,32 +829,6 @@ export function AutoTrader() {
 
             {showConfig && (
               <div className="mt-4 space-y-4">
-
-                {/* Environment */}
-                <div>
-                  <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider mb-1.5">Account</p>
-                  <div className="flex gap-1.5">
-                    {(['demo', 'live'] as const).map(e => (
-                      <button key={e} onClick={() => { if (!autoTraderEnabled) setAutoTraderEnv(e); }}
-                        disabled={autoTraderEnabled}
-                        className={clsx('flex-1 py-2 rounded-lg text-xs font-bold border transition-all disabled:opacity-40',
-                          autoTraderEnv === e
-                            ? e === 'live'
-                              ? 'bg-red-500/20 text-red-300 border-red-500/40'
-                              : 'bg-orange-500/20 text-orange-300 border-orange-500/40'
-                            : 'bg-gray-800 text-gray-500 border-gray-700 hover:border-gray-600'
-                        )}>
-                        {e.toUpperCase()}
-                        {e === 'live' && <span className="ml-1 text-[9px]">⚠</span>}
-                      </button>
-                    ))}
-                  </div>
-                  {autoTraderEnv === 'live' && (
-                    <p className="text-[10px] text-red-400 mt-1.5">
-                      Live mode uses real money. Start with demo until you are confident.
-                    </p>
-                  )}
-                </div>
 
                 {/* Stake */}
                 <div>

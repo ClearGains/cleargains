@@ -59,6 +59,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    console.log(`[ig/session] ${env} login attempt for identifier="${username}" baseUrl=${baseUrl}`);
+
     let res = await fetch(`${baseUrl}/session`, {
       method: 'POST',
       headers: {
@@ -75,11 +77,14 @@ export async function POST(request: NextRequest) {
       const text = await res.text();
       let errorCode = '';
       try { errorCode = (JSON.parse(text) as { errorCode?: string }).errorCode ?? ''; } catch { /* noop */ }
+      console.log(`[ig/session] plain-password attempt failed: status=${res.status} errorCode="${errorCode}" body=${text.slice(0, 300)}`);
 
       if (errorCode.includes('account-migrated')) {
+        console.log(`[ig/session] account-migrated detected — attempting encrypted-password retry`);
         try {
           const encPwd = await getEncryptedPassword(baseUrl, apiKey, password);
-          res = await fetch(`${baseUrl}/session`, {
+          console.log(`[ig/session] encrypted password obtained (length=${encPwd.length}), retrying session`);
+          const encRes = await fetch(`${baseUrl}/session`, {
             method: 'POST',
             headers: {
               'X-IG-API-KEY': apiKey,
@@ -89,9 +94,23 @@ export async function POST(request: NextRequest) {
             },
             body: JSON.stringify({ identifier: username, password: encPwd, encryptedPassword: true }),
           });
+          const encText = await encRes.text();
+          console.log(`[ig/session] encrypted-password retry: status=${encRes.status} body=${encText.slice(0, 300)}`);
+          if (!encRes.ok) {
+            let encCode = '';
+            try { encCode = (JSON.parse(encText) as { errorCode?: string }).errorCode ?? ''; } catch { /* noop */ }
+            tokenCache.delete(`${env}:${username}:${apiKey}`);
+            return NextResponse.json({
+              ok: false,
+              error: `IG encrypted auth failed (${encRes.status}): ${encCode || encText.slice(0, 120)}`,
+            }, { status: encRes.status });
+          }
+          // Reconstruct a Response object from the already-read body so the rest of the handler can parse it
+          res = new Response(encText, { status: encRes.status, headers: encRes.headers });
         } catch (encErr) {
+          console.error(`[ig/session] encrypted auth exception:`, encErr);
           tokenCache.delete(`${env}:${username}:${apiKey}`);
-          return NextResponse.json({ ok: false, error: `IG account migrated — encrypted auth failed: ${encErr instanceof Error ? encErr.message : String(encErr)}` }, { status: 401 });
+          return NextResponse.json({ ok: false, error: `IG account migrated — encrypted auth exception: ${encErr instanceof Error ? encErr.message : String(encErr)}` }, { status: 401 });
         }
       }
     }
