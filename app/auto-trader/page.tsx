@@ -12,7 +12,7 @@ export default function AutoTraderPage() {
           <h1 className="text-xl font-bold text-white">Auto Trader</h1>
         </div>
         <span className="text-xs text-gray-500">
-          Automated spread bet engine — scans signals, places orders, and applies stop/TP on IG
+          Signal scanner — runs the strategy and shows manual entry levels for IG spread bets
         </span>
       </div>
       <AutoTrader />
