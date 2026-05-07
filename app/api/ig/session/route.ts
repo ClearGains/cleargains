@@ -115,7 +115,10 @@ export async function POST(request: NextRequest) {
         console.log(`[ig/session] encrypted: status=${encRes.status} code="${encCode}"`);
         if (!encRes.ok) {
           tokenCache.delete(cacheKey);
-          return NextResponse.json({ ok: false, error: igErrMsg(encCode, encRes.status, 'encrypted') }, { status: encRes.status });
+          return NextResponse.json({
+            ok: false,
+            error: `${igErrMsg(encCode, encRes.status, 'encrypted')} [enc: ${encRes.status} / ${encCode || encText.slice(0, 80)}]`,
+          }, { status: encRes.status });
         }
         sessionText    = encText;
         sessionHeaders = encRes.headers;
