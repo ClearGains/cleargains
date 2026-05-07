@@ -8,7 +8,7 @@ import { NewsStrip } from '@/components/ui/NewsStrip';
 // ── Universe ──────────────────────────────────────────────────────────────────
 
 type Volatility = 'LOW' | 'MEDIUM' | 'HIGH';
-type Market     = 'US_TECH' | 'US_SEMI' | 'US_FINANCE' | 'US_DEFENSIVE' | 'US_ENERGY' | 'UK' | 'ETF';
+type Market     = 'US_TECH' | 'US_SEMI' | 'US_FINANCE' | 'US_DEFENSIVE' | 'US_ENERGY' | 'US_PHARMA' | 'US_INFRA' | 'UK' | 'ETF';
 
 type StockDef = {
   symbol:     string;
@@ -50,6 +50,21 @@ const UNIVERSE: StockDef[] = [
   { symbol: 'WMT',   name: 'Walmart',          market: 'US_DEFENSIVE',  volatility: 'LOW',    sector: 'Retail',      why: 'Recession-proof retailer; growing e-commerce and advertising revenue' },
   { symbol: 'UNH',   name: 'UnitedHealth',     market: 'US_DEFENSIVE',  volatility: 'LOW',    sector: 'Healthcare',  why: 'Largest US health insurer; compounding earnings at scale' },
   { symbol: 'HD',    name: 'Home Depot',       market: 'US_DEFENSIVE',  volatility: 'LOW',    sector: 'Retail',      why: 'Home improvement market leader; long renovation super-cycle tailwind' },
+  // Pharmaceuticals
+  { symbol: 'LLY',   name: 'Eli Lilly',         market: 'US_PHARMA',     volatility: 'HIGH',   sector: 'GLP-1 / Pharma',   why: 'Mounjaro + Zepbound GLP-1 drugs — multi-billion market with years of runway' },
+  { symbol: 'NVO',   name: 'Novo Nordisk',       market: 'US_PHARMA',     volatility: 'MEDIUM', sector: 'GLP-1 / Pharma',   why: 'Ozempic + Wegovy first-mover advantage in weight-loss; global supply scaling' },
+  { symbol: 'ABBV',  name: 'AbbVie',             market: 'US_PHARMA',     volatility: 'LOW',    sector: 'Immunology',       why: 'Skyrizi + Rinvoq replacing Humira revenue; strong dividend + buybacks' },
+  { symbol: 'MRK',   name: 'Merck',              market: 'US_PHARMA',     volatility: 'LOW',    sector: 'Oncology',         why: 'Keytruda is the world\'s best-selling cancer drug; robust pipeline behind it' },
+  { symbol: 'PFE',   name: 'Pfizer',             market: 'US_PHARMA',     volatility: 'LOW',    sector: 'Pharma',           why: 'Trading at a deep discount post-COVID; Paxlovid + oncology acquisitions undervalued' },
+  { symbol: 'REGN',  name: 'Regeneron',          market: 'US_PHARMA',     volatility: 'MEDIUM', sector: 'Biotech',          why: 'Dupixent blockbuster + PCSK9 + Eylea; strong R&D engine with capital returns' },
+  { symbol: 'BMY',   name: 'Bristol-Myers Squibb',market:'US_PHARMA',     volatility: 'LOW',    sector: 'Oncology',         why: 'Diversified oncology portfolio (Opdivo, Revlimid successor); attractive valuation' },
+  // Infrastructure
+  { symbol: 'NEE',   name: 'NextEra Energy',     market: 'US_INFRA',      volatility: 'LOW',    sector: 'Renewable Energy', why: "World's largest renewable energy company; AI data-centre power demand tailwind" },
+  { symbol: 'AMT',   name: 'American Tower',     market: 'US_INFRA',      volatility: 'LOW',    sector: 'Cell Towers',      why: '200,000+ tower assets globally; 5G densification + AI connectivity demand' },
+  { symbol: 'EQIX',  name: 'Equinix',            market: 'US_INFRA',      volatility: 'MEDIUM', sector: 'Data Centres',     why: 'Global data centre REIT; AI model training and inference demand is structural' },
+  { symbol: 'AWK',   name: 'American Water Works',market:'US_INFRA',      volatility: 'LOW',    sector: 'Water Utility',    why: 'Largest US water utility monopoly; essential service with regulated pricing power' },
+  { symbol: 'UNP',   name: 'Union Pacific',      market: 'US_INFRA',      volatility: 'LOW',    sector: 'Freight Rail',     why: 'US western rail duopoly; re-shoring trade flows driving sustained cargo demand' },
+  { symbol: 'WM',    name: 'Waste Management',   market: 'US_INFRA',      volatility: 'LOW',    sector: 'Waste & Recycling',why: 'Largest US waste company; pricing power + landfill gas-to-energy optionality' },
   // US Energy
   { symbol: 'XOM',   name: 'ExxonMobil',       market: 'US_ENERGY',     volatility: 'MEDIUM', sector: 'Energy',      why: 'Largest US oil major; capital discipline + $35B buyback program' },
   { symbol: 'CVX',   name: 'Chevron',          market: 'US_ENERGY',     volatility: 'MEDIUM', sector: 'Energy',      why: 'Strong free cash flow; balance sheet fortress; top-quartile dividend' },
@@ -118,6 +133,8 @@ const MARKET_LABELS: Record<Market, string> = {
   US_FINANCE:   'US Finance',
   US_DEFENSIVE: 'US Defensive',
   US_ENERGY:    'US Energy',
+  US_PHARMA:    'Pharmaceuticals',
+  US_INFRA:     'Infrastructure',
   UK:           'UK Blue Chip',
   ETF:          'ETF',
 };
@@ -275,6 +292,8 @@ const FILTER_TABS: { value: MarketFilter; label: string }[] = [
   { value: 'US_FINANCE',   label: 'US Finance' },
   { value: 'US_DEFENSIVE', label: 'US Defensive' },
   { value: 'US_ENERGY',    label: 'US Energy' },
+  { value: 'US_PHARMA',    label: 'Pharmaceuticals' },
+  { value: 'US_INFRA',     label: 'Infrastructure' },
   { value: 'UK',           label: 'UK Blue Chip' },
   { value: 'ETF',          label: 'ETFs' },
 ];
