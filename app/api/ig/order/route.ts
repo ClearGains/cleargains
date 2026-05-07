@@ -111,6 +111,9 @@ export async function POST(request: NextRequest) {
     // Resolve epic — validate against verified set, search IG if unknown
     const { epic: resolvedEpic, resolvedVia } = await resolveEpic(body.epic, apiKey, cst, securityToken, base);
 
+    // Share spread bets (CS.D.*) use rolling expiry '-'; index DFBs (IX.D.*) use 'DFB'
+    const expiry = body.expiry ?? (resolvedEpic.startsWith('CS.D.') ? '-' : 'DFB');
+
     // ── Working order (LIMIT or STOP) ─────────────────────────────────────────
     if (orderType === 'LIMIT' || orderType === 'STOP') {
       if (!body.level) {
@@ -118,7 +121,7 @@ export async function POST(request: NextRequest) {
       }
       const woPayload: Record<string, unknown> = {
         epic:          resolvedEpic,
-        expiry:        body.expiry ?? 'DFB',
+        expiry,
         direction:     body.direction,
         size:          body.size,
         level:         body.level,

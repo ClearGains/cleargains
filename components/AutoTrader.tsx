@@ -612,17 +612,21 @@ function IGInstrumentsCard({ instruments, onAdd, onRemove, env, engineRunning }:
 
       for (const node of nodes) {
         if (importCancelRef.current) break;
-        // Only recurse into share-related nodes
-        const nameLower = node.name.toLowerCase();
-        if (depth === 0 && !nameLower.includes('share') && !nameLower.includes('stock') && !nameLower.includes('equity')) continue;
         await walk(node.id, depth + 1, node.name);
       }
     }
 
     try {
-      // Start from root
+      // Start from root — filter to share/equity nodes only at the top level
+      // (avoids wasting time on Indices, Forex, Commodities, Options, etc.)
       const root = await fetchNode('');
-      for (const node of root.nodes) {
+      const shareRoots = root.nodes.filter(n => {
+        const nl = n.name.toLowerCase();
+        return nl.includes('share') || nl.includes('stock') || nl.includes('equit') || nl.includes('us ') || nl.includes('uk ') || nl.includes('market');
+      });
+      // If IG returns no labelled share nodes, walk everything (flat account structures)
+      const nodesToWalk = shareRoots.length > 0 ? shareRoots : root.nodes;
+      for (const node of nodesToWalk) {
         if (importCancelRef.current) break;
         await walk(node.id, 0, node.name);
       }
