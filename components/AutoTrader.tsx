@@ -159,15 +159,34 @@ function IGConnectPanel({ env, onStatusChange }: {
         )}
       </div>
 
+      {/* Guidance */}
+      {!creds.connected && (
+        <div className="text-[10px] text-gray-500 bg-gray-800/40 rounded-lg px-3 py-2 space-y-0.5 leading-relaxed">
+          {isLive ? (
+            <>
+              <p>• Account number: your live account ID (e.g. <span className="text-gray-300">Z12345</span>)</p>
+              <p>• API key: IG web → My IG → <span className="text-gray-300">API keys → Live</span></p>
+            </>
+          ) : (
+            <>
+              <p>• Account number: your <span className="text-orange-400 font-medium">demo</span> account ID — different from live. Find it in IG web → switch to Demo account → My IG → Account details.</p>
+              <p>• API key: IG web → My IG → <span className="text-gray-300">API keys → Demo</span> (separate from live key)</p>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Fields */}
       <div className="space-y-2">
         <div>
-          <label className="text-[10px] text-gray-500 font-medium mb-1 block">Account number (e.g. Z12345)</label>
+          <label className="text-[10px] text-gray-500 font-medium mb-1 block">
+            {isLive ? 'Live account number' : 'Demo account number'}
+          </label>
           <input
             type="text"
             value={creds.username}
             onChange={e => setCreds(c => ({ ...c, username: e.target.value }))}
-            placeholder="Z12345"
+            placeholder={isLive ? 'Live account ID' : 'Demo account ID'}
             autoComplete="off"
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
           />
@@ -190,13 +209,15 @@ function IGConnectPanel({ env, onStatusChange }: {
           </div>
         </div>
         <div>
-          <label className="text-[10px] text-gray-500 font-medium mb-1 block">API Key</label>
+          <label className="text-[10px] text-gray-500 font-medium mb-1 block">
+            {isLive ? 'Live API key' : 'Demo API key'}
+          </label>
           <div className="relative">
             <input
               type={showKey ? 'text' : 'password'}
               value={creds.apiKey}
               onChange={e => setCreds(c => ({ ...c, apiKey: e.target.value }))}
-              placeholder="Paste your IG API key"
+              placeholder={isLive ? 'Paste your live IG API key' : 'Paste your demo IG API key'}
               autoComplete="off"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-9 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
             />
