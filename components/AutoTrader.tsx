@@ -5,7 +5,7 @@ import {
   Power, AlertTriangle, CheckCircle2, XCircle, RefreshCw, Settings,
   Activity, ShieldAlert, TrendingUp, TrendingDown, Clock, Zap,
   ToggleLeft, ToggleRight, Info, ChevronDown, ChevronUp,
-  Eye, EyeOff, Wifi, WifiOff, Key,
+  Wifi, WifiOff, Key,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -37,10 +37,6 @@ function loadCreds(env: 'demo' | 'live'): IGCreds {
     if (raw) return JSON.parse(raw) as IGCreds;
   } catch {}
   return { username: '', password: '', apiKey: '', connected: false };
-}
-
-function saveCreds(env: 'demo' | 'live', creds: IGCreds) {
-  localStorage.setItem(CRED_KEY(env), JSON.stringify(creds));
 }
 
 function clearSession(env: 'demo' | 'live') {
@@ -76,77 +72,44 @@ async function getIGSession(env: 'demo' | 'live'): Promise<IGSession | null> {
   } catch { return null; }
 }
 
-// ── IGConnectPanel — standalone credentials card for one environment ──────────
+// ── IGConnectPanel — reads session from Settings, no duplicate credential entry ─
 
-function IGConnectPanel({ env, onStatusChange }: {
-  env: 'demo' | 'live';
-  onStatusChange?: (connected: boolean) => void;
-}) {
-  const [creds, setCreds]       = useState<IGCreds>({ username: '', password: '', apiKey: '', connected: false });
-  const [showPass, setShowPass] = useState(false);
-  const [showKey, setShowKey]   = useState(false);
-  const [loading, setLoading]   = useState(false);
-  const [msg, setMsg]           = useState<{ ok: boolean; text: string } | null>(null);
-
-  useEffect(() => { setCreds(loadCreds(env)); }, [env]);
-
+function IGConnectPanel({ env }: { env: 'demo' | 'live' }) {
   const isLive = env === 'live';
+  const [creds, setCreds]   = useState<IGCreds>({ username: '', password: '', apiKey: '', connected: false });
+  const [testing, setTesting] = useState(false);
+  const [msg, setMsg]         = useState<{ ok: boolean; text: string } | null>(null);
 
-  async function handleConnect() {
-    if (!creds.username || !creds.password || !creds.apiKey) {
-      setMsg({ ok: false, text: 'All three fields are required.' });
-      return;
-    }
-    setLoading(true);
-    setMsg(null);
-    clearSession(env);
+  function refresh() { setCreds(loadCreds(env)); setMsg(null); }
+  useEffect(() => { refresh(); }, [env]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleTest() {
+    setTesting(true); setMsg(null); clearSession(env);
     try {
-      const res = await fetch('/api/ig/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: creds.username.trim(), password: creds.password, apiKey: creds.apiKey.trim(), env }),
-      });
-      const data = await res.json() as { ok: boolean; accountId?: string; cst?: string; securityToken?: string; error?: string };
-      if (data.ok && data.cst) {
-        const connected = { ...creds, connected: true };
-        saveCreds(env, connected);
-        localStorage.setItem(SESS_KEY(env), JSON.stringify({
-          cst: data.cst, securityToken: data.securityToken, apiKey: creds.apiKey.trim(),
-          accountId: data.accountId, authenticatedAt: Date.now(),
-        }));
-        setCreds(connected);
-        setMsg({ ok: true, text: `Connected${data.accountId ? ` — account ${data.accountId}` : ''}` });
-        onStatusChange?.(true);
+      const sess = await getIGSession(env);
+      if (sess) {
+        setMsg({ ok: true, text: 'Session active — engine can trade.' });
+        refresh();
       } else {
-        setMsg({ ok: false, text: data.error ?? 'Connection failed' });
-        onStatusChange?.(false);
+        setMsg({ ok: false, text: 'Could not get a session. Re-save your credentials in Settings → Accounts.' });
       }
     } catch (e) {
-      setMsg({ ok: false, text: e instanceof Error ? e.message : 'Unknown error' });
+      setMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
     }
-    setLoading(false);
+    setTesting(false);
   }
 
-  function handleDisconnect() {
-    const blank: IGCreds = { username: '', password: '', apiKey: '', connected: false };
-    saveCreds(env, blank);
-    clearSession(env);
-    setCreds(blank);
-    setMsg(null);
-    onStatusChange?.(false);
-  }
+  const accent = isLive ? 'red' : 'orange';
 
   return (
     <div className={clsx('rounded-xl border p-4 space-y-3',
       isLive ? 'border-red-500/20 bg-red-500/5' : 'border-orange-500/20 bg-orange-500/5'
     )}>
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           {creds.connected
             ? <Wifi className={clsx('h-4 w-4', isLive ? 'text-red-400' : 'text-orange-400')} />
-            : <WifiOff className="h-4 w-4 text-gray-500" />
-          }
+            : <WifiOff className="h-4 w-4 text-gray-500" />}
           <span className="text-sm font-semibold text-white">
             IG {isLive ? 'Live' : 'Demo'}
             {isLive && <span className="ml-1.5 text-[9px] text-red-400 font-normal">REAL MONEY</span>}
@@ -159,77 +122,17 @@ function IGConnectPanel({ env, onStatusChange }: {
         )}
       </div>
 
-      {/* Guidance */}
-      {!creds.connected && (
-        <div className="text-[10px] text-gray-500 bg-gray-800/40 rounded-lg px-3 py-2 space-y-0.5 leading-relaxed">
-          {isLive ? (
-            <>
-              <p>• Account number: your live account ID (e.g. <span className="text-gray-300">Z12345</span>)</p>
-              <p>• API key: IG web → My IG → <span className="text-gray-300">API keys → Live</span></p>
-            </>
-          ) : (
-            <>
-              <p>• Account number: your <span className="text-orange-400 font-medium">demo</span> account ID — different from live. Find it in IG web → switch to Demo account → My IG → Account details.</p>
-              <p>• API key: IG web → My IG → <span className="text-gray-300">API keys → Demo</span> (separate from live key)</p>
-            </>
-          )}
+      {creds.connected ? (
+        <p className="text-[11px] text-gray-400">
+          Logged in as <span className="text-white font-medium">{creds.username}</span>
+        </p>
+      ) : (
+        <div className="text-[11px] text-gray-500 bg-gray-800/50 rounded-lg px-3 py-2.5 space-y-1">
+          <p className="text-gray-300 font-medium">No {isLive ? 'live' : 'demo'} account connected</p>
+          <p>Go to <a href="/settings/accounts" className={clsx('font-medium underline', isLive ? 'text-red-400' : 'text-orange-400')}>Settings → Accounts</a> and connect your IG {isLive ? 'Live' : 'Demo'} account there — the engine will use that session automatically.</p>
         </div>
       )}
 
-      {/* Fields */}
-      <div className="space-y-2">
-        <div>
-          <label className="text-[10px] text-gray-500 font-medium mb-1 block">
-            {isLive ? 'Live account number' : 'Demo account number'}
-          </label>
-          <input
-            type="text"
-            value={creds.username}
-            onChange={e => setCreds(c => ({ ...c, username: e.target.value }))}
-            placeholder={isLive ? 'Live account ID' : 'Demo account ID'}
-            autoComplete="off"
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
-          />
-        </div>
-        <div>
-          <label className="text-[10px] text-gray-500 font-medium mb-1 block">Password</label>
-          <div className="relative">
-            <input
-              type={showPass ? 'text' : 'password'}
-              value={creds.password}
-              onChange={e => setCreds(c => ({ ...c, password: e.target.value }))}
-              placeholder="••••••••"
-              autoComplete="current-password"
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-9 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
-            />
-            <button type="button" onClick={() => setShowPass(v => !v)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
-              {showPass ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-            </button>
-          </div>
-        </div>
-        <div>
-          <label className="text-[10px] text-gray-500 font-medium mb-1 block">
-            {isLive ? 'Live API key' : 'Demo API key'}
-          </label>
-          <div className="relative">
-            <input
-              type={showKey ? 'text' : 'password'}
-              value={creds.apiKey}
-              onChange={e => setCreds(c => ({ ...c, apiKey: e.target.value }))}
-              placeholder={isLive ? 'Paste your live IG API key' : 'Paste your demo IG API key'}
-              autoComplete="off"
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-9 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500"
-            />
-            <button type="button" onClick={() => setShowKey(v => !v)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
-              {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Result */}
       {msg && (
         <div className={clsx('flex items-start gap-2 rounded-lg px-3 py-2 text-xs',
           msg.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
@@ -241,30 +144,24 @@ function IGConnectPanel({ env, onStatusChange }: {
         </div>
       )}
 
-      {/* Actions */}
       <div className="flex gap-2">
+        <Button size="sm" variant="outline" onClick={refresh}
+          icon={<RefreshCw className="h-3.5 w-3.5" />}>
+          Refresh
+        </Button>
         {creds.connected && (
-          <Button size="sm" variant="outline" onClick={handleDisconnect}
-            className="border-gray-700 text-gray-400 hover:border-gray-500">
-            Disconnect
+          <Button size="sm" variant="outline" loading={testing} onClick={handleTest}>
+            Test session
           </Button>
         )}
-        <Button size="sm" fullWidth loading={loading}
-          onClick={handleConnect}
-          icon={<Key className="h-3.5 w-3.5" />}
-          className={clsx(isLive
-            ? 'bg-red-600/80 hover:bg-red-600 border-red-500 text-white'
-            : ''
-          )}>
-          {loading ? 'Connecting…' : creds.connected ? 'Reconnect' : 'Connect'}
-        </Button>
+        {!creds.connected && (
+          <Button size="sm" variant="outline"
+            onClick={() => window.location.href = '/settings/accounts'}
+            icon={<Key className="h-3.5 w-3.5" />}>
+            Go to Settings
+          </Button>
+        )}
       </div>
-
-      {isLive && !creds.connected && (
-        <p className="text-[10px] text-red-400/70">
-          Live account places real spread bets with real money. Only connect when ready.
-        </p>
-      )}
     </div>
   );
 }
