@@ -259,7 +259,7 @@ export const useClearGainsStore = create<ClearGainsState>()(
       autoTraderStake: 1,
       autoTraderMaxPositions: 3,
       autoTraderMaxDailyLoss: 50,
-      autoTraderMinScore: 6,
+      autoTraderMinScore: 3,
       autoTraderUseLongs: true,
       autoTraderUseShorts: false,
       autoTraderIntervalMin: 5,

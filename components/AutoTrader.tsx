@@ -450,7 +450,7 @@ export function AutoTrader() {
                   </label>
                   <NumInput value={autoTraderMinScore} min={1} max={15}
                     onChange={v => setAutoTraderConfig({ minScore: Math.round(v) })}
-                    hint="Higher = fewer but stronger signals" />
+                    hint="3 = BUY · 6 = STRONG_BUY only · higher = fewer signals" />
                 </div>
 
                 <div>
