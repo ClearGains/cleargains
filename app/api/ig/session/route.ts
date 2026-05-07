@@ -62,13 +62,17 @@ export async function POST(request: NextRequest) {
     function parseCode(text: string) {
       try { return (JSON.parse(text) as { errorCode?: string }).errorCode ?? ''; } catch { return ''; }
     }
-    function igErrMsg(code: string, status: number) {
+    function igErrMsg(code: string, status: number, context?: 'encrypted') {
       if (code.includes('authenticationRequest.identifier') || code.includes('invalid.identifier'))
         return 'IG rejected the username. Use your IG account number (e.g. Z12345), not your email. Find it in the IG app → My Account → Account details.';
       if (code.includes('invalid.password') || code.includes('authentication'))
         return 'IG authentication failed — check your username and password are correct.';
       if (code.includes('exceed-login-session-limit') || code.includes('session-limit'))
         return 'IG session limit reached. Log out of the IG web platform or other devices, wait a minute, then try again.';
+      if (code.includes('account-migrated'))
+        return context === 'encrypted'
+          ? `IG still rejecting after encrypted-password retry. Most likely cause: you are entering ${env.toUpperCase()} credentials in the wrong tab — IG Demo and Live are completely separate accounts with different account numbers and passwords. If your credentials are correct for this environment, your account may require IG support to re-enable API access.`
+          : `IG account migrated — attempting encrypted password retry…`;
       if (status === 500)
         return code ? `IG server error: ${code}` : 'IG server returned 500 — usually temporary. Try again in 1–2 minutes.';
       return code ? `IG: ${code}` : `IG API error ${status}`;
@@ -111,7 +115,7 @@ export async function POST(request: NextRequest) {
         console.log(`[ig/session] encrypted: status=${encRes.status} code="${encCode}"`);
         if (!encRes.ok) {
           tokenCache.delete(cacheKey);
-          return NextResponse.json({ ok: false, error: igErrMsg(encCode, encRes.status) }, { status: encRes.status });
+          return NextResponse.json({ ok: false, error: igErrMsg(encCode, encRes.status, 'encrypted') }, { status: encRes.status });
         }
         sessionText    = encText;
         sessionHeaders = encRes.headers;
