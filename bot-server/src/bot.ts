@@ -11,6 +11,7 @@ import {
 } from './scalperStrategy';
 import { isMarketOpen } from './marketHours';
 import { askGemini, type EntrySignal } from './gemini';
+import { feedCandle, runSignalCheck } from './signalMonitor';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -60,6 +61,7 @@ let currentConfig: ScalperConfig = { ...DEFAULT_CONFIG };
 let openPositions: IGPosition[] = [];
 let positionPollTimer: ReturnType<typeof setInterval> | null = null;
 let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let signalMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
 const log: LogEntry[] = [];
 
@@ -94,6 +96,29 @@ function startPositionPoll() {
 
 function stopPositionPoll() {
   if (positionPollTimer) { clearInterval(positionPollTimer); positionPollTimer = null; }
+}
+
+function startSignalMonitor() {
+  if (signalMonitorTimer) clearInterval(signalMonitorTimer);
+  // Run every 5 minutes — checks ALL open positions, not just scalper ones
+  signalMonitorTimer = setInterval(() => {
+    void runSignalCheck(currentEpics, addLog).then(newEpics => {
+      if (newEpics.length > 0) {
+        // Add newly discovered position epics to the Lightstreamer subscription
+        const session = getSession();
+        if (session) {
+          const merged = [...new Set([...currentEpics, ...newEpics])];
+          addLog('info', '—', `Signal monitor: adding ${newEpics.length} new epic(s) to stream`);
+          connect(session, merged, handleTick, '1MINUTE');
+        }
+      }
+    });
+  }, 5 * 60_000);
+  addLog('info', '—', 'Signal monitor started — checks all open positions every 5 min');
+}
+
+function stopSignalMonitor() {
+  if (signalMonitorTimer) { clearInterval(signalMonitorTimer); signalMonitorTimer = null; }
 }
 
 // ── Session refresh ──────────────────────────────────────────────────────────
@@ -136,6 +161,9 @@ async function refreshSession() {
 
 function handleTick(tick: CandleTick) {
   if (!running) return;
+  // Feed all ticks into signal monitor candle store
+  feedCandle(tick.epic, tick);
+
   const st = epicStates[tick.epic];
   if (!st) return;
   if (pendingEpics.has(tick.epic)) return;
@@ -293,6 +321,7 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
     running = true;
     connect(session, params.epics, handleTick, '1MINUTE');
     startPositionPoll();
+    startSignalMonitor();
     scheduleSessionRefresh(session);
 
     addLog('info', '—', `Bot started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
@@ -309,6 +338,7 @@ export function stopBot() {
   running = false;
   disconnect();
   stopPositionPoll();
+  stopSignalMonitor();
   if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
   clearSession();
   addLog('info', '—', 'Bot stopped');
