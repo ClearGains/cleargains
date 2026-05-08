@@ -166,7 +166,7 @@ export async function POST(request: NextRequest) {
 
     const res = await fetch(`${base}/positions/otc`, {
       method: 'POST',
-      headers: igHeaders(apiKey, cst, securityToken, '2'),
+      headers: igHeaders(apiKey, cst, securityToken, '1'),
       body: JSON.stringify(payload),
     });
 
