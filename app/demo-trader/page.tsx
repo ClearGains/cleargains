@@ -19,8 +19,6 @@ import { clsx } from 'clsx';
 import { sendPush } from '@/lib/pushNotifications';
 import Modal from '@/components/ui/Modal';
 import { IGStrategyTrader } from '@/components/ig/IGStrategyTrader';
-import { IGScalperBot } from '@/components/ig/IGScalperBot';
-import { IGServerBot } from '@/components/ig/IGServerBot';
 import { T212StrategyTrader } from '@/components/t212/T212StrategyTrader';
 import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 import { NewsFeed } from '@/components/news/NewsFeed';
@@ -870,140 +868,6 @@ function IGTrader() {
   return <IGStrategyTrader />;
 }
 
-// ── Scalper Bot tab — reads IG demo session from localStorage ─────────────────
-function ScalperTab() {
-  const [session, setSession] = useState<{
-    cst: string; securityToken: string; accountId: string; apiKey: string;
-    lightstreamerEndpoint?: string;
-  } | null>(null);
-  const [positions, setPositions] = useState<Array<{
-    dealId: string; epic: string; direction: 'BUY'|'SELL'; size: number; level: number;
-  }>>([]);
-
-  // Load session from localStorage + refresh positions periodically
-  useEffect(() => {
-    async function loadSession() {
-      try {
-        // Always force a fresh session to guarantee we're on the SPREADBET account
-        const credRaw = localStorage.getItem('ig_credentials_demo');
-        if (!credRaw) return;
-        const creds = JSON.parse(credRaw) as { username?: string; password?: string; apiKey?: string };
-        if (!creds.username || !creds.password || !creds.apiKey) return;
-
-        const r = await fetch('/api/ig/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh: false }),
-        });
-        const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; lightstreamerEndpoint?: string | null };
-        if (!d.ok || !d.cst || !d.securityToken) return;
-
-        const sess = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '', lightstreamerEndpoint: d.lightstreamerEndpoint ?? undefined };
-        localStorage.setItem('ig_session_demo', JSON.stringify({ ...sess, isSpreadbet: true, authenticatedAt: Date.now() }));
-        setSession(sess);
-      } catch {}
-    }
-    void loadSession();
-    const t = setInterval(() => void loadSession(), 30_000);
-    return () => clearInterval(t);
-  }, []);
-
-  // Refresh positions from IG
-  const refreshPositions = useCallback(async () => {
-    if (!session) return;
-    try {
-      const r = await fetch('/api/ig/positions', {
-        headers: { 'x-ig-cst': session.cst, 'x-ig-security-token': session.securityToken, 'x-ig-api-key': session.apiKey, 'x-ig-env': 'demo' },
-      });
-      const d = await r.json() as { ok: boolean; positions?: Array<{ dealId: string; epic: string; direction: string; size: number; level: number }> };
-      if (d.ok) {
-        setPositions((d.positions ?? []).map(p => ({
-          dealId: p.dealId, epic: p.epic,
-          direction: p.direction as 'BUY'|'SELL',
-          size: p.size, level: p.level,
-        })));
-      }
-    } catch {}
-  }, [session]);
-
-  useEffect(() => {
-    void refreshPositions();
-    const t = setInterval(() => void refreshPositions(), 15_000);
-    return () => clearInterval(t);
-  }, [refreshPositions]);
-
-  const openPosition = useCallback(async (epic: string, size: number): Promise<number> => {
-    // Force-refresh session before every order to guarantee SPREADBET tokens
-    let activeSession = session;
-    try {
-      const credRaw = localStorage.getItem('ig_credentials_demo');
-      if (credRaw) {
-        const creds = JSON.parse(credRaw) as { username?: string; password?: string; apiKey?: string };
-        if (creds.username && creds.password && creds.apiKey) {
-          const r = await fetch('/api/ig/session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh: true }),
-          });
-          const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string };
-          if (d.ok && d.cst && d.securityToken) {
-            activeSession = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '' };
-          }
-        }
-      }
-    } catch { /* fall through to cached session */ }
-
-    if (!activeSession) throw new Error('No IG session');
-    const expiry = epic.startsWith('CS.D.') ? '-' : 'DFB';
-    const r = await fetch('/api/ig/order', {
-      method: 'POST',
-      headers: {
-        'x-ig-cst': activeSession.cst, 'x-ig-security-token': activeSession.securityToken,
-        'x-ig-api-key': activeSession.apiKey, 'x-ig-env': 'demo', 'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ epic, direction: 'BUY', size, expiry }),
-    });
-    const d = await r.json() as { ok: boolean; level?: number; error?: string };
-    if (!d.ok) throw new Error(d.error ?? 'Order failed');
-    void refreshPositions();
-    return d.level ?? 0;
-  }, [session, refreshPositions]);
-
-  const closePosition = useCallback(async (dealId: string, direction: 'BUY'|'SELL', size: number) => {
-    if (!session) throw new Error('No IG session');
-    // IG close requires the opposite direction to the open (SELL to close a BUY)
-    const closeDirection: 'BUY' | 'SELL' = direction === 'BUY' ? 'SELL' : 'BUY';
-    const r = await fetch('/api/ig/order', {
-      method: 'DELETE',
-      headers: {
-        'x-ig-cst': session.cst, 'x-ig-security-token': session.securityToken,
-        'x-ig-api-key': session.apiKey, 'x-ig-env': 'demo', 'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ dealId, direction: closeDirection, size }),
-    });
-    const d = await r.json() as { ok: boolean; error?: string; tried?: string[] };
-    if (!d.ok) throw new Error(`${d.error ?? 'Close failed'}${d.tried ? ` [tried: ${d.tried.join(', ')}]` : ''}`);
-    void refreshPositions();
-  }, [session, refreshPositions]);
-
-  if (!session) {
-    return (
-      <div className="text-center py-12 text-gray-500 text-sm">
-        No IG Demo session found. Connect in <strong>Settings → Accounts → IG Demo</strong> first.
-      </div>
-    );
-  }
-
-  return (
-    <IGScalperBot
-      session={session}
-      openPosition={openPosition}
-      closePosition={closePosition}
-      openPositions={positions}
-    />
-  );
-}
-
 // ── T212 Strategy Trader (full implementation in components/t212/T212StrategyTrader.tsx)
 function T212Trader() {
   return <T212StrategyTrader />;
@@ -1713,7 +1577,7 @@ export default function DemoTraderPage() {
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
-  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'scalper' | 'server-bot' | 't212' | 'news'>('stocks');
+  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 't212' | 'news'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [showExecAccountPicker, setShowExecAccountPicker] = useState(false);
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
@@ -3025,7 +2889,7 @@ export default function DemoTraderPage() {
 
       {/* Tab toggle */}
       <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
-        {(['stocks', 'forex', 'ig', 'scalper', 'server-bot', 't212', 'news'] as const).map(tab => (
+        {(['stocks', 'forex', 'ig', 't212', 'news'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setTraderTab(tab)}
@@ -3036,12 +2900,7 @@ export default function DemoTraderPage() {
                 : 'text-gray-500 hover:text-gray-300'
             )}
           >
-            {tab === 'ig'         ? 'IG Spread Bet'
-             : tab === 'scalper'    ? '⚡ Scalper (Browser)'
-             : tab === 'server-bot' ? '🖥 Server Bot'
-             : tab === 't212'       ? 'T212 Strategy'
-             : tab === 'news'       ? '📰 News Feed'
-             : tab.charAt(0).toUpperCase() + tab.slice(1)}
+            {tab === 'ig' ? 'IG Spread Bet' : tab === 't212' ? 'T212 Strategy' : tab === 'news' ? '📰 News Feed' : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
       </div>
@@ -3052,10 +2911,6 @@ export default function DemoTraderPage() {
         <ForexTrader />
       ) : traderTab === 'ig' ? (
         <IGTrader />
-      ) : traderTab === 'scalper' ? (
-        <ScalperTab />
-      ) : traderTab === 'server-bot' ? (
-        <IGServerBot />
       ) : traderTab === 't212' ? (
         <T212Trader />
       ) : traderTab === 'news' ? (

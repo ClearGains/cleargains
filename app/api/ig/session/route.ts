@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { publicEncrypt, constants, createPublicKey } from 'crypto';
 
 /** In-memory token cache: { cacheKey → { cst, securityToken, accountId, accounts, expiresAt } } */
 const tokenCache = new Map<string, {
@@ -7,25 +6,10 @@ const tokenCache = new Map<string, {
   securityToken: string;
   accountId: string;
   accounts: unknown[];
-  isSpreadbet: boolean;
   expiresAt: number;
 }>();
 
 const TOKEN_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours (IG tokens last 6h; refresh before expiry)
-
-// IG migrated-account auth: fetch RSA key then encrypt password|timestamp
-// Key comes back as raw base64-encoded DER (SPKI format) — load it directly
-// rather than wrapping in PEM, which requires 64-char line breaks to parse.
-async function getEncryptedPassword(baseUrl: string, apiKey: string, password: string): Promise<string> {
-  const keyRes = await fetch(`${baseUrl}/session/encryptionKey`, {
-    headers: { 'X-IG-API-KEY': apiKey, 'Version': '1', 'Accept': 'application/json; charset=UTF-8' },
-  });
-  if (!keyRes.ok) throw new Error(`IG encryption key fetch failed (${keyRes.status})`);
-  const { encryptionKey, timeStamp } = await keyRes.json() as { encryptionKey: string; timeStamp: string | number };
-  const publicKey = createPublicKey({ key: Buffer.from(encryptionKey, 'base64'), format: 'der', type: 'spki' });
-  const encrypted = publicEncrypt({ key: publicKey, padding: constants.RSA_PKCS1_PADDING }, Buffer.from(`${password}|${timeStamp}`));
-  return encrypted.toString('base64');
-}
 
 export async function POST(request: NextRequest) {
   try {
@@ -57,157 +41,103 @@ export async function POST(request: NextRequest) {
         securityToken: cached.securityToken,
         accountId: cached.accountId,
         accounts: cached.accounts,
-        isSpreadbet: cached.isSpreadbet ?? false,
       });
     }
 
-    function parseCode(text: string) {
-      try { return (JSON.parse(text) as { errorCode?: string }).errorCode ?? ''; } catch { return ''; }
-    }
-    function igErrMsg(code: string, status: number, context?: 'encrypted') {
-      if (code.includes('authenticationRequest.identifier') || code.includes('invalid.identifier'))
-        return 'IG rejected the username. Use your IG account number (e.g. Z12345), not your email. Find it in the IG app → My Account → Account details.';
-      if (code.includes('invalid.password') || code.includes('authentication'))
-        return 'IG authentication failed — check your username and password are correct.';
-      if (code.includes('exceed-login-session-limit') || code.includes('session-limit'))
-        return 'IG session limit reached. Log out of the IG web platform or other devices, wait a minute, then try again.';
-      if (code.includes('account-migrated'))
-        return context === 'encrypted'
-          ? `IG still rejecting after encrypted-password retry. Most likely cause: you are entering ${env.toUpperCase()} credentials in the wrong tab — IG Demo and Live are completely separate accounts with different account numbers and passwords. If your credentials are correct for this environment, your account may require IG support to re-enable API access.`
-          : `IG account migrated — attempting encrypted password retry…`;
-      if (status === 500)
-        return code ? `IG server error: ${code}` : 'IG server returned 500 — usually temporary. Try again in 1–2 minutes.';
-      return code ? `IG: ${code}` : `IG API error ${status}`;
-    }
-
-    console.log(`[ig/session] ${env} login attempt identifier="${username}"`);
-
-    // Step 1: plain-password attempt — read body exactly once
-    const plainRes  = await fetch(`${baseUrl}/session`, {
+    const res = await fetch(`${baseUrl}/session`, {
       method: 'POST',
-      headers: { 'X-IG-API-KEY': apiKey, 'Content-Type': 'application/json', 'Accept': 'application/json; charset=UTF-8', 'Version': '2' },
+      headers: {
+        'X-IG-API-KEY': apiKey,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json; charset=UTF-8',
+        'Version': '2',
+      },
       body: JSON.stringify({ identifier: username, password }),
     });
-    const plainText = await plainRes.text();
-    const plainCode = parseCode(plainText);
-    console.log(`[ig/session] plain: status=${plainRes.status} code="${plainCode}"`);
 
-    // sessionText / sessionHeaders point to whichever attempt succeeded
-    let sessionText: string;
-    let sessionHeaders: Headers;
+    if (!res.ok) {
+      const text = await res.text();
+      let errMsg = `IG API error ${res.status}`;
+      let errorCode = '';
+      try {
+        const j = JSON.parse(text) as { errorCode?: string };
+        errorCode = j.errorCode ?? '';
+      } catch { /* plain-text or HTML response */ }
 
-    if (!plainRes.ok) {
-      if (plainCode.includes('account-migrated')) {
-        // Step 2: encrypted-password retry — body read exactly once
-        let encPwd: string;
-        try {
-          encPwd = await getEncryptedPassword(baseUrl, apiKey, password);
-          console.log(`[ig/session] encrypted pwd obtained length=${encPwd.length}`);
-        } catch (e) {
-          tokenCache.delete(cacheKey);
-          return NextResponse.json({ ok: false, error: `IG encrypted auth exception: ${e instanceof Error ? e.message : String(e)}` }, { status: 401 });
-        }
-        const encRes  = await fetch(`${baseUrl}/session`, {
-          method: 'POST',
-          headers: { 'X-IG-API-KEY': apiKey, 'Content-Type': 'application/json', 'Accept': 'application/json; charset=UTF-8', 'Version': '2' },
-          body: JSON.stringify({ identifier: username, password: encPwd, encryptedPassword: true }),
-        });
-        const encText = await encRes.text();
-        const encCode = parseCode(encText);
-        console.log(`[ig/session] encrypted: status=${encRes.status} code="${encCode}"`);
-        if (!encRes.ok) {
-          tokenCache.delete(cacheKey);
-          return NextResponse.json({
-            ok: false,
-            error: `${igErrMsg(encCode, encRes.status, 'encrypted')} [enc: ${encRes.status} / ${encCode || encText.slice(0, 80)}]`,
-          }, { status: encRes.status });
-        }
-        sessionText    = encText;
-        sessionHeaders = encRes.headers;
-      } else {
-        tokenCache.delete(cacheKey);
-        return NextResponse.json({ ok: false, error: igErrMsg(plainCode, plainRes.status) }, { status: plainRes.status });
+      if (errorCode.includes('authenticationRequest.identifier') || errorCode.includes('invalid.identifier')) {
+        errMsg = 'IG rejected the username. Use your IG account number (e.g. Z12345), not your email. Find it in the IG app → My Account → Account details.';
+      } else if (errorCode.includes('invalid.password') || errorCode.includes('authentication')) {
+        errMsg = 'IG authentication failed — check your username and password are correct.';
+      } else if (errorCode.includes('exceed-login-session-limit') || errorCode.includes('session-limit')) {
+        errMsg = 'IG session limit reached. Log out of the IG web platform or other devices, wait a minute, then try again.';
+      } else if (res.status === 500) {
+        errMsg = errorCode
+          ? `IG server error: ${errorCode}`
+          : 'IG demo server returned 500. This is usually temporary — the demo environment is less stable than live. Wait 1–2 minutes and try again, or check status.ig.com.';
+      } else if (errorCode) {
+        errMsg = `IG: ${errorCode}`;
       }
-    } else {
-      sessionText    = plainText;
-      sessionHeaders = plainRes.headers;
+
+      // Clear any cached token so the next attempt hits IG fresh
+      tokenCache.delete(`${env}:${username}:${apiKey}`);
+
+      return NextResponse.json({ ok: false, error: errMsg }, { status: res.status });
     }
 
     // IG returns session tokens in RESPONSE HEADERS (not body)
-    let cst           = sessionHeaders.get('CST') ?? '';
-    let securityToken = sessionHeaders.get('X-SECURITY-TOKEN') ?? '';
+    let cst           = res.headers.get('CST') ?? '';
+    let securityToken = res.headers.get('X-SECURITY-TOKEN') ?? '';
 
     type AccountEntry = { accountId: string; accountName: string; accountType: string; preferred: boolean; status: string };
-    const data = JSON.parse(sessionText) as {
+    const data = await res.json() as {
       accountType?: string;
       accountId?: string;
       accounts?: AccountEntry[];
       clientId?: string;
-      lightstreamerEndpoint?: string;
     };
 
-    // ── Switch to the Spread Bet account ─────────────────────────────────────
+    // ── Auto-switch to the SPREADBET account ─────────────────────────────────
+    // If the user has both a CFD and a Spread Bet account, IG may default to
+    // CFD on login.  Orders placed on the wrong account type are rejected with
+    // REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT (or vice-versa).  Explicitly
+    // switching before trading prevents this.
     let activeAccountId = data.accountId ?? '';
     const accounts = data.accounts ?? [];
     const spreadbetAccount = accounts.find((a: AccountEntry) => a.accountType === 'SPREADBET');
 
-    // Always verify the active account type via GET /session — login response
-    // `accountType` is unreliable on some IG setups.
-    let isSpreadbet = false;
-    {
-      const verifyRes = await fetch(`${baseUrl}/session`, {
-        headers: { 'X-IG-API-KEY': apiKey, 'CST': cst, 'X-SECURITY-TOKEN': securityToken, 'Accept': 'application/json; charset=UTF-8', 'Version': '1' },
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (verifyRes.ok) {
-        const vd = await verifyRes.json() as { accountId?: string; accountType?: string };
-        isSpreadbet = vd.accountType === 'SPREADBET';
-        activeAccountId = vd.accountId ?? activeAccountId;
-        console.log(`[ig/session] Current account: id=${vd.accountId} type=${vd.accountType} isSpreadbet=${isSpreadbet}`);
-      }
-    }
-
-    if (!isSpreadbet && spreadbetAccount) {
-      console.log(`[ig/session] Switching to SPREADBET account ${spreadbetAccount.accountId}…`);
-      const switchRes = await fetch(`${baseUrl}/session`, {
-        method: 'PUT',
-        headers: {
-          'X-IG-API-KEY': apiKey,
-          'CST': cst,
-          'X-SECURITY-TOKEN': securityToken,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json; charset=UTF-8',
-          'Version': '1',
-        },
-        body: JSON.stringify({ accountId: spreadbetAccount.accountId, dealingEnabled: true }),
-      });
-      const switchText = await switchRes.text().catch(() => '{}');
-      if (switchRes.ok) {
-        const newCst      = switchRes.headers.get('CST') ?? switchRes.headers.get('cst');
-        const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN') ?? switchRes.headers.get('x-security-token');
-        if (newCst)      cst           = newCst;
-        if (newSecToken) securityToken = newSecToken;
-        activeAccountId = spreadbetAccount.accountId;
-        isSpreadbet = true;
-        console.log(`[ig/session] Switch OK — now on SPREADBET ${spreadbetAccount.accountId}`);
-      } else {
-        // 412 = precondition failed (often means already on this account) — re-verify
-        console.warn(`[ig/session] Switch returned ${switchRes.status}: ${switchText.slice(0, 200)} — re-verifying account`);
-        const reVerify = await fetch(`${baseUrl}/session`, {
-          headers: { 'X-IG-API-KEY': apiKey, 'CST': cst, 'X-SECURITY-TOKEN': securityToken, 'Accept': 'application/json; charset=UTF-8', 'Version': '1' },
-          signal: AbortSignal.timeout(5_000),
+    if (spreadbetAccount && spreadbetAccount.accountId !== activeAccountId) {
+      try {
+        const switchRes = await fetch(`${baseUrl}/session`, {
+          method: 'PUT',
+          headers: {
+            'X-IG-API-KEY': apiKey,
+            'CST': cst,
+            'X-SECURITY-TOKEN': securityToken,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json; charset=UTF-8',
+            'Version': '1',
+          },
+          body: JSON.stringify({ accountId: spreadbetAccount.accountId, dealingEnabled: true }),
         });
-        if (reVerify.ok) {
-          const rv = await reVerify.json() as { accountId?: string; accountType?: string };
-          isSpreadbet = rv.accountType === 'SPREADBET';
-          activeAccountId = rv.accountId ?? activeAccountId;
-          console.log(`[ig/session] Re-verify: accountId=${rv.accountId} type=${rv.accountType} isSpreadbet=${isSpreadbet}`);
+        if (switchRes.ok) {
+          // IG issues fresh tokens after account switch
+          const newCst      = switchRes.headers.get('CST');
+          const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
+          if (newCst)      cst           = newCst;
+          if (newSecToken) securityToken = newSecToken;
+          activeAccountId = spreadbetAccount.accountId;
+          console.log(`[ig/session] Switched to SPREADBET account ${activeAccountId}`);
+        } else {
+          const errText = await switchRes.text().catch(() => '');
+          console.warn(`[ig/session] Account switch failed (${switchRes.status}):`, errText.slice(0, 200));
         }
+      } catch (e) {
+        console.warn('[ig/session] Account switch error:', e instanceof Error ? e.message : String(e));
       }
-    } else if (isSpreadbet) {
-      console.log(`[ig/session] Already on Spread Bet account ${activeAccountId}`);
+    } else if (spreadbetAccount) {
+      console.log(`[ig/session] Already on SPREADBET account ${activeAccountId}`);
     } else {
-      console.log(`[ig/session] No Spread Bet account found — using default account ${activeAccountId}`);
+      console.log(`[ig/session] No SPREADBET account found — using default account ${activeAccountId}`);
     }
 
     const entry = {
@@ -215,7 +145,6 @@ export async function POST(request: NextRequest) {
       securityToken,
       accountId: activeAccountId,
       accounts,
-      isSpreadbet,
       expiresAt: Date.now() + TOKEN_TTL_MS,
     };
     tokenCache.set(cacheKey, entry);
@@ -227,8 +156,6 @@ export async function POST(request: NextRequest) {
       accountId: activeAccountId,
       accounts,
       spreadbetAccountId: spreadbetAccount?.accountId ?? null,
-      isSpreadbet,
-      lightstreamerEndpoint: data.lightstreamerEndpoint ?? null,
     });
   } catch (err) {
     return NextResponse.json(

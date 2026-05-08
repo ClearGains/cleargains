@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // ── Verified IG spread-bet epic map (DFB / TODAY rolling instruments only) ────
+// ⚠️  Using a CFD epic on a spread-bet account returns REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT
 const VERIFIED_EPICS: Record<string, string> = {
   // Indices — Daily Funded Bets
   'FTSE 100':      'IX.D.FTSE.DAILY.IP',
@@ -17,13 +18,14 @@ const VERIFIED_EPICS: Record<string, string> = {
   'EUR/GBP':       'CS.D.EURGBP.TODAY.IP',
   'AUD/USD':       'CS.D.AUDUSD.TODAY.IP',
   'USD/CHF':       'CS.D.USDCHF.TODAY.IP',
-  // Commodities — spread bet
+  // Commodities — spread bet  (NOT the CFD CS.D.CFDGOLD / CS.D.CRUDEOIL variants)
   'Gold':          'CS.D.GOLD.TODAY.IP',
-  'Silver':        'CS.D.SILVER.TODAY.IP',
-  'Oil (WTI)':     'CS.D.CRUDE.TODAY.IP',
-  'Natural Gas':   'CS.D.NATGAS.TODAY.IP',
+  'Silver':        'CS.D.SLVR.TODAY.IP',
+  'Oil (WTI)':     'CS.D.OILCRUD.TODAY.IP',
+  'Natural Gas':   'CS.D.NGAS.TODAY.IP',
   // Crypto — spread bet
   'Bitcoin':       'CS.D.BITCOIN.TODAY.IP',
+  'Ethereum':      'CS.D.ETHUSD.TODAY.IP',
 };
 
 const VERIFIED_EPIC_SET = new Set(Object.values(VERIFIED_EPICS));
@@ -109,9 +111,6 @@ export async function POST(request: NextRequest) {
     // Resolve epic — validate against verified set, search IG if unknown
     const { epic: resolvedEpic, resolvedVia } = await resolveEpic(body.epic, apiKey, cst, securityToken, base);
 
-    // Share spread bets (CS.D.*) use rolling expiry '-'; index DFBs (IX.D.*) use 'DFB'
-    const expiry = body.expiry ?? (resolvedEpic.startsWith('CS.D.') ? '-' : 'DFB');
-
     // ── Working order (LIMIT or STOP) ─────────────────────────────────────────
     if (orderType === 'LIMIT' || orderType === 'STOP') {
       if (!body.level) {
@@ -119,7 +118,7 @@ export async function POST(request: NextRequest) {
       }
       const woPayload: Record<string, unknown> = {
         epic:          resolvedEpic,
-        expiry,
+        expiry:        body.expiry ?? 'DFB',
         direction:     body.direction,
         size:          body.size,
         level:         body.level,
@@ -152,11 +151,12 @@ export async function POST(request: NextRequest) {
     // SL/TP are applied separately via PUT after the deal is confirmed ACCEPTED.
     const payload: Record<string, unknown> = {
       epic:          resolvedEpic,
-      expiry,
+      expiry:        body.expiry ?? 'DFB',
       direction:     body.direction,
       size:          body.size,
       orderType:     'MARKET',
       guaranteedStop: body.guaranteedStop ?? false,
+      trailingStop:  false,
       forceOpen:     body.forceOpen ?? true,
       currencyCode:  body.currencyCode ?? 'GBP',
     };
@@ -165,7 +165,7 @@ export async function POST(request: NextRequest) {
 
     const res = await fetch(`${base}/positions/otc`, {
       method: 'POST',
-      headers: igHeaders(apiKey, cst, securityToken, '1'),
+      headers: igHeaders(apiKey, cst, securityToken, '2'),
       body: JSON.stringify(payload),
     });
 
@@ -234,7 +234,7 @@ export async function POST(request: NextRequest) {
       try {
         const upd = await fetch(`${base}/positions/otc/${encodeURIComponent(confirm.dealId)}`, {
           method: 'PUT',
-          headers: igHeaders(apiKey, cst, securityToken, '1'),
+          headers: igHeaders(apiKey, cst, securityToken, '2'),
           body: JSON.stringify(slTpPayload),
         });
         if (!upd.ok) {
@@ -273,99 +273,33 @@ export async function DELETE(request: NextRequest) {
     }
 
     const body = await request.json() as { dealId: string; direction: 'BUY' | 'SELL'; size: number };
-    const { dealId, direction, size } = body;
-    if (!dealId || !direction || !size) {
-      return NextResponse.json({ ok: false, error: 'dealId, direction and size are required' }, { status: 400 });
-    }
-
     const base = baseUrl(env);
-    const hdrs1 = igHeaders(apiKey, cst, securityToken, '1');
 
-    // Payload for _method:DELETE override endpoints
-    const overridePayload = {
-      dealId,
+    const closePayload = {
+      dealId:      body.dealId,
       epic:        null,
       expiry:      null,
-      direction,
-      size,
+      direction:   body.direction,
+      size:        body.size,
       level:       null,
       orderType:   'MARKET',
       timeInForce: null,
       quoteId:     null,
     };
 
-    // Payload for true REST DELETE (no dealId in body, it's in the URL)
-    const directPayload = {
-      direction,
-      size,
-      orderType:   'MARKET',
-      timeInForce: null,
-      quoteId:     null,
-      level:       null,
-    };
+    const res = await fetch(`${base}/positions/otc`, {
+      method: 'POST',
+      headers: { ...igHeaders(apiKey, cst, securityToken, '1'), '_method': 'DELETE' },
+      body: JSON.stringify(closePayload),
+    });
 
-    // Three approaches in order of preference
-    const attempts = [
-      // 1. Direct DELETE /positions/{dealId} — cleanest REST, works on spread bet V1
-      {
-        label:   'DELETE /positions/{dealId}',
-        method:  'DELETE' as const,
-        url:     `${base}/positions/${encodeURIComponent(dealId)}`,
-        headers: hdrs1,
-        payload: directPayload,
-      },
-      // 2. POST /positions _method:DELETE — IG official spread bet override
-      {
-        label:   'POST /positions _method:DELETE',
-        method:  'POST' as const,
-        url:     `${base}/positions`,
-        headers: { ...hdrs1, '_method': 'DELETE' },
-        payload: overridePayload,
-      },
-      // 3. POST /positions/otc _method:DELETE — CFD fallback
-      {
-        label:   'POST /positions/otc _method:DELETE',
-        method:  'POST' as const,
-        url:     `${base}/positions/otc`,
-        headers: { ...hdrs1, '_method': 'DELETE' },
-        payload: overridePayload,
-      },
-    ];
-
-    const tried: string[] = [];
     let data: { dealReference?: string; errorCode?: string } = {};
-    let res: Response | null = null;
-
-    for (const attempt of attempts) {
-      const r = await fetch(attempt.url, {
-        method:  attempt.method,
-        headers: attempt.headers,
-        body:    JSON.stringify(attempt.payload),
-      });
-      let parsed: typeof data = {};
-      try { parsed = await r.json() as typeof data; } catch {}
-      tried.push(`${attempt.label} → ${r.status}${parsed.errorCode ? ` (${parsed.errorCode})` : ''}`);
-      // Only fall through on 404 (not found) or 405 (method not allowed) — try next endpoint
-      if (r.ok || (r.status !== 404 && r.status !== 405)) {
-        data = parsed;
-        res  = r;
-        break;
-      }
-    }
-
-    if (!res) {
-      return NextResponse.json({ ok: false, error: 'All close attempts returned 404', tried }, { status: 404 });
-    }
+    try { data = await res.json() as typeof data; } catch {}
 
     if (!res.ok) {
-      return NextResponse.json({
-        ok:    false,
-        error: data.errorCode ?? `IG API error ${res.status}`,
-        tried,
-      }, { status: res.status });
+      return NextResponse.json({ ok: false, error: data.errorCode ?? `IG API error ${res.status}` }, { status: res.status });
     }
-
-    return NextResponse.json({ ok: true, dealReference: data.dealReference, tried });
+    return NextResponse.json({ ok: true, dealReference: data.dealReference });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }
@@ -398,7 +332,7 @@ export async function PATCH(request: NextRequest) {
 
     const res = await fetch(`${base}/positions/otc/${encodeURIComponent(body.dealId)}`, {
       method: 'PUT',
-      headers: igHeaders(apiKey, cst, securityToken, '1'),
+      headers: igHeaders(apiKey, cst, securityToken, '2'),
       body: JSON.stringify(updatePayload),
     });
 
