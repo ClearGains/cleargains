@@ -143,16 +143,13 @@ export async function POST(request: NextRequest) {
       clientId?: string;
     };
 
-    // ── Auto-switch to the SPREADBET account ─────────────────────────────────
-    // If the user has both a CFD and a Spread Bet account, IG may default to
-    // CFD on login.  Orders placed on the wrong account type are rejected with
-    // REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT (or vice-versa).  Explicitly
-    // switching before trading prevents this.
+    // ── Switch to the Spread Bet account ─────────────────────────────────────
     let activeAccountId = data.accountId ?? '';
     const accounts = data.accounts ?? [];
     const spreadbetAccount = accounts.find((a: AccountEntry) => a.accountType === 'SPREADBET');
+    let isSpreadbet = spreadbetAccount ? activeAccountId === spreadbetAccount.accountId : false;
 
-    if (spreadbetAccount && spreadbetAccount.accountId !== activeAccountId) {
+    if (spreadbetAccount && !isSpreadbet) {
       try {
         const switchRes = await fetch(`${baseUrl}/session`, {
           method: 'PUT',
@@ -166,28 +163,44 @@ export async function POST(request: NextRequest) {
           },
           body: JSON.stringify({ accountId: spreadbetAccount.accountId, dealingEnabled: true }),
         });
+        const switchText = await switchRes.text().catch(() => '{}');
         if (switchRes.ok) {
-          // IG issues fresh tokens after account switch
+          // IG may issue new tokens in headers after switch — use them if present
           const newCst      = switchRes.headers.get('CST');
           const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
           if (newCst)      cst           = newCst;
           if (newSecToken) securityToken = newSecToken;
-          activeAccountId = spreadbetAccount.accountId;
-          console.log(`[ig/session] Switched to SPREADBET account ${activeAccountId}`);
+
+          // Verify switch succeeded by reading the response body accountType
+          try {
+            const switchData = JSON.parse(switchText) as { accountType?: string; currencyIsoCode?: string };
+            isSpreadbet = switchData.accountType === 'SPREADBET';
+            activeAccountId = isSpreadbet ? spreadbetAccount.accountId : activeAccountId;
+            console.log(`[ig/session] Switch result: accountType=${switchData.accountType ?? '?'} isSpreadbet=${isSpreadbet}`);
+          } catch {
+            // Body unparseable — confirm via GET /session
+            const verifyRes = await fetch(`${baseUrl}/session`, {
+              headers: { 'X-IG-API-KEY': apiKey, 'CST': cst, 'X-SECURITY-TOKEN': securityToken, 'Accept': 'application/json; charset=UTF-8', 'Version': '1' },
+              signal: AbortSignal.timeout(5_000),
+            });
+            if (verifyRes.ok) {
+              const vd = await verifyRes.json() as { accountId?: string; accountType?: string };
+              isSpreadbet = vd.accountType === 'SPREADBET';
+              activeAccountId = vd.accountId ?? activeAccountId;
+              console.log(`[ig/session] Verified via GET /session: accountId=${vd.accountId} accountType=${vd.accountType} isSpreadbet=${isSpreadbet}`);
+            }
+          }
         } else {
-          const errText = await switchRes.text().catch(() => '');
-          console.warn(`[ig/session] Account switch failed (${switchRes.status}):`, errText.slice(0, 200));
+          console.warn(`[ig/session] Switch failed (${switchRes.status}): ${switchText.slice(0, 200)}`);
         }
       } catch (e) {
-        console.warn('[ig/session] Account switch error:', e instanceof Error ? e.message : String(e));
+        console.warn('[ig/session] Switch error:', e instanceof Error ? e.message : String(e));
       }
-    } else if (spreadbetAccount) {
-      console.log(`[ig/session] Already on SPREADBET account ${activeAccountId}`);
+    } else if (isSpreadbet) {
+      console.log(`[ig/session] Already on Spread Bet account ${activeAccountId}`);
     } else {
-      console.log(`[ig/session] No SPREADBET account found — using default account ${activeAccountId}`);
+      console.log(`[ig/session] No Spread Bet account found — using default account ${activeAccountId}`);
     }
-
-    const isSpreadbet = !!spreadbetAccount && activeAccountId === spreadbetAccount.accountId;
 
     const entry = {
       cst,

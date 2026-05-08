@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // ── Verified IG spread-bet epic map (DFB / TODAY rolling instruments only) ────
-// ⚠️  Using a CFD epic on a spread-bet account returns REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT
 const VERIFIED_EPICS: Record<string, string> = {
   // Indices — Daily Funded Bets
   'FTSE 100':      'IX.D.FTSE.DAILY.IP',

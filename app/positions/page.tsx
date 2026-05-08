@@ -946,16 +946,15 @@ export default function PositionsPage() {
   }
 
   // ── IG session helper — auto-connects from stored credentials if needed ────
-  // forceRefresh=true bypasses the cache — use when placing orders to guarantee
-  // tokens are bound to the SPREADBET account (Z6AFSI), not the default CFD account.
+  // forceRefresh=true bypasses the local cache and forces a fresh login + account switch.
   async function getIGDemoSession(forceRefresh = false): Promise<{ cst: string; securityToken: string; apiKey: string } | null> {
     const SESSION_TTL = 5 * 60 * 60 * 1000;
     const sessKey  = 'ig_session_demo';
     const credKey  = 'ig_demo_credentials';
 
     // Try cached session first (skip on forceRefresh).
-    // Require isSpreadbet: true — old CFD-account sessions fail this check and
-    // fall through to re-auth, which always switches to the SPREADBET account.
+    // Require isSpreadbet: true — sessions that aren't on the Spread Bet account
+    // are rejected and fall through to re-auth which switches to Spread Bet.
     if (!forceRefresh) {
       try {
         const raw = localStorage.getItem(sessKey);
@@ -1000,7 +999,7 @@ export default function PositionsPage() {
     setTestLoading(true);
     setTestResult(null);
     try {
-      // forceRefresh=true ensures we get fresh SPREADBET-account tokens, not stale CFD tokens
+      // forceRefresh=true ensures a fresh login + Spread Bet account switch
       const sess = await getIGDemoSession(true);
       if (!sess) { setTestResult('✗ No IG demo credentials found — go to Settings → Accounts → IG Demo and connect first'); setTestLoading(false); return; }
       const expiry = testEpic.startsWith('CS.D.') ? '-' : 'DFB';
