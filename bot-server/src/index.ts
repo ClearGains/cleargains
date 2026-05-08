@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
-import { startBot, stopBot, getBotStatus, loadSavedState } from './bot';
+import { startBot, stopBot, getBotStatus, loadSavedState, injectPosition, type InjectParams } from './bot';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -52,6 +52,24 @@ app.post('/start', auth, (req: Request, res: Response) => {
 app.post('/stop', auth, (_req, res) => {
   stopBot();
   res.json({ ok: true });
+});
+
+// POST /debug/inject — inject a manually-opened position into bot state for testing exit logic
+app.post('/debug/inject', auth, (req: Request, res: Response) => {
+  const body = req.body as Partial<InjectParams>;
+  const { epic, dealId, direction, size, entryPrice, stopPoints, tpPoints } = body;
+
+  if (!epic || !dealId || !direction || !size || !entryPrice || !stopPoints || !tpPoints) {
+    res.status(400).json({ ok: false, error: 'Required: epic, dealId, direction, size, entryPrice, stopPoints, tpPoints' });
+    return;
+  }
+  if (direction !== 'BUY' && direction !== 'SELL') {
+    res.status(400).json({ ok: false, error: 'direction must be BUY or SELL' });
+    return;
+  }
+
+  const result = injectPosition({ epic, dealId, direction, size, entryPrice, stopPoints, tpPoints });
+  res.status(result.ok ? 200 : 400).json(result);
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────

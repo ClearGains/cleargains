@@ -15,6 +15,16 @@ import { isMarketOpen } from './marketHours';
 import { askGemini, type EntrySignal } from './gemini';
 import { feedCandle, runSignalCheck } from './signalMonitor';
 
+export type InjectParams = {
+  epic:        string;
+  dealId:      string;
+  direction:   'BUY' | 'SELL';
+  size:        number;
+  entryPrice:  number;
+  stopPoints:  number;
+  tpPoints:    number;
+};
+
 const STATE_FILE = path.join(__dirname, '..', 'bot-state.json');
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -394,6 +404,36 @@ export function stopBot() {
   clearSession();
   clearState();
   addLog('info', '—', 'Bot stopped');
+}
+
+export function injectPosition(params: InjectParams): { ok: boolean; error?: string } {
+  if (!running) return { ok: false, error: 'Bot is not running' };
+
+  const { epic, dealId, direction, size, entryPrice, stopPoints, tpPoints } = params;
+
+  if (!epicStates[epic]) {
+    epicStates[epic] = initEpicState(epic);
+    // Also subscribe to this epic's stream if not already watching it
+    const session = getSession();
+    if (session && !currentEpics.includes(epic)) {
+      currentEpics = [...currentEpics, epic];
+      connect(session, currentEpics, handleTick, '1MINUTE');
+    }
+  }
+
+  const st = epicStates[epic];
+  st.state     = 'IN_POSITION';
+  st.direction = direction;
+  st.dealId    = dealId;
+  st.size      = size;
+  recordFill(st, entryPrice, stopPoints, tpPoints);
+
+  const name = epic.split('.').slice(0, 3).join('.');
+  addLog('info', name,
+    `[DEBUG] Injected ${direction} position — dealId=${dealId} entry=${entryPrice} stop±${stopPoints} tp±${tpPoints}`
+  );
+
+  return { ok: true };
 }
 
 export function getBotStatus(): BotStatus {
