@@ -157,7 +157,6 @@ export async function POST(request: NextRequest) {
       size:          body.size,
       orderType:     'MARKET',
       guaranteedStop: body.guaranteedStop ?? false,
-      trailingStop:  false,
       forceOpen:     body.forceOpen ?? true,
       currencyCode:  body.currencyCode ?? 'GBP',
     };
