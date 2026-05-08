@@ -5,7 +5,7 @@ import {
   RefreshCw, X, AlertCircle,
   BarChart3, Clock, Wifi, ExternalLink, Download, Plus,
   ChevronDown, ChevronUp, Bell, Edit2, CheckCircle2, History,
-  Layers,
+  Layers, Zap, FlaskConical, PlayCircle,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Card } from '@/components/ui/Card';
@@ -110,6 +110,21 @@ function fmtAge(iso?: string) {
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
 }
+
+const EPIC_OPTIONS = [
+  { label: 'FTSE 100',    value: 'IX.D.FTSE.DAILY.IP'   },
+  { label: 'S&P 500',     value: 'IX.D.SPTRD.DAILY.IP'  },
+  { label: 'NASDAQ 100',  value: 'IX.D.NASDAQ.DAILY.IP'  },
+  { label: 'Wall Street', value: 'IX.D.DOW.DAILY.IP'     },
+  { label: 'Germany 40',  value: 'IX.D.DAX.DAILY.IP'     },
+  { label: 'Gold',        value: 'CS.D.GOLD.TODAY.IP'    },
+  { label: 'Silver',      value: 'CS.D.SLVR.TODAY.IP'    },
+  { label: 'Oil (WTI)',   value: 'CS.D.OILCRUD.TODAY.IP' },
+  { label: 'GBP/USD',    value: 'CS.D.GBPUSD.TODAY.IP'  },
+  { label: 'EUR/USD',    value: 'CS.D.EURUSD.TODAY.IP'  },
+  { label: 'Bitcoin',    value: 'CS.D.BITCOIN.TODAY.IP' },
+  { label: 'Ethereum',   value: 'CS.D.ETHUSD.TODAY.IP'  },
+];
 
 // Key used to track positions opened by ClearGains
 const CLEARGAINS_POSITIONS_KEY = 'positions_opened_by_cleargains';
@@ -278,10 +293,27 @@ export default function PositionsPage() {
   // Portfolio modal hook
   const portfolioModal = useLoadPortfolio();
 
-  const prevPositionsRef = useRef<UnifiedPosition[]>([]);
-  const refreshRef       = useRef<ReturnType<typeof setInterval> | null>(null);
-  const countdownRef     = useRef<ReturnType<typeof setInterval> | null>(null);
-  const cgIdsRef         = useRef<Set<string>>(new Set());
+  // Auto-close engine
+  const [autoCloseEnabled, setAutoCloseEnabled] = useState(false);
+  const [autoCloseTpPct, setAutoCloseTpPct]     = useState(2.0);
+  const [autoCloseSlPct, setAutoCloseSlPct]     = useState(1.0);
+  const [autoCloseLog, setAutoCloseLog]         = useState<string[]>([]);
+  const [hasIgDemoSession, setHasIgDemoSession] = useState(false);
+  // Test trade panel
+  const [showTestPanel, setShowTestPanel]       = useState(false);
+  const [testEpic, setTestEpic]                 = useState('CS.D.GOLD.TODAY.IP');
+  const [testDir, setTestDir]                   = useState<'BUY' | 'SELL'>('BUY');
+  const [testSize, setTestSize]                 = useState(1);
+  const [testLoading, setTestLoading]           = useState(false);
+  const [testResult, setTestResult]             = useState<string | null>(null);
+
+  const prevPositionsRef     = useRef<UnifiedPosition[]>([]);
+  const refreshRef           = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownRef         = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cgIdsRef             = useRef<Set<string>>(new Set());
+  const autoCloseSettingsRef = useRef({ enabled: false, tpPct: 2.0, slPct: 1.0 });
+  const autoClosingRef       = useRef(false);
+  const closePositionRef     = useRef<((pos: UnifiedPosition) => Promise<void>) | null>(null);
 
   // Load manual positions, CG ids, and cached snapshot on mount
   useEffect(() => {
@@ -299,6 +331,22 @@ export default function PositionsPage() {
         setPortfolioData(parsed);
         setLastSynced(new Date(parsed.loadedAt));
         if (ageMin > 5) setCacheWarning(true);
+      }
+    } catch {}
+  }, []);
+
+  // Keep autoCloseSettingsRef in sync so the auto-close effect always reads fresh values
+  useEffect(() => {
+    autoCloseSettingsRef.current = { enabled: autoCloseEnabled, tpPct: autoCloseTpPct, slPct: autoCloseSlPct };
+  }, [autoCloseEnabled, autoCloseTpPct, autoCloseSlPct]);
+
+  // Check IG demo session on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('ig_session_demo');
+      if (raw) {
+        const sess = JSON.parse(raw) as { cst?: string; securityToken?: string };
+        setHasIgDemoSession(!!(sess.cst && sess.securityToken));
       }
     } catch {}
   }, []);
@@ -678,6 +726,44 @@ export default function PositionsPage() {
     setClosingId(null);
   }
 
+  // Keep closePositionRef pointing at the latest version so auto-close effect
+  // always calls the function that has fresh state in scope
+  closePositionRef.current = closePosition;
+
+  // ── Auto-close engine ─────────────────────────────────────────────────────
+  // Runs after every positions refresh; closes IG Demo positions that breach
+  // the configured profit/loss thresholds using a plain market order (no IG
+  // SL/TP orders required).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const { enabled, tpPct, slPct } = autoCloseSettingsRef.current;
+    if (!enabled || autoClosingRef.current) return;
+
+    const toClose = positions.filter(
+      p => p.account === 'IG_DEMO' && (
+        (tpPct > 0 && p.pnlPct >= tpPct) ||
+        (slPct > 0 && p.pnlPct <= -slPct)
+      ),
+    );
+    if (toClose.length === 0) return;
+
+    autoClosingRef.current = true;
+    const run = async () => {
+      for (const pos of toClose) {
+        const reason = pos.pnlPct >= tpPct
+          ? `+${pos.pnlPct.toFixed(1)}% hit profit target`
+          : `${pos.pnlPct.toFixed(1)}% hit loss limit`;
+        setAutoCloseLog(prev => [
+          `${new Date().toLocaleTimeString('en-GB')}: ${pos.name} — ${reason}`,
+          ...prev.slice(0, 19),
+        ]);
+        await closePositionRef.current?.(pos);
+      }
+      autoClosingRef.current = false;
+    };
+    void run();
+  }, [positions]);
+
   // ── Export CSV ────────────────────────────────────────────────────────────
   function exportCSV() {
     const rows = [
@@ -724,6 +810,44 @@ export default function PositionsPage() {
     setShowManualModal(false);
     setManualForm({ account: 'T212_INVEST', name: '', ticker: '', direction: 'BUY', quantity: 1, entryPrice: 0, openedAt: new Date().toISOString().slice(0, 16) });
     void fetchAll();
+  }
+
+  // ── Open test trade on IG Demo Spread Bet ─────────────────────────────────
+  async function openTestTrade() {
+    setTestLoading(true);
+    setTestResult(null);
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem('ig_session_demo') : null;
+      if (!raw) { setTestResult('✗ No IG demo session — connect your IG account first'); setTestLoading(false); return; }
+      const sess = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
+      if (!sess.cst || !sess.securityToken || !sess.apiKey) {
+        setTestResult('✗ IG demo session is incomplete — reconnect'); setTestLoading(false); return;
+      }
+      const expiry = testEpic.startsWith('CS.D.') ? '-' : 'DFB';
+      const r = await fetch('/api/ig/order', {
+        method: 'POST',
+        headers: {
+          'x-ig-cst':            sess.cst,
+          'x-ig-security-token': sess.securityToken,
+          'x-ig-api-key':        sess.apiKey,
+          'x-ig-env':            'demo',
+          'Content-Type':        'application/json',
+        },
+        body: JSON.stringify({ epic: testEpic, direction: testDir, size: testSize, expiry }),
+      });
+      const d = await r.json() as { ok: boolean; dealId?: string; level?: number; dealStatus?: string; error?: string };
+      if (!d.ok) {
+        setTestResult(`✗ ${d.error ?? 'Open failed'}`);
+      } else {
+        const epicLabel = EPIC_OPTIONS.find(o => o.value === testEpic)?.label ?? testEpic;
+        setTestResult(`✓ ${testDir} ${testSize} ${epicLabel} @ ${d.level ? fmtPrice(d.level) : '?'} (${d.dealStatus ?? 'ACCEPTED'}) — ID: ${d.dealId ?? '?'}`);
+        setHasIgDemoSession(true);
+        setTimeout(() => { void fetchAll(); }, 2_000);
+      }
+    } catch (e) {
+      setTestResult(`✗ ${e instanceof Error ? e.message : 'Unknown error'}`);
+    }
+    setTestLoading(false);
   }
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -890,6 +1014,133 @@ export default function PositionsPage() {
               <span className={`font-semibold tabular-nums ${f.color}`}>£{f.available.toFixed(2)}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Auto-Close Engine — IG Demo Spread Bet */}
+      {hasIgDemoSession && (
+        <div className="bg-gray-900/70 border border-orange-500/25 rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-orange-400" />
+              <span className="text-sm font-semibold text-white">Auto-Close Engine</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400 border border-orange-500/20 font-bold">IG DEMO SPREAD BET</span>
+              {autoCloseEnabled && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 animate-pulse">ACTIVE</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowTestPanel(v => !v)}
+                className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-200 border border-gray-700 hover:border-gray-600 rounded px-2 py-1 transition-all"
+              >
+                <FlaskConical className="h-3 w-3" /> Test Trade
+              </button>
+              <button
+                onClick={() => setAutoCloseEnabled(v => !v)}
+                className={clsx(
+                  'flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border font-medium transition-all',
+                  autoCloseEnabled
+                    ? 'bg-orange-500/20 text-orange-400 border-orange-500/40 hover:bg-orange-500/30'
+                    : 'bg-gray-800 text-gray-400 border-gray-700 hover:border-gray-600',
+                )}
+              >
+                {autoCloseEnabled ? 'Disable' : 'Enable'}
+              </button>
+            </div>
+          </div>
+
+          <p className="text-[10px] text-gray-500">
+            Monitors IG Demo positions every 30s and closes via market order when your thresholds are hit — no SL/TP orders placed on IG.
+          </p>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[10px] text-gray-500 uppercase tracking-wider mb-1">Take Profit at %</label>
+              <input
+                type="number"
+                value={autoCloseTpPct}
+                onChange={e => setAutoCloseTpPct(Math.max(0.1, Number(e.target.value)))}
+                min={0.1} max={100} step={0.5}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white focus:border-emerald-500/50 outline-none"
+              />
+              <p className="text-[9px] text-gray-600 mt-0.5">Close when P&amp;L ≥ +{autoCloseTpPct}%</p>
+            </div>
+            <div>
+              <label className="block text-[10px] text-gray-500 uppercase tracking-wider mb-1">Stop Loss at %</label>
+              <input
+                type="number"
+                value={autoCloseSlPct}
+                onChange={e => setAutoCloseSlPct(Math.max(0.1, Number(e.target.value)))}
+                min={0.1} max={100} step={0.5}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white focus:border-red-500/50 outline-none"
+              />
+              <p className="text-[9px] text-gray-600 mt-0.5">Close when P&amp;L ≤ -{autoCloseSlPct}%</p>
+            </div>
+          </div>
+
+          {/* Activity log */}
+          {autoCloseLog.length > 0 && (
+            <div className="bg-gray-950/80 border border-gray-800 rounded-lg p-2 max-h-28 overflow-y-auto">
+              <p className="text-[9px] text-gray-600 uppercase tracking-wider mb-1.5 font-medium">Auto-close log</p>
+              {autoCloseLog.map((entry, i) => (
+                <p key={i} className="text-[10px] text-gray-400 font-mono leading-relaxed">{entry}</p>
+              ))}
+            </div>
+          )}
+
+          {/* Test trade panel */}
+          {showTestPanel && (
+            <div className="bg-gray-950/80 border border-gray-800 rounded-lg p-3 space-y-2">
+              <p className="text-[10px] text-gray-400 font-medium flex items-center gap-1">
+                <FlaskConical className="h-3 w-3" /> Open a test position on IG Demo
+              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <select
+                  value={testEpic}
+                  onChange={e => setTestEpic(e.target.value)}
+                  className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white outline-none"
+                >
+                  {EPIC_OPTIONS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                <select
+                  value={testDir}
+                  onChange={e => setTestDir(e.target.value as 'BUY' | 'SELL')}
+                  className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white outline-none"
+                >
+                  <option value="BUY">BUY (Long)</option>
+                  <option value="SELL">SELL (Short)</option>
+                </select>
+                <input
+                  type="number"
+                  value={testSize}
+                  onChange={e => setTestSize(Math.max(0.1, Number(e.target.value)))}
+                  min={0.1} step={0.1}
+                  placeholder="Size"
+                  className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white outline-none"
+                />
+                <button
+                  onClick={() => void openTestTrade()}
+                  disabled={testLoading}
+                  className="flex items-center gap-1.5 text-xs bg-orange-500/20 text-orange-400 border border-orange-500/30 hover:border-orange-500/60 rounded px-3 py-1.5 transition-all disabled:opacity-40"
+                >
+                  {testLoading ? <RefreshCw className="h-3 w-3 animate-spin" /> : <PlayCircle className="h-3 w-3" />}
+                  Open Now
+                </button>
+              </div>
+              {testResult && (
+                <p className={clsx('text-[10px] font-mono mt-1', testResult.startsWith('✓') ? 'text-emerald-400' : 'text-red-400')}>
+                  {testResult}
+                </p>
+              )}
+              <p className="text-[9px] text-gray-600">
+                The position will appear in your IG Demo account and in the table below.
+                {autoCloseEnabled ? ` Auto-close is active — it will close at +${autoCloseTpPct}% or -${autoCloseSlPct}%.` : ' Enable Auto-Close above to have it closed automatically.'}
+              </p>
+            </div>
+          )}
         </div>
       )}
 
