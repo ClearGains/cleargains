@@ -349,15 +349,10 @@ export default function PositionsPage() {
     autoCloseSettingsRef.current = { enabled: autoCloseEnabled, tpPct: autoCloseTpPct, slPct: autoCloseSlPct };
   }, [autoCloseEnabled, autoCloseTpPct, autoCloseSlPct]);
 
-  // Check IG demo session on mount
+  // On mount: auto-connect IG demo from stored credentials if session is missing/stale
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('ig_session_demo');
-      if (raw) {
-        const sess = JSON.parse(raw) as { cst?: string; securityToken?: string };
-        setHasIgDemoSession(!!(sess.cst && sess.securityToken));
-      }
-    } catch {}
+    void getIGDemoSession();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Update portfolioData when modal finishes loading
@@ -711,9 +706,10 @@ export default function PositionsPage() {
     try {
       if (pos.account === 'IG_DEMO' || pos.account === 'IG_LIVE') {
         const envKey = pos.account === 'IG_DEMO' ? 'demo' : 'live';
-        const raw = localStorage.getItem(`ig_session_${envKey}`);
-        if (!raw) { setCloseError('No IG session found'); setClosingId(null); return; }
-        const sess = JSON.parse(raw) as { cst: string; securityToken: string; apiKey: string };
+        const sess = pos.account === 'IG_DEMO'
+          ? await getIGDemoSession()
+          : (() => { try { const r = localStorage.getItem('ig_session_live'); return r ? JSON.parse(r) as { cst: string; securityToken: string; apiKey: string } : null; } catch { return null; } })();
+        if (!sess) { setCloseError('No IG session — reconnecting, please try again in a moment'); setClosingId(null); void getIGDemoSession(); return; }
         const r = await fetch('/api/ig/order', {
           method: 'DELETE',
           headers: { 'x-ig-cst': sess.cst, 'x-ig-security-token': sess.securityToken, 'x-ig-api-key': sess.apiKey, 'x-ig-env': envKey, 'Content-Type': 'application/json' },
@@ -790,10 +786,9 @@ export default function PositionsPage() {
     setSignalMonitorChecking(true);
 
     try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem('ig_session_demo') : null;
-      if (!raw) { signalMonitorRunning.current = false; setSignalMonitorChecking(false); return; }
-      const sess = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
-      if (!sess.cst || !sess.securityToken || !sess.apiKey) {
+      const sess = await getIGDemoSession();
+      if (!sess) {
+        setSignalMonitorLog(prev => [`${new Date().toLocaleTimeString('en-GB')}: ✗ No IG demo session — check credentials in Settings`, ...prev.slice(0, 29)]);
         signalMonitorRunning.current = false; setSignalMonitorChecking(false); return;
       }
 
@@ -919,17 +914,54 @@ export default function PositionsPage() {
     void fetchAll();
   }
 
+  // ── IG session helper — auto-connects from stored credentials if needed ────
+  async function getIGDemoSession(): Promise<{ cst: string; securityToken: string; apiKey: string } | null> {
+    const SESSION_TTL = 5 * 60 * 60 * 1000;
+    const sessKey  = 'ig_session_demo';
+    const credKey  = 'ig_demo_credentials';
+
+    // Try cached session first
+    try {
+      const raw = localStorage.getItem(sessKey);
+      if (raw) {
+        const s = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string; authenticatedAt?: number };
+        if (s.cst && s.securityToken && s.apiKey && s.authenticatedAt && (Date.now() - s.authenticatedAt) < SESSION_TTL) {
+          setHasIgDemoSession(true);
+          return { cst: s.cst, securityToken: s.securityToken, apiKey: s.apiKey };
+        }
+      }
+    } catch {}
+
+    // No valid cached session — try to build one from stored credentials
+    try {
+      const credRaw = localStorage.getItem(credKey);
+      if (!credRaw) return null;
+      const creds = JSON.parse(credRaw) as { username?: string; password?: string; apiKey?: string; connected?: boolean };
+      if (!creds.username || !creds.password || !creds.apiKey) return null;
+
+      const r = await fetch('/api/ig/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo' }),
+      });
+      const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; error?: string };
+      if (!d.ok || !d.cst || !d.securityToken) return null;
+
+      const sess = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '', authenticatedAt: Date.now() };
+      localStorage.setItem(sessKey, JSON.stringify(sess));
+      setHasIgDemoSession(true);
+      return { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey };
+    } catch {}
+    return null;
+  }
+
   // ── Open test trade on IG Demo Spread Bet ─────────────────────────────────
   async function openTestTrade() {
     setTestLoading(true);
     setTestResult(null);
     try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem('ig_session_demo') : null;
-      if (!raw) { setTestResult('✗ No IG demo session — connect your IG account first'); setTestLoading(false); return; }
-      const sess = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
-      if (!sess.cst || !sess.securityToken || !sess.apiKey) {
-        setTestResult('✗ IG demo session is incomplete — reconnect'); setTestLoading(false); return;
-      }
+      const sess = await getIGDemoSession();
+      if (!sess) { setTestResult('✗ No IG demo credentials found — go to Settings → Accounts → IG Demo and connect first'); setTestLoading(false); return; }
       const expiry = testEpic.startsWith('CS.D.') ? '-' : 'DFB';
       const r = await fetch('/api/ig/order', {
         method: 'POST',
