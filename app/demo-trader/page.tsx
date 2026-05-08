@@ -882,25 +882,29 @@ function ScalperTab() {
 
   // Load session from localStorage + refresh positions periodically
   useEffect(() => {
-    function loadSession() {
+    async function loadSession() {
       try {
-        const raw = localStorage.getItem('ig_session_demo');
-        if (!raw) return;
-        const s = JSON.parse(raw) as {
-          cst?: string; securityToken?: string; apiKey?: string;
-          accountId?: string; lightstreamerEndpoint?: string;
-        };
-        if (s.cst && s.securityToken && s.apiKey) {
-          setSession({
-            cst: s.cst, securityToken: s.securityToken,
-            apiKey: s.apiKey, accountId: s.accountId ?? '',
-            lightstreamerEndpoint: s.lightstreamerEndpoint,
-          });
-        }
+        // Always force a fresh session to guarantee we're on the SPREADBET account
+        const credRaw = localStorage.getItem('ig_credentials_demo');
+        if (!credRaw) return;
+        const creds = JSON.parse(credRaw) as { username?: string; password?: string; apiKey?: string };
+        if (!creds.username || !creds.password || !creds.apiKey) return;
+
+        const r = await fetch('/api/ig/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh: false }),
+        });
+        const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; lightstreamerEndpoint?: string | null };
+        if (!d.ok || !d.cst || !d.securityToken) return;
+
+        const sess = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '', lightstreamerEndpoint: d.lightstreamerEndpoint ?? undefined };
+        localStorage.setItem('ig_session_demo', JSON.stringify({ ...sess, isSpreadbet: true, authenticatedAt: Date.now() }));
+        setSession(sess);
       } catch {}
     }
-    loadSession();
-    const t = setInterval(loadSession, 30_000);
+    void loadSession();
+    const t = setInterval(() => void loadSession(), 30_000);
     return () => clearInterval(t);
   }, []);
 
@@ -929,13 +933,33 @@ function ScalperTab() {
   }, [refreshPositions]);
 
   const openPosition = useCallback(async (epic: string, size: number): Promise<number> => {
-    if (!session) throw new Error('No IG session');
+    // Force-refresh session before every order to guarantee SPREADBET tokens
+    let activeSession = session;
+    try {
+      const credRaw = localStorage.getItem('ig_credentials_demo');
+      if (credRaw) {
+        const creds = JSON.parse(credRaw) as { username?: string; password?: string; apiKey?: string };
+        if (creds.username && creds.password && creds.apiKey) {
+          const r = await fetch('/api/ig/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh: true }),
+          });
+          const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string };
+          if (d.ok && d.cst && d.securityToken) {
+            activeSession = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '' };
+          }
+        }
+      }
+    } catch { /* fall through to cached session */ }
+
+    if (!activeSession) throw new Error('No IG session');
     const expiry = epic.startsWith('CS.D.') ? '-' : 'DFB';
     const r = await fetch('/api/ig/order', {
       method: 'POST',
       headers: {
-        'x-ig-cst': session.cst, 'x-ig-security-token': session.securityToken,
-        'x-ig-api-key': session.apiKey, 'x-ig-env': 'demo', 'Content-Type': 'application/json',
+        'x-ig-cst': activeSession.cst, 'x-ig-security-token': activeSession.securityToken,
+        'x-ig-api-key': activeSession.apiKey, 'x-ig-env': 'demo', 'Content-Type': 'application/json',
       },
       body: JSON.stringify({ epic, direction: 'BUY', size, expiry }),
     });
