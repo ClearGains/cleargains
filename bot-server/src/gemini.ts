@@ -59,7 +59,12 @@ function fallbackVerdict(signal: EntrySignal): GeminiVerdict {
 
 export async function askGemini(signal: EntrySignal): Promise<GeminiVerdict> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return fallbackVerdict(signal);
+
+  // Stage 1: rules filter — always runs first
+  const rules = fallbackVerdict(signal);
+  if (!apiKey || rules.direction === 'SKIP') return rules;
+
+  // Stage 2: Gemini second opinion — only reached if rules say enter
 
   const candleStr = signal.lastCandles.map((c, i) =>
     `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
@@ -70,8 +75,8 @@ export async function askGemini(signal: EntrySignal): Promise<GeminiVerdict> {
   const lastPrice = signal.lastCandles[signal.lastCandles.length - 1]?.close ?? 0;
   const atrPct    = lastPrice > 0 ? (atrVal / lastPrice * 100).toFixed(3) : 'N/A';
 
-  const prompt = `You are an autonomous spread betting signal engine for 1-minute scalping.
-Decide: go LONG (BUY), SHORT (SELL), or SKIP. Also set position size and levels.
+  const prompt = `You are a second-opinion filter for a 1-minute spread betting scalper.
+A rules engine already approved a ${rules.direction} signal. Confirm, override to the other direction, or SKIP if the setup looks poor.
 Instrument: ${signal.instrumentName} — current price ~${lastPrice.toFixed(2)}
 
 Last 5 closed 1-minute candles (oldest first):
@@ -105,8 +110,8 @@ Respond with JSON only, no markdown:
     );
 
     if (!res.ok) {
-      console.warn(`[gemini] API error ${res.status} — using fallback`);
-      return fallbackVerdict(signal);
+      console.warn(`[gemini] API error ${res.status} — using rules verdict`);
+      return rules;
     }
 
     const data = await res.json() as {
@@ -134,7 +139,7 @@ Respond with JSON only, no markdown:
       engine:           'gemini',
     };
   } catch (e) {
-    console.warn(`[gemini] Failed — fallback. ${e instanceof Error ? e.message : String(e)}`);
-    return fallbackVerdict(signal);
+    console.warn(`[gemini] Failed — using rules verdict. ${e instanceof Error ? e.message : String(e)}`);
+    return rules;
   }
 }
