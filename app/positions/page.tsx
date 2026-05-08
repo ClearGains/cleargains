@@ -865,7 +865,7 @@ export default function PositionsPage() {
           const cachedTag = d.cached ? ' (cached)' : '';
           const action    = d.shouldClose ? ' → CLOSING NOW' : '';
           setSignalMonitorLog(prev => [
-            `${new Date().toLocaleTimeString('en-GB')}: ${pos.name} [${pos.direction}] — AI: ${d.signal ?? '?'} conf ${d.confidence ?? '?'}/10${cachedTag}${action}`,
+            `${new Date().toLocaleTimeString('en-GB')}: ${pos.name} [${pos.direction}] — ${d.signal ?? '?'} conf ${d.confidence ?? '?'}/10${cachedTag}: ${d.reasoning ?? ''}${action}`,
             ...prev.slice(0, 29),
           ]);
 
@@ -1401,7 +1401,7 @@ export default function PositionsPage() {
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2">
                 <Zap className="h-3.5 w-3.5 text-purple-400" />
-                <span className="text-xs font-semibold text-white">AI Signal Monitor</span>
+                <span className="text-xs font-semibold text-white">Signal Monitor</span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">REVERSAL CLOSE</span>
                 {signalMonitorEnabled && (
                   <span className={clsx(
@@ -1438,7 +1438,7 @@ export default function PositionsPage() {
             </div>
 
             <p className="text-[10px] text-gray-500">
-              Runs Claude Haiku on each open IG Demo position every {signalMonitorIntervalMin} minute{signalMonitorIntervalMin !== 1 ? 's' : ''}.
+              Analyses each IG Demo position using RSI, MACD, Bollinger Bands and SMA every {signalMonitorIntervalMin} minute{signalMonitorIntervalMin !== 1 ? 's' : ''}.
               Fires a market close when signal reverses with confidence ≥ 7/10 — no price target needed.
             </p>
 
