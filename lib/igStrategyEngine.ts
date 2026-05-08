@@ -44,9 +44,6 @@ export function getMarketType(epic: string): MarketType {
   if (epic.startsWith('IX.D.')) return 'INDEX';
   if (epic.includes('BITCOIN') || epic.includes('ETHUSD') || epic.includes('CRYPTO')) return 'CRYPTO';
   if (epic.includes('GOLD') || epic.includes('SILVER') || epic.includes('CRUDE') || epic.includes('NATGAS') || epic.includes('OIL')) return 'COMMODITY';
-  if (epic.startsWith('CS.D.') && /USD|EUR|GBP|JPY|CHF|AUD|NZD|CAD/.test(epic) && epic.includes('USD')) return 'FOREX';
-  // CS.D.{TICKER}.TODAY.IP or CS.D.{TICKER}.CFD.IP = shares spread bet
-  if (epic.startsWith('CS.D.') && (epic.includes('.TODAY.') || epic.includes('.CFD.'))) return 'SHARES';
   return 'COMMODITY';
 }
 
@@ -108,35 +105,14 @@ export type IGSavedStrategy = {
 // MINIMUM VIABLE SIZE: When available funds are between £100–£500 the engine
 //   uses the minimum size of 0.1 £/pt rather than refusing to trade.
 
-// ── Verified spread-bet epics for DEFAULT_WATCHLIST ───────────────────────────
-// All epics use .DAILY.IP (indices) or .TODAY.IP (FX/commodities/crypto) which
-// are the DFB (Daily Funded Bet) rolling instruments for UK spread-bet accounts.
-// ⚠️  CFD variants (CS.D.CFDGOLD.*, CS.D.CRUDEOIL.*) are NOT valid here and
-//     will cause REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT rejections.
 export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
-  // ── Indices (Daily Funded Bets) ─────────────────────────────────────────────
-  { epic: 'IX.D.FTSE.DAILY.IP',    name: 'FTSE 100',      enabled: true,  marketType: 'INDEX'     },
-  { epic: 'IX.D.SPTRD.DAILY.IP',   name: 'S&P 500',       enabled: true,  marketType: 'INDEX'     },
-  { epic: 'IX.D.NASDAQ.DAILY.IP',  name: 'NASDAQ 100',    enabled: false, marketType: 'INDEX'     },
-  { epic: 'IX.D.DOW.DAILY.IP',     name: 'Wall Street',   enabled: false, marketType: 'INDEX'     },
-  { epic: 'IX.D.DAX.DAILY.IP',     name: 'Germany 40',    enabled: false, marketType: 'INDEX'     },
-  { epic: 'IX.D.NIKKEI.DAILY.IP',  name: 'Japan 225',     enabled: false, marketType: 'INDEX'     },
-  { epic: 'IX.D.ASX.DAILY.IP',     name: 'Australia 200', enabled: false, marketType: 'INDEX'     },
-  // ── Commodities (spread-bet TODAY instruments) ───────────────────────────────
-  { epic: 'CS.D.GOLD.TODAY.IP',    name: 'Gold',          enabled: true,  marketType: 'COMMODITY' },
-  { epic: 'CS.D.SILVER.TODAY.IP',  name: 'Silver',        enabled: false, marketType: 'COMMODITY' },
-  { epic: 'CS.D.CRUDE.TODAY.IP',   name: 'Oil (WTI)',     enabled: false, marketType: 'COMMODITY' },
-  { epic: 'CS.D.NATGAS.TODAY.IP',  name: 'Natural Gas',   enabled: false, marketType: 'COMMODITY' },
-  // ── Forex ───────────────────────────────────────────────────────────────────
-  { epic: 'CS.D.GBPUSD.TODAY.IP',  name: 'GBP/USD',       enabled: false, marketType: 'FOREX'     },
-  { epic: 'CS.D.EURUSD.TODAY.IP',  name: 'EUR/USD',       enabled: false, marketType: 'FOREX'     },
-  { epic: 'CS.D.USDJPY.TODAY.IP',  name: 'USD/JPY',       enabled: false, marketType: 'FOREX'     },
-  { epic: 'CS.D.EURGBP.TODAY.IP',  name: 'EUR/GBP',       enabled: false, marketType: 'FOREX'     },
-  { epic: 'CS.D.AUDUSD.TODAY.IP',  name: 'AUD/USD',       enabled: false, marketType: 'FOREX'     },
-  { epic: 'CS.D.USDCHF.TODAY.IP',  name: 'USD/CHF',       enabled: false, marketType: 'FOREX'     },
-  // ── Crypto ──────────────────────────────────────────────────────────────────
-  // Note: Ethereum spread-bet epic is unreliable on some IG accounts — only Bitcoin used
-  { epic: 'CS.D.BITCOIN.TODAY.IP', name: 'Bitcoin',       enabled: false, marketType: 'CRYPTO'    },
+  { epic: 'IX.D.FTSE.DAILY.IP',   name: 'FTSE 100',      enabled: true,  marketType: 'INDEX' },
+  { epic: 'IX.D.SPTRD.DAILY.IP',  name: 'S&P 500',       enabled: true,  marketType: 'INDEX' },
+  { epic: 'IX.D.NASDAQ.DAILY.IP', name: 'NASDAQ 100',    enabled: true,  marketType: 'INDEX' },
+  { epic: 'IX.D.DOW.DAILY.IP',    name: 'Wall Street',   enabled: true,  marketType: 'INDEX' },
+  { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40',    enabled: true,  marketType: 'INDEX' },
+  { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225',     enabled: true,  marketType: 'INDEX' },
+  { epic: 'IX.D.ASX.DAILY.IP',    name: 'Australia 200', enabled: true,  marketType: 'INDEX' },
 ];
 
 // ── Technical indicators ──────────────────────────────────────────────────────
