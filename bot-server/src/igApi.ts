@@ -108,6 +108,8 @@ export async function openPosition(
   if (stopLevel  !== undefined) payload.stopLevel  = stopLevel;
   if (limitLevel !== undefined) payload.limitLevel = limitLevel;
 
+  console.log(`[igApi] openPosition ${epic} ${direction} size=${size} stop=${stopLevel?.toFixed(5) ?? 'none'} limit=${limitLevel?.toFixed(5) ?? 'none'}`);
+
   const r = await fetch(`${base}/positions/otc`, {
     method:  'POST',
     headers: headers(session, '2'),
@@ -118,13 +120,21 @@ export async function openPosition(
   if (!r.ok) throw new Error(`openPosition failed ${r.status}: ${d.errorCode ?? JSON.stringify(d)}`);
 
   const dealRef = d.dealReference ?? '';
-  // Confirm deal
-  const cr = await fetch(`${base}/confirms/${dealRef}`, { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });
-  const confirm = await cr.json() as { dealId?: string; level?: number; dealStatus?: string; errorCode?: string };
-  if (!cr.ok || confirm.dealStatus === 'REJECTED') {
-    throw new Error(`openPosition confirm failed: ${confirm.errorCode ?? confirm.dealStatus}`);
+
+  // Poll confirms with retries — IG can take 1-3s to process
+  let confirm: { dealId?: string; level?: number; dealStatus?: string; errorCode?: string } = {};
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await new Promise(res => setTimeout(res, 1500));
+    const cr = await fetch(`${base}/confirms/${dealRef}`, { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });
+    confirm = await cr.json() as typeof confirm;
+    if (cr.ok && confirm.dealStatus && confirm.dealStatus !== 'REJECTED') break;
+    if (confirm.dealStatus === 'REJECTED') break;  // definitive — no point retrying
   }
-  return { dealId: confirm.dealId ?? '', level: confirm.level ?? 0 };
+
+  if (confirm.dealStatus === 'REJECTED' || !confirm.dealId) {
+    throw new Error(`openPosition confirm failed: ${confirm.errorCode ?? confirm.dealStatus ?? 'deal-not-found'}`);
+  }
+  return { dealId: confirm.dealId, level: confirm.level ?? 0 };
 }
 
 export async function closePosition(
