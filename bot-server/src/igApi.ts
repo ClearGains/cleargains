@@ -172,7 +172,7 @@ export async function fetchPositions(session: IGSession): Promise<IGPosition[]> 
   ];
 
   for (const ep of endpoints) {
-    const r = await fetch(ep.url, { headers: headers(session, ep.version), signal: AbortSignal.timeout(8_000) });
+    const r = await fetch(ep.url, { headers: headers(session, ep.version), signal: AbortSignal.timeout(20_000) });
     if (!r.ok) continue;
     const d = await r.json() as { positions?: Array<{ position: { dealId: string; size: number; direction: string; level: number }; market: { epic: string } }> };
     if (!d.positions) continue;
