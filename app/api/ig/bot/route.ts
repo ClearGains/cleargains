@@ -30,13 +30,17 @@ async function proxyTo(path: string, method: string, body?: unknown): Promise<Ne
 
 export async function GET(req: NextRequest) {
   const action = req.nextUrl.searchParams.get('action') ?? 'status';
-  if (action === 'health') return proxyTo('/health', 'GET');
+  if (action === 'health')           return proxyTo('/health',           'GET');
+  if (action === 'strategy-status')  return proxyTo('/strategy/status',  'GET');
   return proxyTo('/status', 'GET');
 }
 
 export async function POST(req: NextRequest) {
   const action = req.nextUrl.searchParams.get('action') ?? 'start';
-  if (action === 'stop') return proxyTo('/stop', 'POST');
+  if (action === 'stop')             return proxyTo('/stop',             'POST');
+  if (action === 'strategy-stop')    return proxyTo('/strategy/stop',    'POST');
   const body = await req.json() as unknown;
+  if (action === 'strategy-start')   return proxyTo('/strategy/start',   'POST', body);
+  if (action === 'inject')           return proxyTo('/debug/inject',      'POST', body);
   return proxyTo('/start', 'POST', body);
 }

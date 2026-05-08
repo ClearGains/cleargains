@@ -2906,12 +2906,19 @@ export default function DemoTraderPage() {
         ))}
       </div>
 
+      {/* IGStrategyTrader is always mounted so its timers survive tab switches */}
+      {portfolioView !== 'compare' && (
+        <div className={traderTab !== 'ig' ? 'hidden' : ''}>
+          <IGTrader />
+        </div>
+      )}
+
       {portfolioView === 'compare' ? (
         <PortfolioCompare portfolios={portfolios} />
       ) : traderTab === 'forex' ? (
         <ForexTrader />
       ) : traderTab === 'ig' ? (
-        <IGTrader />
+        null
       ) : traderTab === 'server-bot' ? (
         <IGServerBot />
       ) : traderTab === 't212' ? (

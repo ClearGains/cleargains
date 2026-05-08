@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { startBot, stopBot, getBotStatus, loadSavedState, injectPosition, type InjectParams } from './bot';
+import { startStrategyRunner, stopStrategyRunner, getStrategyRunnerStatus, type StrategyRunnerConfig } from './strategyRunner';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -70,6 +71,28 @@ app.post('/debug/inject', auth, (req: Request, res: Response) => {
 
   const result = injectPosition({ epic, dealId, direction, size, entryPrice, stopPoints, tpPoints });
   res.status(result.ok ? 200 : 400).json(result);
+});
+
+// POST /strategy/start — start server-side strategy runner
+app.post('/strategy/start', auth, (req: Request, res: Response) => {
+  const cfg = req.body as StrategyRunnerConfig;
+  if (!cfg.markets?.length) {
+    res.status(400).json({ ok: false, error: 'markets array is required' });
+    return;
+  }
+  const result = startStrategyRunner(cfg);
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+// POST /strategy/stop — stop strategy runner
+app.post('/strategy/stop', auth, (_req, res) => {
+  stopStrategyRunner();
+  res.json({ ok: true });
+});
+
+// GET /strategy/status — strategy runner status + log
+app.get('/strategy/status', auth, (_req, res) => {
+  res.json(getStrategyRunnerStatus());
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────

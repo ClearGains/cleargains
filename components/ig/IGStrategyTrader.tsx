@@ -389,6 +389,74 @@ export function IGStrategyTrader() {
   const [posError, setPosError]     = useState<string|null>(null);
   const posRefreshRef = useRef<ReturnType<typeof setInterval>|null>(null);
 
+  // ── Server-side strategy runner ────────────────────────────────────────────
+  const [serverMode, setServerMode]         = useState(false);
+  const [serverRunning, setServerRunning]   = useState(false);
+  const [serverLog, setServerLog]           = useState<Array<{ id: string; ts: string; type: string; msg: string }>>([]);
+  const serverPollRef = useRef<ReturnType<typeof setInterval>|null>(null);
+
+  async function startServerStrategy(strat: IGSavedStrategy) {
+    const { YAHOO_SYMBOL_MAP } = await import('@/lib/yahooClient');
+    const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST)
+      .filter(m => m.enabled)
+      .map(m => ({
+        epic:        m.epic,
+        name:        m.name,
+        yahooSymbol: YAHOO_SYMBOL_MAP[m.name] ?? '',
+        marketType:  (m.marketType ?? getMarketType(m.epic)) as 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO' | 'SHARES',
+      }))
+      .filter(m => m.yahooSymbol);
+
+    const cfg = {
+      markets,
+      minStrength:    strat.minStrength ?? 60,
+      betSize:        0.5,
+      scanIntervalMs: strat.signalScanMs ?? 5 * 60_000,
+    };
+
+    try {
+      const r = await fetch('/api/ig/bot?action=strategy-start', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(cfg),
+      });
+      const d = await r.json() as { ok: boolean; error?: string };
+      if (d.ok) {
+        setServerRunning(true);
+        log('info', `[SERVER] Strategy runner started on Oracle VM — ${markets.length} market(s)`);
+        startServerPoll();
+      } else {
+        log('error', `[SERVER] Failed to start: ${d.error ?? 'unknown'}`);
+      }
+    } catch (e) {
+      log('error', `[SERVER] Unreachable: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  function stopServerStrategy() {
+    void fetch('/api/ig/bot?action=strategy-stop', { method: 'POST' });
+    setServerRunning(false);
+    stopServerPoll();
+    log('info', '[SERVER] Strategy runner stopped');
+  }
+
+  function startServerPoll() {
+    if (serverPollRef.current) clearInterval(serverPollRef.current);
+    serverPollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch('/api/ig/bot?action=strategy-status');
+        if (!r.ok) return;
+        const d = await r.json() as { running: boolean; log?: Array<{ id: string; ts: string; type: string; msg: string }> };
+        setServerRunning(d.running);
+        setServerLog(d.log ?? []);
+      } catch {}
+    }, 30_000);
+  }
+
+  function stopServerPoll() {
+    if (serverPollRef.current) { clearInterval(serverPollRef.current); serverPollRef.current = null; }
+  }
+
   // ── Strategies ─────────────────────────────────────────────────────────────
   const [strategies, setStrategies]     = useState<IGSavedStrategy[]>([]);
   const [activeStratId, setActiveStratId] = useState<string|null>(null);
@@ -1120,11 +1188,40 @@ export function IGStrategyTrader() {
           log('info', `[AUTO] Opened ${market.name} — strong signal override — confidence ${strength}%`);
         }
 
-        const maxLoss = orderSize * stopDist;
-        log(tradeDir === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}] → ${tradeDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+        // Gemini second opinion — runs server-side so API key is never exposed
+        let effectiveDir: 'BUY' | 'SELL' = tradeDir as 'BUY' | 'SELL';
+        try {
+          const gRes = await fetch('/api/gemini/verdict', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              instrumentName: market.name,
+              direction:      effectiveDir,
+              strength,
+              price:          snapshot.price,
+              changePercent:  snapshot.changePercent,
+              stopPoints:     stopDist,
+              tpPoints:       limitDist,
+              marketType:     mType,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (gRes.ok) {
+            const gv = await gRes.json() as { direction: 'BUY' | 'SELL' | 'SKIP'; confidence: number; reason: string; engine: string };
+            log('info', `[GEMINI] ${market.name} → ${gv.direction} ${gv.confidence}% — ${gv.reason} (${gv.engine})`);
+            if (gv.direction === 'SKIP' || gv.confidence < (strat.minStrength ?? 50)) {
+              log('info', `[GEMINI] Skipped ${market.name} — ${gv.direction} ${gv.confidence}%`);
+              continue;
+            }
+            if (gv.direction === 'BUY' || gv.direction === 'SELL') effectiveDir = gv.direction;
+          }
+        } catch { /* Gemini unavailable — proceed with original signal */ }
 
-        const or = await placeOrder(env, market.epic, tradeDir, orderSize, stopDist, limitDist);
+        const maxLoss = orderSize * stopDist;
+        log(effectiveDir === 'BUY' ? 'buy' : 'sell',
+          `[${env.toUpperCase()}] → ${effectiveDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+
+        const or = await placeOrder(env, market.epic, effectiveDir, orderSize, stopDist, limitDist);
 
         if (or.ok) {
           completedTradesRef.current += 1;
@@ -1357,6 +1454,9 @@ export function IGStrategyTrader() {
       posStartRef.current = Date.now();
       void runPositionMonitor(strat);
     }, pMonMs);
+
+    // Also start server-side runner if server mode is enabled
+    if (serverMode) void startServerStrategy(strat);
   }
 
   // ── Test run: one scan cycle, max 1 position opened, then stops ───────────
@@ -1427,6 +1527,7 @@ export function IGStrategyTrader() {
       }));
     }
     log('info', `⏹ Strategy stopped — ${completedTradesRef.current} trades completed · Today P&L: ${todayPnLRef.current >= 0 ? '+' : ''}£${todayPnLRef.current.toFixed(2)}`);
+    if (serverRunning) stopServerStrategy();
   }
 
   async function stopAutoRunAndCloseAll() {
@@ -2614,6 +2715,22 @@ export function IGStrategyTrader() {
                         </button>
                       )
                     )}
+                    {/* Server mode toggle — keeps strategy alive even when browser is closed */}
+                    {!isRunning && canRun && (
+                      <label className="flex items-center gap-1.5 cursor-pointer select-none" title="Run on Oracle VM server — strategy continues even if you close the browser">
+                        <input
+                          type="checkbox"
+                          checked={serverMode}
+                          onChange={e => setServerMode(e.target.checked)}
+                          className="w-3 h-3 accent-violet-500"
+                        />
+                        <span className="text-[10px] text-gray-400">Run on server</span>
+                      </label>
+                    )}
+                    {isActive && isRunning && serverRunning && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-500/20 border border-violet-500/30 text-violet-300">VM running</span>
+                    )}
+
                     {/* Sync settings button — only for copied strategies */}
                     {!isRunning && strat.copiedFrom && (
                       (() => {
@@ -3071,6 +3188,33 @@ export function IGStrategyTrader() {
                   e.type==='close'  ? 'text-blue-400' :
                   e.type==='error'  ? 'text-red-500' :
                   e.type==='signal' ? 'text-amber-400' : 'text-gray-400'
+                )}>{e.msg}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Server-side runner log */}
+      {serverLog.length > 0 && (
+        <Card>
+          <CardHeader
+            title="Server Strategy Log"
+            subtitle="Oracle VM — runs independently of browser"
+            icon={<Activity className="h-4 w-4 text-violet-400" />}
+            action={
+              serverRunning
+                ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300">LIVE</span>
+                : <span className="text-[10px] text-gray-500">stopped</span>
+            }
+          />
+          <div className="space-y-0.5 max-h-48 overflow-y-auto font-mono">
+            {serverLog.map(e => (
+              <div key={e.id} className="flex gap-2 text-[11px] py-0.5">
+                <span className="text-gray-600 flex-shrink-0 tabular-nums">{e.ts}</span>
+                <span className={clsx('flex-1 break-all leading-relaxed',
+                  e.type === 'error' ? 'text-red-500' :
+                  e.type === 'info'  ? 'text-gray-400' : 'text-emerald-400'
                 )}>{e.msg}</span>
               </div>
             ))}
