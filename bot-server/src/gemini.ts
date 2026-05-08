@@ -4,6 +4,7 @@ export type GeminiVerdict = {
   reason:           string;
   stopPoints:       number;   // points away for stop loss
   takeProfitPoints: number;   // points away for take profit
+  betSize:          number;   // £/pt — auto-sized by Gemini based on volatility
   engine:           'gemini' | 'fallback';
 };
 
@@ -36,9 +37,13 @@ function fallbackVerdict(signal: EntrySignal): GeminiVerdict {
   const atrVal    = atr ?? 5;
   const stopPts   = Math.max(2, Math.round(atrVal * 1.5));
   const tpPts     = Math.max(3, Math.round(atrVal * 2.0));
+  // Auto-size: smaller bet when volatile (high ATR), larger when calm
+  const lastPrice = signal.lastCandles[signal.lastCandles.length - 1]?.close ?? 100;
+  const atrPct    = lastPrice > 0 ? (atrVal / lastPrice) * 100 : 1;
+  const betSize   = atrPct > 0.5 ? 0.5 : atrPct > 0.2 ? 1.0 : 1.5;
 
   if (score < 1) {
-    return { direction: 'SKIP', confidence: 40, reason: `Rules score ${score} — insufficient signal`, stopPoints: stopPts, takeProfitPoints: tpPts, engine: 'fallback' };
+    return { direction: 'SKIP', confidence: 40, reason: `Rules score ${score} — insufficient signal`, stopPoints: stopPts, takeProfitPoints: tpPts, betSize: 0.5, engine: 'fallback' };
   }
 
   return {
@@ -47,6 +52,7 @@ function fallbackVerdict(signal: EntrySignal): GeminiVerdict {
     reason:           `Rules: RSI=${rsi?.toFixed(0) ?? 'N/A'} MACD=${macd !== null ? (macd > 0 ? '+' : '') + macd.toFixed(4) : 'N/A'} score=${score}`,
     stopPoints:       stopPts,
     takeProfitPoints: tpPts,
+    betSize,
     engine:           'fallback',
   };
 }
@@ -61,23 +67,28 @@ export async function askGemini(signal: EntrySignal): Promise<GeminiVerdict> {
 
   const atrVal = signal.atr ?? 0;
 
+  const lastPrice = signal.lastCandles[signal.lastCandles.length - 1]?.close ?? 0;
+  const atrPct    = lastPrice > 0 ? (atrVal / lastPrice * 100).toFixed(3) : 'N/A';
+
   const prompt = `You are an autonomous spread betting signal engine for 1-minute scalping.
-Analyse the data and decide whether to go LONG (BUY), SHORT (SELL), or SKIP this trade.
-This is a ${signal.instrumentName} spread bet. Trades last 1–5 minutes typically.
+Decide: go LONG (BUY), SHORT (SELL), or SKIP. Also set position size and levels.
+Instrument: ${signal.instrumentName} — current price ~${lastPrice.toFixed(2)}
 
 Last 5 closed 1-minute candles (oldest first):
 ${candleStr}
 RSI(14): ${signal.rsi?.toFixed(1) ?? 'N/A'}
 MACD histogram: ${signal.macd !== null ? (signal.macd > 0 ? '+' : '') + signal.macd.toFixed(5) : 'N/A'} (positive=bullish)
-ATR(14): ${atrVal.toFixed(2)} points (average candle range)
+ATR(14): ${atrVal.toFixed(2)} pts (${atrPct}% of price) — volatility measure
 Technical suggestion: ${signal.suggestedDir}
 
-Rules: enter BUY on upward momentum, SELL on downward momentum, SKIP if unclear or choppy.
-Set stopPoints = how many price points away for stop loss (use ATR as guide, be realistic).
-Set takeProfitPoints = points away for take profit (aim for at least 1.3:1 reward/risk ratio).
+Guidelines:
+- BUY on clear upward momentum, SELL on clear downward momentum, SKIP if choppy/unclear
+- stopPoints: realistic stop loss in price points (1.5×ATR is a good baseline)
+- takeProfitPoints: aim for ≥1.3:1 reward/risk vs stop
+- betSize: £/pt stake — use 0.5 if volatile (ATR% > 0.5%), 1.0 if moderate, 1.5 if calm and high confidence
 
-Respond with JSON only, no markdown, no explanation outside JSON:
-{"direction":"BUY","confidence":72,"reason":"brief reason max 15 words","stopPoints":12,"takeProfitPoints":18}`;
+Respond with JSON only, no markdown:
+{"direction":"BUY","confidence":72,"reason":"max 12 words","stopPoints":12,"takeProfitPoints":18,"betSize":0.5}`;
 
   try {
     const res = await fetch(
@@ -106,10 +117,12 @@ Respond with JSON only, no markdown, no explanation outside JSON:
     const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
     const parsed  = JSON.parse(cleaned) as {
       direction: string; confidence: number; reason: string;
-      stopPoints: number; takeProfitPoints: number;
+      stopPoints: number; takeProfitPoints: number; betSize?: number;
     };
 
     const dir = (['BUY', 'SELL', 'SKIP'].includes(parsed.direction)) ? parsed.direction as GeminiVerdict['direction'] : 'SKIP';
+    const rawSize = parsed.betSize ?? 0.5;
+    const betSize = Math.min(2.0, Math.max(0.5, rawSize));
 
     return {
       direction:        dir,
@@ -117,6 +130,7 @@ Respond with JSON only, no markdown, no explanation outside JSON:
       reason:           parsed.reason ?? '',
       stopPoints:       Math.max(1, parsed.stopPoints ?? Math.round(atrVal * 1.5)),
       takeProfitPoints: Math.max(1, parsed.takeProfitPoints ?? Math.round(atrVal * 2)),
+      betSize,
       engine:           'gemini',
     };
   } catch (e) {

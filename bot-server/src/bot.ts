@@ -33,16 +33,15 @@ export type EpicStatus = {
 };
 
 export type BotStartParams = {
-  epics:     string[];
-  tradeSize: number;
-  config?:   Partial<ScalperConfig>;
+  epics:    string[];
+  config?:  Partial<ScalperConfig>;
 };
 
 export type BotStatus = {
   running:      boolean;
   streamConnected: boolean;
   epics:        string[];
-  tradeSize:    number;
+  recentLosses: number;
   config:       ScalperConfig;
   epicStatuses: Record<string, EpicStatus>;
   log:          LogEntry[];
@@ -55,9 +54,9 @@ export type BotStatus = {
 let running     = false;
 let epicStates: Record<string, ScalperEpicState> = {};
 let pendingEpics = new Set<string>();
-let currentEpics: string[] = [];
-let currentSize  = 0.5;
+let currentEpics:  string[] = [];
 let currentConfig: ScalperConfig = { ...DEFAULT_CONFIG };
+let recentLosses   = 0;   // tracks consecutive losing trades to auto-scale cooldown
 let openPositions: IGPosition[] = [];
 let positionPollTimer: ReturnType<typeof setInterval> | null = null;
 let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -232,14 +231,14 @@ function handleTick(tick: CandleTick) {
             : tick.bidClose - verdict.takeProfitPoints;
 
           const { dealId, level } = await openPosition(
-            session, tick.epic, currentSize,
+            session, tick.epic, verdict.betSize,
             verdict.direction, stopLevel, limitLevel,
           );
 
           recordFill(st, level, verdict.stopPoints, verdict.takeProfitPoints);
 
           addLog('enter', name,
-            `✓ ${verdict.direction} @ ${level} | stop ${stopLevel.toFixed(2)} (−${verdict.stopPoints}pts) | TP ${limitLevel.toFixed(2)} (+${verdict.takeProfitPoints}pts) | deal ${dealId}`
+            `✓ ${verdict.direction} £${verdict.betSize}/pt @ ${level} | stop −${verdict.stopPoints}pts | TP +${verdict.takeProfitPoints}pts | deal ${dealId}`
           );
           void refreshPositions();
         } catch (e) {
@@ -255,7 +254,23 @@ function handleTick(tick: CandleTick) {
     case 'EXIT': {
       const urgencyTag = decision.urgency === 'immediate' ? ' [IMMEDIATE]' : '';
       addLog('exit', name, `↓ EXIT${urgencyTag} — ${decision.reason}`);
-      const pos = openPositions.find(p => p.epic === tick.epic && p.direction === 'BUY');
+
+      // Track losses to auto-scale cooldown
+      const isLoss = decision.reason.includes('stop') || decision.reason.includes('Stop') ||
+                     decision.reason.includes('reversal') || decision.reason.includes('red');
+      if (isLoss) {
+        recentLosses++;
+        // Auto-scale cooldown: 15min → 30min → 60min after repeated losses
+        const autoCooldown = recentLosses >= 3 ? 60 * 60_000 : recentLosses >= 2 ? 30 * 60_000 : 15 * 60_000;
+        if (autoCooldown !== currentConfig.cooldownMs) {
+          currentConfig = { ...currentConfig, cooldownMs: autoCooldown };
+          addLog('info', name, `⚙ Auto-cooldown adjusted to ${autoCooldown / 60_000} min (${recentLosses} recent losses)`);
+        }
+      } else {
+        recentLosses = 0;  // reset on profitable exit
+      }
+
+      const pos = openPositions.find(p => p.epic === tick.epic && p.direction === st.direction);
       if (!pos) {
         addLog('info', name, 'No open position found to close (may already be closed)');
         break;
@@ -307,11 +322,11 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
   }
 
   try {
-    addLog('info', '—', `Starting bot — epics: ${params.epics.join(', ')}, size: ${params.tradeSize}`);
+    addLog('info', '—', `Starting bot — epics: ${params.epics.join(', ')} | fully automated sizing`);
     const session = await authenticate(apiKey, username, password, env);
 
     currentEpics  = params.epics;
-    currentSize   = params.tradeSize;
+    recentLosses  = 0;
     currentConfig = { ...DEFAULT_CONFIG, ...(params.config ?? {}) };
     epicStates    = {};
     for (const epic of params.epics) {
@@ -366,7 +381,7 @@ export function getBotStatus(): BotStatus {
     running,
     streamConnected: isConnected(),
     epics:           currentEpics,
-    tradeSize:       currentSize,
+    recentLosses,
     config:          currentConfig,
     epicStatuses:    statuses,
     log:             log.slice(0, 100),

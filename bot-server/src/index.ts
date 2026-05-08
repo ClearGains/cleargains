@@ -34,9 +34,8 @@ app.get('/status', auth, (_req, res) => {
 
 // POST /start — start the bot
 app.post('/start', auth, (req: Request, res: Response) => {
-  const { epics, tradeSize, config } = req.body as {
+  const { epics, config } = req.body as {
     epics: string[];
-    tradeSize: number;
     config?: Record<string, number>;
   };
 
@@ -44,12 +43,8 @@ app.post('/start', auth, (req: Request, res: Response) => {
     res.status(400).json({ ok: false, error: 'epics array is required' });
     return;
   }
-  if (typeof tradeSize !== 'number' || tradeSize <= 0) {
-    res.status(400).json({ ok: false, error: 'tradeSize must be a positive number' });
-    return;
-  }
 
-  void startBot({ epics, tradeSize, config }).then(result => res.json(result));
+  void startBot({ epics, config }).then(result => res.json(result));
 });
 
 // POST /stop — stop the bot
