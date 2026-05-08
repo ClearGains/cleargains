@@ -293,12 +293,18 @@ export default function PositionsPage() {
   // Portfolio modal hook
   const portfolioModal = useLoadPortfolio();
 
-  // Auto-close engine
+  // Auto-close engine (threshold-based — kept for manual threshold safety net)
   const [autoCloseEnabled, setAutoCloseEnabled] = useState(false);
   const [autoCloseTpPct, setAutoCloseTpPct]     = useState(2.0);
   const [autoCloseSlPct, setAutoCloseSlPct]     = useState(1.0);
   const [autoCloseLog, setAutoCloseLog]         = useState<string[]>([]);
   const [hasIgDemoSession, setHasIgDemoSession] = useState(false);
+
+  // Signal monitor (AI-driven reversal close — Option A)
+  const [signalMonitorEnabled, setSignalMonitorEnabled]   = useState(false);
+  const [signalMonitorIntervalMin, setSignalMonitorIntervalMin] = useState(5);
+  const [signalMonitorLog, setSignalMonitorLog]           = useState<string[]>([]);
+  const [signalMonitorChecking, setSignalMonitorChecking] = useState(false);
   // Test trade panel
   const [showTestPanel, setShowTestPanel]       = useState(false);
   const [testEpic, setTestEpic]                 = useState('CS.D.GOLD.TODAY.IP');
@@ -311,9 +317,12 @@ export default function PositionsPage() {
   const refreshRef           = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef         = useRef<ReturnType<typeof setInterval> | null>(null);
   const cgIdsRef             = useRef<Set<string>>(new Set());
-  const autoCloseSettingsRef = useRef({ enabled: false, tpPct: 2.0, slPct: 1.0 });
-  const autoClosingRef       = useRef(false);
-  const closePositionRef     = useRef<((pos: UnifiedPosition) => Promise<void>) | null>(null);
+  const autoCloseSettingsRef   = useRef({ enabled: false, tpPct: 2.0, slPct: 1.0 });
+  const autoClosingRef         = useRef(false);
+  const closePositionRef       = useRef<((pos: UnifiedPosition) => Promise<void>) | null>(null);
+  const positionsRef           = useRef<UnifiedPosition[]>([]);
+  const signalMonitorRunning   = useRef(false);
+  const signalMonitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Load manual positions, CG ids, and cached snapshot on mount
   useEffect(() => {
@@ -532,6 +541,7 @@ export default function PositionsPage() {
     prevPositionsRef.current = all;
 
     setPositions(merged);
+    positionsRef.current = merged;
     setErrors(errs);
     setLoading(false);
     setCountdown(30);
@@ -763,6 +773,94 @@ export default function PositionsPage() {
     };
     void run();
   }, [positions]);
+
+  // ── Signal Monitor — AI-driven reversal close ─────────────────────────────
+  async function runSignalMonitor() {
+    if (signalMonitorRunning.current) return;
+    signalMonitorRunning.current = true;
+    setSignalMonitorChecking(true);
+
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem('ig_session_demo') : null;
+      if (!raw) { signalMonitorRunning.current = false; setSignalMonitorChecking(false); return; }
+      const sess = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
+      if (!sess.cst || !sess.securityToken || !sess.apiKey) {
+        signalMonitorRunning.current = false; setSignalMonitorChecking(false); return;
+      }
+
+      const igDemoPositions = positionsRef.current.filter(p => p.account === 'IG_DEMO' && p.epic && p.dealId);
+
+      if (igDemoPositions.length === 0) {
+        setSignalMonitorLog(prev => [
+          `${new Date().toLocaleTimeString('en-GB')}: No IG Demo positions to monitor`,
+          ...prev.slice(0, 29),
+        ]);
+        signalMonitorRunning.current = false; setSignalMonitorChecking(false); return;
+      }
+
+      for (const pos of igDemoPositions) {
+        if (!pos.epic) continue;
+        try {
+          const r = await fetch('/api/ig/signal-check', {
+            method: 'POST',
+            headers: {
+              'x-ig-cst':            sess.cst,
+              'x-ig-security-token': sess.securityToken,
+              'x-ig-api-key':        sess.apiKey,
+              'x-ig-env':            'demo',
+              'Content-Type':        'application/json',
+            },
+            body: JSON.stringify({ epic: pos.epic, direction: pos.direction, instrumentName: pos.name }),
+          });
+          const d = await r.json() as {
+            ok: boolean;
+            signal?: string; confidence?: number;
+            shouldClose?: boolean; reasoning?: string; cached?: boolean;
+            error?: string;
+          };
+
+          if (!d.ok) {
+            setSignalMonitorLog(prev => [`${new Date().toLocaleTimeString('en-GB')}: ✗ ${pos.name} — ${d.error ?? 'check failed'}`, ...prev.slice(0, 29)]);
+            continue;
+          }
+
+          const cachedTag = d.cached ? ' (cached)' : '';
+          const action    = d.shouldClose ? ' → CLOSING NOW' : '';
+          setSignalMonitorLog(prev => [
+            `${new Date().toLocaleTimeString('en-GB')}: ${pos.name} [${pos.direction}] — AI: ${d.signal ?? '?'} conf ${d.confidence ?? '?'}/10${cachedTag}${action}`,
+            ...prev.slice(0, 29),
+          ]);
+
+          if (d.shouldClose) {
+            await closePositionRef.current?.(pos);
+          }
+        } catch (e) {
+          setSignalMonitorLog(prev => [
+            `${new Date().toLocaleTimeString('en-GB')}: ✗ ${pos.name} — ${e instanceof Error ? e.message : 'unknown error'}`,
+            ...prev.slice(0, 29),
+          ]);
+        }
+      }
+    } finally {
+      signalMonitorRunning.current = false;
+      setSignalMonitorChecking(false);
+    }
+  }
+
+  // Start/stop signal monitor interval
+  useEffect(() => {
+    if (signalMonitorIntervalRef.current) {
+      clearInterval(signalMonitorIntervalRef.current);
+      signalMonitorIntervalRef.current = null;
+    }
+    if (!signalMonitorEnabled) return;
+    void runSignalMonitor();
+    signalMonitorIntervalRef.current = setInterval(() => void runSignalMonitor(), signalMonitorIntervalMin * 60_000);
+    return () => {
+      if (signalMonitorIntervalRef.current) clearInterval(signalMonitorIntervalRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signalMonitorEnabled, signalMonitorIntervalMin]);
 
   // ── Export CSV ────────────────────────────────────────────────────────────
   function exportCSV() {
@@ -1137,10 +1235,88 @@ export default function PositionsPage() {
               )}
               <p className="text-[9px] text-gray-600">
                 The position will appear in your IG Demo account and in the table below.
-                {autoCloseEnabled ? ` Auto-close is active — it will close at +${autoCloseTpPct}% or -${autoCloseSlPct}%.` : ' Enable Auto-Close above to have it closed automatically.'}
+                {signalMonitorEnabled ? ' Signal Monitor is active — it will close when AI detects a reversal.' : ' Enable Signal Monitor below to auto-close on AI signal reversal.'}
               </p>
             </div>
           )}
+
+          {/* ── Signal Monitor — AI-driven reversal close ── */}
+          <div className="border-t border-gray-800/60 pt-3 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Zap className="h-3.5 w-3.5 text-purple-400" />
+                <span className="text-xs font-semibold text-white">AI Signal Monitor</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">REVERSAL CLOSE</span>
+                {signalMonitorEnabled && (
+                  <span className={clsx(
+                    'text-[9px] px-1.5 py-0.5 rounded border',
+                    signalMonitorChecking
+                      ? 'bg-blue-500/15 text-blue-400 border-blue-500/20 animate-pulse'
+                      : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20 animate-pulse',
+                  )}>
+                    {signalMonitorChecking ? 'CHECKING…' : 'WATCHING'}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { void runSignalMonitor(); }}
+                  disabled={signalMonitorChecking}
+                  className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-200 border border-gray-700 hover:border-gray-600 rounded px-2 py-1 transition-all disabled:opacity-40"
+                >
+                  {signalMonitorChecking ? <RefreshCw className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                  Check Now
+                </button>
+                <button
+                  onClick={() => setSignalMonitorEnabled(v => !v)}
+                  className={clsx(
+                    'flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border font-medium transition-all',
+                    signalMonitorEnabled
+                      ? 'bg-purple-500/20 text-purple-400 border-purple-500/40 hover:bg-purple-500/30'
+                      : 'bg-gray-800 text-gray-400 border-gray-700 hover:border-gray-600',
+                  )}
+                >
+                  {signalMonitorEnabled ? 'Disable' : 'Enable'}
+                </button>
+              </div>
+            </div>
+
+            <p className="text-[10px] text-gray-500">
+              Runs Claude Haiku on each open IG Demo position every {signalMonitorIntervalMin} minute{signalMonitorIntervalMin !== 1 ? 's' : ''}.
+              Fires a market close when signal reverses with confidence ≥ 7/10 — no price target needed.
+            </p>
+
+            <div className="flex items-center gap-3">
+              <label className="text-[10px] text-gray-500 uppercase tracking-wider whitespace-nowrap">Check every</label>
+              <input
+                type="number"
+                value={signalMonitorIntervalMin}
+                onChange={e => setSignalMonitorIntervalMin(Math.max(1, Math.min(60, Number(e.target.value))))}
+                min={1} max={60} step={1}
+                className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white outline-none"
+              />
+              <span className="text-[10px] text-gray-500">minutes</span>
+              <span className="text-[9px] text-gray-600 ml-auto">Results cached 10 min server-side</span>
+            </div>
+
+            {signalMonitorLog.length > 0 && (
+              <div className="bg-gray-950/80 border border-gray-800 rounded-lg p-2 max-h-36 overflow-y-auto">
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="text-[9px] text-gray-600 uppercase tracking-wider font-medium">Signal monitor log</p>
+                  <button onClick={() => setSignalMonitorLog([])} className="text-[9px] text-gray-600 hover:text-gray-400">Clear</button>
+                </div>
+                {signalMonitorLog.map((entry, i) => (
+                  <p key={i} className={clsx(
+                    'text-[10px] font-mono leading-relaxed',
+                    entry.includes('CLOSING') ? 'text-orange-400' :
+                    entry.includes('✗') ? 'text-red-400' :
+                    entry.includes('BUY') ? 'text-emerald-400' :
+                    entry.includes('SELL') ? 'text-red-400' : 'text-gray-400',
+                  )}>{entry}</p>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
