@@ -182,9 +182,75 @@ export async function POST(request: NextRequest) {
       }
     } catch { /* fall back to last close */ }
 
-    // ── Rule-based signal (free) ──────────────────────────────────────────────
-    const ind = calcIndicators(candles);
-    const { signal, confidence, reasoning } = ruleSignal(ind, bid, offer);
+    const ind  = calcIndicators(candles);
+    const l    = ind.latest;
+    const mid  = (bid + offer) / 2;
+    const last90 = candles.slice(-90);
+
+    // ── Gemini Flash (free tier) — used when GEMINI_API_KEY is set ─────────────
+    // Falls back to rule-based engine when key is absent or Gemini errors.
+    let signal:    RawSignal = 'HOLD';
+    let confidence = 5;
+    let reasoning  = '';
+    let usedEngine = 'rules';
+
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (geminiKey) {
+      try {
+        const prompt = `You are a financial analyst deciding whether to EXIT an open spread-bet position.
+
+Instrument: ${instrumentName ?? epic}
+Current: bid=${bid}, offer=${offer}, mid=${mid.toFixed(4)}, spread=${((offer - bid) / mid * 100).toFixed(3)}%
+
+Indicators:
+RSI(14)=${l.rsi?.toFixed(2) ?? 'N/A'} [${l.rsiZone ?? 'N/A'}]
+MACD line=${l.macdLine?.toFixed(4) ?? 'N/A'} signal=${l.macdSignal?.toFixed(4) ?? 'N/A'} hist=${l.macdHist?.toFixed(4) ?? 'N/A'} [${l.macdZone ?? 'N/A'}]
+SMA20=${l.sma20?.toFixed(4) ?? 'N/A'} SMA50=${l.sma50?.toFixed(4) ?? 'N/A'} cross=${l.smaCross}
+BB upper=${l.bbUpper?.toFixed(4) ?? 'N/A'} lower=${l.bbLower?.toFixed(4) ?? 'N/A'} position=${l.bbPosition ?? 'N/A'}
+
+Last 90 hourly bars (most recent last):
+${last90.map(c => `${c.time.slice(0, 16)} O:${c.open.toFixed(2)} H:${c.high.toFixed(2)} L:${c.low.toFixed(2)} C:${c.close.toFixed(2)}`).join('\n')}
+
+Return ONLY this JSON (no markdown, no other text):
+{"signal":"BUY"|"SELL"|"HOLD"|"WATCH","confidence":<1-10>,"reasoning":"<2 sentences on current direction and momentum>"}`;
+
+        const gRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { maxOutputTokens: 256, temperature: 0.1 },
+            }),
+            signal: AbortSignal.timeout(15_000),
+          },
+        );
+
+        if (gRes.ok) {
+          const gData = await gRes.json() as {
+            candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+          };
+          const raw   = gData.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+          const clean = raw.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+          const parsed = JSON.parse(clean) as { signal?: string; confidence?: number; reasoning?: string };
+          signal     = (parsed.signal ?? 'HOLD') as RawSignal;
+          confidence = Math.min(10, Math.max(1, parsed.confidence ?? 5));
+          reasoning  = parsed.reasoning ?? '';
+          usedEngine = 'gemini-2.0-flash';
+        }
+      } catch {
+        // Gemini failed — fall through to rule-based
+      }
+    }
+
+    // Rule-based fallback (or primary when no Gemini key)
+    if (usedEngine === 'rules') {
+      const r = ruleSignal(ind, bid, offer);
+      signal     = r.signal;
+      confidence = r.confidence;
+      reasoning  = r.reasoning;
+    }
 
     const result: CheckResult = {
       signal,
@@ -196,7 +262,7 @@ export async function POST(request: NextRequest) {
 
     cache.set(cacheKey, { result, expiresAt: Date.now() + CACHE_TTL });
 
-    return NextResponse.json({ ok: true, ...result, cached: false });
+    return NextResponse.json({ ok: true, ...result, engine: usedEngine, cached: false });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : 'Unknown error' },

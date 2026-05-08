@@ -854,7 +854,7 @@ export default function PositionsPage() {
             ok: boolean;
             signal?: string; confidence?: number;
             shouldClose?: boolean; reasoning?: string; cached?: boolean;
-            error?: string;
+            engine?: string; error?: string;
           };
 
           if (!d.ok) {
@@ -862,10 +862,11 @@ export default function PositionsPage() {
             continue;
           }
 
+          const engineTag = d.engine ? ` [${d.engine}]` : '';
           const cachedTag = d.cached ? ' (cached)' : '';
           const action    = d.shouldClose ? ' → CLOSING NOW' : '';
           setSignalMonitorLog(prev => [
-            `${new Date().toLocaleTimeString('en-GB')}: ${pos.name} [${pos.direction}] — ${d.signal ?? '?'} conf ${d.confidence ?? '?'}/10${cachedTag}: ${d.reasoning ?? ''}${action}`,
+            `${new Date().toLocaleTimeString('en-GB')}: ${pos.name} [${pos.direction}]${engineTag} — ${d.signal ?? '?'} ${d.confidence ?? '?'}/10${cachedTag}: ${d.reasoning ?? ''}${action}`,
             ...prev.slice(0, 29),
           ]);
 
@@ -1438,7 +1439,7 @@ export default function PositionsPage() {
             </div>
 
             <p className="text-[10px] text-gray-500">
-              Analyses each IG Demo position using RSI, MACD, Bollinger Bands and SMA every {signalMonitorIntervalMin} minute{signalMonitorIntervalMin !== 1 ? 's' : ''}.
+              Uses Gemini Flash AI (if configured) or rule-based RSI/MACD/BB analysis. Checks every {signalMonitorIntervalMin} minute{signalMonitorIntervalMin !== 1 ? 's' : ''}.
               Fires a market close when signal reverses with confidence ≥ 7/10 — no price target needed.
             </p>
 
