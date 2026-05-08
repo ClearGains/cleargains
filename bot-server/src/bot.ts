@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  authenticate, openPosition, closePosition, fetchPositions,
+  authenticate, openPosition, closePosition,
   getSession, clearSession,
-  type IGSession, type IGPosition,
+  type IGSession,
 } from './igApi';
 import { connect, disconnect, isConnected } from './igStream';
 import {
@@ -73,8 +73,6 @@ let pendingEpics = new Set<string>();
 let currentEpics:  string[] = [];
 let currentConfig: ScalperConfig = { ...DEFAULT_CONFIG };
 let recentLosses   = 0;   // tracks consecutive losing trades to auto-scale cooldown
-let openPositions: IGPosition[] = [];
-let positionPollTimer: ReturnType<typeof setInterval> | null = null;
 let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let signalMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -101,27 +99,6 @@ function addLog(type: LogEntry['type'], epic: string, msg: string) {
   console[level](`[${entry.ts}] [${type.toUpperCase()}] [${epic}] ${msg}`);
 }
 
-// ── Position polling ─────────────────────────────────────────────────────────
-
-async function refreshPositions() {
-  const session = getSession();
-  if (!session) return;
-  try {
-    openPositions = await fetchPositions(session);
-  } catch (e) {
-    addLog('error', '—', `Position poll failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-function startPositionPoll() {
-  if (positionPollTimer) clearInterval(positionPollTimer);
-  void refreshPositions();
-  positionPollTimer = setInterval(() => { void refreshPositions(); }, 60_000);
-}
-
-function stopPositionPoll() {
-  if (positionPollTimer) { clearInterval(positionPollTimer); positionPollTimer = null; }
-}
 
 function startSignalMonitor() {
   if (signalMonitorTimer) clearInterval(signalMonitorTimer);
@@ -281,7 +258,6 @@ function handleTick(tick: CandleTick) {
           addLog('enter', name,
             `✓ ${verdict.direction} £${verdict.betSize}/pt @ ${level} | stop −${verdict.stopPoints}pts | TP +${verdict.takeProfitPoints}pts | deal ${dealId}`
           );
-          void refreshPositions();
         } catch (e) {
           st.state = 'FLAT';
           addLog('error', name, `✗ Order failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -330,7 +306,6 @@ function handleTick(tick: CandleTick) {
           st.dealId = '';
           st.size   = 0;
           addLog('exit', name, `✓ Closed deal ${dealId}`);
-          void refreshPositions();
         })
         .catch(e => {
           addLog('error', name, `✗ Close failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -380,7 +355,6 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
 
     running = true;
     connect(session, params.epics, handleTick, '1MINUTE');
-    startPositionPoll();
     startSignalMonitor();
     scheduleSessionRefresh(session);
 
@@ -398,7 +372,6 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
 export function stopBot() {
   running = false;
   disconnect();
-  stopPositionPoll();
   stopSignalMonitor();
   if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
   clearSession();
