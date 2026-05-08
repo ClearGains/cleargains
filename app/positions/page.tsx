@@ -475,10 +475,18 @@ export default function PositionsPage() {
     // ── IG helper ─────────────────────────────────────────────────────────────
     async function fetchIG(envKey: 'demo' | 'live', accountKey: AccountKey) {
       try {
-        const raw = typeof window !== 'undefined' ? localStorage.getItem(`ig_session_${envKey}`) : null;
-        if (!raw) return;
-        const sess = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
-        if (!sess.cst || !sess.securityToken || !sess.apiKey) return;
+        // For demo: use getIGDemoSession() so stale/CFD-bound tokens are auto-refreshed
+        // For live: fall back to raw localStorage (no auto-connect logic yet)
+        let sess: { cst: string; securityToken: string; apiKey: string } | null = null;
+        if (envKey === 'demo') {
+          sess = await getIGDemoSession();
+        } else {
+          const raw = typeof window !== 'undefined' ? localStorage.getItem(`ig_session_${envKey}`) : null;
+          if (!raw) return;
+          const parsed = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
+          if (parsed.cst && parsed.securityToken && parsed.apiKey) sess = { cst: parsed.cst, securityToken: parsed.securityToken, apiKey: parsed.apiKey };
+        }
+        if (!sess) return;
 
         const r = await fetch('/api/ig/positions', {
           headers: {
@@ -956,7 +964,7 @@ export default function PositionsPage() {
       const r = await fetch('/api/ig/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo' }),
+        body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh }),
       });
       const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; error?: string };
       if (!d.ok || !d.cst || !d.securityToken) return null;
