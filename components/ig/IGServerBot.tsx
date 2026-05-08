@@ -6,7 +6,6 @@ import { clsx } from 'clsx';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { DEFAULT_WATCHLIST } from '@/lib/igStrategyEngine';
-import { DEFAULT_CONFIG, type ScalperConfig } from '@/lib/scalperStrategy';
 
 const AVAILABLE_INSTRUMENTS = DEFAULT_WATCHLIST.map(m => ({ epic: m.epic, name: m.name }));
 
@@ -31,8 +30,7 @@ type BotStatus = {
   running:         boolean;
   streamConnected: boolean;
   epics:           string[];
-  tradeSize:       number;
-  config:          ScalperConfig;
+  recentLosses:    number;
   epicStatuses:    Record<string, EpicStatus>;
   log:             LogEntry[];
   sessionOk:       boolean;
@@ -44,13 +42,10 @@ const POLL_INTERVAL = 5_000;  // poll server status every 5s when running
 export function IGServerBot() {
   const [status, setStatus]           = useState<BotStatus | null>(null);
   const [serverOnline, setServerOnline] = useState<boolean | null>(null);  // null = unknown
-  const [configuring, setConfiguring] = useState(false);
   const [loading, setLoading]         = useState(false);
   const [error, setError]             = useState<string | null>(null);
 
   const [selectedEpics, setSelectedEpics] = useState<string[]>(['IX.D.FTSE.DAILY.IP']);
-  const [tradeSize, setTradeSize]         = useState(0.5);
-  const [config, setConfig]               = useState<ScalperConfig>(DEFAULT_CONFIG);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -107,12 +102,11 @@ export function IGServerBot() {
       const r = await fetch('/api/ig/bot?action=start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ epics: selectedEpics, tradeSize, config }),
+        body: JSON.stringify({ epics: selectedEpics }),
       });
       const d = await r.json() as { ok: boolean; error?: string };
       if (!d.ok) { setError(d.error ?? 'Start failed'); return; }
       await fetchStatus();
-      setConfiguring(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Start failed');
     } finally {
@@ -181,11 +175,6 @@ export function IGServerBot() {
           <button onClick={() => void fetchStatus()} className="text-gray-600 hover:text-gray-400" title="Refresh status">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
-          {!running && (
-            <Button size="sm" variant="ghost" onClick={() => setConfiguring(c => !c)}>
-              {configuring ? 'Cancel' : 'Configure'}
-            </Button>
-          )}
           <Button
             size="sm"
             variant={running ? 'danger' : 'primary'}
@@ -214,49 +203,27 @@ export function IGServerBot() {
         </div>
       )}
 
-      {/* Config panel (shown when not running and configure clicked) */}
-      {configuring && !running && (
-        <div className="bg-gray-900/50 border border-gray-800 rounded p-3 space-y-3">
-          <p className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Bot configuration</p>
-
-          <div className="flex items-center gap-3 flex-wrap">
-            <div>
-              <label className="text-[10px] text-gray-500 block mb-1">£/pt per trade</label>
-              <input type="number" value={tradeSize} onChange={e => setTradeSize(Math.max(0.1, Number(e.target.value)))}
-                min={0.1} step={0.1} className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white outline-none" />
-            </div>
-            <div>
-              <label className="text-[10px] text-gray-500 block mb-1">Stop loss %</label>
-              <input type="number" value={config.stopLossPct} onChange={e => setConfig(c => ({ ...c, stopLossPct: Math.max(0.1, Number(e.target.value)) }))}
-                min={0.1} step={0.1} className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white outline-none" />
-            </div>
-            <div>
-              <label className="text-[10px] text-gray-500 block mb-1">Cooldown (min)</label>
-              <input type="number" value={config.cooldownMs / 60_000} onChange={e => setConfig(c => ({ ...c, cooldownMs: Math.max(1, Number(e.target.value)) * 60_000 }))}
-                min={1} step={1} className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white outline-none" />
-            </div>
-          </div>
-
-          <div>
-            <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Instruments</p>
-            <div className="flex flex-wrap gap-1.5">
-              {AVAILABLE_INSTRUMENTS.map(ins => (
-                <button
-                  key={ins.epic}
-                  onClick={() => setSelectedEpics(prev =>
-                    prev.includes(ins.epic) ? prev.filter(e => e !== ins.epic) : [...prev, ins.epic]
-                  )}
-                  className={clsx(
-                    'text-[10px] px-2 py-1 rounded border transition-all',
-                    selectedEpics.includes(ins.epic)
-                      ? 'bg-orange-500/20 text-orange-400 border-orange-500/40'
-                      : 'bg-gray-800 text-gray-500 border-gray-700 hover:border-gray-500'
-                  )}
-                >
-                  {ins.name}
-                </button>
-              ))}
-            </div>
+      {/* Instrument selector */}
+      {!running && (
+        <div className="bg-gray-900/50 border border-gray-800 rounded p-3 space-y-2">
+          <p className="text-[10px] text-gray-500 uppercase tracking-wider">Instruments — Gemini auto-sizes everything</p>
+          <div className="flex flex-wrap gap-1.5">
+            {AVAILABLE_INSTRUMENTS.map(ins => (
+              <button
+                key={ins.epic}
+                onClick={() => setSelectedEpics(prev =>
+                  prev.includes(ins.epic) ? prev.filter(e => e !== ins.epic) : [...prev, ins.epic]
+                )}
+                className={clsx(
+                  'text-[10px] px-2 py-1 rounded border transition-all',
+                  selectedEpics.includes(ins.epic)
+                    ? 'bg-orange-500/20 text-orange-400 border-orange-500/40'
+                    : 'bg-gray-800 text-gray-500 border-gray-700 hover:border-gray-500'
+                )}
+              >
+                {ins.name}
+              </button>
+            ))}
           </div>
         </div>
       )}
@@ -297,12 +264,15 @@ export function IGServerBot() {
               <p className="text-[10px] text-gray-600">No active instruments</p>
             )}
 
-            {/* Session info */}
-            {status.sessionExpiry && (
-              <div className="text-[10px] text-gray-600 mt-2">
-                Session {status.sessionOk ? 'valid' : 'expired'} · auto-renews {new Date(status.sessionExpiry).toLocaleTimeString()}
-              </div>
-            )}
+            {/* Session + loss tracker */}
+            <div className="text-[10px] text-gray-600 mt-2 space-y-0.5">
+              {status.sessionExpiry && (
+                <div>Session {status.sessionOk ? 'valid' : 'expired'} · auto-renews {new Date(status.sessionExpiry).toLocaleTimeString()}</div>
+              )}
+              {status.recentLosses > 0 && (
+                <div className="text-yellow-600">⚠ {status.recentLosses} recent loss{status.recentLosses > 1 ? 'es' : ''} — cooldown auto-scaled</div>
+              )}
+            </div>
           </div>
 
           {/* Log */}
