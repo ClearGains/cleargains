@@ -277,6 +277,35 @@ function calcAutoSizing(
   return { stopDist, limitDist, size };
 }
 
+function isEpicTradeable(epic: string): boolean {
+  const now  = new Date();
+  const day  = now.getUTCDay();   // 0=Sun 6=Sat
+  const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+
+  if (epic.startsWith('CS.D.')) {
+    if (day === 6) return false;
+    if (day === 0 && mins < 22 * 60) return false;
+    if (day === 5 && mins >= 22 * 60) return false;
+    return true;
+  }
+  // Indices — closed all weekend
+  if (day === 0 || day === 6) return false;
+  const sessions: Record<string, [number, number, number, number]> = {
+    'IX.D.FTSE.DAILY.IP':   [8,  0,  16, 30],
+    'IX.D.SPTRD.DAILY.IP':  [14, 30, 21, 0 ],
+    'IX.D.NASDAQ.DAILY.IP': [14, 30, 21, 0 ],
+    'IX.D.DOW.DAILY.IP':    [14, 30, 21, 0 ],
+    'IX.D.DAX.DAILY.IP':    [8,  0,  22, 0 ],
+    'IX.D.NIKKEI.DAILY.IP': [23, 0,  6,  0 ],
+    'IX.D.ASX.DAILY.IP':    [23, 50, 6,  30],
+  };
+  const s = sessions[epic];
+  if (!s) return true;
+  const [oh, om, ch, cm] = s;
+  const open = oh * 60 + om, close = ch * 60 + cm;
+  return open > close ? (mins >= open || mins < close) : (mins >= open && mins < close);
+}
+
 /**
  * Calibrated signal scoring for spread-bet markets.
  * Indices / forex move much less than individual stocks, so the
@@ -1189,6 +1218,12 @@ export function IGStrategyTrader() {
         const isHighConf = strength >= 90;
         if (isHighConf) {
           log('info', `[AUTO] Opened ${market.name} — strong signal override — confidence ${strength}%`);
+        }
+
+        // Skip if market is outside its trading session
+        if (!isEpicTradeable(market.epic)) {
+          log('info', `[${env.toUpperCase()}] ⏸ ${market.name} — market closed, skipping`);
+          continue;
         }
 
         // Gemini second opinion — runs server-side so API key is never exposed
