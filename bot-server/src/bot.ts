@@ -106,7 +106,7 @@ async function refreshPositions() {
 function startPositionPoll() {
   if (positionPollTimer) clearInterval(positionPollTimer);
   void refreshPositions();
-  positionPollTimer = setInterval(() => { void refreshPositions(); }, 30_000);
+  positionPollTimer = setInterval(() => { void refreshPositions(); }, 60_000);
 }
 
 function stopPositionPoll() {
