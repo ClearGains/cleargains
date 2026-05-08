@@ -192,6 +192,11 @@ export function processTick(
 
     // ── FLAT entry logic ───────────────────────────────────────────────────
     if (st.state === 'FLAT') {
+      // Need enough history for RSI (15) and ATR (15) before entering
+      if (st.closedCandles.length < 15) {
+        return { action: 'WAIT', reason: `Accumulating data (${st.closedCandles.length}/15 candles)` };
+      }
+
       const ind = getIndicators(st.closedCandles);
 
       // BUY signal: green candle, RSI not overbought, MACD not strongly bearish

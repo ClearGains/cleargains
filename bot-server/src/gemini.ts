@@ -34,11 +34,11 @@ function fallbackVerdict(signal: EntrySignal): GeminiVerdict {
     if (redCount >= 3) score += 1; else if (redCount <= 1) score -= 1;
   }
 
-  const atrVal    = atr ?? 5;
-  const stopPts   = Math.max(2, Math.round(atrVal * 1.5));
-  const tpPts     = Math.max(3, Math.round(atrVal * 2.0));
-  // Auto-size: smaller bet when volatile (high ATR), larger when calm
   const lastPrice = signal.lastCandles[signal.lastCandles.length - 1]?.close ?? 100;
+  const atrVal    = atr ?? lastPrice * 0.003;  // fallback: 0.3% of price
+  // Use percentage-based minimum so forex (price ~1) gets sensible stops, not rounded-to-zero
+  const stopPts   = Math.max(lastPrice * 0.001, atrVal * 1.5);   // min 0.1% of price
+  const tpPts     = Math.max(lastPrice * 0.0015, atrVal * 2.0);  // min 0.15% of price
   const atrPct    = lastPrice > 0 ? (atrVal / lastPrice) * 100 : 1;
   const betSize   = atrPct > 0.5 ? 0.5 : atrPct > 0.2 ? 1.0 : 1.5;
 
@@ -83,12 +83,12 @@ Technical suggestion: ${signal.suggestedDir}
 
 Guidelines:
 - BUY on clear upward momentum, SELL on clear downward momentum, SKIP if choppy/unclear
-- stopPoints: realistic stop loss in price points (1.5×ATR is a good baseline)
-- takeProfitPoints: aim for ≥1.3:1 reward/risk vs stop
+- stopPoints: stop distance in SAME price units as current price (e.g. price=8000 → stopPoints=40; price=1.08 → stopPoints=0.0012; price=0.84 → stopPoints=0.0008)
+- takeProfitPoints: same price units, aim for ≥1.3:1 reward/risk vs stop
 - betSize: £/pt stake — use 0.5 if volatile (ATR% > 0.5%), 1.0 if moderate, 1.5 if calm and high confidence
 
 Respond with JSON only, no markdown:
-{"direction":"BUY","confidence":72,"reason":"max 12 words","stopPoints":12,"takeProfitPoints":18,"betSize":0.5}`;
+{"direction":"BUY","confidence":72,"reason":"max 12 words","stopPoints":0.0012,"takeProfitPoints":0.0018,"betSize":0.5}`;
 
   try {
     const res = await fetch(
