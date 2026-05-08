@@ -55,6 +55,8 @@ export type BotStatus = {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
+const MAX_CONCURRENT_POSITIONS = 3;
+
 let running     = false;
 let epicStates: Record<string, ScalperEpicState> = {};
 let pendingEpics = new Set<string>();
@@ -201,6 +203,14 @@ function handleTick(tick: CandleTick) {
         break;
       }
 
+      // Max concurrent positions guard
+      const activePositions = Object.values(epicStates).filter(s => s.state === 'IN_POSITION').length + pendingEpics.size;
+      if (activePositions >= MAX_CONCURRENT_POSITIONS) {
+        st.state = 'FLAT';
+        addLog('wait', name, `⏸ Max positions (${MAX_CONCURRENT_POSITIONS}) reached — skipping`);
+        break;
+      }
+
       addLog('info', name, `📊 Signal ${decision.direction} — ${decision.reason}`);
       pendingEpics.add(tick.epic);
 
@@ -237,6 +247,11 @@ function handleTick(tick: CandleTick) {
         st.direction = verdict.direction;
 
         try {
+          // Stagger concurrent orders — random 0-2s delay so multiple instruments
+          // don't all hit IG's API simultaneously
+          await new Promise(r => setTimeout(r, Math.random() * 2000));
+          if (!running) { st.state = 'FLAT'; pendingEpics.delete(tick.epic); return; }
+
           const stopLevel  = verdict.direction === 'BUY'
             ? tick.bidClose - verdict.stopPoints
             : tick.bidClose + verdict.stopPoints;

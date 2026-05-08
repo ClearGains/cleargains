@@ -114,7 +114,7 @@ export async function openPosition(
     method:  'POST',
     headers: headers(session, '2'),
     body:    JSON.stringify(payload),
-    signal:  AbortSignal.timeout(10_000),
+    signal:  AbortSignal.timeout(20_000),
   });
   const d = await r.json() as { dealReference?: string; errorCode?: string };
   if (!r.ok) throw new Error(`openPosition failed ${r.status}: ${d.errorCode ?? JSON.stringify(d)}`);
