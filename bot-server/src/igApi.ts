@@ -112,7 +112,7 @@ export async function openPosition(
 
   const r = await fetch(`${base}/positions/otc`, {
     method:  'POST',
-    headers: headers(session, '2'),
+    headers: headers(session, '1'),
     body:    JSON.stringify(payload),
     signal:  AbortSignal.timeout(20_000),
   });
