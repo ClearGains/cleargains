@@ -7,6 +7,7 @@ const tokenCache = new Map<string, {
   securityToken: string;
   accountId: string;
   accounts: unknown[];
+  isSpreadbet: boolean;
   expiresAt: number;
 }>();
 
