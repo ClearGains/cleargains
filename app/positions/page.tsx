@@ -953,13 +953,15 @@ export default function PositionsPage() {
     const sessKey  = 'ig_session_demo';
     const credKey  = 'ig_demo_credentials';
 
-    // Try cached session first (skip on forceRefresh)
+    // Try cached session first (skip on forceRefresh).
+    // Require isSpreadbet: true — old CFD-account sessions fail this check and
+    // fall through to re-auth, which always switches to the SPREADBET account.
     if (!forceRefresh) {
       try {
         const raw = localStorage.getItem(sessKey);
         if (raw) {
-          const s = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string; authenticatedAt?: number };
-          if (s.cst && s.securityToken && s.apiKey && s.authenticatedAt && (Date.now() - s.authenticatedAt) < SESSION_TTL) {
+          const s = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string; authenticatedAt?: number; isSpreadbet?: boolean };
+          if (s.cst && s.securityToken && s.apiKey && s.authenticatedAt && s.isSpreadbet && (Date.now() - s.authenticatedAt) < SESSION_TTL) {
             const result = { cst: s.cst, securityToken: s.securityToken, apiKey: s.apiKey };
             igDemoSessionRef.current = result;
             setHasIgDemoSession(true);
@@ -981,10 +983,10 @@ export default function PositionsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh }),
       });
-      const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; error?: string };
+      const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; isSpreadbet?: boolean; error?: string };
       if (!d.ok || !d.cst || !d.securityToken) return null;
 
-      const sess = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '', authenticatedAt: Date.now() };
+      const sess = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '', isSpreadbet: d.isSpreadbet ?? false, authenticatedAt: Date.now() };
       localStorage.setItem(sessKey, JSON.stringify(sess));
       igDemoSessionRef.current = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey };
       setHasIgDemoSession(true);

@@ -187,11 +187,14 @@ export async function POST(request: NextRequest) {
       console.log(`[ig/session] No SPREADBET account found — using default account ${activeAccountId}`);
     }
 
+    const isSpreadbet = !!spreadbetAccount && activeAccountId === spreadbetAccount.accountId;
+
     const entry = {
       cst,
       securityToken,
       accountId: activeAccountId,
       accounts,
+      isSpreadbet,
       expiresAt: Date.now() + TOKEN_TTL_MS,
     };
     tokenCache.set(cacheKey, entry);
@@ -203,6 +206,7 @@ export async function POST(request: NextRequest) {
       accountId: activeAccountId,
       accounts,
       spreadbetAccountId: spreadbetAccount?.accountId ?? null,
+      isSpreadbet,
     });
   } catch (err) {
     return NextResponse.json(
