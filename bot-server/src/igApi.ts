@@ -51,8 +51,8 @@ export async function authenticate(
     throw new Error(`IG auth failed ${res.status}: ${txt}`);
   }
   // Node.js fetch normalises header names to lowercase
-  const cst           = res.headers.get('cst') ?? res.headers.get('CST') ?? '';
-  const securityToken = res.headers.get('x-security-token') ?? res.headers.get('X-SECURITY-TOKEN') ?? '';
+  let cst           = res.headers.get('cst') ?? res.headers.get('CST') ?? '';
+  let securityToken = res.headers.get('x-security-token') ?? res.headers.get('X-SECURITY-TOKEN') ?? '';
   const data          = await res.json() as {
     accountId?: string;
     currentAccountId?: string;
