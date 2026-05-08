@@ -56,6 +56,7 @@ export async function POST(request: NextRequest) {
         securityToken: cached.securityToken,
         accountId: cached.accountId,
         accounts: cached.accounts,
+        isSpreadbet: cached.isSpreadbet ?? false,
       });
     }
 
