@@ -143,6 +143,7 @@ export async function POST(request: NextRequest) {
       accountId?: string;
       accounts?: AccountEntry[];
       clientId?: string;
+      lightstreamerEndpoint?: string;
     };
 
     // ── Switch to the Spread Bet account ─────────────────────────────────────
@@ -222,6 +223,7 @@ export async function POST(request: NextRequest) {
       accounts,
       spreadbetAccountId: spreadbetAccount?.accountId ?? null,
       isSpreadbet,
+      lightstreamerEndpoint: data.lightstreamerEndpoint ?? null,
     });
   } catch (err) {
     return NextResponse.json(

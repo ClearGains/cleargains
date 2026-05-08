@@ -1015,10 +1015,15 @@ export default function PositionsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh }),
       });
-      const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; isSpreadbet?: boolean; error?: string };
+      const d = await r.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; isSpreadbet?: boolean; lightstreamerEndpoint?: string | null; error?: string };
       if (!d.ok || !d.cst || !d.securityToken) return null;
 
-      const sess = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '', isSpreadbet: d.isSpreadbet ?? false, authenticatedAt: Date.now() };
+      const sess = {
+        cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey,
+        accountId: d.accountId ?? '', isSpreadbet: d.isSpreadbet ?? false,
+        lightstreamerEndpoint: d.lightstreamerEndpoint ?? null,
+        authenticatedAt: Date.now(),
+      };
       localStorage.setItem(sessKey, JSON.stringify(sess));
       igDemoSessionRef.current = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey };
       setHasIgDemoSession(true);
