@@ -94,7 +94,7 @@ export async function openPosition(
   limitLevel?: number,
 ): Promise<{ dealId: string; level: number }> {
   const base   = BASE[session.env];
-  const expiry = 'DFB';
+  const expiry = epic.startsWith('CS.D.') ? '-' : 'DFB';
   const payload: Record<string, unknown> = {
     epic,
     expiry,

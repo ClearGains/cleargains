@@ -106,6 +106,7 @@ export type IGSavedStrategy = {
 //   uses the minimum size of 0.1 £/pt rather than refusing to trade.
 
 export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
+  // ── Indices ─────────────────────────────────────────────────────────────────
   { epic: 'IX.D.FTSE.DAILY.IP',   name: 'FTSE 100',      enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.SPTRD.DAILY.IP',  name: 'S&P 500',       enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.NASDAQ.DAILY.IP', name: 'NASDAQ 100',    enabled: true,  marketType: 'INDEX' },
@@ -113,6 +114,13 @@ export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
   { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40',    enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225',     enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.ASX.DAILY.IP',    name: 'Australia 200', enabled: true,  marketType: 'INDEX' },
+  // ── Forex (spread bet TODAY instruments — CS.D.*.TODAY.IP) ──────────────────
+  { epic: 'CS.D.GBPUSD.TODAY.IP', name: 'GBP/USD',       enabled: true,  marketType: 'FOREX' },
+  { epic: 'CS.D.EURUSD.TODAY.IP', name: 'EUR/USD',       enabled: true,  marketType: 'FOREX' },
+  { epic: 'CS.D.USDJPY.TODAY.IP', name: 'USD/JPY',       enabled: true,  marketType: 'FOREX' },
+  { epic: 'CS.D.EURGBP.TODAY.IP', name: 'EUR/GBP',       enabled: true,  marketType: 'FOREX' },
+  { epic: 'CS.D.AUDUSD.TODAY.IP', name: 'AUD/USD',       enabled: true,  marketType: 'FOREX' },
+  { epic: 'CS.D.USDCHF.TODAY.IP', name: 'USD/CHF',       enabled: true,  marketType: 'FOREX' },
 ];
 
 // ── Technical indicators ──────────────────────────────────────────────────────
