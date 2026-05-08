@@ -1078,10 +1078,11 @@ export function IGStrategyTrader() {
         if (strat.autoClose) {
           for (const opp of envPos.filter(p => p.epic === market.epic && p.direction === opposite)) {
             const exitPnl = opp.upl ?? 0;
-            log('close', `[AUTO] Closed ${market.name} — signal reversed to ${tradeDir} — P&L: £${exitPnl.toFixed(2)}`);
+            log('info', `[AUTO] Closing ${market.name} — signal reversed to ${tradeDir}…`);
             const cr = await closePos(env, opp);
             if (cr.ok) {
               const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
+              log('close', `[AUTO] ✓ Closed ${market.name} — signal reversed to ${tradeDir} — P&L: £${exitPnl.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, exitPnl, 'STRATEGY', new Date().toISOString()));
               recentlyClosedRef.current.set(`${market.epic}:${opp.direction}`, Date.now());
             } else log('error', `[${env.toUpperCase()}] Close failed: ${cr.error ?? 'unknown'}`);
@@ -1097,12 +1098,13 @@ export function IGStrategyTrader() {
             const weakStrength = weakScan?.signal?.strength ?? 100;
             if (strength >= weakStrength + 15) {
               const weakPnl = weakPos.upl ?? 0;
-              log('close', `[AUTO] Closed ${weakPos.instrumentName ?? weakPos.epic} (signal ${weakStrength}%) — overriding with stronger signal ${market.name} (${strength}%) — P&L: £${weakPnl.toFixed(2)}`);
+              log('info', `[AUTO] Closing ${weakPos.instrumentName ?? weakPos.epic} — overriding with stronger signal ${market.name} (${strength}%)…`);
               const cr = await closePos(env, weakPos);
               if (cr.ok) {
                 const exitPx = weakPos.direction === 'BUY' ? (weakPos.bid ?? weakPos.level) : (weakPos.offer ?? weakPos.level);
+                log('close', `[AUTO] ✓ Closed ${weakPos.instrumentName ?? weakPos.epic} (${weakStrength}%) for ${market.name} (${strength}%) — P&L: £${weakPnl.toFixed(2)}`);
                 setTradeHistory(prev => recordTradeClose(prev, weakPos.dealId, exitPx, weakPnl, 'STRATEGY', new Date().toISOString()));
-              }
+              } else log('error', `[${env.toUpperCase()}] Override close failed: ${cr.error ?? 'unknown'}`);
             }
           }
           await loadPositions(env);
@@ -1171,14 +1173,15 @@ export function IGStrategyTrader() {
             .sort((a, b) => a.upl - b.upl); // most negative first
           if (oldLosers.length > 0) {
             const worst = oldLosers[0];
-            log('close', `[AUTO] Closed ${worst.instrumentName ?? worst.epic} early — capital below £500 threshold — P&L: £${worst.upl.toFixed(2)}`);
+            log('info', `[AUTO] Closing ${worst.instrumentName ?? worst.epic} — capital below £500 threshold…`);
             const cr = await closePos(env, worst);
             if (cr.ok) {
               const exitPx = worst.direction === 'BUY' ? (worst.bid ?? worst.level) : (worst.offer ?? worst.level);
+              log('close', `[AUTO] ✓ Closed ${worst.instrumentName ?? worst.epic} — capital below £500 — P&L: £${(worst.upl ?? 0).toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, worst.dealId, exitPx, worst.upl ?? 0, 'STRATEGY', new Date().toISOString()));
               await loadPositions(env);
               await fetchIGFunds(env);
-            }
+            } else log('error', `[${env.toUpperCase()}] Capital-floor close failed: ${cr.error ?? 'unknown'}`);
           }
         }
 
@@ -1323,13 +1326,14 @@ export function IGStrategyTrader() {
           const ageMs = Date.now() - new Date(pos.createdDate).getTime();
           if (ageMs > 48 * 3_600_000 && Math.abs(pnlPct) < 0.5) {
             const ageLabel = ageMs > 86_400_000 ? `${Math.floor(ageMs / 86_400_000)}d` : `${Math.floor(ageMs / 3_600_000)}h`;
-            log('close', `[AUTO] Closed ${pos.instrumentName ?? pos.epic} early — stale position (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L) — P&L: £${(pos.upl ?? 0).toFixed(2)}`);
+            log('info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — stale (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L)…`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
               const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+              log('close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${(pos.upl ?? 0).toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STALE', new Date().toISOString()));
               recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
-            } else log('error', `[${env.toUpperCase()}] Recycle close failed: ${cr.error ?? 'unknown'}`);
+            } else log('error', `[${env.toUpperCase()}] Stale close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
         }
@@ -1342,9 +1346,10 @@ export function IGStrategyTrader() {
           const isMovingTowardTP = pos.direction === 'BUY' ? currentPx > entryPx : currentPx < entryPx;
           if (isMovingTowardTP && tpDist > 0 && currentDist >= tpDist * 0.75) {
             const pnlStr = `£${(pos.upl ?? 0).toFixed(2)}`;
-            log('close', `[AUTO] Closed ${pos.instrumentName ?? pos.epic} early — 75% of TP target reached (${((currentDist / tpDist) * 100).toFixed(0)}%) — P&L: ${pnlStr}`);
+            log('info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — 75% of TP reached (${((currentDist / tpDist) * 100).toFixed(0)}%)…`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
+              log('close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} — 75% TP — P&L: ${pnlStr}`);
               const closedPnl = pos.upl ?? 0;
               todayPnLRef.current += closedPnl;
               setTodayPnL(todayPnLRef.current);
