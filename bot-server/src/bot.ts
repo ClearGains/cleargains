@@ -9,6 +9,8 @@ import {
   DEFAULT_CONFIG,
   type CandleTick, type ScalperEpicState, type ScalperConfig,
 } from './scalperStrategy';
+import { isMarketOpen } from './marketHours';
+import { askGemini, type EntrySignal } from './gemini';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -150,8 +152,17 @@ function handleTick(tick: CandleTick) {
 
   switch (decision.action) {
     case 'ENTER': {
-      addLog('enter', name, `↑ ENTER — ${decision.reason}`);
+      // Market hours check
+      const mkt = isMarketOpen(tick.epic);
+      if (!mkt.open) {
+        st.state = 'FLAT';
+        addLog('wait', name, `⏸ Market closed — ${mkt.reason}`);
+        break;
+      }
+
+      addLog('enter', name, `↑ Signal — ${decision.reason}`);
       pendingEpics.add(tick.epic);
+
       const session = getSession();
       if (!session) {
         addLog('error', name, '✗ No session — cannot open position');
@@ -159,17 +170,41 @@ function handleTick(tick: CandleTick) {
         pendingEpics.delete(tick.epic);
         break;
       }
-      void openPosition(session, tick.epic, currentSize)
-        .then(({ dealId, level }) => {
-          recordFill(st, level);
-          addLog('enter', name, `✓ Filled @ ${level} (deal ${dealId})`);
+
+      // Gemini confirmation (async — don't block tick handler)
+      const entrySignal: EntrySignal = {
+        instrumentName: name,
+        epic:           tick.epic,
+        rsi:            decision.indicators.rsi,
+        macd:           decision.indicators.macd,
+        atr:            decision.indicators.atr,
+        greenCount:     decision.indicators.greenCount,
+        lastCandles:    st.closedCandles.slice(-5).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+      };
+
+      void askGemini(entrySignal).then(async verdict => {
+        addLog('info', name, `🤖 Gemini (${verdict.engine}): ${verdict.decision} ${verdict.confidence}% — ${verdict.reason}`);
+
+        if (verdict.decision === 'NO' || verdict.confidence < currentConfig.minConfidence) {
+          st.state = 'FLAT';
+          addLog('wait', name, `✋ Gemini vetoed entry (confidence ${verdict.confidence}% < ${currentConfig.minConfidence}%)`);
+          pendingEpics.delete(tick.epic);
+          return;
+        }
+
+        try {
+          const { dealId, level } = await openPosition(session, tick.epic, currentSize);
+          recordFill(st, level, decision.indicators.atr, currentConfig);
+          const stopInfo = st.dynamicStopPrice > 0 ? ` stop@${st.dynamicStopPrice.toFixed(2)}` : '';
+          addLog('enter', name, `✓ Filled @ ${level}${stopInfo} (deal ${dealId})`);
           void refreshPositions();
-        })
-        .catch(e => {
+        } catch (e) {
           st.state = 'FLAT';
           addLog('error', name, `✗ Order failed: ${e instanceof Error ? e.message : String(e)}`);
-        })
-        .finally(() => pendingEpics.delete(tick.epic));
+        } finally {
+          pendingEpics.delete(tick.epic);
+        }
+      });
       break;
     }
 
