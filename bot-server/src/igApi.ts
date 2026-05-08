@@ -152,8 +152,9 @@ export async function closePosition(
     });
     const d = await r.json().catch(() => ({} as { errorCode?: string })) as { errorCode?: string };
     if (r.ok) return;
-    if (r.status !== 404) throw new Error(`closePosition failed ${r.status}: ${d.errorCode ?? attempt.url}`);
-    // 404 → try next endpoint
+    // 404 = endpoint doesn't exist, 405 = method not allowed — try next
+    if (r.status !== 404 && r.status !== 405) throw new Error(`closePosition failed ${r.status}: ${d.errorCode ?? attempt.url}`);
+    // otherwise fall through to next attempt
   }
   throw new Error(`closePosition: all endpoints returned 404 for dealId=${dealId}`);
 }

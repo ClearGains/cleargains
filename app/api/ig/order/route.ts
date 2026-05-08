@@ -346,7 +346,8 @@ export async function DELETE(request: NextRequest) {
       let parsed: typeof data = {};
       try { parsed = await r.json() as typeof data; } catch {}
       tried.push(`${attempt.label} → ${r.status}${parsed.errorCode ? ` (${parsed.errorCode})` : ''}`);
-      if (r.ok || r.status !== 404) {
+      // Only fall through on 404 (not found) or 405 (method not allowed) — try next endpoint
+      if (r.ok || (r.status !== 404 && r.status !== 405)) {
         data = parsed;
         res  = r;
         break;
