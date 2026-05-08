@@ -43,15 +43,16 @@ export async function authenticate(
   const base = BASE[env];
   const res = await fetch(`${base}/session`, {
     method:  'POST',
-    headers: { 'X-IG-API-KEY': apiKey, 'Content-Type': 'application/json', 'Accept': 'application/json; charset=UTF-8', 'Version': '3' },
-    body:    JSON.stringify({ identifier: username, password }),
+    headers: { 'X-IG-API-KEY': apiKey, 'Content-Type': 'application/json', 'Accept': 'application/json; charset=UTF-8', 'Version': '2' },
+    body:    JSON.stringify({ identifier: username, password, encryptedPassword: false }),
   });
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`IG auth failed ${res.status}: ${txt}`);
   }
-  const cst           = res.headers.get('CST') ?? '';
-  const securityToken = res.headers.get('X-SECURITY-TOKEN') ?? '';
+  // Node.js fetch normalises header names to lowercase
+  const cst           = res.headers.get('cst') ?? res.headers.get('CST') ?? '';
+  const securityToken = res.headers.get('x-security-token') ?? res.headers.get('X-SECURITY-TOKEN') ?? '';
   const data          = await res.json() as {
     accountId?: string;
     currentAccountId?: string;
