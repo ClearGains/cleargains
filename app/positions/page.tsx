@@ -322,6 +322,9 @@ export default function PositionsPage() {
   const [testSize, setTestSize]                 = useState(1);
   const [testLoading, setTestLoading]           = useState(false);
   const [testResult, setTestResult]             = useState<string | null>(null);
+  // Diagnostic
+  const [diagLoading, setDiagLoading]           = useState(false);
+  const [diagResult, setDiagResult]             = useState<string | null>(null);
 
   const prevPositionsRef     = useRef<UnifiedPosition[]>([]);
   const refreshRef           = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1044,6 +1047,41 @@ export default function PositionsPage() {
     setTestLoading(false);
   }
 
+  // ── IG API diagnostic ─────────────────────────────────────────────────────
+  async function runDiagnostic() {
+    setDiagLoading(true);
+    setDiagResult('Running diagnostics…');
+    try {
+      const sess = await getIGDemoSession();
+      if (!sess) { setDiagResult('✗ No IG demo session — connect in Settings → Accounts → IG Demo first'); setDiagLoading(false); return; }
+      const r = await fetch('/api/ig/diagnostic', {
+        headers: {
+          'x-ig-cst':            sess.cst,
+          'x-ig-security-token': sess.securityToken,
+          'x-ig-api-key':        sess.apiKey,
+          'x-ig-env':            'demo',
+        },
+      });
+      const d = await r.json() as {
+        ok: boolean; sessionSummary?: string;
+        probes?: Array<{ label: string; status: number; ok: boolean; body: string }>;
+        error?: string;
+      };
+      if (!d.ok) { setDiagResult(`✗ ${d.error ?? 'Diagnostic failed'}`); setDiagLoading(false); return; }
+      const lines: string[] = [];
+      if (d.sessionSummary) lines.push(`Session: ${d.sessionSummary}`);
+      (d.probes ?? []).forEach(p => {
+        const icon = p.ok ? '✓' : p.status === 404 ? '404' : `✗${p.status}`;
+        const preview = p.body.slice(0, 120).replace(/\n/g, ' ');
+        lines.push(`${icon} ${p.label}: ${preview}`);
+      });
+      setDiagResult(lines.join('\n'));
+    } catch (e) {
+      setDiagResult(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setDiagLoading(false);
+  }
+
   // ── Derived ───────────────────────────────────────────────────────────────
   const filtered     = activeTab === 'ALL' ? positions : positions.filter(p => p.account === activeTab);
   const totalPnL     = positions.reduce((s, p) => s + p.pnl, 0);
@@ -1335,6 +1373,26 @@ export default function PositionsPage() {
                 The position will appear in your IG Demo account and in the table below.
                 {signalMonitorEnabled ? ' Signal Monitor is active — it will close when AI detects a reversal.' : ' Enable Signal Monitor below to auto-close on AI signal reversal.'}
               </p>
+
+              {/* API Diagnostic */}
+              <div className="border-t border-gray-800/60 pt-2 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void runDiagnostic()}
+                    disabled={diagLoading}
+                    className="flex items-center gap-1.5 text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/30 hover:border-blue-500/60 rounded px-2.5 py-1 transition-all disabled:opacity-40"
+                  >
+                    {diagLoading ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <Zap className="h-2.5 w-2.5" />}
+                    Run API Diagnostics
+                  </button>
+                  <span className="text-[9px] text-gray-600">Tests all IG endpoints + versions</span>
+                </div>
+                {diagResult && (
+                  <pre className="text-[9px] font-mono text-gray-400 bg-gray-900/60 border border-gray-800 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-48 overflow-y-auto">
+                    {diagResult}
+                  </pre>
+                )}
+              </div>
             </div>
           )}
 
