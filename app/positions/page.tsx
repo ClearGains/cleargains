@@ -326,6 +326,11 @@ export default function PositionsPage() {
   const [diagLoading, setDiagLoading]           = useState(false);
   const [diagResult, setDiagResult]             = useState<string | null>(null);
 
+  // Per-epic client-side cooldown: tracks last time each epic was checked (avoids
+  // hammering IG price API when multiple positions share the same epic, or when
+  // the server cache is cold on a fresh Vercel invocation)
+  const epicLastCheckedRef   = useRef<Map<string, number>>(new Map());
+
   const prevPositionsRef     = useRef<UnifiedPosition[]>([]);
   const refreshRef           = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef         = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -836,8 +841,28 @@ export default function PositionsPage() {
         signalMonitorRunning.current = false; setSignalMonitorChecking(false); return;
       }
 
+      // Deduplicate by epic: one price fetch per unique epic regardless of how
+      // many positions share it. Also enforce a 12-min client-side cooldown per
+      // epic so a cold Vercel invocation (empty server cache) doesn't re-hit IG.
+      const CLIENT_COOLDOWN_MS = 12 * 60_000;
+      const checkedEpics = new Map<string, { signal: string; confidence: number; reasoning: string; engine?: string }>();
+
       for (const pos of igDemoPositions) {
         if (!pos.epic) continue;
+        const ts = epicLastCheckedRef.current.get(pos.epic) ?? 0;
+        const sinceLastCheck = Date.now() - ts;
+
+        // Skip this epic entirely if we checked it within the cooldown window
+        if (sinceLastCheck < CLIENT_COOLDOWN_MS && checkedEpics.has(pos.epic)) {
+          const cached = checkedEpics.get(pos.epic)!;
+          const engineTag = cached.engine ? ` [${cached.engine}]` : '';
+          setSignalMonitorLog(prev => [
+            `${new Date().toLocaleTimeString('en-GB')}: ${pos.name} [${pos.direction}]${engineTag} — ${cached.signal} ${cached.confidence}/10 (client-cache): ${cached.reasoning}`,
+            ...prev.slice(0, 29),
+          ]);
+          continue;
+        }
+
         try {
           const r = await fetch('/api/ig/signal-check', {
             method: 'POST',
@@ -862,8 +887,12 @@ export default function PositionsPage() {
             continue;
           }
 
+          // Store result for any other positions that share this epic
+          epicLastCheckedRef.current.set(pos.epic, Date.now());
+          checkedEpics.set(pos.epic, { signal: d.signal ?? 'HOLD', confidence: d.confidence ?? 5, reasoning: d.reasoning ?? '', engine: d.engine });
+
           const engineTag = d.engine ? ` [${d.engine}]` : '';
-          const cachedTag = d.cached ? ' (cached)' : '';
+          const cachedTag = d.cached ? ' (server-cache)' : '';
           const action    = d.shouldClose ? ' → CLOSING NOW' : '';
           setSignalMonitorLog(prev => [
             `${new Date().toLocaleTimeString('en-GB')}: ${pos.name} [${pos.direction}]${engineTag} — ${d.signal ?? '?'} ${d.confidence ?? '?'}/10${cachedTag}: ${d.reasoning ?? ''}${action}`,
