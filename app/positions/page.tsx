@@ -546,6 +546,15 @@ export default function PositionsPage() {
     setLoading(false);
     setCountdown(30);
 
+    // Re-check IG demo session after every fetch (handles navigation timing)
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem('ig_session_demo') : null;
+      if (raw) {
+        const s = JSON.parse(raw) as { cst?: string; securityToken?: string };
+        setHasIgDemoSession(!!(s.cst && s.securityToken));
+      }
+    } catch {}
+
     // ── Fetch available funds ────────────────────────────────────────────────
     const funds: Partial<Record<string, { available: number; label: string; color: string }>> = {};
 
@@ -1115,9 +1124,8 @@ export default function PositionsPage() {
         </div>
       )}
 
-      {/* Auto-Close Engine — IG Demo Spread Bet */}
-      {hasIgDemoSession && (
-        <div className="bg-gray-900/70 border border-orange-500/25 rounded-xl p-4 space-y-3">
+      {/* Auto-Close Engine — IG Demo Spread Bet (always visible) */}
+      <div className="bg-gray-900/70 border border-orange-500/25 rounded-xl p-4 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-2">
               <Zap className="h-4 w-4 text-orange-400" />
@@ -1150,6 +1158,9 @@ export default function PositionsPage() {
 
           <p className="text-[10px] text-gray-500">
             Monitors IG Demo positions every 30s and closes via market order when your thresholds are hit — no SL/TP orders placed on IG.
+            {!hasIgDemoSession && (
+              <span className="ml-2 text-amber-400 font-medium">⚠ No IG Demo session detected — connect via Auto Trader → IG Strategy Trader first.</span>
+            )}
           </p>
 
           <div className="grid grid-cols-2 gap-3">
@@ -1318,7 +1329,6 @@ export default function PositionsPage() {
             )}
           </div>
         </div>
-      )}
 
       {/* Account summary cards — shown when portfolio data is available */}
       {portfolioData && (portfolioData.t212.length > 0 || portfolioData.ig.length > 0) && (
