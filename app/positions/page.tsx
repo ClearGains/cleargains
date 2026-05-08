@@ -512,9 +512,9 @@ export default function PositionsPage() {
           bid: number; offer: number;
         }>; error?: string; steps?: string[] };
 
-        if (!d.ok) { errs[accountKey] = `${d.error ?? `IG ${envKey} error`} | ${(d.steps ?? []).slice(-2).join(' | ')}`; return; }
+        if (!d.ok) { errs[accountKey] = `${d.error ?? `IG ${envKey} error`} | ${(d.steps ?? []).slice(-3).join(' | ')}`; return; }
         if ((d.positions ?? []).length === 0) {
-          errs[accountKey] = `0 positions returned | ${(d.steps ?? []).slice(-2).join(' | ')}`;
+          errs[accountKey] = `0 positions | ${(d.steps ?? []).slice(-3).join(' | ')}`;
         }
 
         (d.positions ?? []).forEach(p => {

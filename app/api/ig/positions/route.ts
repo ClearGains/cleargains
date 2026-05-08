@@ -33,9 +33,23 @@ export async function GET(request: NextRequest) {
 
     steps.push(`[2] HTTP ${res.status} ${res.statusText}`);
 
-    // 404 = no positions on account (not a real error)
+    // 404 = no positions on account — check which account these tokens are bound to
     if (res.status === 404) {
-      steps.push('[2] 404 = no positions (normal empty response)');
+      steps.push('[2] 404 — checking which account these tokens are for…');
+      try {
+        const sessRes = await fetch(`${baseUrl}/session`, {
+          headers: { 'X-IG-API-KEY': apiKey, 'CST': cst, 'X-SECURITY-TOKEN': securityToken, 'Accept': 'application/json; charset=UTF-8', 'Version': '1' },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (sessRes.ok) {
+          const sd = await sessRes.json() as { accountId?: string; accountType?: string; clientId?: string };
+          steps.push(`[3] Tokens bound to accountId=${sd.accountId ?? '?'} accountType=${sd.accountType ?? '?'}`);
+        } else {
+          steps.push(`[3] Session check returned ${sessRes.status}`);
+        }
+      } catch (e) {
+        steps.push(`[3] Session check failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
       return NextResponse.json({ ok: true, positions: [], steps, rawResponse: '404 - no positions' });
     }
 
