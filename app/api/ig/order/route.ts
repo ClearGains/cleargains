@@ -235,7 +235,7 @@ export async function POST(request: NextRequest) {
       try {
         const upd = await fetch(`${base}/positions/otc/${encodeURIComponent(confirm.dealId)}`, {
           method: 'PUT',
-          headers: igHeaders(apiKey, cst, securityToken, '2'),
+          headers: igHeaders(apiKey, cst, securityToken, '1'),
           body: JSON.stringify(slTpPayload),
         });
         if (!upd.ok) {
@@ -399,7 +399,7 @@ export async function PATCH(request: NextRequest) {
 
     const res = await fetch(`${base}/positions/otc/${encodeURIComponent(body.dealId)}`, {
       method: 'PUT',
-      headers: igHeaders(apiKey, cst, securityToken, '2'),
+      headers: igHeaders(apiKey, cst, securityToken, '1'),
       body: JSON.stringify(updatePayload),
     });
 
