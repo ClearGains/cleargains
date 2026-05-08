@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   authenticate, openPosition, closePosition, fetchPositions,
   getSession, clearSession,
@@ -12,6 +14,8 @@ import {
 import { isMarketOpen } from './marketHours';
 import { askGemini, type EntrySignal } from './gemini';
 import { feedCandle, runSignalCheck } from './signalMonitor';
+
+const STATE_FILE = path.join(__dirname, '..', 'bot-state.json');
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +70,16 @@ const log: LogEntry[] = [];
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
 function ts()  { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+
+function saveState(params: BotStartParams) {
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify(params), 'utf8'); } catch {}
+}
+function clearState() {
+  try { fs.unlinkSync(STATE_FILE); } catch {}
+}
+export function loadSavedState(): BotStartParams | null {
+  try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) as BotStartParams; } catch { return null; }
+}
 
 function addLog(type: LogEntry['type'], epic: string, msg: string) {
   const entry: LogEntry = { id: uid(), ts: ts(), type, epic, msg };
@@ -339,6 +353,7 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
     startSignalMonitor();
     scheduleSessionRefresh(session);
 
+    saveState(params);
     addLog('info', '—', `Bot started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
     return { ok: true };
   } catch (e) {
@@ -356,6 +371,7 @@ export function stopBot() {
   stopSignalMonitor();
   if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
   clearSession();
+  clearState();
   addLog('info', '—', 'Bot stopped');
 }
 

@@ -1,5 +1,5 @@
 import express, { Request, Response, NextFunction } from 'express';
-import { startBot, stopBot, getBotStatus } from './bot';
+import { startBot, stopBot, getBotStatus, loadSavedState } from './bot';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -57,4 +57,14 @@ app.post('/stop', auth, (_req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[bot-server] Listening on 0.0.0.0:${PORT}`);
   console.log(`[bot-server] IG env: ${process.env.IG_ENV ?? 'demo'}`);
+
+  // Auto-resume if bot was running before process restart
+  const saved = loadSavedState();
+  if (saved) {
+    console.log(`[bot-server] Auto-resuming bot with ${saved.epics.length} epic(s)...`);
+    void startBot(saved).then(r => {
+      if (r.ok) console.log('[bot-server] Auto-resume successful');
+      else console.error(`[bot-server] Auto-resume failed: ${r.error}`);
+    });
+  }
 });
