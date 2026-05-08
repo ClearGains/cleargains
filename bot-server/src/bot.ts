@@ -160,7 +160,7 @@ function handleTick(tick: CandleTick) {
         break;
       }
 
-      addLog('enter', name, `↑ Signal — ${decision.reason}`);
+      addLog('info', name, `📊 Signal ${decision.direction} — ${decision.reason}`);
       pendingEpics.add(tick.epic);
 
       const session = getSession();
@@ -171,7 +171,6 @@ function handleTick(tick: CandleTick) {
         break;
       }
 
-      // Gemini confirmation (async — don't block tick handler)
       const entrySignal: EntrySignal = {
         instrumentName: name,
         epic:           tick.epic,
@@ -179,24 +178,41 @@ function handleTick(tick: CandleTick) {
         macd:           decision.indicators.macd,
         atr:            decision.indicators.atr,
         greenCount:     decision.indicators.greenCount,
+        suggestedDir:   decision.direction,
         lastCandles:    st.closedCandles.slice(-5).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
       };
 
       void askGemini(entrySignal).then(async verdict => {
-        addLog('info', name, `🤖 Gemini (${verdict.engine}): ${verdict.decision} ${verdict.confidence}% — ${verdict.reason}`);
+        addLog('info', name, `🤖 Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
 
-        if (verdict.decision === 'NO' || verdict.confidence < currentConfig.minConfidence) {
+        if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {
           st.state = 'FLAT';
-          addLog('wait', name, `✋ Gemini vetoed entry (confidence ${verdict.confidence}% < ${currentConfig.minConfidence}%)`);
+          addLog('wait', name, `✋ Skipped (${verdict.direction}, confidence ${verdict.confidence}%)`);
           pendingEpics.delete(tick.epic);
           return;
         }
 
+        // Gemini may override technical direction
+        st.direction = verdict.direction;
+
         try {
-          const { dealId, level } = await openPosition(session, tick.epic, currentSize);
-          recordFill(st, level, decision.indicators.atr, currentConfig);
-          const stopInfo = st.dynamicStopPrice > 0 ? ` stop@${st.dynamicStopPrice.toFixed(2)}` : '';
-          addLog('enter', name, `✓ Filled @ ${level}${stopInfo} (deal ${dealId})`);
+          const stopLevel  = verdict.direction === 'BUY'
+            ? tick.bidClose - verdict.stopPoints
+            : tick.bidClose + verdict.stopPoints;
+          const limitLevel = verdict.direction === 'BUY'
+            ? tick.bidClose + verdict.takeProfitPoints
+            : tick.bidClose - verdict.takeProfitPoints;
+
+          const { dealId, level } = await openPosition(
+            session, tick.epic, currentSize,
+            verdict.direction, stopLevel, limitLevel,
+          );
+
+          recordFill(st, level, verdict.stopPoints, verdict.takeProfitPoints);
+
+          addLog('enter', name,
+            `✓ ${verdict.direction} @ ${level} | stop ${stopLevel.toFixed(2)} (−${verdict.stopPoints}pts) | TP ${limitLevel.toFixed(2)} (+${verdict.takeProfitPoints}pts) | deal ${dealId}`
+          );
           void refreshPositions();
         } catch (e) {
           st.state = 'FLAT';

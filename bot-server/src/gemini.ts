@@ -1,43 +1,53 @@
 export type GeminiVerdict = {
-  decision:   'YES' | 'NO';
-  confidence: number;   // 0-100
-  reason:     string;
-  engine:     'gemini' | 'fallback';
+  direction:        'BUY' | 'SELL' | 'SKIP';
+  confidence:       number;   // 0-100
+  reason:           string;
+  stopPoints:       number;   // points away for stop loss
+  takeProfitPoints: number;   // points away for take profit
+  engine:           'gemini' | 'fallback';
 };
 
 export type EntrySignal = {
   instrumentName: string;
   epic:           string;
   rsi:            number | null;
-  macd:           number | null;  // MACD histogram — positive = bullish
+  macd:           number | null;
   atr:            number | null;
-  greenCount:     number;         // green candles in last 5
+  greenCount:     number;
   lastCandles:    Array<{ open: number; high: number; low: number; close: number }>;
+  suggestedDir:   'BUY' | 'SELL';  // technical suggestion
 };
 
-// Simple fallback when Gemini unavailable — mirrors old RSI-only logic
 function fallbackVerdict(signal: EntrySignal): GeminiVerdict {
-  const { rsi, macd, greenCount } = signal;
-
+  const { rsi, macd, greenCount, atr, suggestedDir } = signal;
   let score = 0;
-  if (rsi !== null) {
-    if (rsi < 40)       score += 2;
-    else if (rsi < 55)  score += 1;
-    else if (rsi > 65)  score -= 2;
-  }
-  if (macd !== null) {
-    if (macd > 0)  score += 1;
-    else           score -= 1;
-  }
-  if (greenCount >= 3) score += 1;
-  if (greenCount <= 1) score -= 1;
 
-  const decision = score >= 1 ? 'YES' : 'NO';
+  if (suggestedDir === 'BUY') {
+    if (rsi !== null) { if (rsi < 40) score += 2; else if (rsi < 55) score += 1; else if (rsi > 65) score -= 2; }
+    if (macd !== null) { if (macd > 0) score += 1; else score -= 1; }
+    if (greenCount >= 3) score += 1; else if (greenCount <= 1) score -= 1;
+  } else {
+    if (rsi !== null) { if (rsi > 60) score += 2; else if (rsi > 45) score += 1; else if (rsi < 35) score -= 2; }
+    if (macd !== null) { if (macd < 0) score += 1; else score -= 1; }
+    const redCount = 5 - greenCount;
+    if (redCount >= 3) score += 1; else if (redCount <= 1) score -= 1;
+  }
+
+  const atrVal    = atr ?? 5;
+  const stopPts   = Math.max(2, Math.round(atrVal * 1.5));
+  const tpPts     = Math.max(3, Math.round(atrVal * 2.0));
+
+  if (score < 1) {
+    return { direction: 'SKIP', confidence: 40, reason: `Rules score ${score} — insufficient signal`, stopPoints: stopPts, takeProfitPoints: tpPts, engine: 'fallback' };
+  }
+
   return {
-    decision,
-    confidence: Math.min(90, 50 + score * 10),
-    reason:     `Rules: RSI=${rsi?.toFixed(0) ?? 'N/A'} MACD=${macd !== null ? (macd > 0 ? '+' : '') + macd.toFixed(4) : 'N/A'} greens=${greenCount}/5 score=${score}`,
-    engine:     'fallback',
+    direction:        suggestedDir,
+    confidence:       Math.min(90, 50 + score * 10),
+    reason:           `Rules: RSI=${rsi?.toFixed(0) ?? 'N/A'} MACD=${macd !== null ? (macd > 0 ? '+' : '') + macd.toFixed(4) : 'N/A'} score=${score}`,
+    stopPoints:       stopPts,
+    takeProfitPoints: tpPts,
+    engine:           'fallback',
   };
 }
 
@@ -45,27 +55,29 @@ export async function askGemini(signal: EntrySignal): Promise<GeminiVerdict> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return fallbackVerdict(signal);
 
-  const candleStr = signal.lastCandles.slice(-5).map((c, i) =>
-    `  Candle -${signal.lastCandles.slice(-5).length - i}: O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
+  const candleStr = signal.lastCandles.map((c, i) =>
+    `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
   ).join('\n');
 
-  const prompt = `You are a short-term trading signal validator for a 1-minute scalping bot.
-The bot is considering entering a BUY position on ${signal.instrumentName}.
+  const atrVal = signal.atr ?? 0;
 
-Technical data:
+  const prompt = `You are an autonomous spread betting signal engine for 1-minute scalping.
+Analyse the data and decide whether to go LONG (BUY), SHORT (SELL), or SKIP this trade.
+This is a ${signal.instrumentName} spread bet. Trades last 1–5 minutes typically.
+
+Last 5 closed 1-minute candles (oldest first):
 ${candleStr}
-RSI(14): ${signal.rsi !== null ? signal.rsi.toFixed(1) : 'insufficient data'}
-MACD histogram: ${signal.macd !== null ? (signal.macd > 0 ? '+' : '') + signal.macd.toFixed(4) : 'insufficient data'} (positive = bullish momentum)
-ATR(14): ${signal.atr !== null ? signal.atr.toFixed(2) : 'N/A'} (volatility measure)
-Green candles in last 5: ${signal.greenCount}/5
+RSI(14): ${signal.rsi?.toFixed(1) ?? 'N/A'}
+MACD histogram: ${signal.macd !== null ? (signal.macd > 0 ? '+' : '') + signal.macd.toFixed(5) : 'N/A'} (positive=bullish)
+ATR(14): ${atrVal.toFixed(2)} points (average candle range)
+Technical suggestion: ${signal.suggestedDir}
 
-The last candle just closed GREEN. The bot enters on green candle closes and exits on red candles or ≥0.5% loss.
-Trades are typically held for 1-5 minutes.
+Rules: enter BUY on upward momentum, SELL on downward momentum, SKIP if unclear or choppy.
+Set stopPoints = how many price points away for stop loss (use ATR as guide, be realistic).
+Set takeProfitPoints = points away for take profit (aim for at least 1.3:1 reward/risk ratio).
 
-Should the bot enter a BUY now? Consider momentum, RSI level, and whether this looks like a genuine upward move vs a false breakout.
-
-Respond with JSON only, no markdown:
-{"decision":"YES","confidence":75,"reason":"brief one-line reason"}`;
+Respond with JSON only, no markdown, no explanation outside JSON:
+{"direction":"BUY","confidence":72,"reason":"brief reason max 15 words","stopPoints":12,"takeProfitPoints":18}`;
 
   try {
     const res = await fetch(
@@ -75,7 +87,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 120 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 150 },
         }),
         signal: AbortSignal.timeout(8_000),
       }
@@ -90,19 +102,25 @@ Respond with JSON only, no markdown:
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
     };
 
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    // Strip markdown code fences if present
+    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed  = JSON.parse(cleaned) as { decision: string; confidence: number; reason: string };
+    const parsed  = JSON.parse(cleaned) as {
+      direction: string; confidence: number; reason: string;
+      stopPoints: number; takeProfitPoints: number;
+    };
+
+    const dir = (['BUY', 'SELL', 'SKIP'].includes(parsed.direction)) ? parsed.direction as GeminiVerdict['direction'] : 'SKIP';
 
     return {
-      decision:   parsed.decision === 'YES' ? 'YES' : 'NO',
-      confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
-      reason:     parsed.reason ?? '',
-      engine:     'gemini',
+      direction:        dir,
+      confidence:       Math.max(0, Math.min(100, parsed.confidence ?? 50)),
+      reason:           parsed.reason ?? '',
+      stopPoints:       Math.max(1, parsed.stopPoints ?? Math.round(atrVal * 1.5)),
+      takeProfitPoints: Math.max(1, parsed.takeProfitPoints ?? Math.round(atrVal * 2)),
+      engine:           'gemini',
     };
   } catch (e) {
-    console.warn(`[gemini] Failed — using fallback. Error: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[gemini] Failed — fallback. ${e instanceof Error ? e.message : String(e)}`);
     return fallbackVerdict(signal);
   }
 }

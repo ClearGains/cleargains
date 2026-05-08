@@ -86,22 +86,27 @@ export function getSession(): IGSession | null { return activeSession; }
 export function clearSession() { activeSession = null; }
 
 export async function openPosition(
-  session:  IGSession,
-  epic:     string,
-  size:     number,
+  session:    IGSession,
+  epic:       string,
+  size:       number,
+  direction:  'BUY' | 'SELL' = 'BUY',
+  stopLevel?: number,
+  limitLevel?: number,
 ): Promise<{ dealId: string; level: number }> {
-  const base    = BASE[session.env];
-  const expiry  = epic.startsWith('CS.D.') ? '-' : 'DFB';
-  const payload = {
+  const base   = BASE[session.env];
+  const expiry = epic.startsWith('CS.D.') ? '-' : 'DFB';
+  const payload: Record<string, unknown> = {
     epic,
     expiry,
-    direction:     'BUY',
+    direction,
     size,
     orderType:     'MARKET',
     guaranteedStop: false,
     forceOpen:      true,
     currencyCode:   'GBP',
   };
+  if (stopLevel  !== undefined) payload.stopLevel  = stopLevel;
+  if (limitLevel !== undefined) payload.limitLevel = limitLevel;
 
   const r = await fetch(`${base}/positions/otc`, {
     method:  'POST',
