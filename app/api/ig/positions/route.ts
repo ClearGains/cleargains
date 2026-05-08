@@ -63,92 +63,41 @@ export async function GET(request: NextRequest) {
       ? 'https://demo-api.ig.com/gateway/deal'
       : 'https://api.ig.com/gateway/deal';
 
-    steps.push(`[2] GET ${baseUrl}/positions/otc (Version: 2)`);
+    // IG Spread Bet accounts use /positions (not /positions/otc).
+    // Try /positions first; if that 404s, fall back to /positions/otc (CFD).
+    const endpoints = [
+      { path: `${baseUrl}/positions`,     version: '2', label: '/positions V2 (spreadbet)'  },
+      { path: `${baseUrl}/positions/otc`, version: '2', label: '/positions/otc V2 (CFD)'    },
+    ];
 
-    const res = await fetch(`${baseUrl}/positions/otc`, {
-      headers: {
-        'X-IG-API-KEY': apiKey,
-        'CST': cst,
-        'X-SECURITY-TOKEN': securityToken,
-        'Accept': 'application/json; charset=UTF-8',
-        'Version': '2',
-      },
-    });
-
-    steps.push(`[2] HTTP ${res.status} ${res.statusText}`);
-
-    // 404 from IG — capture body and retry with Version: 1 before giving up
-    if (res.status === 404) {
-      const body404 = await res.text().catch(() => '');
-      steps.push(`[2] 404 body: ${body404.slice(0, 200) || '(empty)'}`);
-
-      // Retry with Version: 1 — some SPREADBET accounts need V1
-      steps.push('[2b] Retrying with Version: 1…');
-      const res1 = await fetch(`${baseUrl}/positions/otc`, {
+    let rawText = '';
+    let usedLabel = '';
+    for (const ep of endpoints) {
+      steps.push(`[2] Trying ${ep.label}`);
+      const r = await fetch(ep.path, {
         headers: {
           'X-IG-API-KEY': apiKey,
           'CST': cst,
           'X-SECURITY-TOKEN': securityToken,
           'Accept': 'application/json; charset=UTF-8',
-          'Version': '1',
+          'Version': ep.version,
         },
       });
-      steps.push(`[2b] V1 response: HTTP ${res1.status}`);
-
-      if (res1.ok) {
-        const rawText1 = await res1.text();
-        steps.push(`[2b] V1 body length: ${rawText1.length}`);
-        try {
-          const data1 = JSON.parse(rawText1) as { positions?: unknown[] };
-          const count1 = data1.positions?.length ?? 0;
-          steps.push(`[2b] V1 positions count: ${count1}`);
-          if (count1 > 0) {
-            // Re-parse as full position data
-            const fullData = data1 as Parameters<typeof normalisePositions>[0];
-            const positions = normalisePositions(fullData);
-            steps.push(`[5] Normalised ${positions.length} position(s) via V1 — returning`);
-            return NextResponse.json({ ok: true, positions, steps, rawResponse: rawText1.slice(0, 2000) });
-          }
-        } catch (e) {
-          steps.push(`[2b] V1 JSON parse error: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      } else {
-        const body1 = await res1.text().catch(() => '');
-        steps.push(`[2b] V1 error body: ${body1.slice(0, 200)}`);
+      steps.push(`[2] HTTP ${r.status}`);
+      if (r.ok) {
+        rawText   = await r.text();
+        usedLabel = ep.label;
+        break;
       }
-
-      // Diagnose which account/type these tokens are for
-      try {
-        const sessRes = await fetch(`${baseUrl}/session`, {
-          headers: { 'X-IG-API-KEY': apiKey, 'CST': cst, 'X-SECURITY-TOKEN': securityToken, 'Accept': 'application/json; charset=UTF-8', 'Version': '1' },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (sessRes.ok) {
-          type SessResp = { currentAccountId?: string; accountId?: string; accounts?: Array<{ accountId: string; accountType: string }> };
-          const sd = await sessRes.json() as SessResp;
-          const activeId = sd.currentAccountId ?? sd.accountId ?? '?';
-          const activeType = sd.accounts?.find(a => a.accountId === activeId)?.accountType ?? '?';
-          steps.push(`[3] Tokens → accountId=${activeId} accountType=${activeType} (${sd.accounts?.map(a => `${a.accountId}:${a.accountType}`).join(', ') ?? 'no accounts'})`);
-        } else {
-          steps.push(`[3] Session check returned ${sessRes.status}`);
-        }
-      } catch (e) {
-        steps.push(`[3] Session check failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-      return NextResponse.json({ ok: true, positions: [], steps, rawResponse: `404 body: ${body404.slice(0, 300)}` });
+      const errBody = await r.text().catch(() => '');
+      steps.push(`[2] ${ep.label} error: ${errBody.slice(0, 150)}`);
     }
 
-    const rawText = await res.text();
-    steps.push(`[3] Raw response length: ${rawText.length} chars`);
-
-    if (!res.ok) {
-      steps.push(`[3] ✗ IG error: ${rawText.slice(0, 300)}`);
-      console.error(`[ig/positions] IG ${res.status}:`, rawText.slice(0, 300));
-      return NextResponse.json(
-        { ok: false, error: `IG positions error ${res.status}`, detail: rawText.slice(0, 200), steps, rawResponse: rawText.slice(0, 500) },
-        { status: res.status },
-      );
+    if (!rawText) {
+      steps.push('[2] ✗ All endpoints returned errors');
+      return NextResponse.json({ ok: true, positions: [], steps });
     }
+    steps.push(`[3] Got response via ${usedLabel} — length ${rawText.length}`);
 
     let data: RawPositionsData;
 

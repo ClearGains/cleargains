@@ -288,14 +288,32 @@ export async function DELETE(request: NextRequest) {
       quoteId:     null,
     };
 
-    const res = await fetch(`${base}/positions/otc`, {
-      method: 'POST',
-      headers: { ...igHeaders(apiKey, cst, securityToken, '1'), '_method': 'DELETE' },
-      body: JSON.stringify(closePayload),
-    });
+    // Try /positions first (Spread Bet), fall back to /positions/otc (CFD)
+    const closeEndpoints = [
+      { url: `${base}/positions`,     label: '/positions'     },
+      { url: `${base}/positions/otc`, label: '/positions/otc' },
+    ];
 
     let data: { dealReference?: string; errorCode?: string } = {};
-    try { data = await res.json() as typeof data; } catch {}
+    let res: Response | null = null;
+    for (const ep of closeEndpoints) {
+      const r = await fetch(ep.url, {
+        method: 'POST',
+        headers: { ...igHeaders(apiKey, cst, securityToken, '1'), '_method': 'DELETE' },
+        body: JSON.stringify(closePayload),
+      });
+      let parsed: typeof data = {};
+      try { parsed = await r.json() as typeof data; } catch {}
+      if (r.ok || r.status !== 404) {
+        data = parsed;
+        res  = r;
+        break;
+      }
+    }
+
+    if (!res) {
+      return NextResponse.json({ ok: false, error: 'All close endpoints returned 404' }, { status: 404 });
+    }
 
     if (!res.ok) {
       return NextResponse.json({ ok: false, error: data.errorCode ?? `IG API error ${res.status}` }, { status: res.status });
