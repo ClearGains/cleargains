@@ -333,6 +333,7 @@ export default function PositionsPage() {
   const positionsRef           = useRef<UnifiedPosition[]>([]);
   const signalMonitorRunning   = useRef(false);
   const signalMonitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const igDemoSessionRef       = useRef<{ cst: string; securityToken: string; apiKey: string } | null>(null);
 
   // Load manual positions, CG ids, and cached snapshot on mount
   useEffect(() => {
@@ -431,6 +432,10 @@ export default function PositionsPage() {
     const all: UnifiedPosition[] = [];
     const errs: Partial<Record<AccountKey, string>> = {};
 
+    // Refresh IG Demo session upfront — updates igDemoSessionRef which fetchIG reads.
+    // Safe to call from this closure: only uses localStorage, fetch, and stable state setters.
+    await getIGDemoSession();
+
     // ── T212 helper ──────────────────────────────────────────────────────────
     async function fetchT212(key: string, secret: string, accountKey: AccountKey, env: string) {
       if (!key) return;
@@ -475,18 +480,22 @@ export default function PositionsPage() {
     // ── IG helper ─────────────────────────────────────────────────────────────
     async function fetchIG(envKey: 'demo' | 'live', accountKey: AccountKey) {
       try {
-        // For demo: use getIGDemoSession() so stale/CFD-bound tokens are auto-refreshed
-        // For live: fall back to raw localStorage (no auto-connect logic yet)
-        let sess: { cst: string; securityToken: string; apiKey: string } | null = null;
-        if (envKey === 'demo') {
-          sess = await getIGDemoSession();
-        } else {
-          const raw = typeof window !== 'undefined' ? localStorage.getItem(`ig_session_${envKey}`) : null;
-          if (!raw) return;
-          const parsed = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
-          if (parsed.cst && parsed.securityToken && parsed.apiKey) sess = { cst: parsed.cst, securityToken: parsed.securityToken, apiKey: parsed.apiKey };
+        // For demo: use the ref populated by getIGDemoSession() before fetchAll runs
+        // For live: read from localStorage directly
+        const sess = envKey === 'demo'
+          ? igDemoSessionRef.current
+          : (() => {
+              try {
+                const raw = typeof window !== 'undefined' ? localStorage.getItem(`ig_session_${envKey}`) : null;
+                if (!raw) return null;
+                const p = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string };
+                return p.cst && p.securityToken && p.apiKey ? { cst: p.cst, securityToken: p.securityToken, apiKey: p.apiKey } : null;
+              } catch { return null; }
+            })();
+        if (!sess) {
+          if (envKey === 'demo') errs[accountKey] = 'No IG demo session — connect in Settings → Accounts → IG Demo';
+          return;
         }
-        if (!sess) return;
 
         const r = await fetch('/api/ig/positions', {
           headers: {
@@ -688,6 +697,7 @@ export default function PositionsPage() {
     t212IsaApiKey, t212IsaApiSecret, t212IsaConnected,
     t212DemoApiKey, t212DemoApiSecret, t212DemoConnected,
   ]);
+
 
   // ── Auto-refresh every 30s ────────────────────────────────────────────────
   useEffect(() => {
@@ -947,8 +957,10 @@ export default function PositionsPage() {
         if (raw) {
           const s = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string; authenticatedAt?: number };
           if (s.cst && s.securityToken && s.apiKey && s.authenticatedAt && (Date.now() - s.authenticatedAt) < SESSION_TTL) {
+            const result = { cst: s.cst, securityToken: s.securityToken, apiKey: s.apiKey };
+            igDemoSessionRef.current = result;
             setHasIgDemoSession(true);
-            return { cst: s.cst, securityToken: s.securityToken, apiKey: s.apiKey };
+            return result;
           }
         }
       } catch {}
@@ -971,6 +983,7 @@ export default function PositionsPage() {
 
       const sess = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey, accountId: d.accountId ?? '', authenticatedAt: Date.now() };
       localStorage.setItem(sessKey, JSON.stringify(sess));
+      igDemoSessionRef.current = { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey };
       setHasIgDemoSession(true);
       return { cst: d.cst, securityToken: d.securityToken, apiKey: creds.apiKey };
     } catch {}
