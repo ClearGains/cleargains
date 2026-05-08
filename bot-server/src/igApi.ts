@@ -132,6 +132,7 @@ export async function openPosition(
   }
 
   if (confirm.dealStatus === 'REJECTED' || !confirm.dealId) {
+    console.error(`[igApi] REJECTED confirm: ${JSON.stringify(confirm)}`);
     throw new Error(`openPosition confirm failed: ${confirm.errorCode ?? confirm.dealStatus ?? 'deal-not-found'}`);
   }
   return { dealId: confirm.dealId, level: confirm.level ?? 0 };
