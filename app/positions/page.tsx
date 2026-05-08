@@ -510,9 +510,12 @@ export default function PositionsPage() {
           upl: number; currency: string; stopLevel?: number; limitLevel?: number;
           createdDate?: string; epic: string; instrumentName: string;
           bid: number; offer: number;
-        }>; error?: string };
+        }>; error?: string; steps?: string[] };
 
-        if (!d.ok) { errs[accountKey] = d.error ?? `IG ${envKey} error`; return; }
+        if (!d.ok) { errs[accountKey] = `${d.error ?? `IG ${envKey} error`} | ${(d.steps ?? []).slice(-2).join(' | ')}`; return; }
+        if ((d.positions ?? []).length === 0) {
+          errs[accountKey] = `0 positions returned | ${(d.steps ?? []).slice(-2).join(' | ')}`;
+        }
 
         (d.positions ?? []).forEach(p => {
           const curr = p.direction === 'BUY' ? p.bid : p.offer;
