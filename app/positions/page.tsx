@@ -112,18 +112,28 @@ function fmtAge(iso?: string) {
 }
 
 const EPIC_OPTIONS = [
-  { label: 'FTSE 100',    value: 'IX.D.FTSE.DAILY.IP'   },
-  { label: 'S&P 500',     value: 'IX.D.SPTRD.DAILY.IP'  },
-  { label: 'NASDAQ 100',  value: 'IX.D.NASDAQ.DAILY.IP'  },
-  { label: 'Wall Street', value: 'IX.D.DOW.DAILY.IP'     },
-  { label: 'Germany 40',  value: 'IX.D.DAX.DAILY.IP'     },
-  { label: 'Gold',        value: 'CS.D.GOLD.TODAY.IP'    },
-  { label: 'Silver',      value: 'CS.D.SLVR.TODAY.IP'    },
-  { label: 'Oil (WTI)',   value: 'CS.D.OILCRUD.TODAY.IP' },
-  { label: 'GBP/USD',    value: 'CS.D.GBPUSD.TODAY.IP'  },
-  { label: 'EUR/USD',    value: 'CS.D.EURUSD.TODAY.IP'  },
-  { label: 'Bitcoin',    value: 'CS.D.BITCOIN.TODAY.IP' },
-  { label: 'Ethereum',   value: 'CS.D.ETHUSD.TODAY.IP'  },
+  // Indices
+  { label: 'FTSE 100',      value: 'IX.D.FTSE.DAILY.IP'    },
+  { label: 'S&P 500',       value: 'IX.D.SPTRD.DAILY.IP'   },
+  { label: 'NASDAQ 100',    value: 'IX.D.NASDAQ.DAILY.IP'   },
+  { label: 'Wall Street',   value: 'IX.D.DOW.DAILY.IP'      },
+  { label: 'Germany 40',    value: 'IX.D.DAX.DAILY.IP'      },
+  { label: 'Japan 225',     value: 'IX.D.NIKKEI.DAILY.IP'   },
+  { label: 'Australia 200', value: 'IX.D.ASX.DAILY.IP'      },
+  // Commodities
+  { label: 'Gold',          value: 'CS.D.GOLD.TODAY.IP'     },
+  { label: 'Silver',        value: 'CS.D.SILVER.TODAY.IP'   },
+  { label: 'Oil (WTI)',     value: 'CS.D.CRUDE.TODAY.IP'    },
+  { label: 'Natural Gas',   value: 'CS.D.NATGAS.TODAY.IP'   },
+  // Forex
+  { label: 'GBP/USD',       value: 'CS.D.GBPUSD.TODAY.IP'  },
+  { label: 'EUR/USD',       value: 'CS.D.EURUSD.TODAY.IP'  },
+  { label: 'USD/JPY',       value: 'CS.D.USDJPY.TODAY.IP'  },
+  { label: 'EUR/GBP',       value: 'CS.D.EURGBP.TODAY.IP'  },
+  { label: 'AUD/USD',       value: 'CS.D.AUDUSD.TODAY.IP'  },
+  { label: 'USD/CHF',       value: 'CS.D.USDCHF.TODAY.IP'  },
+  // Crypto
+  { label: 'Bitcoin',       value: 'CS.D.BITCOIN.TODAY.IP' },
 ];
 
 // Key used to track positions opened by ClearGains
@@ -307,7 +317,7 @@ export default function PositionsPage() {
   const [signalMonitorChecking, setSignalMonitorChecking] = useState(false);
   // Test trade panel
   const [showTestPanel, setShowTestPanel]       = useState(false);
-  const [testEpic, setTestEpic]                 = useState('CS.D.GOLD.TODAY.IP');
+  const [testEpic, setTestEpic]                 = useState('IX.D.FTSE.DAILY.IP');
   const [testDir, setTestDir]                   = useState<'BUY' | 'SELL'>('BUY');
   const [testSize, setTestSize]                 = useState(1);
   const [testLoading, setTestLoading]           = useState(false);
@@ -707,9 +717,9 @@ export default function PositionsPage() {
       if (pos.account === 'IG_DEMO' || pos.account === 'IG_LIVE') {
         const envKey = pos.account === 'IG_DEMO' ? 'demo' : 'live';
         const sess = pos.account === 'IG_DEMO'
-          ? await getIGDemoSession()
+          ? await getIGDemoSession(true)
           : (() => { try { const r = localStorage.getItem('ig_session_live'); return r ? JSON.parse(r) as { cst: string; securityToken: string; apiKey: string } : null; } catch { return null; } })();
-        if (!sess) { setCloseError('No IG session — reconnecting, please try again in a moment'); setClosingId(null); void getIGDemoSession(); return; }
+        if (!sess) { setCloseError('No IG session — reconnecting, please try again in a moment'); setClosingId(null); void getIGDemoSession(true); return; }
         const r = await fetch('/api/ig/order', {
           method: 'DELETE',
           headers: { 'x-ig-cst': sess.cst, 'x-ig-security-token': sess.securityToken, 'x-ig-api-key': sess.apiKey, 'x-ig-env': envKey, 'Content-Type': 'application/json' },
@@ -915,24 +925,28 @@ export default function PositionsPage() {
   }
 
   // ── IG session helper — auto-connects from stored credentials if needed ────
-  async function getIGDemoSession(): Promise<{ cst: string; securityToken: string; apiKey: string } | null> {
+  // forceRefresh=true bypasses the cache — use when placing orders to guarantee
+  // tokens are bound to the SPREADBET account (Z6AFSI), not the default CFD account.
+  async function getIGDemoSession(forceRefresh = false): Promise<{ cst: string; securityToken: string; apiKey: string } | null> {
     const SESSION_TTL = 5 * 60 * 60 * 1000;
     const sessKey  = 'ig_session_demo';
     const credKey  = 'ig_demo_credentials';
 
-    // Try cached session first
-    try {
-      const raw = localStorage.getItem(sessKey);
-      if (raw) {
-        const s = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string; authenticatedAt?: number };
-        if (s.cst && s.securityToken && s.apiKey && s.authenticatedAt && (Date.now() - s.authenticatedAt) < SESSION_TTL) {
-          setHasIgDemoSession(true);
-          return { cst: s.cst, securityToken: s.securityToken, apiKey: s.apiKey };
+    // Try cached session first (skip on forceRefresh)
+    if (!forceRefresh) {
+      try {
+        const raw = localStorage.getItem(sessKey);
+        if (raw) {
+          const s = JSON.parse(raw) as { cst?: string; securityToken?: string; apiKey?: string; authenticatedAt?: number };
+          if (s.cst && s.securityToken && s.apiKey && s.authenticatedAt && (Date.now() - s.authenticatedAt) < SESSION_TTL) {
+            setHasIgDemoSession(true);
+            return { cst: s.cst, securityToken: s.securityToken, apiKey: s.apiKey };
+          }
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
-    // No valid cached session — try to build one from stored credentials
+    // No valid cached session (or forceRefresh) — build one from stored credentials
     try {
       const credRaw = localStorage.getItem(credKey);
       if (!credRaw) return null;
@@ -960,7 +974,8 @@ export default function PositionsPage() {
     setTestLoading(true);
     setTestResult(null);
     try {
-      const sess = await getIGDemoSession();
+      // forceRefresh=true ensures we get fresh SPREADBET-account tokens, not stale CFD tokens
+      const sess = await getIGDemoSession(true);
       if (!sess) { setTestResult('✗ No IG demo credentials found — go to Settings → Accounts → IG Demo and connect first'); setTestLoading(false); return; }
       const expiry = testEpic.startsWith('CS.D.') ? '-' : 'DFB';
       const r = await fetch('/api/ig/order', {
