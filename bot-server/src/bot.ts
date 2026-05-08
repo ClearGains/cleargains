@@ -265,6 +265,8 @@ function handleTick(tick: CandleTick) {
           );
 
           recordFill(st, level, verdict.stopPoints, verdict.takeProfitPoints);
+          st.dealId = dealId;
+          st.size   = verdict.betSize;
 
           addLog('enter', name,
             `✓ ${verdict.direction} £${verdict.betSize}/pt @ ${level} | stop −${verdict.stopPoints}pts | TP +${verdict.takeProfitPoints}pts | deal ${dealId}`
@@ -299,9 +301,11 @@ function handleTick(tick: CandleTick) {
         recentLosses = 0;  // reset on profitable exit
       }
 
-      const pos = openPositions.find(p => p.epic === tick.epic && p.direction === st.direction);
-      if (!pos) {
-        addLog('info', name, 'No open position found to close (may already be closed)');
+      // Use dealId stored on entry — no position poll needed
+      const dealId = st.dealId;
+      const size   = st.size;
+      if (!dealId) {
+        addLog('info', name, 'No dealId on record — position may already be closed');
         break;
       }
       pendingEpics.add(tick.epic);
@@ -311,9 +315,11 @@ function handleTick(tick: CandleTick) {
         pendingEpics.delete(tick.epic);
         break;
       }
-      void closePosition(session, pos.dealId, pos.direction, pos.size)
+      void closePosition(session, dealId, st.direction, size)
         .then(() => {
-          addLog('exit', name, `✓ Closed deal ${pos.dealId}`);
+          st.dealId = '';
+          st.size   = 0;
+          addLog('exit', name, `✓ Closed deal ${dealId}`);
           void refreshPositions();
         })
         .catch(e => {

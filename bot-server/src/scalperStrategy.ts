@@ -32,6 +32,8 @@ export type ScalperEpicState = {
   direction:        'BUY' | 'SELL';   // current position direction
   entryPrice:       number;
   entryTime:        string;
+  dealId:           string;           // IG dealId — set on entry, used to close without polling
+  size:             number;           // position size — set on entry, used to close
   closedCandles:    CandleTick[];
   formingCandle:    CandleTick | null;
   cooldownUntil:    number;
@@ -121,7 +123,7 @@ function getIndicators(candles: CandleTick[]): IndicatorSnapshot {
 export function initEpicState(epic: string): ScalperEpicState {
   return {
     epic, state: 'FLAT', direction: 'BUY',
-    entryPrice: 0, entryTime: '',
+    entryPrice: 0, entryTime: '', dealId: '', size: 0,
     closedCandles: [], formingCandle: null,
     cooldownUntil: 0, consecutiveReds: 0, consecutiveGreens: 0,
     dynamicStopPrice: 0, takeProfitPrice: 0,
