@@ -274,36 +274,78 @@ export async function DELETE(request: NextRequest) {
     }
 
     const body = await request.json() as { dealId: string; direction: 'BUY' | 'SELL'; size: number };
-    const base = baseUrl(env);
+    const { dealId, direction, size } = body;
+    if (!dealId || !direction || !size) {
+      return NextResponse.json({ ok: false, error: 'dealId, direction and size are required' }, { status: 400 });
+    }
 
-    const closePayload = {
-      dealId:      body.dealId,
+    const base = baseUrl(env);
+    const hdrs1 = igHeaders(apiKey, cst, securityToken, '1');
+
+    // Payload for _method:DELETE override endpoints
+    const overridePayload = {
+      dealId,
       epic:        null,
       expiry:      null,
-      direction:   body.direction,
-      size:        body.size,
+      direction,
+      size,
       level:       null,
       orderType:   'MARKET',
       timeInForce: null,
       quoteId:     null,
     };
 
-    // Try /positions first (Spread Bet), fall back to /positions/otc (CFD)
-    const closeEndpoints = [
-      { url: `${base}/positions`,     label: '/positions'     },
-      { url: `${base}/positions/otc`, label: '/positions/otc' },
+    // Payload for true REST DELETE (no dealId in body, it's in the URL)
+    const directPayload = {
+      direction,
+      size,
+      orderType:   'MARKET',
+      timeInForce: null,
+      quoteId:     null,
+      level:       null,
+    };
+
+    // Three approaches in order of preference
+    const attempts = [
+      // 1. Direct DELETE /positions/{dealId} — cleanest REST, works on spread bet V1
+      {
+        label:   'DELETE /positions/{dealId}',
+        method:  'DELETE' as const,
+        url:     `${base}/positions/${encodeURIComponent(dealId)}`,
+        headers: hdrs1,
+        payload: directPayload,
+      },
+      // 2. POST /positions _method:DELETE — IG official spread bet override
+      {
+        label:   'POST /positions _method:DELETE',
+        method:  'POST' as const,
+        url:     `${base}/positions`,
+        headers: { ...hdrs1, '_method': 'DELETE' },
+        payload: overridePayload,
+      },
+      // 3. POST /positions/otc _method:DELETE — CFD fallback
+      {
+        label:   'POST /positions/otc _method:DELETE',
+        method:  'POST' as const,
+        url:     `${base}/positions/otc`,
+        headers: { ...hdrs1, '_method': 'DELETE' },
+        payload: overridePayload,
+      },
     ];
 
+    const tried: string[] = [];
     let data: { dealReference?: string; errorCode?: string } = {};
     let res: Response | null = null;
-    for (const ep of closeEndpoints) {
-      const r = await fetch(ep.url, {
-        method: 'POST',
-        headers: { ...igHeaders(apiKey, cst, securityToken, '1'), '_method': 'DELETE' },
-        body: JSON.stringify(closePayload),
+
+    for (const attempt of attempts) {
+      const r = await fetch(attempt.url, {
+        method:  attempt.method,
+        headers: attempt.headers,
+        body:    JSON.stringify(attempt.payload),
       });
       let parsed: typeof data = {};
       try { parsed = await r.json() as typeof data; } catch {}
+      tried.push(`${attempt.label} → ${r.status}${parsed.errorCode ? ` (${parsed.errorCode})` : ''}`);
       if (r.ok || r.status !== 404) {
         data = parsed;
         res  = r;
@@ -312,13 +354,18 @@ export async function DELETE(request: NextRequest) {
     }
 
     if (!res) {
-      return NextResponse.json({ ok: false, error: 'All close endpoints returned 404' }, { status: 404 });
+      return NextResponse.json({ ok: false, error: 'All close attempts returned 404', tried }, { status: 404 });
     }
 
     if (!res.ok) {
-      return NextResponse.json({ ok: false, error: data.errorCode ?? `IG API error ${res.status}` }, { status: res.status });
+      return NextResponse.json({
+        ok:    false,
+        error: data.errorCode ?? `IG API error ${res.status}`,
+        tried,
+      }, { status: res.status });
     }
-    return NextResponse.json({ ok: true, dealReference: data.dealReference });
+
+    return NextResponse.json({ ok: true, dealReference: data.dealReference, tried });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }

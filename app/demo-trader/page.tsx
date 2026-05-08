@@ -946,16 +946,18 @@ function ScalperTab() {
 
   const closePosition = useCallback(async (dealId: string, direction: 'BUY'|'SELL', size: number) => {
     if (!session) throw new Error('No IG session');
+    // IG close requires the opposite direction to the open (SELL to close a BUY)
+    const closeDirection: 'BUY' | 'SELL' = direction === 'BUY' ? 'SELL' : 'BUY';
     const r = await fetch('/api/ig/order', {
       method: 'DELETE',
       headers: {
         'x-ig-cst': session.cst, 'x-ig-security-token': session.securityToken,
         'x-ig-api-key': session.apiKey, 'x-ig-env': 'demo', 'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ dealId, direction, size }),
+      body: JSON.stringify({ dealId, direction: closeDirection, size }),
     });
-    const d = await r.json() as { ok: boolean; error?: string };
-    if (!d.ok) throw new Error(d.error ?? 'Close failed');
+    const d = await r.json() as { ok: boolean; error?: string; tried?: string[] };
+    if (!d.ok) throw new Error(`${d.error ?? 'Close failed'}${d.tried ? ` [tried: ${d.tried.join(', ')}]` : ''}`);
     void refreshPositions();
   }, [session, refreshPositions]);
 

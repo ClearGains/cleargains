@@ -754,8 +754,13 @@ export default function PositionsPage() {
           headers: { 'x-ig-cst': sess.cst, 'x-ig-security-token': sess.securityToken, 'x-ig-api-key': sess.apiKey, 'x-ig-env': envKey, 'Content-Type': 'application/json' },
           body: JSON.stringify({ dealId: pos.dealId, direction: pos.direction === 'BUY' ? 'SELL' : 'BUY', size: pos.quantity }),
         });
-        const d = await r.json() as { ok: boolean; error?: string };
-        if (!d.ok) { setCloseError(d.error ?? 'Close failed'); setClosingId(null); return; }
+        const d = await r.json() as { ok: boolean; error?: string; tried?: string[] };
+        if (!d.ok) {
+          const detail = d.tried?.length ? ` [tried: ${d.tried.join(' | ')}]` : '';
+          setCloseError((d.error ?? 'Close failed') + detail);
+          setClosingId(null);
+          return;
+        }
         setCloseSuccess(`Closed ${pos.name}`);
       } else {
         const isDemo = pos.account === 'T212_DEMO';
