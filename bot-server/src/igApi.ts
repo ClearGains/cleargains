@@ -57,14 +57,36 @@ export async function authenticate(
     accountId?: string;
     currentAccountId?: string;
     lightstreamerEndpoint?: string;
-    accounts?: Array<{ accountId: string; preferred: boolean }>;
+    accounts?: Array<{ accountId: string; accountType?: string; preferred: boolean }>;
   };
 
-  const accountId = data.currentAccountId ?? data.accountId ?? (data.accounts?.find(a => a.preferred)?.accountId ?? '');
+  let accountId = data.currentAccountId ?? data.accountId ?? (data.accounts?.find(a => a.preferred)?.accountId ?? '');
   const lsEndpoint = data.lightstreamerEndpoint ?? '';
 
   if (!cst || !securityToken || !accountId) {
     throw new Error(`IG auth succeeded but missing tokens. cst=${!!cst} token=${!!securityToken} account=${accountId}`);
+  }
+
+  // Switch to SPREADBET account if not already on it — same logic as website session route
+  const spreadbetAccount = data.accounts?.find(a => a.accountType === 'SPREADBET');
+  if (spreadbetAccount && spreadbetAccount.accountId !== accountId) {
+    const switchRes = await fetch(`${base}/session`, {
+      method:  'PUT',
+      headers: { 'X-IG-API-KEY': apiKey, 'CST': cst, 'X-SECURITY-TOKEN': securityToken, 'Content-Type': 'application/json', 'Accept': 'application/json; charset=UTF-8', 'Version': '1' },
+      body:    JSON.stringify({ accountId: spreadbetAccount.accountId, dealingEnabled: true }),
+    });
+    if (switchRes.ok) {
+      const newCst   = switchRes.headers.get('cst') ?? switchRes.headers.get('CST');
+      const newToken = switchRes.headers.get('x-security-token') ?? switchRes.headers.get('X-SECURITY-TOKEN');
+      if (newCst)   cst           = newCst;
+      if (newToken) securityToken = newToken;
+      accountId = spreadbetAccount.accountId;
+      console.log(`[igApi] Switched to SPREADBET account ${accountId}`);
+    } else {
+      console.warn(`[igApi] SPREADBET switch failed (${switchRes.status}) — continuing with default account`);
+    }
+  } else if (spreadbetAccount) {
+    console.log(`[igApi] Already on SPREADBET account ${accountId}`);
   }
 
   const session: IGSession = {
@@ -74,7 +96,7 @@ export async function authenticate(
     apiKey,
     env,
     lightstreamerEndpoint: lsEndpoint,
-    expiresAt: Date.now() + 5.5 * 60 * 60 * 1000,  // 5.5 hours (IG tokens last 6h)
+    expiresAt: Date.now() + 5.5 * 60 * 60 * 1000,
   };
   activeSession = session;
   console.log(`[igApi] Authenticated — account=${accountId} env=${env} ls=${lsEndpoint}`);
@@ -100,8 +122,9 @@ export async function openPosition(
     expiry,
     direction,
     size,
-    orderType:     'MARKET',
+    orderType:      'MARKET',
     guaranteedStop: false,
+    trailingStop:   false,
     forceOpen:      true,
     currencyCode:   'GBP',
   };
@@ -112,7 +135,7 @@ export async function openPosition(
 
   const r = await fetch(`${base}/positions/otc`, {
     method:  'POST',
-    headers: headers(session, '1'),
+    headers: headers(session, '2'),
     body:    JSON.stringify(payload),
     signal:  AbortSignal.timeout(20_000),
   });
