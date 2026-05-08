@@ -1019,9 +1019,24 @@ export default function PositionsPage() {
         setTestResult(`✗ ${d.error ?? 'Open failed'}`);
       } else {
         const epicLabel = EPIC_OPTIONS.find(o => o.value === testEpic)?.label ?? testEpic;
-        setTestResult(`✓ ${testDir} ${testSize} ${epicLabel} @ ${d.level ? fmtPrice(d.level) : '?'} (${d.dealStatus ?? 'ACCEPTED'}) — ID: ${d.dealId ?? '?'}`);
+        setTestResult(`✓ ${testDir} ${testSize} ${epicLabel} @ ${d.level ? fmtPrice(d.level) : '?'} (${d.dealStatus ?? 'ACCEPTED'}) — ID: ${d.dealId ?? '?'} — checking positions…`);
         setHasIgDemoSession(true);
-        setTimeout(() => { void fetchAll(); }, 2_000);
+        // Immediately check positions with the SAME tokens that placed the order
+        // to see if the position is visible right away (same account context)
+        await new Promise(res => setTimeout(res, 1_500));
+        try {
+          const posR = await fetch('/api/ig/positions', {
+            headers: { 'x-ig-cst': sess.cst, 'x-ig-security-token': sess.securityToken, 'x-ig-api-key': sess.apiKey, 'x-ig-env': 'demo' },
+          });
+          const posD = await posR.json() as { ok: boolean; positions?: unknown[]; steps?: string[]; error?: string };
+          const lastSteps = (posD.steps ?? []).slice(-3).join(' | ');
+          if (posD.ok && (posD.positions?.length ?? 0) > 0) {
+            setTestResult(`✓ ${testDir} ${testSize} ${epicLabel} @ ${d.level ? fmtPrice(d.level) : '?'} — ${posD.positions!.length} position(s) visible ✓`);
+          } else {
+            setTestResult(`✓ opened (${d.dealId ?? '?'}) but positions returned ${posD.positions?.length ?? 0} | ${lastSteps}`);
+          }
+        } catch { /* keep original success message */ }
+        void fetchAll();
       }
     } catch (e) {
       setTestResult(`✗ ${e instanceof Error ? e.message : 'Unknown error'}`);
