@@ -20,6 +20,7 @@ import { sendPush } from '@/lib/pushNotifications';
 import Modal from '@/components/ui/Modal';
 import { IGStrategyTrader } from '@/components/ig/IGStrategyTrader';
 import { IGScalperBot } from '@/components/ig/IGScalperBot';
+import { IGServerBot } from '@/components/ig/IGServerBot';
 import { T212StrategyTrader } from '@/components/t212/T212StrategyTrader';
 import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 import { NewsFeed } from '@/components/news/NewsFeed';
@@ -1688,7 +1689,7 @@ export default function DemoTraderPage() {
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
-  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'scalper' | 't212' | 'news'>('stocks');
+  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'scalper' | 'server-bot' | 't212' | 'news'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [showExecAccountPicker, setShowExecAccountPicker] = useState(false);
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
@@ -3000,7 +3001,7 @@ export default function DemoTraderPage() {
 
       {/* Tab toggle */}
       <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
-        {(['stocks', 'forex', 'ig', 'scalper', 't212', 'news'] as const).map(tab => (
+        {(['stocks', 'forex', 'ig', 'scalper', 'server-bot', 't212', 'news'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setTraderTab(tab)}
@@ -3011,10 +3012,11 @@ export default function DemoTraderPage() {
                 : 'text-gray-500 hover:text-gray-300'
             )}
           >
-            {tab === 'ig'      ? 'IG Spread Bet'
-             : tab === 'scalper' ? '⚡ Scalper Bot'
-             : tab === 't212'  ? 'T212 Strategy'
-             : tab === 'news'  ? '📰 News Feed'
+            {tab === 'ig'         ? 'IG Spread Bet'
+             : tab === 'scalper'    ? '⚡ Scalper (Browser)'
+             : tab === 'server-bot' ? '🖥 Server Bot'
+             : tab === 't212'       ? 'T212 Strategy'
+             : tab === 'news'       ? '📰 News Feed'
              : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
@@ -3028,6 +3030,8 @@ export default function DemoTraderPage() {
         <IGTrader />
       ) : traderTab === 'scalper' ? (
         <ScalperTab />
+      ) : traderTab === 'server-bot' ? (
+        <IGServerBot />
       ) : traderTab === 't212' ? (
         <T212Trader />
       ) : traderTab === 'news' ? (
