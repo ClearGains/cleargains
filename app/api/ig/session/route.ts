@@ -191,9 +191,18 @@ export async function POST(request: NextRequest) {
         isSpreadbet = true;
         console.log(`[ig/session] Switch OK — now on SPREADBET ${spreadbetAccount.accountId}`);
       } else {
-        console.error(`[ig/session] Switch FAILED (${switchRes.status}): ${switchText.slice(0, 200)}`);
-        // Return error — do not issue CFD tokens silently
-        return NextResponse.json({ ok: false, error: `Failed to switch to Spread Bet account (${switchRes.status}). Check your IG account has a Spread Bet sub-account.` }, { status: 403 });
+        // 412 = precondition failed (often means already on this account) — re-verify
+        console.warn(`[ig/session] Switch returned ${switchRes.status}: ${switchText.slice(0, 200)} — re-verifying account`);
+        const reVerify = await fetch(`${baseUrl}/session`, {
+          headers: { 'X-IG-API-KEY': apiKey, 'CST': cst, 'X-SECURITY-TOKEN': securityToken, 'Accept': 'application/json; charset=UTF-8', 'Version': '1' },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (reVerify.ok) {
+          const rv = await reVerify.json() as { accountId?: string; accountType?: string };
+          isSpreadbet = rv.accountType === 'SPREADBET';
+          activeAccountId = rv.accountId ?? activeAccountId;
+          console.log(`[ig/session] Re-verify: accountId=${rv.accountId} type=${rv.accountType} isSpreadbet=${isSpreadbet}`);
+        }
       }
     } else if (isSpreadbet) {
       console.log(`[ig/session] Already on Spread Bet account ${activeAccountId}`);
