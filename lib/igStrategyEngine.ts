@@ -64,6 +64,7 @@ export type IGSavedStrategy = {
   accounts: ('demo' | 'live')[];
   autoTrade: boolean;
   autoClose: boolean;
+  mode?: 'LONG_ONLY' | 'SHORT_ONLY' | 'BOTH';  // default BOTH
   createdAt: string;
   lastRunAt?: string;
   lastRunEnv?: 'demo' | 'live';

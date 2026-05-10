@@ -572,6 +572,7 @@ export function IGStrategyTrader() {
   const [bMinStrength, setBMinStrength]     = useState(55);
   const [bAccounts, setBAccounts]           = useState<('demo'|'live')[]>(['demo']);
   const [bAutoClose, setBAutoClose]         = useState(true);
+  const [bMode, setBMode]                   = useState<'LONG_ONLY' | 'SHORT_ONLY' | 'BOTH'>('BOTH');
   const [bWatchlist, setBWatchlist]         = useState<WatchlistMarket[]>([...DEFAULT_WATCHLIST]);
   const [bSignalScanMs, setBSignalScanMs]   = useState(5 * 60_000);
   const [bPosMonitorMs, setBPosMonitorMs]   = useState(60_000);
@@ -1137,6 +1138,18 @@ export function IGStrategyTrader() {
             }
           }
           await loadPositions(env);
+        }
+
+        // Mode filter — LONG_ONLY bots never open shorts; SHORT_ONLY never open longs.
+        // Opposing positions above were still closed (reversal close still fires).
+        const botMode = strat.mode ?? 'BOTH';
+        if (botMode === 'LONG_ONLY' && tradeDir === 'SELL') {
+          log('signal', `[LONG_ONLY] ${market.name} — SELL signal: closed opposites, no new short entry`);
+          continue;
+        }
+        if (botMode === 'SHORT_ONLY' && tradeDir === 'BUY') {
+          log('signal', `[SHORT_ONLY] ${market.name} — BUY signal: closed opposites, no new long entry`);
+          continue;
         }
 
         // Don't open if already same direction
@@ -1857,7 +1870,7 @@ export function IGStrategyTrader() {
       setEditId(existing.id); setBName(existing.name); setBTimeframe(existing.timeframe);
       setBSize(existing.size); setBMaxPos(existing.maxPositions);
       setBMinStrength(existing.minStrength ?? 55);
-      setBAccounts(existing.accounts); setBAutoClose(existing.autoClose ?? true);
+      setBAccounts(existing.accounts); setBAutoClose(existing.autoClose ?? true); setBMode(existing.mode ?? 'BOTH');
       setBWatchlist(existing.watchlist?.length ? existing.watchlist : [...DEFAULT_WATCHLIST]);
       setBSignalScanMs(existing.signalScanMs ?? 5 * 60_000);
       setBPosMonitorMs(existing.posMonitorMs ?? 60_000);
@@ -1868,7 +1881,7 @@ export function IGStrategyTrader() {
       setBMinStrength(55);
       // Only default to live if we actually have a live session
       setBAccounts([sessions[activeMode] ? activeMode : 'demo']);
-      setBAutoClose(true);
+      setBAutoClose(true); setBMode('BOTH');
       setBWatchlist([...DEFAULT_WATCHLIST]);
       setBSignalScanMs(5 * 60_000);
       setBPosMonitorMs(60_000);
@@ -1896,6 +1909,7 @@ export function IGStrategyTrader() {
       accounts: bAccounts,
       autoTrade: true,
       autoClose: bAutoClose,
+      mode: bMode,
       createdAt: existingStrat?.createdAt ?? new Date().toISOString(),
       signalScanMs: bSignalScanMs,
       posMonitorMs: bPosMonitorMs,
@@ -2460,6 +2474,30 @@ export function IGStrategyTrader() {
               </div>
             </div>
 
+            {/* Direction mode */}
+            <div>
+              <label className="text-xs text-gray-400 mb-1.5 block">Direction mode</label>
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  { value: 'LONG_ONLY',  label: '📈 Long only',  desc: 'BUY entries only, close on reversal' },
+                  { value: 'SHORT_ONLY', label: '📉 Short only', desc: 'SELL entries only, close on reversal' },
+                  { value: 'BOTH',       label: '↕ Both',        desc: 'Long and short entries' },
+                ] as const).map(opt => (
+                  <button key={opt.value} onClick={() => setBMode(opt.value)}
+                    className={clsx('rounded-lg border px-2 py-2 text-left transition-all',
+                      bMode === opt.value
+                        ? opt.value === 'LONG_ONLY'  ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                          : opt.value === 'SHORT_ONLY' ? 'bg-red-500/20 border-red-500/40 text-red-300'
+                          : 'bg-orange-500/20 border-orange-500/40 text-orange-300'
+                        : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-300'
+                    )}>
+                    <p className="text-[11px] font-semibold">{opt.label}</p>
+                    <p className="text-[10px] opacity-70 mt-0.5">{opt.desc}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Auto-close toggle */}
             <div className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2.5">
               <div>
@@ -2660,6 +2698,8 @@ export function IGStrategyTrader() {
                       }
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300">{cfg.label}</span>
                       {strat.autoClose && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400">AutoClose</span>}
+                      {strat.mode === 'LONG_ONLY'  && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400">📈 Long only</span>}
+                      {strat.mode === 'SHORT_ONLY' && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400">📉 Short only</span>}
                       {strat.copiedFrom && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-700 text-gray-400">
                           📋 Copied from {strat.copiedFrom}{strat.copiedAt ? ` · ${new Date(strat.copiedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
