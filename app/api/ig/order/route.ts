@@ -186,7 +186,7 @@ export async function POST(request: NextRequest) {
     let confirm: ConfirmData = {};
     if (dealRef) {
       for (let attempt = 0; attempt < 4; attempt++) {
-        await new Promise(r => setTimeout(r, 600));
+        await new Promise(r => setTimeout(r, 1_500));
         try {
           const cr = await fetch(`${base}/confirms/${encodeURIComponent(dealRef)}`, {
             headers: igHeaders(apiKey, cst, securityToken, '1'),
