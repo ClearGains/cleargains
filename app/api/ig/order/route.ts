@@ -297,7 +297,12 @@ export async function DELETE(request: NextRequest) {
     try { data = await res.json() as typeof data; } catch {}
 
     if (!res.ok) {
-      return NextResponse.json({ ok: false, error: data.errorCode ?? `IG API error ${res.status}` }, { status: res.status });
+      const code = data.errorCode ?? '';
+      // Position already gone — treat as successful so callers don't retry
+      if (code.includes('notional.details.null') || code.includes('position.notfound') || code.includes('POSITION_NOT_FOUND')) {
+        return NextResponse.json({ ok: true, alreadyClosed: true, dealReference: null });
+      }
+      return NextResponse.json({ ok: false, error: code || `IG API error ${res.status}` }, { status: res.status });
     }
     return NextResponse.json({ ok: true, dealReference: data.dealReference });
   } catch (err) {

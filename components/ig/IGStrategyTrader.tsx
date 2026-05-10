@@ -1368,6 +1368,8 @@ export function IGStrategyTrader() {
               log('close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${(pos.upl ?? 0).toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STALE', new Date().toISOString()));
               recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
+            } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
+              log('info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG (stop/limit/rollover)`);
             } else log('error', `[${env.toUpperCase()}] Stale close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
