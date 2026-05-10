@@ -488,11 +488,12 @@ export function IGStrategyTrader() {
 
   // ── Strategies ─────────────────────────────────────────────────────────────
   const [strategies, setStrategies]     = useState<IGSavedStrategy[]>([]);
-  const [activeStratId, setActiveStratId] = useState<string|null>(null);
-  const [isRunning, setIsRunning]       = useState(false);
-  const timerRef    = useRef<ReturnType<typeof setInterval>|null>(null);
-  const posTimerRef = useRef<ReturnType<typeof setInterval>|null>(null);
-  const runningRef  = useRef(false);
+  const [activeStratId, setActiveStratId] = useState<string|null>(null); // display only (scanner)
+  type StratTimers = { signal: ReturnType<typeof setInterval>; pos: ReturnType<typeof setInterval> };
+  const stratTimersRef  = useRef<Record<string, Partial<StratTimers>>>({});
+  const stratStateRef   = useRef<Record<string, RunState>>({});
+  const [stratStates, setStratStates]   = useState<Record<string, RunState>>({});
+  const runningRef  = useRef(false); // test-scan only
   const newsSignalsRef     = useRef<Map<string, 'BUY'|'SELL'>>(new Map());
   const recentlyClosedRef  = useRef<Map<string, number>>(new Map());
 
@@ -501,8 +502,6 @@ export function IGStrategyTrader() {
   const [showLiveConfirm, setShowLiveConfirm] = useState(false);
   const [liveConfirmSkipSession, setLiveConfirmSkipSession] = useState(false);
   const [pendingRunAction, setPendingRunAction] = useState<(() => void)|null>(null);
-  // Track the env of the currently running strategy so the live banner can show regardless of active tab
-  const [runStratEnv, setRunStratEnv] = useState<'demo'|'live'|null>(null);
   // Copy modals
   type CopyModal = { strat: IGSavedStrategy; direction: 'toDemo' | 'toLive' };
   const [copyModal, setCopyModal] = useState<CopyModal|null>(null);
@@ -590,17 +589,15 @@ export function IGStrategyTrader() {
   const [manualEnv, setManualEnv]       = useState<'demo'|'live'>('demo');
   const [placingManual, setPlacingManual] = useState(false);
 
-  // ── Run state: RUNNING=full; PAUSED=monitor only (no new entries); STOPPED=idle ─
+  // ── Run state: per-strategy. RUNNING=full; PAUSED=monitor only; STOPPED=idle ─
   type RunState = 'RUNNING' | 'PAUSED' | 'STOPPED';
-  const [runState, setRunState]                   = useState<RunState>('STOPPED');
-  const runStateRef                                = useRef<RunState>('STOPPED');
   const runtimeStartRef                            = useRef<number|null>(null);
   const [runtimeDisplay, setRuntimeDisplay]       = useState('');
   const completedTradesRef                         = useRef(0);
   const [completedTrades, setCompletedTrades]     = useState(0);
   const todayPnLRef                                = useRef(0);
   const [todayPnL, setTodayPnL]                   = useState(0);
-  const pendingRestartRef                          = useRef<string|null>(null);
+  const pendingRestartRef                          = useRef<string[]>([]);
   // ── Enhanced status tracking ──────────────────────────────────────────────
   const lastSignalAtRef                            = useRef<number|null>(null);
   const [lastSignalAt, setLastSignalAt]           = useState<number|null>(null);
@@ -618,6 +615,19 @@ export function IGStrategyTrader() {
   function log(type: RunLog['type'], msg: string) {
     setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0, 100));
   }
+
+  // ── Per-strategy state helpers ────────────────────────────────────────────
+  function getStratState(id: string): RunState {
+    return stratStateRef.current[id] ?? 'STOPPED';
+  }
+  function setStratState(id: string, state: RunState) {
+    stratStateRef.current = { ...stratStateRef.current, [id]: state };
+    setStratStates({ ...stratStateRef.current });
+  }
+
+  // Derived: any strategy running or paused
+  const isRunning = Object.values(stratStates).some(s => s !== 'STOPPED');
+  const runStratEnv = strategies.find(s => (stratStates[s.id] ?? 'STOPPED') !== 'STOPPED' && s.env === 'live') ? 'live' : null;
 
   function setActiveMode(mode: 'demo'|'live') {
     setActiveModeState(mode);
@@ -669,29 +679,33 @@ export function IGStrategyTrader() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMode]);
 
-  // ── Auto-restart: detect strategy_running_id on mount ────────────────────
+  // ── Auto-restart: collect all running strategy IDs on mount ─────────────
   useEffect(() => {
-    const runningId = localStorage.getItem('strategy_running_id');
-    if (runningId) pendingRestartRef.current = runningId;
+    const ids: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith('strategy_running_id_')) ids.push(key.replace('strategy_running_id_', ''));
+    }
+    pendingRestartRef.current = ids;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Auto-restart: start strategy once sessions connect ────────────────────
+  // ── Auto-restart: start all pending strategies once sessions connect ──────
   useEffect(() => {
-    if (!pendingRestartRef.current) return;
+    if (!pendingRestartRef.current.length) return;
     if (!Object.values(sessions).some(Boolean)) return;
-    const stratId = pendingRestartRef.current;
-    // Search both env namespaces for the running strategy
-    const strat = loadStrategies('demo').find(s => s.id === stratId)
-               ?? loadStrategies('live').find(s => s.id === stratId);
-    if (!strat) { pendingRestartRef.current = null; return; }
-    pendingRestartRef.current = null;
-    // Switch to correct tab so user sees the resumed strategy
-    setActiveModeState(strat.env ?? 'demo');
-    setStrategies(loadStrategies(strat.env ?? 'demo'));
-    log('info', `♻️ Strategy "${strat.name}" resumed — was running before page reload`);
-    setActiveStratId(stratId);
-    startAutoRun(strat);
+    const ids = [...pendingRestartRef.current];
+    pendingRestartRef.current = [];
+    for (const stratId of ids) {
+      const strat = loadStrategies('demo').find(s => s.id === stratId)
+                 ?? loadStrategies('live').find(s => s.id === stratId);
+      if (!strat) continue;
+      setActiveModeState(strat.env ?? 'demo');
+      setStrategies(loadStrategies(strat.env ?? 'demo'));
+      log('info', `♻️ Strategy "${strat.name}" resumed — was running before page reload`);
+      setActiveStratId(stratId);
+      startAutoRun(strat);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
 
@@ -721,7 +735,7 @@ export function IGStrategyTrader() {
   // ── Countdown ticker ───────────────────────────────────────────────────────
   useEffect(() => {
     const t = setInterval(() => {
-      if (!isRunning) { setSignalCountdown(''); setPosCountdown(''); return; }
+      if (!Object.values(stratStateRef.current).some(s => s !== 'STOPPED')) { setSignalCountdown(''); setPosCountdown(''); return; }
       const fmt = (ms: number) => {
         const s = Math.max(0, Math.ceil(ms / 1000));
         return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -736,7 +750,7 @@ export function IGStrategyTrader() {
       }
     }, 1000);
     return () => clearInterval(t);
-  }, [isRunning, signalScanMs, posMonitorMs]);
+  }, [stratStates, signalScanMs, posMonitorMs]);
 
   // ── Load positions ─────────────────────────────────────────────────────────
   const loadPositions = useCallback(async (envFilter?: 'demo'|'live') => {
@@ -1174,7 +1188,7 @@ export function IGStrategyTrader() {
         }
 
         // Skip new trades when paused — monitor only
-        if (runStateRef.current === 'PAUSED') {
+        if (getStratState(strat.id) === 'PAUSED') {
           log('signal', `[PAUSED] ${market.name} → ${tradeDir} ${strength}% — no new entries while paused`);
           continue;
         }
@@ -1315,7 +1329,7 @@ export function IGStrategyTrader() {
 
   // ── Signal scan: scan markets + execute trades ────────────────────────────
   const runSignalScan = useCallback(async (strat: IGSavedStrategy) => {
-    if (!runningRef.current) return;
+    if (getStratState(strat.id) === 'STOPPED') return;
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
 
     // PERMISSION: Fetch account balances at the start of each scan cycle so
@@ -1330,7 +1344,7 @@ export function IGStrategyTrader() {
     await fetchNewsSignals(markets, positions);
 
     for (let i = 0; i < markets.length; i++) {
-      if (!runningRef.current) break;
+      if (getStratState(strat.id) === 'STOPPED') break;
       const m = markets[i];
       setScanProgress(`${m.name} (${i+1}/${markets.length})`);
       await scanMarket(strat, m);
@@ -1351,7 +1365,7 @@ export function IGStrategyTrader() {
 
   // ── Position monitor: trailing stops + SL/TP refresh + stale recycling ────
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
-    if (!runningRef.current) return;
+    if (getStratState(strat.id) === 'STOPPED') return;
     await loadPositions();
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
     for (const env of envs) {
@@ -1434,15 +1448,14 @@ export function IGStrategyTrader() {
 
   // ── Start / stop auto-run ──────────────────────────────────────────────────
   function startAutoRun(strat: IGSavedStrategy) {
-    // Clear any existing intervals first
-    if (timerRef.current)    { clearInterval(timerRef.current);    timerRef.current    = null; }
-    if (posTimerRef.current) { clearInterval(posTimerRef.current); posTimerRef.current = null; }
+    // Clear any existing timers for this strategy
+    const prev = stratTimersRef.current[strat.id];
+    if (prev?.signal) clearInterval(prev.signal);
+    if (prev?.pos)    clearInterval(prev.pos);
+    stratTimersRef.current[strat.id] = {};
 
-    runningRef.current = true;
-    runStateRef.current = 'RUNNING';
-    setRunState('RUNNING');
-    setIsRunning(true);
-    setRunStratEnv(strat.env ?? activeMode);
+    setStratState(strat.id, 'RUNNING');
+    setActiveStratId(strat.id);
 
     // Runtime tracking
     runtimeStartRef.current = Date.now();
@@ -1458,8 +1471,8 @@ export function IGStrategyTrader() {
     setLastSignalDisplay('');
     setRuntimeStartDisplay(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
 
-    // Persist full strategy state for restore on page reload
-    localStorage.setItem('strategy_running_id', strat.id);
+    // Persist running ID for restore on page reload
+    localStorage.setItem(`strategy_running_id_${strat.id}`, '1');
     localStorage.setItem(`strategy_state_${strat.id}`, JSON.stringify({
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -1494,15 +1507,10 @@ export function IGStrategyTrader() {
     posStartRef.current = Date.now();
     void runPositionMonitor(strat);
 
-    timerRef.current = setInterval(() => {
-      signalStartRef.current = Date.now();
-      void runSignalScan(strat);
-    }, sScanMs);
-
-    posTimerRef.current = setInterval(() => {
-      posStartRef.current = Date.now();
-      void runPositionMonitor(strat);
-    }, pMonMs);
+    stratTimersRef.current[strat.id] = {
+      signal: setInterval(() => { signalStartRef.current = Date.now(); void runSignalScan(strat); }, sScanMs),
+      pos:    setInterval(() => { posStartRef.current    = Date.now(); void runPositionMonitor(strat); }, pMonMs),
+    };
 
     // Also start server-side runner if server mode is enabled
     if (serverMode) void startServerStrategy(strat);
@@ -1510,7 +1518,7 @@ export function IGStrategyTrader() {
 
   // ── Test run: one scan cycle, max 1 position opened, then stops ───────────
   async function runTestScan(strat: IGSavedStrategy) {
-    if (testRunning || isRunning) return;
+    if (testRunning || getStratState(strat.id) !== 'STOPPED') return;
     setTestRunning(true);
     runningRef.current = true;
     const testStrat: IGSavedStrategy = { ...strat, maxPositions: 1 };
@@ -1534,29 +1542,36 @@ export function IGStrategyTrader() {
     );
   }
 
-  function pauseAutoRun() {
-    runStateRef.current = 'PAUSED';
-    setRunState('PAUSED');
-    if (activeStratId) {
-      localStorage.setItem(`strategy_state_${activeStratId}`, JSON.stringify({
-        status: 'paused',
-        pausedAt: new Date().toISOString(),
-        lastActivityAt: new Date().toISOString(),
-        tradesCount: completedTradesRef.current,
-        error: null,
-      }));
-    }
-    log('info', '⏸ Strategy PAUSED — monitoring open positions, no new entries until resumed');
+  function pauseAutoRun(stratId: string) {
+    setStratState(stratId, 'PAUSED');
+    localStorage.setItem(`strategy_state_${stratId}`, JSON.stringify({
+      status: 'paused', pausedAt: new Date().toISOString(), tradesCount: completedTradesRef.current, error: null,
+    }));
+    const name = strategies.find(s => s.id === stratId)?.name ?? stratId;
+    log('info', `⏸ "${name}" PAUSED — monitoring open positions, no new entries until resumed`);
   }
 
-  function stopAutoRun(reason?: string) {
-    runningRef.current = false;
-    runStateRef.current = 'STOPPED';
-    setRunState('STOPPED');
-    if (timerRef.current)    { clearInterval(timerRef.current);    timerRef.current    = null; }
-    if (posTimerRef.current) { clearInterval(posTimerRef.current); posTimerRef.current = null; }
-    setIsRunning(false);
-    setRunStratEnv(null);
+  function resumeAutoRun(stratId: string) {
+    setStratState(stratId, 'RUNNING');
+    const name = strategies.find(s => s.id === stratId)?.name ?? stratId;
+    log('info', `▶ "${name}" RESUMED — scanning for new entries`);
+  }
+
+  function stopAutoRun(stratId?: string, reason?: string) {
+    // If no ID given, stop all running strategies
+    const ids = stratId ? [stratId] : Object.keys(stratStateRef.current).filter(id => stratStateRef.current[id] !== 'STOPPED');
+    for (const id of ids) {
+      setStratState(id, 'STOPPED');
+      const timers = stratTimersRef.current[id];
+      if (timers?.signal) clearInterval(timers.signal);
+      if (timers?.pos)    clearInterval(timers.pos);
+      delete stratTimersRef.current[id];
+      localStorage.removeItem(`strategy_running_id_${id}`);
+      localStorage.setItem(`strategy_state_${id}`, JSON.stringify({
+        status: 'stopped', stoppedAt: new Date().toISOString(),
+        tradesCount: completedTradesRef.current, error: reason ?? null,
+      }));
+    }
     setScanProgress('');
     setSignalCountdown('');
     setPosCountdown('');
@@ -1565,22 +1580,12 @@ export function IGStrategyTrader() {
     const now = new Date().toISOString();
     setStoppedAt(now);
     if (reason) setStopError(reason);
-    localStorage.removeItem('strategy_running_id');
-    if (activeStratId) {
-      localStorage.setItem(`strategy_state_${activeStratId}`, JSON.stringify({
-        status: 'stopped',
-        stoppedAt: now,
-        lastActivityAt: now,
-        tradesCount: completedTradesRef.current,
-        error: reason ?? null,
-      }));
-    }
-    log('info', `⏹ Strategy stopped — ${completedTradesRef.current} trades completed · Today P&L: ${todayPnLRef.current >= 0 ? '+' : ''}£${todayPnLRef.current.toFixed(2)}`);
+    log('info', `⏹ ${ids.length > 1 ? 'All strategies' : 'Strategy'} stopped — ${completedTradesRef.current} trades · Today P&L: ${todayPnLRef.current >= 0 ? '+' : ''}£${todayPnLRef.current.toFixed(2)}`);
     if (serverRunning) stopServerStrategy();
   }
 
   async function stopAutoRunAndCloseAll() {
-    stopAutoRun();
+    stopAutoRun(undefined);
     log('info', '🔴 STOP + CLOSE ALL — closing all open positions…');
     const allPos: Array<{p: IGPosition; env: 'demo'|'live'}> = [
       ...positions.demo.map(p => ({p, env: 'demo' as const})),
@@ -1600,8 +1605,11 @@ export function IGStrategyTrader() {
   }
 
   useEffect(() => () => {
-    if (timerRef.current)      clearInterval(timerRef.current);
-    if (posTimerRef.current)   clearInterval(posTimerRef.current);
+    // Clean up all per-strategy timers on unmount
+    for (const timers of Object.values(stratTimersRef.current)) {
+      if (timers.signal) clearInterval(timers.signal);
+      if (timers.pos)    clearInterval(timers.pos);
+    }
     if (posRefreshRef.current) clearInterval(posRefreshRef.current);
   }, []);
 
@@ -1986,7 +1994,8 @@ export function IGStrategyTrader() {
       {runStratEnv === 'live' && isRunning && (
         <div className="fixed top-0 left-0 right-0 z-[9998] bg-red-600 text-white text-center py-2 text-sm font-bold flex items-center justify-center gap-4">
           ⚠️ LIVE STRATEGY RUNNING — Real money trades are being placed automatically
-          <button onClick={pauseAutoRun}
+          <button
+            onClick={() => strategies.filter(s => stratStates[s.id] === 'RUNNING').forEach(s => pauseAutoRun(s.id))}
             className="text-xs bg-white/20 hover:bg-white/30 px-2 py-0.5 rounded font-medium transition-colors">
             Pause All
           </button>
@@ -2672,7 +2681,7 @@ export function IGStrategyTrader() {
       ) : (
         <div className="space-y-2">
           {strategies.map(strat => {
-            const isActive = strat.id === activeStratId;
+            const stratState = stratStates[strat.id] ?? 'STOPPED';
             const stratEnv = strat.env ?? 'demo';
             const enabledMarkets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
             const cfg = TIMEFRAME_CONFIG[strat.timeframe];
@@ -2681,14 +2690,14 @@ export function IGStrategyTrader() {
             const canRun = stratEnv === activeMode;
             return (
               <Card key={strat.id} className={clsx(
-                isActive && (isLiveStrat ? 'border-red-500/40 bg-red-500/[0.03]' : 'border-blue-500/40 bg-blue-500/[0.03]'),
-                !isActive && (isLiveStrat ? 'border-red-900/40' : 'border-blue-900/30')
+                stratState !== 'STOPPED' && (isLiveStrat ? 'border-red-500/40 bg-red-500/[0.03]' : 'border-blue-500/40 bg-blue-500/[0.03]'),
+                stratState === 'STOPPED' && (isLiveStrat ? 'border-red-900/40' : 'border-blue-900/30')
               )}>
                 {/* Env left border accent */}
                 <div className={clsx('absolute left-0 top-0 bottom-0 w-0.5 rounded-l-xl', isLiveStrat ? 'bg-red-500/60' : 'bg-blue-500/60')} />
                 <div className="flex items-start justify-between gap-3">
                   {/* Strategy info */}
-                  <button className="flex-1 text-left min-w-0" onClick={() => setActiveStratId(isActive ? null : strat.id)}>
+                  <button className="flex-1 text-left min-w-0" onClick={() => setActiveStratId(activeStratId === strat.id ? null : strat.id)}>
                     <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
                       <p className="text-sm font-bold text-white">{strat.name}</p>
                       {/* Env badge */}
@@ -2720,22 +2729,36 @@ export function IGStrategyTrader() {
                     </p>
                   </button>
 
-                  {/* Controls */}
+                  {/* Controls — per-strategy */}
                   <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap">
-                    {isActive && isRunning ? (
+                    {/* Running state badge */}
+                    {stratState !== 'STOPPED' && (
+                      <span className={clsx('text-[9px] px-1.5 py-0.5 rounded font-bold border',
+                        stratState === 'RUNNING'
+                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 animate-pulse'
+                          : 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
+                      )}>
+                        {stratState === 'RUNNING' ? 'LIVE' : 'PAUSED'}
+                      </span>
+                    )}
+
+                    {stratState !== 'STOPPED' ? (
                       <>
-                        {runState === 'PAUSED' ? (
+                        {stratState === 'PAUSED' ? (
                           <Button size="sm" variant="outline" className="text-amber-400 border-amber-500/40"
                             icon={<Play className="h-3.5 w-3.5" />}
-                            onClick={() => { runStateRef.current = 'RUNNING'; setRunState('RUNNING'); log('info', '▶ Resumed — scanning for new entries'); }}>
+                            onClick={() => resumeAutoRun(strat.id)}>
                             Resume
                           </Button>
                         ) : (
-                          <Button size="sm" variant="outline" icon={<Pause className="h-3.5 w-3.5" />} onClick={pauseAutoRun}>
+                          <Button size="sm" variant="outline" icon={<Pause className="h-3.5 w-3.5" />}
+                            onClick={() => pauseAutoRun(strat.id)}>
                             Pause
                           </Button>
                         )}
-                        <Button size="sm" className="bg-red-600 hover:bg-red-500 text-white" icon={<Square className="h-3.5 w-3.5" />} onClick={() => stopAutoRun()}>
+                        <Button size="sm" className="bg-red-600 hover:bg-red-500 text-white"
+                          icon={<Square className="h-3.5 w-3.5" />}
+                          onClick={() => stopAutoRun(strat.id)}>
                           Stop
                         </Button>
                         <button
@@ -2752,9 +2775,7 @@ export function IGStrategyTrader() {
                           const doRun = () => { setActiveStratId(strat.id); startAutoRun(strat); };
                           if (isLiveStrat) {
                             if (confirm(`▶ Run LIVE strategy "${strat.name}" with real money? This will place real spread-bet orders.`)) doRun();
-                          } else {
-                            doRun();
-                          }
+                          } else { doRun(); }
                         }}>
                         {isLiveStrat ? '▶ Run LIVE — Real Money' : '▶ Run on Demo'}
                       </Button>
@@ -2763,22 +2784,22 @@ export function IGStrategyTrader() {
                         Switch to {stratEnv} tab to run
                       </span>
                     )}
-                    {!isRunning && canRun && (
+                    {stratState === 'STOPPED' && canRun && (
                       <>
                         <Button size="sm" variant="outline"
-                          loading={testRunning && isActive}
-                          disabled={isRunning || testRunning}
+                          loading={testRunning && strat.id === activeStratId}
+                          disabled={testRunning}
                           onClick={() => { setActiveStratId(strat.id); void runTestScan(strat); }}
                           title="Run one scan cycle — opens max 1 position">
                           Test
                         </Button>
                         <button onClick={() => openBuilder(strat)} className="p-1.5 text-gray-600 hover:text-orange-400 transition-colors"><Edit2 className="h-3.5 w-3.5" /></button>
-                        <button onClick={() => { deleteStrategy(strat.id, strat.env ?? activeMode); setStrategies(loadStrategies(activeMode)); if (activeStratId===strat.id) stopAutoRun(); }}
+                        <button onClick={() => { deleteStrategy(strat.id, strat.env ?? activeMode); setStrategies(loadStrategies(activeMode)); stopAutoRun(strat.id); }}
                           className="p-1.5 text-gray-600 hover:text-red-400 transition-colors"><Trash2 className="h-3.5 w-3.5" /></button>
                       </>
                     )}
                     {/* Copy buttons */}
-                    {!isRunning && (
+                    {stratState === 'STOPPED' && (
                       isLiveStrat ? (
                         <button onClick={() => { setCopyModal({ strat, direction: 'toDemo' }); setCopyConfirmText(''); }}
                           className="text-[10px] px-2 py-1 rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors whitespace-nowrap">
@@ -2792,7 +2813,7 @@ export function IGStrategyTrader() {
                       )
                     )}
                     {/* Server mode toggle — keeps strategy alive even when browser is closed */}
-                    {!isRunning && canRun && (
+                    {stratState === 'STOPPED' && canRun && (
                       <label className="flex items-center gap-1.5 cursor-pointer select-none" title="Run on Oracle VM server — strategy continues even if you close the browser">
                         <input
                           type="checkbox"
@@ -2803,12 +2824,12 @@ export function IGStrategyTrader() {
                         <span className="text-[10px] text-gray-400">Run on server</span>
                       </label>
                     )}
-                    {isActive && isRunning && serverRunning && (
+                    {stratState !== 'STOPPED' && serverRunning && (
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-500/20 border border-violet-500/30 text-violet-300">VM running</span>
                     )}
 
                     {/* Sync settings button — only for copied strategies */}
-                    {!isRunning && strat.copiedFrom && (
+                    {stratState === 'STOPPED' && strat.copiedFrom && (
                       (() => {
                         const srcEnv = strat.copiedFrom as 'demo' | 'live';
                         const origName = strat.name.replace(/ \((Demo Copy|Live)\)$/, '');
@@ -2826,7 +2847,7 @@ export function IGStrategyTrader() {
                 </div>
 
                 {/* ── Status display (RUNNING / PAUSED / STOPPED / not-started) ── */}
-                {isActive && isRunning && runState === 'RUNNING' && (
+                {stratState === 'RUNNING' && (
                   <div className="mt-2 rounded-lg px-3 py-2.5 space-y-2 border bg-emerald-500/[0.06] border-emerald-500/25">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
@@ -2868,7 +2889,7 @@ export function IGStrategyTrader() {
                     )}
                   </div>
                 )}
-                {isActive && isRunning && runState === 'PAUSED' && (
+                {stratState === 'PAUSED' && (
                   <div className="mt-2 rounded-lg px-3 py-2.5 space-y-1.5 border bg-amber-500/[0.06] border-amber-500/25">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
@@ -2883,7 +2904,7 @@ export function IGStrategyTrader() {
                     </div>
                   </div>
                 )}
-                {isActive && !isRunning && stoppedAt && (
+                {stratState === 'STOPPED' && stoppedAt && strat.id === activeStratId && (
                   <div className="mt-2 rounded-lg px-3 py-2.5 space-y-1.5 border bg-red-500/[0.06] border-red-500/25">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
