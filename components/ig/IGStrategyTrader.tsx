@@ -1220,12 +1220,6 @@ export function IGStrategyTrader() {
           log('info', `[AUTO] Opened ${market.name} — strong signal override — confidence ${strength}%`);
         }
 
-        // Skip if market is outside its trading session
-        if (!isEpicTradeable(market.epic)) {
-          log('info', `[${env.toUpperCase()}] ⏸ ${market.name} — market closed, skipping`);
-          continue;
-        }
-
         // Gemini second opinion — runs server-side so API key is never exposed
         let effectiveDir: 'BUY' | 'SELL' = tradeDir as 'BUY' | 'SELL';
         try {
