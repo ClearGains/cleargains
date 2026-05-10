@@ -118,7 +118,7 @@ export async function POST(request: NextRequest) {
       }
       const woPayload: Record<string, unknown> = {
         epic:          resolvedEpic,
-        expiry:        body.expiry ?? (resolvedEpic.startsWith('CS.D.') ? '-' : 'DFB'),
+        expiry:        body.expiry ?? 'DFB',
         direction:     body.direction,
         size:          body.size,
         level:         body.level,
@@ -151,7 +151,7 @@ export async function POST(request: NextRequest) {
     // SL/TP are applied separately via PUT after the deal is confirmed ACCEPTED.
     const payload: Record<string, unknown> = {
       epic:          resolvedEpic,
-      expiry:        body.expiry ?? (resolvedEpic.startsWith('CS.D.') ? '-' : 'DFB'),
+      expiry:        body.expiry ?? 'DFB',
       direction:     body.direction,
       size:          body.size,
       orderType:     'MARKET',
