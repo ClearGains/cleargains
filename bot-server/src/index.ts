@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
-import { startBot, stopBot, getBotStatus, loadSavedState, injectPosition, type InjectParams } from './bot';
+import { startBot, stopBot, getBotStatus, loadSavedState, injectPosition, pauseBot, resumeBot, type InjectParams } from './bot';
 import { startStrategyRunner, stopStrategyRunner, getStrategyRunnerStatus, type StrategyRunnerConfig } from './strategyRunner';
 
 const app    = express();
@@ -52,6 +52,18 @@ app.post('/start', auth, (req: Request, res: Response) => {
 // POST /stop — stop the bot
 app.post('/stop', auth, (_req, res) => {
   stopBot();
+  res.json({ ok: true });
+});
+
+// POST /pause — pause new entries (still monitors/closes open positions)
+app.post('/pause', auth, (_req, res) => {
+  pauseBot();
+  res.json({ ok: true });
+});
+
+// POST /resume — resume entering new positions
+app.post('/resume', auth, (_req, res) => {
+  resumeBot();
   res.json({ ok: true });
 });
 

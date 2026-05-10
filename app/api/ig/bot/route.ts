@@ -38,6 +38,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const action = req.nextUrl.searchParams.get('action') ?? 'start';
   if (action === 'stop')             return proxyTo('/stop',             'POST');
+  if (action === 'pause')            return proxyTo('/pause',            'POST');
+  if (action === 'resume')           return proxyTo('/resume',           'POST');
   if (action === 'strategy-stop')    return proxyTo('/strategy/stop',    'POST');
   const body = await req.json() as unknown;
   if (action === 'strategy-start')   return proxyTo('/strategy/start',   'POST', body);

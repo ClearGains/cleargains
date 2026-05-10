@@ -53,6 +53,7 @@ export type BotStartParams = {
 
 export type BotStatus = {
   running:      boolean;
+  paused:       boolean;
   streamConnected: boolean;
   epics:        string[];
   recentLosses: number;
@@ -68,6 +69,7 @@ export type BotStatus = {
 const MAX_CONCURRENT_POSITIONS = 3;
 
 let running     = false;
+let paused      = false;
 let epicStates: Record<string, ScalperEpicState> = {};
 let pendingEpics = new Set<string>();
 let currentEpics:  string[] = [];
@@ -182,6 +184,12 @@ function handleTick(tick: CandleTick) {
 
   switch (decision.action) {
     case 'ENTER': {
+      // Paused — skip new entries but still process exits
+      if (paused) {
+        if (tick.candleClosed) addLog('wait', name, '⏸ Paused — skipping entry');
+        break;
+      }
+
       // Market hours check
       const mkt = isMarketOpen(tick.epic);
       if (!mkt.open) {
@@ -371,12 +379,25 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
 
 export function stopBot() {
   running = false;
+  paused  = false;
   disconnect();
   stopSignalMonitor();
   if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
   clearSession();
   clearState();
   addLog('info', '—', 'Bot stopped');
+}
+
+export function pauseBot() {
+  if (!running) return;
+  paused = true;
+  addLog('info', '—', '⏸ Bot paused — monitoring open positions, no new entries');
+}
+
+export function resumeBot() {
+  if (!running) return;
+  paused = false;
+  addLog('info', '—', '▶ Bot resumed — will enter new positions on next signal');
 }
 
 export function injectPosition(params: InjectParams): { ok: boolean; error?: string } {
@@ -429,6 +450,7 @@ export function getBotStatus(): BotStatus {
 
   return {
     running,
+    paused,
     streamConnected: isConnected(),
     epics:           currentEpics,
     recentLosses,

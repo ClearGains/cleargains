@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Play, Square, Activity, AlertTriangle, Server, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { Play, Pause, Square, Activity, AlertTriangle, Server, Wifi, WifiOff, RefreshCw } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -28,6 +28,7 @@ type EpicStatus = {
 
 type BotStatus = {
   running:         boolean;
+  paused:          boolean;
   streamConnected: boolean;
   epics:           string[];
   recentLosses:    number;
@@ -124,6 +125,26 @@ export function IGServerBot() {
     }
   }
 
+  async function handlePause() {
+    setLoading(true);
+    try {
+      await fetch('/api/ig/bot?action=pause', { method: 'POST' });
+      await fetchStatus();
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleResume() {
+    setLoading(true);
+    try {
+      await fetch('/api/ig/bot?action=resume', { method: 'POST' });
+      await fetchStatus();
+    } finally {
+      setLoading(false);
+    }
+  }
+
   const logTypeStyle: Record<LogEntry['type'], string> = {
     enter:    'text-emerald-400',
     exit:     'text-red-400',
@@ -135,6 +156,7 @@ export function IGServerBot() {
   };
 
   const running = status?.running ?? false;
+  const paused  = status?.paused  ?? false;
 
   return (
     <Card className="space-y-4">
@@ -145,11 +167,13 @@ export function IGServerBot() {
           <span className="text-sm font-semibold text-white">Server Scalper Bot</span>
           <span className={clsx(
             'text-[9px] px-1.5 py-0.5 rounded font-bold border',
-            running
+            running && !paused
               ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 animate-pulse'
+              : running && paused
+              ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
               : 'bg-gray-700 text-gray-400 border-gray-600'
           )}>
-            {running ? 'LIVE' : 'STOPPED'}
+            {running && !paused ? 'LIVE' : running && paused ? 'PAUSED' : 'STOPPED'}
           </span>
 
           {/* Server online indicator */}
@@ -175,6 +199,20 @@ export function IGServerBot() {
           <button onClick={() => void fetchStatus()} className="text-gray-600 hover:text-gray-400" title="Refresh status">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
+
+          {/* Pause / Resume — only shown when bot is running */}
+          {running && (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={paused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+              onClick={paused ? handleResume : handlePause}
+              disabled={loading}
+            >
+              {paused ? 'Resume' : 'Pause'}
+            </Button>
+          )}
+
           <Button
             size="sm"
             variant={running ? 'danger' : 'primary'}
@@ -262,6 +300,13 @@ export function IGServerBot() {
             })}
             {Object.keys(status.epicStatuses).length === 0 && (
               <p className="text-[10px] text-gray-600">No active instruments</p>
+            )}
+
+            {/* Paused notice */}
+            {paused && (
+              <div className="text-[10px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1 mt-1">
+                ⏸ Paused — monitoring open positions, no new entries. Click Resume to re-enable.
+              </div>
             )}
 
             {/* Session + loss tracker */}
