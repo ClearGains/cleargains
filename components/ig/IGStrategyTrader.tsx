@@ -293,7 +293,7 @@ function isEpicTradeable(epic: string): boolean {
   const sessions: Record<string, [number, number, number, number]> = {
     'IX.D.FTSE.DAILY.IP':   [8,  0,  16, 30],
     'IX.D.SPTRD.DAILY.IP':  [14, 30, 21, 0 ],
-    'IX.D.NASDAQ.DAILY.IP': [14, 30, 21, 0 ],
+    'IX.D.NASDAQ.CASH.IP':  [14, 30, 21, 0 ],
     'IX.D.DOW.DAILY.IP':    [14, 30, 21, 0 ],
     'IX.D.DAX.DAILY.IP':    [8,  0,  22, 0 ],
     'IX.D.NIKKEI.DAILY.IP': [23, 0,  6,  0 ],

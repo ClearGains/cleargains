@@ -47,7 +47,6 @@ export const YAHOO_SYMBOL_MAP: Record<string, string> = {
   'EUR/GBP':       'EURGBP=X',
   'USD/JPY':       'JPY=X',
   'AUD/USD':       'AUDUSD=X',
-  'USD/CHF':       'USDCHF=X',
   'Bitcoin':       'BTC-USD',
   'Ethereum':      'ETH-USD',
 };

@@ -6,7 +6,7 @@ const VERIFIED_EPICS: Record<string, string> = {
   // Indices — Daily Funded Bets
   'FTSE 100':      'IX.D.FTSE.DAILY.IP',
   'S&P 500':       'IX.D.SPTRD.DAILY.IP',
-  'NASDAQ 100':    'IX.D.NASDAQ.DAILY.IP',
+  'NASDAQ 100':    'IX.D.NASDAQ.CASH.IP',
   'Wall Street':   'IX.D.DOW.DAILY.IP',
   'Germany 40':    'IX.D.DAX.DAILY.IP',
   'Japan 225':     'IX.D.NIKKEI.DAILY.IP',
@@ -17,7 +17,6 @@ const VERIFIED_EPICS: Record<string, string> = {
   'USD/JPY':       'CS.D.USDJPY.TODAY.IP',
   'EUR/GBP':       'CS.D.EURGBP.TODAY.IP',
   'AUD/USD':       'CS.D.AUDUSD.TODAY.IP',
-  'USD/CHF':       'CS.D.USDCHF.TODAY.IP',
   // Commodities — spread bet  (NOT the CFD CS.D.CFDGOLD / CS.D.CRUDEOIL variants)
   'Gold':          'CS.D.GOLD.TODAY.IP',
   'Silver':        'CS.D.SLVR.TODAY.IP',

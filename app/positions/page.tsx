@@ -115,7 +115,7 @@ const EPIC_OPTIONS = [
   // Indices
   { label: 'FTSE 100',      value: 'IX.D.FTSE.DAILY.IP'    },
   { label: 'S&P 500',       value: 'IX.D.SPTRD.DAILY.IP'   },
-  { label: 'NASDAQ 100',    value: 'IX.D.NASDAQ.DAILY.IP'   },
+  { label: 'NASDAQ 100',    value: 'IX.D.NASDAQ.CASH.IP'    },
   { label: 'Wall Street',   value: 'IX.D.DOW.DAILY.IP'      },
   { label: 'Germany 40',    value: 'IX.D.DAX.DAILY.IP'      },
   { label: 'Japan 225',     value: 'IX.D.NIKKEI.DAILY.IP'   },
@@ -131,7 +131,6 @@ const EPIC_OPTIONS = [
   { label: 'USD/JPY',       value: 'CS.D.USDJPY.TODAY.IP'  },
   { label: 'EUR/GBP',       value: 'CS.D.EURGBP.TODAY.IP'  },
   { label: 'AUD/USD',       value: 'CS.D.AUDUSD.TODAY.IP'  },
-  { label: 'USD/CHF',       value: 'CS.D.USDCHF.TODAY.IP'  },
   // Crypto
   { label: 'Bitcoin',       value: 'CS.D.BITCOIN.TODAY.IP' },
 ];

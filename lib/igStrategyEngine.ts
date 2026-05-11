@@ -110,7 +110,7 @@ export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
   // ── Indices ─────────────────────────────────────────────────────────────────
   { epic: 'IX.D.FTSE.DAILY.IP',   name: 'FTSE 100',      enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.SPTRD.DAILY.IP',  name: 'S&P 500',       enabled: true,  marketType: 'INDEX' },
-  { epic: 'IX.D.NASDAQ.DAILY.IP', name: 'NASDAQ 100',    enabled: true,  marketType: 'INDEX' },
+  { epic: 'IX.D.NASDAQ.CASH.IP',  name: 'NASDAQ 100',    enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.DOW.DAILY.IP',    name: 'Wall Street',   enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40',    enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225',     enabled: true,  marketType: 'INDEX' },
@@ -121,7 +121,6 @@ export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
   { epic: 'CS.D.USDJPY.TODAY.IP', name: 'USD/JPY',       enabled: true,  marketType: 'FOREX' },
   { epic: 'CS.D.EURGBP.TODAY.IP', name: 'EUR/GBP',       enabled: true,  marketType: 'FOREX' },
   { epic: 'CS.D.AUDUSD.TODAY.IP', name: 'AUD/USD',       enabled: true,  marketType: 'FOREX' },
-  { epic: 'CS.D.USDCHF.TODAY.IP', name: 'USD/CHF',       enabled: true,  marketType: 'FOREX' },
 ];
 
 // ── Technical indicators ──────────────────────────────────────────────────────

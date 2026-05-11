@@ -7,7 +7,7 @@ const INDEX_SESSIONS: Record<string, Session> = {
   'IX.D.FTSE.DAILY.IP':   { openH: 8,  openM: 0,  closeH: 16, closeM: 30 },
   // US indices
   'IX.D.SPTRD.DAILY.IP':  { openH: 14, openM: 30, closeH: 21, closeM: 0  },
-  'IX.D.NASDAQ.DAILY.IP': { openH: 14, openM: 30, closeH: 21, closeM: 0  },
+  'IX.D.NASDAQ.CASH.IP':  { openH: 14, openM: 30, closeH: 21, closeM: 0  },
   'IX.D.DOW.DAILY.IP':    { openH: 14, openM: 30, closeH: 21, closeM: 0  },
   // European indices
   'IX.D.DAX.DAILY.IP':    { openH: 8,  openM: 0,  closeH: 22, closeM: 0  },
@@ -23,7 +23,6 @@ const FOREX_EPICS = new Set([
   'CS.D.USDJPY.TODAY.IP',
   'CS.D.EURGBP.TODAY.IP',
   'CS.D.AUDUSD.TODAY.IP',
-  'CS.D.USDCHF.TODAY.IP',
 ]);
 
 function minutesSinceMidnightUTC(): number {
