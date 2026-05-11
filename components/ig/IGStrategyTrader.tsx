@@ -1514,6 +1514,24 @@ export function IGStrategyTrader() {
         // Don't double up in same direction on same instrument
         if (positions[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
+        // ── Per-type concentration cap ──────────────────────────────────────────
+        // Indices (FTSE/S&P/NASDAQ/DOW/DAX) are highly correlated — capped at 2.
+        // Commodities and crypto are volatile — capped at 1 each.
+        // Forex pairs share USD exposure — capped at 3.
+        // Shares — capped at 2 to avoid sector concentration.
+        const typeMax: Record<MarketType, number> = {
+          INDEX:     2,
+          FOREX:     3,
+          SHARES:    2,
+          COMMODITY: 1,
+          CRYPTO:    1,
+        };
+        const typeCount = positions[env].filter(p => getMarketType(p.epic) === mType).length;
+        if (typeCount >= typeMax[mType]) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — ${mType} cap (${typeCount}/${typeMax[mType]} positions)`);
+          continue;
+        }
+
         // ── Portfolio cap + one-for-one rotation ───────────────────────────────
         // When at cap, swap out the single worst losing position (held >30min) to make room.
         // We never close a profitable position just to open a new one.
