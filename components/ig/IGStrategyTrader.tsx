@@ -364,48 +364,56 @@ function calibrateSignal(
   return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
 }
 
-// ── Momentum-based signal calibration (bot server real-time data is primary) ──
-// Strategy: enter in direction of current price momentum.
-// MACD drives direction; RSI gates extremes; daily change confirms.
-// Positions are flipped in runPositionMonitor when bot server detects candle reversal.
+// ── Signal calibration from bot server indicators (frontend decides, server just supplies data) ──
+// Priority: (1) consecutive candle streak, (2) MACD momentum, (3) daily change fallback.
+// RSI prevents entering already-exhausted moves. consRed/consGreen come from bot server /prices.
 function calibrateFromIndicators(
   rsi:           number | null,
   macd:          number | null,
   changePercent: number,
   mType:         MarketType,
+  consRed   = 0,
+  consGreen = 0,
 ): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
-  if (rsi === null && macd === null) {
+  if (rsi === null && macd === null && consRed === 0 && consGreen === 0) {
     return calibrateSignal(changePercent, changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL', mType);
   }
 
-  const macdBullish = macd !== null && macd > 0;
-  const macdBearish = macd !== null && macd < 0;
-  const dailyUp     = changePercent >  0.15;
-  const dailyDown   = changePercent < -0.15;
+  const macdBullish   = macd !== null && macd > 0;
+  const macdBearish   = macd !== null && macd < 0;
+  const dailyUp       = changePercent >  0.15;
+  const dailyDown     = changePercent < -0.15;
+  const notOverbought = rsi === null || rsi < 70;
+  const notOversold   = rsi === null || rsi > 30;
 
   let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
   let strength = 0;
 
-  // MACD drives direction: bullish momentum = BUY, bearish momentum = SELL.
-  // RSI gates: don't enter when momentum is already exhausted at extremes.
-  if (macdBullish && (rsi === null || rsi < 70)) {
-    direction = 'BUY';
-    strength  = 62;
-    if (dailyUp)                    strength = Math.min(95, strength + 10);
-    if (macd! > 0.002)             strength = Math.min(95, strength + 8);
-    if (rsi !== null && rsi > 45)  strength = Math.min(95, strength + 5);
-  } else if (macdBearish && (rsi === null || rsi > 30)) {
-    direction = 'SELL';
-    strength  = 62;
-    if (dailyDown)                  strength = Math.min(95, strength + 10);
-    if (macd! < -0.002)            strength = Math.min(95, strength + 8);
-    if (rsi !== null && rsi < 55)  strength = Math.min(95, strength + 5);
+  // (1) Primary: consecutive same-direction candles — clearest momentum signal
+  if (consGreen >= 2 && notOverbought) {
+    direction = 'BUY';   strength = 65;
+    if (macdBullish)          strength = Math.min(95, strength + 15);
+    if (dailyUp)              strength = Math.min(95, strength + 8);
+    if (consGreen >= 3)       strength = Math.min(95, strength + 5);
+  } else if (consRed >= 2 && notOversold) {
+    direction = 'SELL';  strength = 65;
+    if (macdBearish)          strength = Math.min(95, strength + 15);
+    if (dailyDown)            strength = Math.min(95, strength + 8);
+    if (consRed >= 3)         strength = Math.min(95, strength + 5);
   }
-
-  // MACD flat or unavailable — use daily change with RSI gate as fallback
-  if (direction === 'HOLD') {
-    if (dailyUp   && (rsi === null || rsi < 68)) { direction = 'BUY';  strength = 54; }
-    if (dailyDown && (rsi === null || rsi > 32)) { direction = 'SELL'; strength = 54; }
+  // (2) Secondary: MACD + daily trend confirm each other
+  else if (macdBullish && dailyUp && notOverbought) {
+    direction = 'BUY';   strength = 60;
+    if (macd! > 0.002)        strength = Math.min(95, strength + 8);
+  } else if (macdBearish && dailyDown && notOversold) {
+    direction = 'SELL';  strength = 60;
+    if (macd! < -0.002)       strength = Math.min(95, strength + 8);
+  }
+  // (3) Tertiary: MACD alone with RSI gate
+  else if (macdBullish && notOverbought) {
+    direction = 'BUY';   strength = 54;
+  } else if (macdBearish && notOversold) {
+    direction = 'SELL';  strength = 54;
   }
 
   if (direction === 'HOLD') return { direction: 'HOLD', strength: 0 };
@@ -1115,10 +1123,19 @@ export function IGStrategyTrader() {
         : yahooResult;
     }
 
-    // No Yahoo data — fall back to bot server alone if available
+    // No Yahoo data — fall back to bot server alone if available.
+    // Derive signal from raw indicators (bot server is data-only; frontend decides direction).
     if (hasBot) {
+      const bd    = botData!;
+      const cRed  = bd.consecutiveReds   ?? 0;
+      const cGrn  = bd.consecutiveGreens ?? 0;
+      const botSignal: 'BUY' | 'SELL' | 'NEUTRAL' =
+        cGrn >= 2 && (bd.rsi === null || bd.rsi  < 70) ? 'BUY'  :
+        cRed >= 2 && (bd.rsi === null || bd.rsi  > 30) ? 'SELL' :
+        bd.macd !== null && bd.macd > 0               ? 'BUY'  :
+        bd.macd !== null && bd.macd < 0               ? 'SELL' : 'NEUTRAL';
       return {
-        price: botData!.mid, changePercent: botData!.changePercent, signal: botData!.signal,
+        price: bd.mid, changePercent: bd.changePercent, signal: botSignal,
         source: 'bot-server', indicators: botInds,
       };
     }
@@ -1194,9 +1211,13 @@ export function IGStrategyTrader() {
     const rsiVal         = snapshot.indicators?.rsi  ?? null;
     const macdVal        = snapshot.indicators?.macd ?? null;
     const atrVal         = snapshot.indicators?.atr  ?? null;
-    const botCandleCount = botPricesRef.current[market.epic]?.candleCount ?? 0;
+    // Pull raw candle streak counts from bot server — frontend uses these for its own signal logic
+    const botEntry       = botPricesRef.current[market.epic];
+    const botCandleCount = botEntry?.candleCount ?? 0;
+    const consRed        = botEntry?.consecutiveReds   ?? 0;
+    const consGreen      = botEntry?.consecutiveGreens ?? 0;
 
-    // Bot server is primary when ≥20 candles available (enough for reliable RSI/MACD)
+    // Bot server is primary when ≥20 candles available (enough for reliable RSI/MACD/candle streaks)
     // or when bot is the only data source. Below 20 candles indicators are unreliable.
     const useBotPrimary = snapshot.source === 'bot-server' ||
                           (snapshot.source === 'yahoo+bot' && botCandleCount >= 20);
@@ -1205,7 +1226,8 @@ export function IGStrategyTrader() {
     let strength = 0;
 
     if (useBotPrimary) {
-      const r = calibrateFromIndicators(rsiVal, macdVal, snapshot.changePercent, mType);
+      // All signal logic in the frontend — bot server supplies raw indicators only
+      const r = calibrateFromIndicators(rsiVal, macdVal, snapshot.changePercent, mType, consRed, consGreen);
       direction = r.direction;
       strength  = r.strength;
     } else {
@@ -1605,20 +1627,26 @@ export function IGStrategyTrader() {
         const posName  = pos.instrumentName ?? pos.epic;
 
         // [FLIP] Core momentum strategy: close and immediately open opposite when
-        // the bot server detects that candle momentum has reversed direction.
+        // raw candle data (from bot server as data source) shows momentum has reversed.
+        // Frontend computes the reversal signal — bot server only supplies indicator values.
         // Minimum 2-minute hold prevents flipping on tiny noise candles.
         if (strat.autoClose && strat.autoTrade && ageMs > 2 * 60_000) {
           const botData = botPricesRef.current[pos.epic];
-          if (botData && botData.candleCount >= 15 && botData.signal !== 'NEUTRAL') {
-            const shouldFlip = (pos.direction === 'BUY'  && botData.signal === 'SELL') ||
-                               (pos.direction === 'SELL' && botData.signal === 'BUY');
+          if (botData && botData.candleCount >= 15) {
+            const cRed   = botData.consecutiveReds   ?? 0;
+            const cGreen = botData.consecutiveGreens ?? 0;
+            // Frontend-computed reversal: 2+ consecutive candles against position + RSI/MACD gate
+            const reversalToSell = cRed   >= 2 && (botData.rsi === null || botData.rsi > 30) && (botData.macd === null || botData.macd < 0.001);
+            const reversalToBuy  = cGreen >= 2 && (botData.rsi === null || botData.rsi < 70) && (botData.macd === null || botData.macd > -0.001);
+            const shouldFlip = (pos.direction === 'BUY'  && reversalToSell) ||
+                               (pos.direction === 'SELL' && reversalToBuy);
             if (shouldFlip) {
               const flipDir  = (pos.direction === 'BUY' ? 'SELL' : 'BUY') as 'BUY' | 'SELL';
               const canFlip  = !(botMode === 'LONG_ONLY' && flipDir === 'SELL') &&
                                !(botMode === 'SHORT_ONLY' && flipDir === 'BUY');
               const consTag  = flipDir === 'SELL'
-                ? `${botData.consecutiveReds ?? '?'}×red`
-                : `${botData.consecutiveGreens ?? '?'}×green`;
+                ? `${cRed}×red`
+                : `${cGreen}×green`;
               const rsiTag   = botData.rsi  !== null ? ` RSI:${botData.rsi.toFixed(0)}` : '';
               const macdTag  = botData.macd !== null ? ` MACD:${botData.macd > 0 ? '+' : ''}${botData.macd.toFixed(4)}` : '';
               slog(strat.id, 'info', `[FLIP] ${posName}: ${pos.direction}→${canFlip ? flipDir : 'CLOSE'} (${consTag}${rsiTag}${macdTag} P&L:£${(pos.upl ?? 0).toFixed(2)})`);
