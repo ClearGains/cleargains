@@ -637,7 +637,7 @@ export function IGStrategyTrader() {
   const [stratStates, setStratStates]   = useState<Record<string, RunState>>({});
   const runningRef  = useRef(false); // test-scan only
   const newsSignalsRef     = useRef<Map<string, 'BUY'|'SELL'>>(new Map());
-  const recentlyClosedRef  = useRef<Map<string, number>>(new Map());
+  const recentlyClosedRef  = useRef<Map<string, { closedAt: number; wasLoss: boolean }>>(new Map());
 
   // ── Active demo/live mode ──────────────────────────────────────────────────
   const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
@@ -932,6 +932,23 @@ export function IGStrategyTrader() {
         const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
         if (d.ok) {
           const newList = d.positions ?? [];
+          // Detect server-side closes (stop-loss / limit hit by IG).
+          // Any position that existed before but is no longer in the list was closed
+          // externally — mark it in recentlyClosedRef so the scan loop won't
+          // immediately re-enter the same instrument in the same direction.
+          const prevList = positionsRef.current[env] ?? [];
+          const newIds = new Set(newList.map(p => p.dealId));
+          for (const gone of prevList) {
+            if (!newIds.has(gone.dealId)) {
+              // We can't know if it was a win (TP hit) or loss (SL hit) without an
+              // extra history call, so treat all server-side closes conservatively
+              // as losses → 4-hour cooldown blocks re-entry.
+              recentlyClosedRef.current.set(
+                `${gone.epic}:${gone.direction}`,
+                { closedAt: Date.now(), wasLoss: true },
+              );
+            }
+          }
           positionsRef.current = { ...positionsRef.current, [env]: newList };
           setPositions(p => ({...p, [env]: newList}));
         } else {
@@ -1461,7 +1478,7 @@ export function IGStrategyTrader() {
               const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
               slog(strat.id, 'close', `[AUTO] ✓ Closed ${market.name} — reversed to ${tradeDir} — P&L: £${exitPnl.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, exitPnl, 'STRATEGY', new Date().toISOString()));
-              recentlyClosedRef.current.set(`${market.epic}:${opp.direction}`, Date.now());
+              recentlyClosedRef.current.set(`${market.epic}:${opp.direction}`, { closedAt: Date.now(), wasLoss: exitPnl < 0 });
             } else slog(strat.id, 'error', `[${env.toUpperCase()}] Reversal close failed: ${cr.error ?? 'unknown'}`);
           }
           if (toClose.length) await loadPositions(env);
@@ -1508,16 +1525,21 @@ export function IGStrategyTrader() {
           continue;
         }
 
-        // Re-entry cooldown — shorter when portfolio has spare capacity
-        const recentlyClosedAt = recentlyClosedRef.current.get(`${market.epic}:${tradeDir}`);
-        const cooldown = fillRatio < 0.8 ? 20 * 60_000 : 2 * 60 * 60_000;
-        if (recentlyClosedAt && Date.now() - recentlyClosedAt < cooldown) {
-          const newsConf = newsSignalsRef.current.get(market.name);
-          if (!newsConf || newsConf !== tradeDir) {
-            slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} — recently closed, cooldown ${Math.round(cooldown / 60_000)}min`);
-            continue;
+        // Re-entry cooldown — loss closes block re-entry for 4h, profit closes for 2h.
+        // Portfolio fill ratio no longer shortens the cooldown: a losing instrument
+        // should not be re-entered just because there is spare capacity.
+        const recentClose = recentlyClosedRef.current.get(`${market.epic}:${tradeDir}`);
+        if (recentClose) {
+          const cooldown = recentClose.wasLoss ? 4 * 60 * 60_000 : 2 * 60 * 60_000;
+          if (Date.now() - recentClose.closedAt < cooldown) {
+            const newsConf = newsSignalsRef.current.get(market.name);
+            if (!newsConf || newsConf !== tradeDir) {
+              const label = recentClose.wasLoss ? 'loss' : 'profit';
+              slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} — closed at ${label}, cooldown ${Math.round(cooldown / 60_000)}min`);
+              continue;
+            }
+            slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} — news confirms re-entry after close`);
           }
-          slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} — news confirms re-entry after close`);
         }
 
         // Skip when paused
@@ -1778,7 +1800,7 @@ export function IGStrategyTrader() {
                 setTodayPnL(todayPnLRef.current);
                 slog(strat.id, 'close', `[REVERSAL] Closed ${posName} @ ${currentPx.toFixed(2)} P&L: ${closedPnl.toFixed(2)}`);
                 setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'STRATEGY', new Date().toISOString()));
-                recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
+                recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: closedPnl < 0 });
               } else if ((cr as { alreadyClosed?: boolean }).alreadyClosed) {
                 slog(strat.id, 'info', `[REVERSAL] ${posName} already closed by IG`);
               } else {
@@ -1802,7 +1824,7 @@ export function IGStrategyTrader() {
             setTodayPnL(todayPnLRef.current);
             slog(strat.id, 'close', `[AUTO] ✓ Emergency stop fired: ${pos.instrumentName ?? pos.epic} — P&L: ${pnlStr}`);
             setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STOP_LOSS', new Date().toISOString()));
-            recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
+            recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: true });
           } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
             slog(strat.id, 'info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG`);
           } else slog(strat.id, 'error', `[${env.toUpperCase()}] Emergency stop failed: ${cr.error ?? 'unknown'}`);
@@ -1828,7 +1850,7 @@ export function IGStrategyTrader() {
               setTodayPnL(todayPnLRef.current);
               slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${closedPnl.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STALE', new Date().toISOString()));
-              recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
+              recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: closedPnl < 0 });
             } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
               slog(strat.id, 'info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG (stop/limit/rollover)`);
             } else slog(strat.id, 'error', `[${env.toUpperCase()}] Stale close failed: ${cr.error ?? 'unknown'}`);
@@ -1896,7 +1918,7 @@ export function IGStrategyTrader() {
               setTodayPnL(todayPnLRef.current);
               slog(strat.id, 'close', `[AUTO] ✓ Trimmed ${weak.instrumentName ?? weak.epic} — portfolio capped — P&L: £${closedPnl.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, weak.dealId, exitPx, closedPnl, 'STRATEGY', new Date().toISOString()));
-              recentlyClosedRef.current.set(`${weak.epic}:${weak.direction}`, Date.now());
+              recentlyClosedRef.current.set(`${weak.epic}:${weak.direction}`, { closedAt: Date.now(), wasLoss: closedPnl < 0 });
             } else slog(strat.id, 'error', `[${env.toUpperCase()}] Trim close failed: ${cr.error ?? 'unknown'}`);
           }
         }
