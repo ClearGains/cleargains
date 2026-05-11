@@ -74,6 +74,7 @@ type BotPriceEntry = {
   rsi: number | null; macd: number | null; atr: number | null;
   signal: 'BUY' | 'SELL' | 'NEUTRAL'; signalState: string;
   consecutiveReds?: number; consecutiveGreens?: number;
+  trend5m?: 'UP' | 'DOWN' | 'NEUTRAL';
 };
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -326,6 +327,57 @@ function isEpicTradeable(epic: string): boolean {
   const [oh, om, ch, cm] = s;
   const open = oh * 60 + om, close = ch * 60 + cm;
   return open > close ? (mins >= open || mins < close) : (mins >= open && mins < close);
+}
+
+/**
+ * Liquid trading window filter — only scan during high-volume periods.
+ * Thin liquidity = wider spreads, more whipsaws, less reliable signals.
+ *
+ * Times are UK local time (UTC+0 winter / UTC+1 summer).
+ * We use UTC and add 1 hour as a simple approximation.
+ */
+function isLiquidTradingWindow(mType: MarketType): boolean {
+  const now     = new Date();
+  const utcH    = now.getUTCHours();
+  const utcM    = now.getUTCMinutes();
+  const utcDay  = now.getUTCDay(); // 0=Sun 6=Sat
+  const ukMins  = (utcH * 60 + utcM + 60) % (24 * 60); // approx UK time (UTC+1)
+
+  // Never during weekend (forex handles its own)
+  if (mType !== 'FOREX' && (utcDay === 0 || utcDay === 6)) return false;
+
+  switch (mType) {
+    case 'INDEX': {
+      // UK/EU open: 08:00–10:30 UK  (active London open)
+      // US overlap: 14:30–17:30 UK  (best liquidity of day)
+      const inUKOpen = ukMins >= 8 * 60 && ukMins < 10 * 60 + 30;
+      const inUSOver = ukMins >= 14 * 60 + 30 && ukMins < 17 * 60 + 30;
+      return inUKOpen || inUSOver;
+    }
+    case 'FOREX': {
+      // Forex liquid: London session 08:00–17:00 UK, or NY overlap 13:00–17:00 UK
+      // Skip weekends (Sat all day, Sun before 22:00 UTC)
+      if (utcDay === 6) return false;
+      if (utcDay === 0 && utcH < 22) return false;
+      if (utcDay === 5 && utcH >= 22) return false;
+      return ukMins >= 8 * 60 && ukMins < 17 * 60;
+    }
+    case 'SHARES': {
+      // UK shares: 08:00–16:30 UK
+      // US shares: 14:30–21:00 UK
+      const inUK = ukMins >= 8 * 60 && ukMins < 16 * 60 + 30;
+      const inUS = ukMins >= 14 * 60 + 30 && ukMins < 21 * 60;
+      return inUK || inUS;
+    }
+    case 'COMMODITY':
+      // Commodities most liquid during NY session
+      return ukMins >= 14 * 60 + 30 && ukMins < 21 * 60;
+    case 'CRYPTO':
+      // Crypto is 24/7, no filter
+      return true;
+    default:
+      return true;
+  }
 }
 
 /**
@@ -640,6 +692,8 @@ export function IGStrategyTrader() {
   const [scanProgress, setScanProgress] = useState<string>('');
   // Bot server real-time prices + indicators — refreshed once per scan cycle
   const botPricesRef = useRef<Record<string, BotPriceEntry>>({});
+  // IG client sentiment — refreshed once per scan cycle (contrarian gate)
+  const sentimentRef = useRef<Record<string, { longPct: number; shortPct: number }>>({});
 
   // ── Working orders ─────────────────────────────────────────────────────────
   const [workingOrders, setWorkingOrders] = useState<Record<'demo'|'live', IGWorkingOrder[]>>({ demo:[], live:[] });
@@ -1222,8 +1276,14 @@ export function IGStrategyTrader() {
       return null;
     }
 
+    // ── Gate 1: Liquid trading window ─────────────────────────────────────────
+    const mType = market.marketType ?? getMarketType(market.epic);
+    if (!isLiquidTradingWindow(mType)) {
+      setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'idle' } }));
+      return null; // outside liquid hours — skip silently
+    }
+
     // ── Calibrated signal scoring ─────────────────────────────────────────────
-    const mType    = market.marketType ?? getMarketType(market.epic);
     const stopLoss = strat.stopLoss ?? strat.stopPct ?? 5;
 
     const pctStr         = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
@@ -1271,6 +1331,36 @@ export function IGStrategyTrader() {
         // Matching calibrateFromIndicators: BUY only RSI<62, SELL only RSI>40.
         if (direction === 'BUY'  && rsi !== null && rsi > 62) { direction = 'HOLD'; strength = 0; }
         if (direction === 'SELL' && rsi !== null && rsi < 40) { direction = 'HOLD'; strength = 0; }
+      }
+    }
+
+    // ── Gate 2: IG Client Sentiment (contrarian) ─────────────────────────────
+    // Retail crowds are typically wrong at extremes. When ≥75% of IG clients
+    // are on one side, trade against them. Reduce strength when ≥65%.
+    if (direction !== 'HOLD') {
+      const sent = sentimentRef.current[market.epic];
+      if (sent) {
+        const crowdedLong  = sent.longPct  >= 75 && direction === 'BUY';
+        const crowdedShort = sent.shortPct >= 75 && direction === 'SELL';
+        const moderateLong  = sent.longPct  >= 65 && direction === 'BUY';
+        const moderateShort = sent.shortPct >= 65 && direction === 'SELL';
+        if (crowdedLong || crowdedShort) {
+          direction = 'HOLD'; strength = 0; // hard block at ≥75% extreme
+        } else if (moderateLong || moderateShort) {
+          strength = Math.max(0, strength - 15); // soften at ≥65%
+        }
+      }
+    }
+
+    // ── Gate 3: 5-minute trend alignment ────────────────────────────────────
+    // Only take a 1-min signal when the 5-min trend agrees (avoids counter-trend scalps).
+    if (direction !== 'HOLD' && botCandleCount >= 10) {
+      const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
+      const trendConflict = (direction === 'BUY'  && trend5m === 'DOWN') ||
+                            (direction === 'SELL' && trend5m === 'UP');
+      if (trendConflict) {
+        strength = Math.max(0, strength - 20); // heavy penalty for counter-trend entry
+        if (strength < (strat.minStrength ?? 65)) { direction = 'HOLD'; strength = 0; }
       }
     }
 
@@ -1588,6 +1678,27 @@ export function IGStrategyTrader() {
         }
       }
     } catch { /* bot server offline — Yahoo fallback will be used */ }
+
+    // Pre-fetch IG client sentiment for all watchlist epics (contrarian gate)
+    const envForSent = strat.accounts.includes('live') ? 'live' : 'demo';
+    const sentSession = sessions[envForSent];
+    if (sentSession) {
+      try {
+        const epicList = markets.map(m => m.epic).join(',');
+        const sr = await fetch(
+          `/api/ig/sentiment?marketIds=${encodeURIComponent(epicList)}`,
+          { headers: makeHeaders(sentSession, envForSent) },
+        );
+        if (sr.ok) {
+          const sd = await sr.json() as { ok: boolean; sentiments?: { marketId: string; longPct: number; shortPct: number }[] };
+          if (sd.ok && sd.sentiments) {
+            const next: Record<string, { longPct: number; shortPct: number }> = {};
+            for (const s of sd.sentiments) next[s.marketId] = { longPct: s.longPct, shortPct: s.shortPct };
+            sentimentRef.current = next;
+          }
+        }
+      } catch { /* sentiment fetch failed — skip contrarian gate this cycle */ }
+    }
 
     slog(strat.id, 'info', `📡 Signal scan — ${markets.length} markets… (fetching news)`);
     await fetchNewsSignals(markets, positions);

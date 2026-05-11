@@ -107,6 +107,7 @@ app.get('/prices', auth, (_req: Request, res: Response) => {
     rsi: number | null; macd: number | null; atr: number | null;
     signal: 'BUY' | 'SELL' | 'NEUTRAL'; signalState: string;
     consecutiveReds: number; consecutiveGreens: number;
+    trend5m: 'UP' | 'DOWN' | 'NEUTRAL';
   };
   const prices: Record<string, PriceEntry> = {};
 
@@ -157,11 +158,21 @@ app.get('/prices', auth, (_req: Request, res: Response) => {
         signal = 'SELL';
       }
 
+      // 5-minute trend: compare avg close of last 5 candles vs previous 5
+      let trend5m: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
+      if (candles.length >= 10) {
+        const last5 = candles.slice(-5).reduce((s, c) => s + c.close, 0) / 5;
+        const prev5 = candles.slice(-10, -5).reduce((s, c) => s + c.close, 0) / 5;
+        if (last5 > prev5 * 1.0002) trend5m = 'UP';
+        else if (last5 < prev5 * 0.9998) trend5m = 'DOWN';
+      }
+
       prices[epic] = {
         bid, mid: bid, changePercent, candleCount: candles.length,
         rsi, macd, atr, signal,
         signalState: st.epicStatuses[epic]?.state ?? 'FLAT',
         consecutiveReds: consRed, consecutiveGreens: consGreen,
+        trend5m,
       };
     }
   }
