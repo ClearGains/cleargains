@@ -33,11 +33,22 @@ type PriceEntry = {
   signalState:   string;
 };
 
+type EpicStatus = {
+  state:        string;
+  entryPrice:   number;
+  pnlPct:       number | null;
+  lastPrice:    number;
+  reds:         number;
+  formingIsRed: boolean | null;
+};
+
 type AccountStatus = {
   running:         boolean;
   paused:          boolean;
   streamConnected: boolean;
   epics:           string[];
+  recentLosses:    number;
+  epicStatuses:    Record<string, EpicStatus>;
   log:             LogEntry[];
   sessionOk:       boolean;
   sessionExpiry:   string | null;
@@ -214,24 +225,68 @@ function AccountPanel({ account, serverOnline }: { account: AccountKey; serverOn
         </div>
       )}
 
-      {/* Session info + analysis log */}
-      {status && running && (
-        <div>
-          <div className="text-[10px] text-gray-600 mb-1">
-            {status.sessionExpiry && (
-              <span>Session {status.sessionOk ? 'valid' : 'expired'} · renews {new Date(status.sessionExpiry).toLocaleTimeString()}</span>
-            )}
-          </div>
-          <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Analysis log</p>
-          <div className="h-32 overflow-y-auto space-y-0.5 bg-gray-950/60 border border-gray-800 rounded p-1.5">
-            {status.log.length === 0 && <p className="text-[10px] text-gray-600 text-center mt-4">Waiting for candles…</p>}
-            {status.log.map(entry => (
-              <div key={entry.id} className="flex gap-1.5 text-[10px] font-mono">
-                <span className="text-gray-600 shrink-0">{entry.ts}</span>
-                <span className="text-gray-500 shrink-0">[{entry.epic.slice(0, 10)}]</span>
-                <span className={logTypeStyle[entry.type]}>{entry.msg}</span>
+      {/* Signal states + analysis log — two columns */}
+      {status && running && Object.keys(status.epicStatuses).length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+
+          {/* Signal states */}
+          <div className="space-y-1">
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider">Signal States</p>
+            {Object.entries(status.epicStatuses).map(([epic, s]) => {
+              const name = AVAILABLE_INSTRUMENTS.find(i => i.epic === epic)?.name ?? epic.split('.').slice(0, 3).join('.');
+              return (
+                <div key={epic} className="flex items-center justify-between bg-gray-900/60 rounded px-2 py-1">
+                  <span className="text-[10px] text-gray-300">{name}</span>
+                  <div className="flex items-center gap-2 text-[10px]">
+                    {s.reds > 0 && <span className="text-red-400">{s.reds}🔴</span>}
+                    <span className={clsx('font-medium',
+                      s.state === 'IN_POSITION' ? 'text-emerald-400' :
+                      s.state === 'COOLDOWN'    ? 'text-yellow-400' : 'text-gray-400'
+                    )}>
+                      {s.state === 'IN_POSITION' ? '⚡ SIGNAL' : s.state}
+                    </span>
+                    {s.formingIsRed !== null && (
+                      <span className={s.formingIsRed ? 'text-red-400' : 'text-emerald-400'}>
+                        {s.formingIsRed ? '▼' : '▲'}
+                      </span>
+                    )}
+                    <span className="text-gray-600 font-mono">
+                      {s.lastPrice > 0 ? (s.lastPrice > 100 ? s.lastPrice.toFixed(1) : s.lastPrice.toFixed(4)) : '—'}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+            {paused && (
+              <div className="text-[10px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1 mt-1">
+                ⏸ Paused — monitoring, signals suppressed
               </div>
-            ))}
+            )}
+            <div className="text-[10px] text-gray-600 mt-1 space-y-0.5">
+              {status.sessionExpiry && (
+                <div>Session {status.sessionOk ? 'valid' : 'expired'} · renews {new Date(status.sessionExpiry).toLocaleTimeString()}</div>
+              )}
+              {status.recentLosses > 0 && (
+                <div className="text-yellow-600">⚠ {status.recentLosses} signal loss{status.recentLosses > 1 ? 'es' : ''} — cooldown scaled</div>
+              )}
+            </div>
+          </div>
+
+          {/* Analysis log */}
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Analysis log</p>
+            <div className="h-44 overflow-y-auto space-y-0.5 bg-gray-950/60 border border-gray-800 rounded p-2">
+              {status.log.length === 0 && (
+                <p className="text-[10px] text-gray-600 text-center mt-6">Waiting for candles…</p>
+              )}
+              {status.log.map(entry => (
+                <div key={entry.id} className="flex gap-1.5 text-[10px] font-mono">
+                  <span className="text-gray-600 shrink-0">{entry.ts}</span>
+                  <span className="text-gray-500 shrink-0">[{entry.epic.slice(0, 10)}]</span>
+                  <span className={logTypeStyle[entry.type]}>{entry.msg}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
