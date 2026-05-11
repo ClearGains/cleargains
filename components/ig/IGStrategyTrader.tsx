@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -18,7 +18,7 @@ import {
 } from '@/lib/igStrategyEngine';
 import { IGStockOpportunities } from './IGStockOpportunities';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type IGSession = { cst: string; securityToken: string; accountId: string; apiKey: string };
 
@@ -78,15 +78,15 @@ type BotPriceEntry = {
 };
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
-function fmt(n: number) { return `£${Math.abs(n).toFixed(2)}`; }
+function fmt(n: number) { return `Â£${Math.abs(n).toFixed(2)}`; }
 function fmtTime(iso: string) {
   return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 // PERMISSION: Dynamic position sizing based on available capital.
-// Caps order size to at most 5% of available funds, minimum 0.1 £/pt.
-// Returns 0 (skip trade) if available falls below £100 OR below 15% of starting balance.
+// Caps order size to at most 5% of available funds, minimum 0.1 Â£/pt.
+// Returns 0 (skip trade) if available falls below Â£100 OR below 15% of starting balance.
 function calcDynamicSize(requestedSize: number, available: number, startingBalance?: number): number {
   if (available < 100) return 0;       // pause if critically low
   if (startingBalance && available < startingBalance * 0.15) return 0; // pause at <15% of starting balance
@@ -120,13 +120,13 @@ function hasCorrelatedConfirmation(
   return false;
 }
 
-// ── API helpers ───────────────────────────────────────────────────────────────
+// â”€â”€ API helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function makeHeaders(s: IGSession, env: 'demo'|'live', extra?: Record<string,string>) {
   return { 'x-ig-cst': s.cst, 'x-ig-security-token': s.securityToken, 'x-ig-api-key': s.apiKey, 'x-ig-env': env, ...extra };
 }
 
-const SESSION_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours — matches server-side cache
+const SESSION_TTL_MS = 5 * 60 * 60 * 1000; // 5 hours â€” matches server-side cache
 
 async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSession|null> {
   const credKey = env === 'demo' ? 'ig_demo_credentials' : 'ig_live_credentials';
@@ -148,7 +148,7 @@ async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSe
       }
     }
 
-    // Fresh auth — pass forceRefresh so the server also bypasses its in-memory cache
+    // Fresh auth â€” pass forceRefresh so the server also bypasses its in-memory cache
     const r = await fetch('/api/ig/session', { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ username:c.username, password:c.password, apiKey:c.apiKey, env, forceRefresh }) });
     const d = await r.json() as { ok:boolean; cst?:string; securityToken?:string; accountId?:string };
@@ -162,7 +162,7 @@ async function connectIG(env: 'demo'|'live', forceRefresh = false): Promise<IGSe
   return null;
 }
 
-// ── Small UI pieces ───────────────────────────────────────────────────────────
+// â”€â”€ Small UI pieces â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function DirectionBadge({ dir, size='sm' }: { dir: string; size?: 'sm'|'xs' }) {
   const base = size === 'xs' ? 'text-[9px] px-1 py-0' : 'text-[10px] px-1.5 py-0.5';
@@ -205,7 +205,7 @@ function MarketSearch({ session, env, onSelect }: {
     <div>
       <div className="flex gap-2">
         <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key==='Enter' && void go()}
-          placeholder="Search market…"
+          placeholder="Search marketâ€¦"
           className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-orange-500" />
         <Button size="sm" onClick={go} loading={busy} icon={<Search className="h-3.5 w-3.5" />}>Find</Button>
       </div>
@@ -227,20 +227,20 @@ function MarketSearch({ session, env, onSelect }: {
   );
 }
 
-// ── Market-type helpers ───────────────────────────────────────────────────────
+// â”€â”€ Market-type helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Auto-sizing: stop distance is derived from BOTH market type AND timeframe.
- * Size is back-calculated so hitting the stop costs exactly stopLoss £.
+ * Size is back-calculated so hitting the stop costs exactly stopLoss Â£.
  * limitDist uses the timeframe's R:R ratio so the target is realistic to hit
  * within the chosen holding period (hours vs days vs weeks vs long-term).
  *
  * Timeframe multipliers vs daily baseline:
- *   hourly   → 0.5× stop, 1.5:1 R:R  (tight, same-session exits)
- *   daily    → 1.0× stop, 2.0:1 R:R  (intraday / end-of-day exits)
- *   weekly   → 2.5× stop, 2.5:1 R:R  (swing, multi-day holds)
- *   longterm → 5.0× stop, 3.0:1 R:R  (trend following, weeks/months)
- *   rsi2     → 1.2× stop, 2.0:1 R:R  (mean reversion, 1–5 days)
+ *   hourly   â†’ 0.5Ã— stop, 1.5:1 R:R  (tight, same-session exits)
+ *   daily    â†’ 1.0Ã— stop, 2.0:1 R:R  (intraday / end-of-day exits)
+ *   weekly   â†’ 2.5Ã— stop, 2.5:1 R:R  (swing, multi-day holds)
+ *   longterm â†’ 5.0Ã— stop, 3.0:1 R:R  (trend following, weeks/months)
+ *   rsi2     â†’ 1.2Ã— stop, 2.0:1 R:R  (mean reversion, 1â€“5 days)
  */
 function calcAutoSizing(
   price: number,
@@ -262,13 +262,13 @@ function calcAutoSizing(
   let baseStop: number;
   switch (mType) {
     case 'INDEX':
-      baseStop = Math.max(8, Math.round(price * 0.003));    // 0.3% e.g. FTSE 8500 → 26pt
+      baseStop = Math.max(8, Math.round(price * 0.003));    // 0.3% e.g. FTSE 8500 â†’ 26pt
       break;
     case 'FOREX':
       baseStop = 25;                                         // 25 pips baseline
       break;
     case 'COMMODITY':
-      baseStop = Math.max(5, Math.round(price * 0.005));    // 0.5% e.g. Gold $3300 → 17pt
+      baseStop = Math.max(5, Math.round(price * 0.005));    // 0.5% e.g. Gold $3300 â†’ 17pt
       break;
     case 'CRYPTO':
       baseStop = Math.max(200, Math.round(price * 0.015));  // 1.5%
@@ -280,24 +280,24 @@ function calcAutoSizing(
   const stopDist  = Math.max(1, Math.round(baseStop * mult));
   const rawSize   = stopLoss / stopDist;
   const size      = Math.max(0.1, Math.round(rawSize * 10) / 10);
-  const limitDist = Math.max(1, Math.round(stopDist * rr));   // R:R from timeframe, not £ target
+  const limitDist = Math.max(1, Math.round(stopDist * rr));   // R:R from timeframe, not Â£ target
   return { stopDist, limitDist, size };
 }
 
 /**
- * Dynamic position cap — scales with available funds and average signal quality.
+ * Dynamic position cap â€” scales with available funds and average signal quality.
  * Ensures the strategy self-limits when capital is tight or signals are weak.
  */
 function calcAutoMaxPositions(available: number, avgStrength: number): number {
-  // Target 10 per env (≈ 20 total with demo + live).
+  // Hard cap at 3 â€” fewer, higher-quality positions beat a bloated book.
+  // Rotation was the main source of forced losses; capping at 3 removes pressure to rotate.
   const byFunds =
-    available >= 5000 ? 10 :
-    available >= 3000 ? 8  :
-    available >= 2000 ? 6  :
-    available >= 1000 ? 4  :
-    available >= 500  ? 2  : 1;
-  const confAdj = avgStrength >= 80 ? 1 : avgStrength < 55 ? -1 : 0;
-  return Math.max(1, byFunds + confAdj);
+    available >= 3000 ? 3 :
+    available >= 1500 ? 2 :
+    available >= 500  ? 1 : 0;
+  // Confidence nudge: -1 when signals are weak (never raise above cap)
+  const confAdj = avgStrength < 60 ? -1 : 0;
+  return Math.max(0, byFunds + confAdj);
 }
 
 function isEpicTradeable(epic: string): boolean {
@@ -311,7 +311,7 @@ function isEpicTradeable(epic: string): boolean {
     if (day === 5 && mins >= 22 * 60) return false;
     return true;
   }
-  // Indices — closed all weekend
+  // Indices â€” closed all weekend
   if (day === 0 || day === 6) return false;
   const sessions: Record<string, [number, number, number, number]> = {
     'IX.D.FTSE.DAILY.IP':   [8,  0,  16, 30],
@@ -330,7 +330,7 @@ function isEpicTradeable(epic: string): boolean {
 }
 
 /**
- * Liquid trading window filter — only scan during high-volume periods.
+ * Liquid trading window filter â€” only scan during high-volume periods.
  * Thin liquidity = wider spreads, more whipsaws, less reliable signals.
  *
  * Times are UK local time (UTC+0 winter / UTC+1 summer).
@@ -348,14 +348,14 @@ function isLiquidTradingWindow(mType: MarketType): boolean {
 
   switch (mType) {
     case 'INDEX': {
-      // UK/EU open: 08:00–10:30 UK  (active London open)
-      // US overlap: 14:30–17:30 UK  (best liquidity of day)
+      // UK/EU open: 08:00â€“10:30 UK  (active London open)
+      // US overlap: 14:30â€“17:30 UK  (best liquidity of day)
       const inUKOpen = ukMins >= 8 * 60 && ukMins < 10 * 60 + 30;
       const inUSOver = ukMins >= 14 * 60 + 30 && ukMins < 17 * 60 + 30;
       return inUKOpen || inUSOver;
     }
     case 'FOREX': {
-      // Forex liquid: London session 08:00–17:00 UK, or NY overlap 13:00–17:00 UK
+      // Forex liquid: London session 08:00â€“17:00 UK, or NY overlap 13:00â€“17:00 UK
       // Skip weekends (Sat all day, Sun before 22:00 UTC)
       if (utcDay === 6) return false;
       if (utcDay === 0 && utcH < 22) return false;
@@ -363,8 +363,8 @@ function isLiquidTradingWindow(mType: MarketType): boolean {
       return ukMins >= 8 * 60 && ukMins < 17 * 60;
     }
     case 'SHARES': {
-      // UK shares: 08:00–16:30 UK
-      // US shares: 14:30–21:00 UK
+      // UK shares: 08:00â€“16:30 UK
+      // US shares: 14:30â€“21:00 UK
       const inUK = ukMins >= 8 * 60 && ukMins < 16 * 60 + 30;
       const inUS = ukMins >= 14 * 60 + 30 && ukMins < 21 * 60;
       return inUK || inUS;
@@ -416,16 +416,16 @@ function calibrateSignal(
   return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
 }
 
-// ── Signal calibration from bot server indicators (frontend decides, server just supplies data) ──
+// â”€â”€ Signal calibration from bot server indicators (frontend decides, server just supplies data) â”€â”€
 // High-conviction entry only: candle streak + MACD must agree. No low-quality signals.
 //
-// RSI gates — stricter, mid-range only:
-//   BUY  allowed when RSI 35–62 (early in upswing, not yet overextended)
-//   SELL allowed when RSI 38–65 (early in downswing, room still to fall)
-//   Both are BLOCKED outside these bands — don't chase exhausted moves.
+// RSI gates â€” stricter, mid-range only:
+//   BUY  allowed when RSI 35â€“62 (early in upswing, not yet overextended)
+//   SELL allowed when RSI 38â€“65 (early in downswing, room still to fall)
+//   Both are BLOCKED outside these bands â€” don't chase exhausted moves.
 //
-// SHORT logic: requires MACD clearly negative + RSI well above oversold (≥40).
-//   Shorting near RSI 30 is shorting the bottom — very high reversal risk.
+// SHORT logic: requires MACD clearly negative + RSI well above oversold (â‰¥40).
+//   Shorting near RSI 30 is shorting the bottom â€” very high reversal risk.
 function calibrateFromIndicators(
   rsi:           number | null,
   macd:          number | null,
@@ -450,9 +450,9 @@ function calibrateFromIndicators(
   let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
   let strength = 0;
 
-  // ── LONG entries ──
+  // â”€â”€ LONG entries â”€â”€
   if (consGreen >= 3 && okForBuy && macdBullish) {
-    // 3+ green candles + MACD bullish — high conviction
+    // 3+ green candles + MACD bullish â€” high conviction
     direction = 'BUY'; strength = 82;
     if (dailyUp) strength = Math.min(95, strength + 6);
     if (consGreen >= 4) strength = Math.min(95, strength + 4);
@@ -465,7 +465,7 @@ function calibrateFromIndicators(
     direction = 'BUY'; strength = 64;
   }
 
-  // ── SHORT entries — stricter: RSI must confirm room to fall ──
+  // â”€â”€ SHORT entries â€” stricter: RSI must confirm room to fall â”€â”€
   else if (consRed >= 3 && okForSell && macdBearish) {
     direction = 'SELL'; strength = 82;
     if (dailyDown) strength = Math.min(95, strength + 6);
@@ -478,20 +478,11 @@ function calibrateFromIndicators(
     direction = 'SELL'; strength = 64;
   }
 
-  // ── Fallback: MACD + daily trend, no candle data from bot server ──
-  else if (macdBullish && dailyUp && okForBuy) {
-    direction = 'BUY';  strength = 58;
-    if (macdStrong('BUY')) strength = Math.min(95, strength + 6);
-  } else if (macdBearish && dailyDown && okForSell) {
-    direction = 'SELL'; strength = 58;
-    if (macdStrong('SELL')) strength = Math.min(95, strength + 6);
-  }
-
-  if (direction === 'HOLD') return { direction: 'HOLD', strength: 0 };
+    if (direction === 'HOLD') return { direction: 'HOLD', strength: 0 };
   return { direction, strength: Math.min(99, Math.max(0, strength)) };
 }
 
-// ── Trade history ─────────────────────────────────────────────────────────────
+// â”€â”€ Trade history â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const IG_TRADE_HISTORY_KEY = 'ig_trade_history';
 
@@ -552,17 +543,17 @@ function recordTradeClose(
   return next;
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
+// â”€â”€ Main component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function IGStrategyTrader() {
 
-  // ── Sessions ───────────────────────────────────────────────────────────────
+  // â”€â”€ Sessions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [sessions, setSessions]     = useState<Partial<Record<'demo'|'live', IGSession>>>({});
   const [connecting, setConnecting] = useState<Partial<Record<'demo'|'live', boolean>>>({});
 
-  // ── Positions ──────────────────────────────────────────────────────────────
+  // â”€â”€ Positions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [positions, setPositions] = useState<PositionMap>({ demo:[], live:[] });
-  // positionsRef mirrors state but is updated synchronously — scanMarket reads
+  // positionsRef mirrors state but is updated synchronously â€” scanMarket reads
   // this so it never sees stale positions after a trade is placed mid-scan.
   const positionsRef = useRef<PositionMap>({ demo:[], live:[] });
   const [loadingPos, setLoadingPos] = useState(false);
@@ -570,7 +561,7 @@ export function IGStrategyTrader() {
   const [posError, setPosError]     = useState<string|null>(null);
   const posRefreshRef = useRef<ReturnType<typeof setInterval>|null>(null);
 
-  // ── Server-side strategy runner ────────────────────────────────────────────
+  // â”€â”€ Server-side strategy runner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [serverMode, setServerMode]         = useState(false);
   const [serverRunning, setServerRunning]   = useState(false);
   const [serverLog, setServerLog]           = useState<Array<{ id: string; ts: string; type: string; msg: string }>>([]);
@@ -604,7 +595,7 @@ export function IGStrategyTrader() {
       const d = await r.json() as { ok: boolean; error?: string };
       if (d.ok) {
         setServerRunning(true);
-        log('info', `[SERVER] Strategy runner started on Oracle VM — ${markets.length} market(s)`);
+        log('info', `[SERVER] Strategy runner started on Oracle VM â€” ${markets.length} market(s)`);
         startServerPoll();
       } else {
         log('error', `[SERVER] Failed to start: ${d.error ?? 'unknown'}`);
@@ -638,7 +629,7 @@ export function IGStrategyTrader() {
     if (serverPollRef.current) { clearInterval(serverPollRef.current); serverPollRef.current = null; }
   }
 
-  // ── Strategies ─────────────────────────────────────────────────────────────
+  // â”€â”€ Strategies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [strategies, setStrategies]     = useState<IGSavedStrategy[]>([]);
   const [activeStratId, setActiveStratId] = useState<string|null>(null); // display only (scanner)
   type StratTimers = { signal: ReturnType<typeof setInterval>; pos: ReturnType<typeof setInterval> };
@@ -649,7 +640,7 @@ export function IGStrategyTrader() {
   const newsSignalsRef     = useRef<Map<string, 'BUY'|'SELL'>>(new Map());
   const recentlyClosedRef  = useRef<Map<string, number>>(new Map());
 
-  // ── Active demo/live mode ──────────────────────────────────────────────────
+  // â”€â”€ Active demo/live mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
   const [showLiveConfirm, setShowLiveConfirm] = useState(false);
   const [liveConfirmSkipSession, setLiveConfirmSkipSession] = useState(false);
@@ -661,28 +652,28 @@ export function IGStrategyTrader() {
   // Sync settings modal
   const [syncModal, setSyncModal] = useState<{ demo: IGSavedStrategy; live: IGSavedStrategy }|null>(null);
 
-  // ── First-live-trade disclaimer (shown once ever) ──────────────────────────
+  // â”€â”€ First-live-trade disclaimer (shown once ever) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const liveTradeAckedRef   = useRef(false);
   const liveTradeResolveRef = useRef<((ok: boolean) => void)|null>(null);
   const [showLiveTradeDisclaimer, setShowLiveTradeDisclaimer] = useState(false);
 
-  // ── Test-run mode (single cycle, max 1 position) ───────────────────────────
+  // â”€â”€ Test-run mode (single cycle, max 1 position) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [testRunning, setTestRunning] = useState(false);
 
-  // ── Test Order / Diagnostic ───────────────────────────────────────────────
+  // â”€â”€ Test Order / Diagnostic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [testOrderBusy, setTestOrderBusy] = useState(false);
   const [diagModal, setDiagModal]         = useState(false);
   const [diagLines, setDiagLines]         = useState<string[]>([]);
 
-  // ── Funds management ───────────────────────────────────────────────────────
+  // â”€â”€ Funds management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // PERMISSION: igFundsRef holds freshly-fetched balance data across closures
   // (useRef avoids stale-closure issues with React state in callbacks).
   const igFundsRef = useRef<Partial<Record<'demo'|'live', { available: number; balance: number }>>>({});
   const [igFundsDisplay, setIgFundsDisplay] = useState<Partial<Record<'demo'|'live', { available: number; balance: number }>>>({});
-  // Starting balance captured when auto-run begins — used for 15% capital floor check.
+  // Starting balance captured when auto-run begins â€” used for 15% capital floor check.
   const startingBalanceRef = useRef<Partial<Record<'demo'|'live', number>>>({});
 
-  // ── Scan frequency settings ────────────────────────────────────────────────
+  // â”€â”€ Scan frequency settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [signalScanMs, setSignalScanMs] = useState(5 * 60_000);
   const [posMonitorMs, setPosMonitorMs] = useState(60_000);
   const signalStartRef = useRef<number|null>(null);
@@ -690,19 +681,19 @@ export function IGStrategyTrader() {
   const [signalCountdown, setSignalCountdown] = useState('');
   const [posCountdown, setPosCountdown]       = useState('');
 
-  // ── Market scanner state ───────────────────────────────────────────────────
+  // â”€â”€ Market scanner state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [scans, setScans] = useState<Record<string, MarketScan>>({});
   const [scanProgress, setScanProgress] = useState<string>('');
-  // Bot server real-time prices + indicators — refreshed once per scan cycle
+  // Bot server real-time prices + indicators â€” refreshed once per scan cycle
   const botPricesRef = useRef<Record<string, BotPriceEntry>>({});
-  // IG client sentiment — refreshed once per scan cycle (contrarian gate)
+  // IG client sentiment â€” refreshed once per scan cycle (contrarian gate)
   const sentimentRef = useRef<Record<string, { longPct: number; shortPct: number }>>({});
 
-  // ── Working orders ─────────────────────────────────────────────────────────
+  // â”€â”€ Working orders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [workingOrders, setWorkingOrders] = useState<Record<'demo'|'live', IGWorkingOrder[]>>({ demo:[], live:[] });
   const [cancellingOrder, setCancellingOrder] = useState<string|null>(null);
 
-  // ── Position management modals ─────────────────────────────────────────────
+  // â”€â”€ Position management modals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   type SlTpModal = { env: 'demo'|'live'; pos: IGPosition };
   const [slModal, setSlModal] = useState<SlTpModal|null>(null);
   const [tpModal, setTpModal] = useState<SlTpModal|null>(null);
@@ -711,13 +702,13 @@ export function IGStrategyTrader() {
   const [updatingPos, setUpdatingPos] = useState<string|null>(null);
   const [reversingPos, setReversingPos] = useState<string|null>(null);
 
-  // ── Tab (positions / working orders / trade history) ──────────────────────
+  // â”€â”€ Tab (positions / working orders / trade history) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [posTab, setPosTab] = useState<'positions'|'orders'|'history'>('positions');
 
-  // ── Trade history ──────────────────────────────────────────────────────────
+  // â”€â”€ Trade history â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [tradeHistory, setTradeHistory] = useState<IGTradeRecord[]>([]);
 
-  // ── Builder ────────────────────────────────────────────────────────────────
+  // â”€â”€ Builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [showBuilder, setShowBuilder]       = useState(false);
   const [editId, setEditId]                 = useState<string|null>(null);
   const [bName, setBName]                   = useState('');
@@ -735,7 +726,7 @@ export function IGStrategyTrader() {
   const [bStopLoss, setBStopLoss]           = useState(5);
   const [bTakeProfit, setBTakeProfit]       = useState(30);
 
-  // ── Manual trade ───────────────────────────────────────────────────────────
+  // â”€â”€ Manual trade â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [showManual, setShowManual]     = useState(false);
   const [manualEpic, setManualEpic]     = useState('');
   const [manualName, setManualName]     = useState('');
@@ -746,7 +737,7 @@ export function IGStrategyTrader() {
   const [manualEnv, setManualEnv]       = useState<'demo'|'live'>('demo');
   const [placingManual, setPlacingManual] = useState(false);
 
-  // ── Run state: per-strategy. RUNNING=full; PAUSED=monitor only; STOPPED=idle ─
+  // â”€â”€ Run state: per-strategy. RUNNING=full; PAUSED=monitor only; STOPPED=idle â”€
   type RunState = 'RUNNING' | 'PAUSED' | 'STOPPED';
   const runtimeStartRef                            = useRef<number|null>(null);
   const [runtimeDisplay, setRuntimeDisplay]       = useState('');
@@ -755,7 +746,7 @@ export function IGStrategyTrader() {
   const todayPnLRef                                = useRef(0);
   const [todayPnL, setTodayPnL]                   = useState(0);
   const pendingRestartRef                          = useRef<string[]>([]);
-  // ── Enhanced status tracking ──────────────────────────────────────────────
+  // â”€â”€ Enhanced status tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const lastSignalAtRef                            = useRef<number|null>(null);
   const [lastSignalAt, setLastSignalAt]           = useState<number|null>(null);
   const [lastSignalDisplay, setLastSignalDisplay] = useState('');
@@ -763,14 +754,14 @@ export function IGStrategyTrader() {
   const [stopError, setStopError]                 = useState<string|null>(null);
   const [runtimeStartDisplay, setRuntimeStartDisplay] = useState<string>('');
 
-  // ── Log ─────────────────────────────────────────────────────────────────────
+  // â”€â”€ Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Global log: manual trades, position management, system messages
   const [runLog, setRunLog] = useState<RunLog[]>([]);
   // Per-strategy log: one entry list per strategy ID
   const stratLogsRef = useRef<Record<string, RunLog[]>>({});
   const [stratLogs, setStratLogs] = useState<Record<string, RunLog[]>>({});
 
-  // ── Toast ──────────────────────────────────────────────────────────────────
+  // â”€â”€ Toast â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [toast, setToast] = useState<{ok:boolean;msg:string}|null>(null);
   function showToast(ok:boolean, msg:string) { setToast({ok,msg}); setTimeout(() => setToast(null), 4000); }
 
@@ -778,7 +769,7 @@ export function IGStrategyTrader() {
   function log(type: RunLog['type'], msg: string) {
     setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0, 100));
   }
-  // Per-strategy log (bot activity — each card shows its own)
+  // Per-strategy log (bot activity â€” each card shows its own)
   function slog(stratId: string, type: RunLog['type'], msg: string) {
     const entry: RunLog = { id: uid(), ts: new Date().toISOString(), type, msg };
     const prev = stratLogsRef.current[stratId] ?? [];
@@ -786,7 +777,7 @@ export function IGStrategyTrader() {
     setStratLogs(p => ({ ...p, [stratId]: [entry, ...(p[stratId] ?? [])].slice(0, 200) }));
   }
 
-  // ── Per-strategy state helpers ────────────────────────────────────────────
+  // â”€â”€ Per-strategy state helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   function getStratState(id: string): RunState {
     return stratStateRef.current[id] ?? 'STOPPED';
   }
@@ -819,7 +810,7 @@ export function IGStrategyTrader() {
     });
   }
 
-  // ── Connect on mount ───────────────────────────────────────────────────────
+  // â”€â”€ Connect on mount â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     setStrategies(loadStrategies('demo')); // start with demo strategies
     setTradeHistory(loadIGTradeHistory());
@@ -838,7 +829,7 @@ export function IGStrategyTrader() {
     if (savedMode === 'demo') setActiveModeState('demo');
   }, []);
 
-  // ── Reload env-namespaced strategies when switching Demo ↔ Live ──────────
+  // â”€â”€ Reload env-namespaced strategies when switching Demo â†” Live â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     setStrategies(loadStrategies(activeMode));
     // If there's an active running strategy that belongs to the other env, keep it running but deselect
@@ -849,7 +840,7 @@ export function IGStrategyTrader() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMode]);
 
-  // ── Auto-restart: collect all running strategy IDs on mount ─────────────
+  // â”€â”€ Auto-restart: collect all running strategy IDs on mount â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     const ids: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -860,7 +851,7 @@ export function IGStrategyTrader() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Auto-restart: start all pending strategies once sessions connect ──────
+  // â”€â”€ Auto-restart: start all pending strategies once sessions connect â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     if (!pendingRestartRef.current.length) return;
     if (!Object.values(sessions).some(Boolean)) return;
@@ -872,14 +863,14 @@ export function IGStrategyTrader() {
       if (!strat) continue;
       setActiveModeState(strat.env ?? 'demo');
       setStrategies(loadStrategies(strat.env ?? 'demo'));
-      log('info', `♻️ Strategy "${strat.name}" resumed — was running before page reload`);
+      log('info', `â™»ï¸ Strategy "${strat.name}" resumed â€” was running before page reload`);
       setActiveStratId(stratId);
       startAutoRun(strat);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
 
-  // ── Runtime + last-signal display tickers (1s resolution) ───────────────
+  // â”€â”€ Runtime + last-signal display tickers (1s resolution) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     const t = setInterval(() => {
       if (runtimeStartRef.current !== null) {
@@ -902,7 +893,7 @@ export function IGStrategyTrader() {
     return () => clearInterval(t);
   }, []);
 
-  // ── Countdown ticker ───────────────────────────────────────────────────────
+  // â”€â”€ Countdown ticker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     const t = setInterval(() => {
       if (!Object.values(stratStateRef.current).some(s => s !== 'STOPPED')) { setSignalCountdown(''); setPosCountdown(''); return; }
@@ -922,7 +913,7 @@ export function IGStrategyTrader() {
     return () => clearInterval(t);
   }, [stratStates, signalScanMs, posMonitorMs]);
 
-  // ── Load positions ─────────────────────────────────────────────────────────
+  // â”€â”€ Load positions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const loadPositions = useCallback(async (envFilter?: 'demo'|'live') => {
     const envs: ('demo'|'live')[] = envFilter ? [envFilter] : ['demo','live'];
     setLoadingPos(true);
@@ -932,7 +923,7 @@ export function IGStrategyTrader() {
       if (!sess) continue;
       try {
         let r = await fetch('/api/ig/positions', { headers: makeHeaders(sess, env) });
-        // 401 → clear stale cache, re-authenticate fresh and retry once
+        // 401 â†’ clear stale cache, re-authenticate fresh and retry once
         if (r.status === 401) {
           localStorage.removeItem(`ig_session_${env}`);
           const fresh = await connectIG(env, true);
@@ -945,7 +936,7 @@ export function IGStrategyTrader() {
           positionsRef.current = { ...positionsRef.current, [env]: newList };
           setPositions(p => ({...p, [env]: newList}));
         } else {
-          const msg = `[${env.toUpperCase()}] Positions error: ${d.error ?? 'unknown'}${d.detail ? ` — ${d.detail}` : ''}`;
+          const msg = `[${env.toUpperCase()}] Positions error: ${d.error ?? 'unknown'}${d.detail ? ` â€” ${d.detail}` : ''}`;
           setPosError(msg);
         }
       } catch (e) {
@@ -967,7 +958,7 @@ export function IGStrategyTrader() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
 
-  // ── Load working orders ────────────────────────────────────────────────────
+  // â”€â”€ Load working orders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const loadWorkingOrders = useCallback(async (envFilter?: 'demo'|'live') => {
     const envs: ('demo'|'live')[] = envFilter ? [envFilter] : ['demo','live'];
     for (const env of envs) {
@@ -981,7 +972,7 @@ export function IGStrategyTrader() {
     }
   }, [sessions]);
 
-  // ── Update stop/limit levels on open position ──────────────────────────────
+  // â”€â”€ Update stop/limit levels on open position â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function updatePositionSL(env: 'demo'|'live', pos: IGPosition, stopLevel: number|null, limitLevel: number|null) {
     const sess = sessions[env];
     if (!sess) return { ok: false, error: `No ${env} session` };
@@ -993,7 +984,7 @@ export function IGStrategyTrader() {
     return r.json() as Promise<{ok:boolean;error?:string}>;
   }
 
-  // ── Cancel working order ───────────────────────────────────────────────────
+  // â”€â”€ Cancel working order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function cancelWorkingOrder(env: 'demo'|'live', dealId: string) {
     setCancellingOrder(dealId);
     const sess = sessions[env];
@@ -1016,7 +1007,7 @@ export function IGStrategyTrader() {
     setCancellingOrder(null);
   }
 
-  // ── Reverse position (close + open opposite) ───────────────────────────────
+  // â”€â”€ Reverse position (close + open opposite) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function reversePosition(env: 'demo'|'live', pos: IGPosition) {
     setReversingPos(pos.dealId);
     const closeDir = pos.direction === 'BUY' ? 'SELL' : 'BUY';
@@ -1028,7 +1019,7 @@ export function IGStrategyTrader() {
     // Step 2: open opposite direction
     const or = await placeOrder(env, pos.epic, closeDir, pos.size);
     if (or.ok) {
-      log(closeDir === 'BUY' ? 'buy' : 'sell', `[${env.toUpperCase()}] Reversed → opened ${closeDir} ${pos.instrumentName ?? pos.epic}`);
+      log(closeDir === 'BUY' ? 'buy' : 'sell', `[${env.toUpperCase()}] Reversed â†’ opened ${closeDir} ${pos.instrumentName ?? pos.epic}`);
       showToast(true, `Reversed to ${closeDir}`);
       await loadPositions(env);
     } else {
@@ -1055,11 +1046,11 @@ export function IGStrategyTrader() {
     });
   }, [activeStratId, strategies]);
 
-  // ── Place / close ──────────────────────────────────────────────────────────
+  // â”€â”€ Place / close â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Returns a guaranteed-fresh session for `env`.
-   * Proactively re-auths if the cached token is ≥ 5h old.
+   * Proactively re-auths if the cached token is â‰¥ 5h old.
    * Clears stale localStorage cache before re-authing.
    */
   async function freshSession(env: 'demo'|'live'): Promise<IGSession|null> {
@@ -1077,7 +1068,7 @@ export function IGStrategyTrader() {
         }
       }
     } catch {}
-    // Session still fresh — return from state (connectIG cached it on mount)
+    // Session still fresh â€” return from state (connectIG cached it on mount)
     return sessions[env] ?? null;
   }
 
@@ -1093,7 +1084,7 @@ export function IGStrategyTrader() {
       body: JSON.stringify(orderBody),
     });
 
-    // 401 / 403 → clear cache, re-auth, retry once
+    // 401 / 403 â†’ clear cache, re-auth, retry once
     if (r.status === 401 || r.status === 403) {
       localStorage.removeItem(`ig_session_${env}`);
       const fresh = await connectIG(env, true);
@@ -1122,7 +1113,7 @@ export function IGStrategyTrader() {
       body: JSON.stringify(closeBody),
     });
 
-    // 401 / 403 → re-auth and retry once
+    // 401 / 403 â†’ re-auth and retry once
     if (r.status === 401 || r.status === 403) {
       localStorage.removeItem(`ig_session_${env}`);
       const fresh = await connectIG(env, true);
@@ -1140,7 +1131,7 @@ export function IGStrategyTrader() {
     return r.json() as Promise<{ok:boolean;error?:string}>;
   }
 
-  // ── Fetch IG account funds ─────────────────────────────────────────────────
+  // â”€â”€ Fetch IG account funds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // PERMISSION: Fetches available funds before each scan cycle so the strategy
   // can size positions dynamically and skip markets when funds are low.
   async function fetchIGFunds(env: 'demo'|'live'): Promise<{ available: number; balance: number } | null> {
@@ -1165,12 +1156,12 @@ export function IGStrategyTrader() {
     indicators?: { rsi: number|null; macd: number|null; atr: number|null };
   };
 
-  // ── Fetch market snapshot — Yahoo Finance primary, bot server as validation layer ──
-  // Yahoo drives the signal (daily change % → BUY/SELL threshold).
-  // Bot server RSI/MACD is attached when available — used in scanMarket to
+  // â”€â”€ Fetch market snapshot â€” Yahoo Finance primary, bot server as validation layer â”€â”€
+  // Yahoo drives the signal (daily change % â†’ BUY/SELL threshold).
+  // Bot server RSI/MACD is attached when available â€” used in scanMarket to
   // boost or reduce strength based on whether indicators confirm the direction.
   async function fetchSnapshot(name: string, epic?: string): Promise<SnapshotResult|null> {
-    // ── Step 1: Yahoo Finance (primary signal source) ──
+    // â”€â”€ Step 1: Yahoo Finance (primary signal source) â”€â”€
     const { YAHOO_SYMBOL_MAP } = await import('@/lib/yahooClient');
     const symbol = YAHOO_SYMBOL_MAP[name];
     let yahooResult: SnapshotResult | null = null;
@@ -1189,19 +1180,19 @@ export function IGStrategyTrader() {
       } catch {}
     }
 
-    // ── Step 2: Bot server (secondary — real-time RSI/MACD/ATR from Lightstreamer) ──
+    // â”€â”€ Step 2: Bot server (secondary â€” real-time RSI/MACD/ATR from Lightstreamer) â”€â”€
     const botData  = epic ? botPricesRef.current[epic] : null;
     const hasBot   = !!(botData && botData.candleCount >= 5 && botData.mid > 0);
     const botInds  = hasBot ? { rsi: botData!.rsi, macd: botData!.macd, atr: botData!.atr } : undefined;
 
-    // ── Return: Yahoo result with bot indicators attached, or bot-only, or error ──
+    // â”€â”€ Return: Yahoo result with bot indicators attached, or bot-only, or error â”€â”€
     if (yahooResult) {
       return hasBot
         ? { ...yahooResult, source: 'yahoo+bot', indicators: botInds }
         : yahooResult;
     }
 
-    // No Yahoo data — fall back to bot server alone if available.
+    // No Yahoo data â€” fall back to bot server alone if available.
     // Derive signal from raw indicators (bot server is data-only; frontend decides direction).
     if (hasBot) {
       const bd    = botData!;
@@ -1222,7 +1213,7 @@ export function IGStrategyTrader() {
              error: symbol ? 'No data returned' : `No symbol mapping for "${name}"` };
   }
 
-  // ── Fetch news signals once per scan cycle ────────────────────────────────
+  // â”€â”€ Fetch news signals once per scan cycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function fetchNewsSignals(markets: WatchlistMarket[], envPositions: Record<string, IGPosition[]>) {
     try {
       const r = await fetch('/api/news/finnhub?category=general');
@@ -1259,7 +1250,7 @@ export function IGStrategyTrader() {
           const match = watchlistNames.find(n => n.toLowerCase().includes(asset.toLowerCase()) || asset.toLowerCase().includes(n.toLowerCase()));
           if (match) {
             newMap.set(match, dir);
-            log('signal', `[NEWS] ${match} → ${dir} (${sig.confidence}%) — ${sig.reasoning}`);
+            log('signal', `[NEWS] ${match} â†’ ${dir} (${sig.confidence}%) â€” ${sig.reasoning}`);
           }
         }
       }
@@ -1267,7 +1258,7 @@ export function IGStrategyTrader() {
     } catch {}
   }
 
-  // ── Scan one market + execute ──────────────────────────────────────────────
+  // â”€â”€ Scan one market + execute â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
     const envs = strat.accounts.filter(e => sessions[e]);
@@ -1281,27 +1272,27 @@ export function IGStrategyTrader() {
       return null;
     }
 
-    // ── Gate 1: Liquid trading window ─────────────────────────────────────────
+    // â”€â”€ Gate 1: Liquid trading window â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const mType = market.marketType ?? getMarketType(market.epic);
     if (!isLiquidTradingWindow(mType)) {
       setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'idle' } }));
-      return null; // outside liquid hours — skip silently
+      return null; // outside liquid hours â€” skip silently
     }
 
-    // ── Calibrated signal scoring ─────────────────────────────────────────────
+    // â”€â”€ Calibrated signal scoring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const stopLoss = strat.stopLoss ?? strat.stopPct ?? 5;
 
     const pctStr         = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
     const rsiVal         = snapshot.indicators?.rsi  ?? null;
     const macdVal        = snapshot.indicators?.macd ?? null;
     const atrVal         = snapshot.indicators?.atr  ?? null;
-    // Pull raw candle streak counts from bot server — frontend uses these for its own signal logic
+    // Pull raw candle streak counts from bot server â€” frontend uses these for its own signal logic
     const botEntry       = botPricesRef.current[market.epic];
     const botCandleCount = botEntry?.candleCount ?? 0;
     const consRed        = botEntry?.consecutiveReds   ?? 0;
     const consGreen      = botEntry?.consecutiveGreens ?? 0;
 
-    // Bot server is primary when ≥20 candles available (enough for reliable RSI/MACD/candle streaks)
+    // Bot server is primary when â‰¥20 candles available (enough for reliable RSI/MACD/candle streaks)
     // or when bot is the only data source. Below 20 candles indicators are unreliable.
     const useBotPrimary = snapshot.source === 'bot-server' ||
                           (snapshot.source === 'yahoo+bot' && botCandleCount >= 20);
@@ -1310,7 +1301,7 @@ export function IGStrategyTrader() {
     let strength = 0;
 
     if (useBotPrimary) {
-      // All signal logic in the frontend — bot server supplies raw indicators only
+      // All signal logic in the frontend â€” bot server supplies raw indicators only
       const r = calibrateFromIndicators(rsiVal, macdVal, snapshot.changePercent, mType, consRed, consGreen);
       direction = r.direction;
       strength  = r.strength;
@@ -1339,9 +1330,9 @@ export function IGStrategyTrader() {
       }
     }
 
-    // ── Gate 2: IG Client Sentiment (contrarian) ─────────────────────────────
-    // Retail crowds are typically wrong at extremes. When ≥75% of IG clients
-    // are on one side, trade against them. Reduce strength when ≥65%.
+    // â”€â”€ Gate 2: IG Client Sentiment (contrarian) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Retail crowds are typically wrong at extremes. When â‰¥75% of IG clients
+    // are on one side, trade against them. Reduce strength when â‰¥65%.
     if (direction !== 'HOLD') {
       const sent = sentimentRef.current[market.epic];
       if (sent) {
@@ -1350,14 +1341,14 @@ export function IGStrategyTrader() {
         const moderateLong  = sent.longPct  >= 65 && direction === 'BUY';
         const moderateShort = sent.shortPct >= 65 && direction === 'SELL';
         if (crowdedLong || crowdedShort) {
-          direction = 'HOLD'; strength = 0; // hard block at ≥75% extreme
+          direction = 'HOLD'; strength = 0; // hard block at â‰¥75% extreme
         } else if (moderateLong || moderateShort) {
-          strength = Math.max(0, strength - 15); // soften at ≥65%
+          strength = Math.max(0, strength - 15); // soften at â‰¥65%
         }
       }
     }
 
-    // ── Gate 3: 5-minute trend alignment ────────────────────────────────────
+    // â”€â”€ Gate 3: 5-minute trend alignment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Only take a 1-min signal when the 5-min trend agrees (avoids counter-trend scalps).
     if (direction !== 'HOLD' && botCandleCount >= 10) {
       const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
@@ -1369,7 +1360,7 @@ export function IGStrategyTrader() {
       }
     }
 
-    // ATR-based stop/TP when real-time ATR available (3×ATR stop, 6×ATR TP → 2:1 R:R)
+    // ATR-based stop/TP when real-time ATR available (3Ã—ATR stop, 6Ã—ATR TP â†’ 2:1 R:R)
     let { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, strat.timeframe);
     if (atrVal !== null && atrVal > 0) {
       const atrStop = Math.round(atrVal * 3);
@@ -1379,9 +1370,9 @@ export function IGStrategyTrader() {
 
     const hasBotData = snapshot.source === 'yahoo+bot' || snapshot.source === 'bot-server';
     const reason = useBotPrimary && rsiVal !== null
-      ? `RSI ${rsiVal.toFixed(0)} (${mType}) · Daily ${pctStr} [${botCandleCount}c]`
+      ? `RSI ${rsiVal.toFixed(0)} (${mType}) Â· Daily ${pctStr} [${botCandleCount}c]`
       : hasBotData && rsiVal !== null
-        ? `Daily ${pctStr} (${mType}) · RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? '✓' : '⚠') : (rsiVal > 50 ? '✓' : '⚠')}`
+        ? `Daily ${pctStr} (${mType}) Â· RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? 'âœ“' : 'âš ') : (rsiVal > 50 ? 'âœ“' : 'âš ')}`
         : `Daily ${pctStr} (${mType})`;
 
     const sig: StrategySignal = {
@@ -1397,15 +1388,15 @@ export function IGStrategyTrader() {
           ? { label: 'RSI (live)',  value: rsiVal.toFixed(0),     status: (direction === 'BUY' ? (rsiVal < 50 ? 'bullish' : 'bearish') : (rsiVal > 50 ? 'bearish' : 'bullish')) as 'bullish'|'bearish'|'neutral' }
           : { label: 'Type',        value: mType,                 status: 'neutral' as const },
         hasBotData && macdVal !== null
-          ? { label: 'MACD (live)', value: macdVal > 0 ? '↑ bullish' : '↓ bearish', status: (macdVal > 0 ? 'bullish' : 'bearish') as 'bullish'|'bearish'|'neutral' }
+          ? { label: 'MACD (live)', value: macdVal > 0 ? 'â†‘ bullish' : 'â†“ bearish', status: (macdVal > 0 ? 'bullish' : 'bearish') as 'bullish'|'bearish'|'neutral' }
           : { label: 'Type',        value: mType,                 status: 'neutral' as const },
         hasBotData && atrVal !== null
           ? { label: 'ATR (live)',  value: atrVal.toFixed(1),     status: 'neutral' as const }
           : { label: 'Type',        value: mType,                 status: 'neutral' as const },
         { label: 'Stop dist',  value: `${stopDist}pt`,            status: 'neutral' as const },
         { label: 'TP dist',    value: `${limitDist}pt`,           status: 'neutral' as const },
-        { label: 'Size',       value: `£${autoSize}/pt`,          status: 'neutral' as const },
-        { label: 'Max loss',   value: `£${(autoSize * stopDist).toFixed(2)}`, status: 'neutral' as const },
+        { label: 'Size',       value: `Â£${autoSize}/pt`,          status: 'neutral' as const },
+        { label: 'Max loss',   value: `Â£${(autoSize * stopDist).toFixed(2)}`, status: 'neutral' as const },
       ],
     };
 
@@ -1418,12 +1409,12 @@ export function IGStrategyTrader() {
       },
     }));
 
-    // ── Decide whether to trade ───────────────────────────────────────────────
+    // â”€â”€ Decide whether to trade â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const newsDir   = newsSignalsRef.current.get(market.name) ?? null;
     const forceOpen = market.forceOpen === true;
     const highConf  = strength >= 90;
 
-    // Signal threshold — fixed, no adaptive lowering. Quality over quantity:
+    // Signal threshold â€” fixed, no adaptive lowering. Quality over quantity:
     // a sparse portfolio does not justify taking weaker signals.
     const botModeGlobal  = strat.mode ?? 'BOTH';
     const ownedDirGlobal = botModeGlobal === 'LONG_ONLY' ? 'BUY' : botModeGlobal === 'SHORT_ONLY' ? 'SELL' : null;
@@ -1436,7 +1427,7 @@ export function IGStrategyTrader() {
     const totalOwned = envs.reduce((sum, e) =>
       sum + positions[e].filter(p => ownedDirGlobal === null || p.direction === ownedDirGlobal).length, 0);
     const globalFillRatio = totalAllowed > 0 ? totalOwned / totalAllowed : 1;
-    const dynamicMinStrength = strat.minStrength ?? 65; // raised default; no adaptive lowering
+    const dynamicMinStrength = strat.minStrength ?? 72; // high bar â€” only strong, confirmed signals
 
     const tradeDir: 'BUY' | 'SELL' | null =
       newsDir
@@ -1448,10 +1439,10 @@ export function IGStrategyTrader() {
 
     if (!strat.autoTrade || !tradeDir) {
       if (direction !== 'HOLD' && !forceOpen)
-        log('signal', `${market.name} → ${direction} ${strength}% (need ${dynamicMinStrength}% — no trade)`);
+        log('signal', `${market.name} â†’ ${direction} ${strength}% (need ${dynamicMinStrength}% â€” no trade)`);
     } else {
       for (const env of envs) {
-        // Always read the ref — not the stale React state — so checks see positions
+        // Always read the ref â€” not the stale React state â€” so checks see positions
         // placed earlier in the same scan loop without waiting for a re-render.
         const envPos = positionsRef.current[env];
         const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
@@ -1465,11 +1456,11 @@ export function IGStrategyTrader() {
           );
           for (const opp of toClose) {
             const exitPnl = opp.upl ?? 0;
-            slog(strat.id, 'info', `[AUTO] Closing ${market.name} — signal reversed to ${tradeDir}…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${market.name} â€” signal reversed to ${tradeDir}â€¦`);
             const cr = await closePos(env, opp);
             if (cr.ok) {
               const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
-              slog(strat.id, 'close', `[AUTO] ✓ Closed ${market.name} — reversed to ${tradeDir} — P&L: £${exitPnl.toFixed(2)}`);
+              slog(strat.id, 'close', `[AUTO] âœ“ Closed ${market.name} â€” reversed to ${tradeDir} â€” P&L: Â£${exitPnl.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, exitPnl, 'STRATEGY', new Date().toISOString()));
               recentlyClosedRef.current.set(`${market.epic}:${opp.direction}`, Date.now());
             } else slog(strat.id, 'error', `[${env.toUpperCase()}] Reversal close failed: ${cr.error ?? 'unknown'}`);
@@ -1484,27 +1475,29 @@ export function IGStrategyTrader() {
         // Don't double up in same direction on same instrument
         if (positionsRef.current[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
-        // ── Per-type concentration cap ──────────────────────────────────────────
-        // Indices (FTSE/S&P/NASDAQ/DOW/DAX) are highly correlated — capped at 2.
-        // Commodities and crypto are volatile — capped at 1 each.
-        // Forex pairs share USD exposure — capped at 3.
-        // Shares — capped at 2 to avoid sector concentration.
+        // â”€â”€ Per-type concentration cap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Indices (FTSE/S&P/NASDAQ/DOW/DAX) are highly correlated â€” capped at 2.
+        // Commodities and crypto are volatile â€” capped at 1 each.
+        // Forex pairs share USD exposure â€” capped at 3.
+        // Shares â€” capped at 2 to avoid sector concentration.
         const typeMax: Record<MarketType, number> = {
           INDEX:     2,
-          FOREX:     3,
+          FOREX:     2,
           SHARES:    2,
           COMMODITY: 1,
           CRYPTO:    1,
         };
         const typeCount = positionsRef.current[env].filter(p => getMarketType(p.epic) === mType).length;
         if (typeCount >= typeMax[mType]) {
-          slog(strat.id, 'signal', `[SKIP] ${market.name} — ${mType} cap (${typeCount}/${typeMax[mType]} positions)`);
+          slog(strat.id, 'signal', `[SKIP] ${market.name} â€” ${mType} cap (${typeCount}/${typeMax[mType]} positions)`);
           continue;
         }
 
-        // ── Portfolio cap + one-for-one rotation ───────────────────────────────
-        // When at cap, swap out the single worst losing position (held >30min) to make room.
-        // We never close a profitable position just to open a new one.
+        // â”€â”€ Portfolio cap â€” hard stop, no rotation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Rotation (closing losers to make room) was the primary source of forced
+        // losses. Now we simply skip any new signal when the book is full.
+        // Positions close naturally via TP, stop-loss, or the momentum-flip close
+        // in the position monitor â€” never to manufacture capacity.
         const ownedPositions = positionsRef.current[env].filter(p => ownedDir === null || p.direction === ownedDir);
         const fundsForMax    = igFundsRef.current[env]?.available ?? 0;
         const effectiveMax   = strat.autoMaxPositions
@@ -1513,76 +1506,53 @@ export function IGStrategyTrader() {
         const fillRatio = effectiveMax > 0 ? ownedPositions.length / effectiveMax : 1;
 
         if (effectiveMax > 0 && ownedPositions.length >= effectiveMax) {
-          if (strat.autoClose) {
-            const now = Date.now();
-            const rotatableLoser = ownedPositions
-              .filter(p => (p.upl ?? 0) < 0 && p.createdDate && now - new Date(p.createdDate).getTime() > 30 * 60_000)
-              .sort((a, b) => (a.upl ?? 0) - (b.upl ?? 0))[0];
-            if (rotatableLoser) {
-              const lossPnl = rotatableLoser.upl ?? 0;
-              slog(strat.id, 'info', `[ROTATE] ${rotatableLoser.instrumentName ?? rotatableLoser.epic} (£${lossPnl.toFixed(2)}) → ${market.name} (${strength}%)…`);
-              const cr = await closePos(env, rotatableLoser);
-              if (!cr.ok) { slog(strat.id, 'error', `[ROTATE] Close failed: ${cr.error}`); continue; }
-              const exitPx = rotatableLoser.direction === 'BUY' ? (rotatableLoser.bid ?? rotatableLoser.level) : (rotatableLoser.offer ?? rotatableLoser.level);
-              todayPnLRef.current += lossPnl;
-              setTodayPnL(todayPnLRef.current);
-              slog(strat.id, 'close', `[ROTATE] ✓ ${rotatableLoser.instrumentName ?? rotatableLoser.epic} — P&L: £${lossPnl.toFixed(2)}`);
-              setTradeHistory(prev => recordTradeClose(prev, rotatableLoser.dealId, exitPx, lossPnl, 'STRATEGY', new Date().toISOString()));
-              recentlyClosedRef.current.set(`${rotatableLoser.epic}:${rotatableLoser.direction}`, Date.now());
-              await loadPositions(env);
-            } else {
-              slog(strat.id, 'signal', `[HOLD] ${market.name} — at cap (${ownedPositions.length}/${effectiveMax}), all positions in profit`);
-              continue;
-            }
-          } else {
-            slog(strat.id, 'signal', `[SKIP] ${market.name} — at cap (${ownedPositions.length}/${effectiveMax})`);
-            continue;
-          }
+          slog(strat.id, 'signal', `[SKIP] ${market.name} â€” at cap (${ownedPositions.length}/${effectiveMax})`);
+          continue;
         }
 
-        // Re-entry cooldown — shorter when portfolio has spare capacity
+        // Re-entry cooldown â€” shorter when portfolio has spare capacity
         const recentlyClosedAt = recentlyClosedRef.current.get(`${market.epic}:${tradeDir}`);
         const cooldown = fillRatio < 0.8 ? 20 * 60_000 : 2 * 60 * 60_000;
         if (recentlyClosedAt && Date.now() - recentlyClosedAt < cooldown) {
           const newsConf = newsSignalsRef.current.get(market.name);
           if (!newsConf || newsConf !== tradeDir) {
-            slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} — recently closed, cooldown ${Math.round(cooldown / 60_000)}min`);
+            slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} â€” recently closed, cooldown ${Math.round(cooldown / 60_000)}min`);
             continue;
           }
-          slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} — news confirms re-entry after close`);
+          slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} â€” news confirms re-entry after close`);
         }
 
         // Skip when paused
         if (getStratState(strat.id) === 'PAUSED') {
-          slog(strat.id, 'signal', `[PAUSED] ${market.name} → ${tradeDir} ${strength}% — monitoring only`);
+          slog(strat.id, 'signal', `[PAUSED] ${market.name} â†’ ${tradeDir} ${strength}% â€” monitoring only`);
           continue;
         }
 
         // One-time disclaimer before first live trade
         if (env === 'live') {
           const ok = await confirmLiveTrade();
-          if (!ok) { slog(strat.id, 'info', `[LIVE] Disclaimer declined — skipping ${market.name}`); continue; }
+          if (!ok) { slog(strat.id, 'info', `[LIVE] Disclaimer declined â€” skipping ${market.name}`); continue; }
         }
 
-        // PERMISSION: Dynamic position sizing — cap size to 5% of available funds.
+        // PERMISSION: Dynamic position sizing â€” cap size to 5% of available funds.
         const fundsNow = igFundsRef.current[env];
         const available = fundsNow?.available ?? Infinity;
         const startBal  = startingBalanceRef.current[env];
         const orderSizeRaw = calcDynamicSize(autoSize, available, startBal);
 
         if (orderSizeRaw === 0) {
-          const floorPct = startBal ? ` (floor: 15% of starting £${startBal.toFixed(0)})` : '';
-          slog(strat.id, 'error', `[${env.toUpperCase()}] ⚠️ Insufficient funds (£${available.toFixed(2)} available${floorPct}) — pausing trades. Top up at ig.com.`);
-          showToast(false, `⚠️ Low funds in IG ${env} — skipping`);
+          const floorPct = startBal ? ` (floor: 15% of starting Â£${startBal.toFixed(0)})` : '';
+          slog(strat.id, 'error', `[${env.toUpperCase()}] âš ï¸ Insufficient funds (Â£${available.toFixed(2)} available${floorPct}) â€” pausing trades. Top up at ig.com.`);
+          showToast(false, `âš ï¸ Low funds in IG ${env} â€” skipping`);
           continue;
         }
 
         // [AUTO] +50% size boost when a correlated instrument confirms the signal
         const corroborated = hasCorrelatedConfirmation(market.name, tradeDir, scans);
         const orderSize = corroborated ? Math.round(orderSizeRaw * 1.5 * 10) / 10 : orderSizeRaw;
-        if (corroborated) slog(strat.id, 'info', `[AUTO] Correlated confirmation — size boosted to £${orderSize}/pt`);
+        if (corroborated) slog(strat.id, 'info', `[AUTO] Correlated confirmation â€” size boosted to Â£${orderSize}/pt`);
 
-        // Capital-floor: if funds tight (< £500), close worst own-mode loser to free capital
+        // Capital-floor: if funds tight (< Â£500), close worst own-mode loser to free capital
         if (available < 500 && ownedPositions.length > 0) {
           const now = Date.now();
           const oldLosers = ownedPositions
@@ -1590,18 +1560,18 @@ export function IGStrategyTrader() {
             .sort((a, b) => a.upl - b.upl);
           if (oldLosers.length > 0) {
             const worst = oldLosers[0];
-            slog(strat.id, 'info', `[AUTO] Closing ${worst.instrumentName ?? worst.epic} — capital below £500…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${worst.instrumentName ?? worst.epic} â€” capital below Â£500â€¦`);
             const cr = await closePos(env, worst);
             if (cr.ok) {
               const exitPx = worst.direction === 'BUY' ? (worst.bid ?? worst.level) : (worst.offer ?? worst.level);
-              slog(strat.id, 'close', `[AUTO] ✓ Closed ${worst.instrumentName ?? worst.epic} — capital floor — P&L: £${(worst.upl ?? 0).toFixed(2)}`);
+              slog(strat.id, 'close', `[AUTO] âœ“ Closed ${worst.instrumentName ?? worst.epic} â€” capital floor â€” P&L: Â£${(worst.upl ?? 0).toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, worst.dealId, exitPx, worst.upl ?? 0, 'STRATEGY', new Date().toISOString()));
               await loadPositions(env); await fetchIGFunds(env);
             } else slog(strat.id, 'error', `[${env.toUpperCase()}] Capital-floor close failed: ${cr.error ?? 'unknown'}`);
           }
         }
 
-        if (strength >= 90) slog(strat.id, 'info', `[AUTO] High-confidence signal (${strength}%) — proceeding`);
+        if (strength >= 90) slog(strat.id, 'info', `[AUTO] High-confidence signal (${strength}%) â€” proceeding`);
 
         // Gemini second opinion
         let effectiveDir: 'BUY' | 'SELL' = tradeDir as 'BUY' | 'SELL';
@@ -1623,18 +1593,18 @@ export function IGStrategyTrader() {
           });
           if (gRes.ok) {
             const gv = await gRes.json() as { direction: 'BUY' | 'SELL' | 'SKIP'; confidence: number; reason: string; engine: string };
-            slog(strat.id, 'info', `[GEMINI] ${market.name} → ${gv.direction} ${gv.confidence}% — ${gv.reason} (${gv.engine})`);
+            slog(strat.id, 'info', `[GEMINI] ${market.name} â†’ ${gv.direction} ${gv.confidence}% â€” ${gv.reason} (${gv.engine})`);
             if (gv.direction === 'SKIP' || gv.confidence < (strat.minStrength ?? 50)) {
-              slog(strat.id, 'info', `[GEMINI] Skipped ${market.name} — ${gv.direction} ${gv.confidence}%`);
+              slog(strat.id, 'info', `[GEMINI] Skipped ${market.name} â€” ${gv.direction} ${gv.confidence}%`);
               continue;
             }
             if (gv.direction === 'BUY' || gv.direction === 'SELL') effectiveDir = gv.direction;
           }
-        } catch { /* Gemini unavailable — proceed with original signal */ }
+        } catch { /* Gemini unavailable â€” proceed with original signal */ }
 
         const maxLoss = orderSize * stopDist;
         slog(strat.id, effectiveDir === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}] → ${effectiveDir} ${market.name} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+          `[${env.toUpperCase()}] â†’ ${effectiveDir} ${market.name} | Â£${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss Â£${maxLoss.toFixed(2)} | ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
 
         const or = await placeOrder(env, market.epic, effectiveDir, orderSize, stopDist, limitDist);
 
@@ -1642,7 +1612,7 @@ export function IGStrategyTrader() {
           completedTradesRef.current += 1;
           setCompletedTrades(completedTradesRef.current);
           slog(strat.id, tradeDir === 'BUY' ? 'buy' : 'sell',
-            `[${env.toUpperCase()}] ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · filled @ ${or.level ?? '?'}`);
+            `[${env.toUpperCase()}] âœ… ${or.dealStatus ?? 'ACCEPTED'} â€” ref ${or.dealReference ?? 'n/a'} Â· filled @ ${or.level ?? '?'}`);
           showToast(true, `[${env}] ${tradeDir} ${market.name}`);
           setTradeHistory(prev => recordTradeOpen(prev, {
             portfolioName: strat.name, market: market.name, epic: market.epic,
@@ -1657,11 +1627,11 @@ export function IGStrategyTrader() {
         } else {
           const errStr = (or.error ?? '').toLowerCase();
           if (errStr.includes('insufficient_funds') || errStr.includes('insufficient funds') || errStr.includes('insufficient fund')) {
-            slog(strat.id, 'error', `[${env.toUpperCase()}] ⚠️ Insufficient funds — top up at ig.com`);
-            showToast(false, `⚠️ Insufficient funds in IG ${env} — skipping`);
+            slog(strat.id, 'error', `[${env.toUpperCase()}] âš ï¸ Insufficient funds â€” top up at ig.com`);
+            showToast(false, `âš ï¸ Insufficient funds in IG ${env} â€” skipping`);
             continue;
           }
-          slog(strat.id, 'error', `[${env.toUpperCase()}] ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}${or.reason ? ` (${or.reason})` : ''}`);
+          slog(strat.id, 'error', `[${env.toUpperCase()}] âŒ ${market.name} FAILED â€” ${or.error ?? 'unknown'}${or.reason ? ` (${or.reason})` : ''}`);
           if (or.sentPayload) slog(strat.id, 'error', `  sent: ${JSON.stringify(or.sentPayload)}`);
           if (or.igBody)      slog(strat.id, 'error', `  ig:   ${JSON.stringify(or.igBody)}`);
           setTradeHistory(prev => recordTradeOpen(prev, {
@@ -1678,7 +1648,7 @@ export function IGStrategyTrader() {
     return sig;
   }
 
-  // ── Signal scan: scan markets + execute trades ────────────────────────────
+  // â”€â”€ Signal scan: scan markets + execute trades â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const runSignalScan = useCallback(async (strat: IGSavedStrategy) => {
     if (getStratState(strat.id) === 'STOPPED') return;
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
@@ -1688,7 +1658,7 @@ export function IGStrategyTrader() {
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
     for (const env of envs) {
       const funds = await fetchIGFunds(env);
-      if (funds) slog(strat.id, 'info', `[${env.toUpperCase()}] 💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
+      if (funds) slog(strat.id, 'info', `[${env.toUpperCase()}] ðŸ’° Available: Â£${funds.available.toFixed(2)} | Balance: Â£${funds.balance.toFixed(2)}`);
     }
 
     // Pre-fetch real-time prices + RSI/MACD/ATR from bot server (one call for all markets)
@@ -1699,10 +1669,10 @@ export function IGStrategyTrader() {
         if (pd.ok && pd.prices) {
           botPricesRef.current = pd.prices;
           const liveCount = Object.keys(pd.prices).length;
-          if (liveCount > 0) slog(strat.id, 'info', `⚡ Bot server: ${liveCount} live feed(s) — RSI/MACD/ATR active`);
+          if (liveCount > 0) slog(strat.id, 'info', `âš¡ Bot server: ${liveCount} live feed(s) â€” RSI/MACD/ATR active`);
         }
       }
-    } catch { /* bot server offline — Yahoo fallback will be used */ }
+    } catch { /* bot server offline â€” Yahoo fallback will be used */ }
 
     // Pre-fetch IG client sentiment for all watchlist epics (contrarian gate)
     const envForSent = strat.accounts.includes('live') ? 'live' : 'demo';
@@ -1722,10 +1692,10 @@ export function IGStrategyTrader() {
             sentimentRef.current = next;
           }
         }
-      } catch { /* sentiment fetch failed — skip contrarian gate this cycle */ }
+      } catch { /* sentiment fetch failed â€” skip contrarian gate this cycle */ }
     }
 
-    slog(strat.id, 'info', `📡 Signal scan — ${markets.length} markets… (fetching news)`);
+    slog(strat.id, 'info', `ðŸ“¡ Signal scan â€” ${markets.length} marketsâ€¦ (fetching news)`);
     await fetchNewsSignals(markets, positions);
 
     for (let i = 0; i < markets.length; i++) {
@@ -1744,23 +1714,23 @@ export function IGStrategyTrader() {
     const scanMs = strat.signalScanMs ?? signalScanMs;
     lastSignalAtRef.current = Date.now();
     setLastSignalAt(Date.now());
-    slog(strat.id, 'info', `Signal scan complete — next in ${Math.round(scanMs / 60_000)}min`);
+    slog(strat.id, 'info', `Signal scan complete â€” next in ${Math.round(scanMs / 60_000)}min`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, positions, signalScanMs]);
 
-  // ── Position monitor: trailing stops + SL/TP refresh + stale recycling ────
+  // â”€â”€ Position monitor: trailing stops + SL/TP refresh + stale recycling â”€â”€â”€â”€
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
     if (getStratState(strat.id) === 'STOPPED') return;
     await loadPositions();
 
-    // Refresh bot server prices — needed for real-time momentum flip detection
+    // Refresh bot server prices â€” needed for real-time momentum flip detection
     try {
       const pr = await fetch('/api/ig/bot?action=prices');
       if (pr.ok) {
         const pd = await pr.json() as { ok: boolean; prices: Record<string, BotPriceEntry> };
         if (pd.ok && pd.prices) botPricesRef.current = pd.prices;
       }
-    } catch { /* bot server offline — skip flip logic */ }
+    } catch { /* bot server offline â€” skip flip logic */ }
 
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
     const botMode = strat.mode ?? 'BOTH';
@@ -1782,7 +1752,7 @@ export function IGStrategyTrader() {
 
         // [FLIP] Core momentum strategy: close and immediately open opposite when
         // raw candle data (from bot server as data source) shows momentum has reversed.
-        // Frontend computes the reversal signal — bot server only supplies indicator values.
+        // Frontend computes the reversal signal â€” bot server only supplies indicator values.
         // Minimum 2-minute hold prevents flipping on tiny noise candles.
         if (strat.autoClose && strat.autoTrade && ageMs > 2 * 60_000) {
           const botData = botPricesRef.current[pos.epic];
@@ -1795,72 +1765,44 @@ export function IGStrategyTrader() {
             const shouldFlip = (pos.direction === 'BUY'  && reversalToSell) ||
                                (pos.direction === 'SELL' && reversalToBuy);
             if (shouldFlip) {
-              const flipDir  = (pos.direction === 'BUY' ? 'SELL' : 'BUY') as 'BUY' | 'SELL';
-              const canFlip  = !(botMode === 'LONG_ONLY' && flipDir === 'SELL') &&
-                               !(botMode === 'SHORT_ONLY' && flipDir === 'BUY');
-              const consTag  = flipDir === 'SELL'
-                ? `${cRed}×red`
-                : `${cGreen}×green`;
-              const rsiTag   = botData.rsi  !== null ? ` RSI:${botData.rsi.toFixed(0)}` : '';
-              const macdTag  = botData.macd !== null ? ` MACD:${botData.macd > 0 ? '+' : ''}${botData.macd.toFixed(4)}` : '';
-              slog(strat.id, 'info', `[FLIP] ${posName}: ${pos.direction}→${canFlip ? flipDir : 'CLOSE'} (${consTag}${rsiTag}${macdTag} P&L:£${(pos.upl ?? 0).toFixed(2)})`);
+              // Close on momentum reversal. Do NOT immediately re-enter opposite direction.
+              // Instant flips churn capital on brief pullbacks. The next scan cycle decides
+              // whether the new direction has a strong enough signal to enter fresh.
+              const consTag = pos.direction === 'BUY' ? cRed + 'x red' : cGreen + 'x green';
+              const rsiTag  = botData.rsi  !== null ? ' RSI:' + botData.rsi.toFixed(0) : '';
+              const macdTag = botData.macd !== null ? ' MACD:' + (botData.macd > 0 ? '+' : '') + botData.macd.toFixed(4) : '';
+              slog(strat.id, 'info', '[REVERSAL] Closing ' + posName + ' ' + pos.direction + ' (' + consTag + rsiTag + macdTag + ' P&L:' + (pos.upl ?? 0).toFixed(2) + ')');
 
               const cr = await closePos(env, pos);
               if (cr.ok) {
                 const closedPnl = pos.upl ?? 0;
                 todayPnLRef.current += closedPnl;
                 setTodayPnL(todayPnLRef.current);
-                slog(strat.id, 'close', `[FLIP] ✓ Closed ${posName} ${pos.direction} @ ${currentPx.toFixed(2)} — P&L: £${closedPnl.toFixed(2)}`);
+                slog(strat.id, 'close', '[REVERSAL] Closed ' + posName + ' @ ' + currentPx.toFixed(2) + ' P&L: ' + closedPnl.toFixed(2));
                 setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'STRATEGY', new Date().toISOString()));
-
-                if (canFlip) {
-                  // Clear cooldown so we can open opposite immediately
-                  recentlyClosedRef.current.delete(`${pos.epic}:${flipDir}`);
-                  const funds    = igFundsRef.current[env]?.available ?? 0;
-                  const startBal = startingBalanceRef.current[env];
-                  const flipSize = calcDynamicSize(pos.size, funds, startBal);
-                  if (flipSize > 0 && funds >= 100) {
-                    const atr      = botData.atr ?? null;
-                    const flipStop = atr !== null ? Math.max(2, Math.round(atr * 2))  : 15;
-                    const flipTP   = atr !== null ? Math.max(4, Math.round(atr * 4))  : 30;
-                    const or = await placeOrder(env, pos.epic, flipDir, flipSize, flipStop, flipTP);
-                    if (or.ok) {
-                      slog(strat.id, flipDir === 'BUY' ? 'buy' : 'sell',
-                        `[FLIP] ✓ Opened ${flipDir} ${posName} @ ${or.level ?? currentPx} — £${flipSize}/pt stop:${flipStop}pt TP:${flipTP}pt`);
-                      setTradeHistory(prev => recordTradeOpen(prev, {
-                        portfolioName: strat.name, market: posName, epic: pos.epic,
-                        direction: flipDir, size: flipSize, entryLevel: or.level ?? currentPx,
-                        exitLevel: null, openedAt: new Date().toISOString(), closedAt: null,
-                        status: 'OPEN', dealReference: or.dealReference ?? '', dealId: or.dealId ?? '',
-                        pnl: null, closeReason: null, accountType: env,
-                      }));
-                    } else {
-                      slog(strat.id, 'error', `[FLIP] Open ${flipDir} failed: ${or.error ?? 'unknown'}`);
-                    }
-                  }
-                }
+                recentlyClosedRef.current.set(pos.epic + ':' + pos.direction, Date.now());
               } else if ((cr as { alreadyClosed?: boolean }).alreadyClosed) {
-                slog(strat.id, 'info', `[FLIP] ${posName} already closed by IG`);
+                slog(strat.id, 'info', '[REVERSAL] ' + posName + ' already closed by IG');
               } else {
-                slog(strat.id, 'error', `[FLIP] Close failed: ${cr.error ?? 'unknown'}`);
+                slog(strat.id, 'error', '[REVERSAL] Close failed: ' + (cr.error ?? 'unknown'));
               }
               continue;
             }
           }
         }
 
-        // [AUTO] Emergency soft stop — cut losses at -1.5%, but only after 30min hold.
+        // [AUTO] Emergency soft stop â€” cut losses at -1.5%, but only after 30min hold.
         // The 30min gate prevents whipsawing freshly-opened positions on normal noise.
         if (strat.autoClose && pnlPct < -1.5 && ageMs > 30 * 60_000) {
-          const pnlStr = `£${(pos.upl ?? 0).toFixed(2)}`;
-          slog(strat.id, 'info', `[AUTO] Emergency stop: ${pos.instrumentName ?? pos.epic} at ${pnlPct.toFixed(2)}% — cutting loss…`);
+          const pnlStr = `Â£${(pos.upl ?? 0).toFixed(2)}`;
+          slog(strat.id, 'info', `[AUTO] Emergency stop: ${pos.instrumentName ?? pos.epic} at ${pnlPct.toFixed(2)}% â€” cutting lossâ€¦`);
           const cr = await closePos(env, pos);
           if (cr.ok) {
             const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
             const closedPnl = pos.upl ?? 0;
             todayPnLRef.current += closedPnl;
             setTodayPnL(todayPnLRef.current);
-            slog(strat.id, 'close', `[AUTO] ✓ Emergency stop fired: ${pos.instrumentName ?? pos.epic} — P&L: ${pnlStr}`);
+            slog(strat.id, 'close', `[AUTO] âœ“ Emergency stop fired: ${pos.instrumentName ?? pos.epic} â€” P&L: ${pnlStr}`);
             setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STOP_LOSS', new Date().toISOString()));
             recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
           } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
@@ -1869,24 +1811,24 @@ export function IGStrategyTrader() {
           continue;
         }
 
-        // [AUTO] Stale position recycling — tiered by P&L:
-        //   24h if losing (>0.5% down) — don't let small losers become big ones overnight
-        //   48h if neutral (<1% gain) — stagnant capital redeployment
-        //   72h if profitable (≥1%) — let winners run a bit longer
+        // [AUTO] Stale position recycling â€” tiered by P&L:
+        //   24h if losing (>0.5% down) â€” don't let small losers become big ones overnight
+        //   48h if neutral (<1% gain) â€” stagnant capital redeployment
+        //   72h if profitable (â‰¥1%) â€” let winners run a bit longer
         if (pos.createdDate && strat.autoClose) {
           const staleThreshold =
             pnlPct < -0.5  ? 24 * 3_600_000 :
             pnlPct >= 1.0   ? 72 * 3_600_000 :
                               48 * 3_600_000;
           if (ageMs > staleThreshold && pnlPct < 1.0) {
-            slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — stale (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L)…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} â€” stale (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L)â€¦`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
               const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
               const closedPnl = pos.upl ?? 0;
               todayPnLRef.current += closedPnl;
               setTodayPnL(todayPnLRef.current);
-              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${closedPnl.toFixed(2)}`);
+              slog(strat.id, 'close', `[AUTO] âœ“ Closed ${pos.instrumentName ?? pos.epic} stale position â€” P&L: Â£${closedPnl.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STALE', new Date().toISOString()));
               recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
             } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
@@ -1896,34 +1838,12 @@ export function IGStrategyTrader() {
           }
         }
 
-        // [AUTO] Early TP at 65% of target — lock gains before a reversal erases them.
-        // 65% is more responsive than 75%; by 65% we've captured the bulk of the move.
-        if (strat.autoClose && pos.limitLevel) {
-          const tpTarget = pos.limitLevel;
-          const tpDist = Math.abs(tpTarget - entryPx);
-          const currentDist = Math.abs(currentPx - entryPx);
-          const isMovingTowardTP = pos.direction === 'BUY' ? currentPx > entryPx : currentPx < entryPx;
-          if (isMovingTowardTP && tpDist > 0 && currentDist >= tpDist * 0.65) {
-            const pnlStr = `£${(pos.upl ?? 0).toFixed(2)}`;
-            slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — 65% of TP reached (${((currentDist / tpDist) * 100).toFixed(0)}%)…`);
-            const cr = await closePos(env, pos);
-            if (cr.ok) {
-              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} — 65% TP — P&L: ${pnlStr}`);
-              const closedPnl = pos.upl ?? 0;
-              todayPnLRef.current += closedPnl;
-              setTodayPnL(todayPnLRef.current);
-              slog(strat.id, 'close', `💰 Capital redeployment: +£${closedPnl.toFixed(2)} — available for next signal`);
-              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'TAKE_PROFIT', new Date().toISOString()));
-              recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
-            } else slog(strat.id, 'error', `[${env.toUpperCase()}] 65% TP close failed: ${cr.error ?? 'unknown'}`);
-            continue;
-          }
-        }
 
-        // [AUTO] Trailing stop ladder — activates much earlier to protect gains:
-        //  +1.5% → SL to breakeven (was +3%): more positions reach this threshold
-        //  +3%   → SL locks +1% profit (new intermediate step)
-        //  +5%   → SL locks +2% profit (unchanged)
+
+        // [AUTO] Trailing stop ladder â€” activates much earlier to protect gains:
+        //  +1.5% â†’ SL to breakeven (was +3%): more positions reach this threshold
+        //  +3%   â†’ SL locks +1% profit (new intermediate step)
+        //  +5%   â†’ SL locks +2% profit (unchanged)
         let newStop: number | null = null;
         let reason = '';
 
@@ -1931,21 +1851,21 @@ export function IGStrategyTrader() {
           const breakevenStop = entryPx;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < breakevenStop : pos.stopLevel > breakevenStop)) {
             newStop = breakevenStop;
-            reason = `+${pnlPct.toFixed(1)}% → SL to breakeven ${breakevenStop}`;
+            reason = `+${pnlPct.toFixed(1)}% â†’ SL to breakeven ${breakevenStop}`;
           }
         }
         if (pnlPct >= 3 && pnlPct < 5) {
           const lockStop = pos.direction === 'BUY' ? entryPx * 1.01 : entryPx * 0.99;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lockStop : pos.stopLevel > lockStop)) {
             newStop = Math.round(lockStop * 100) / 100;
-            reason = `+${pnlPct.toFixed(1)}% → SL to lock +1% at ${newStop}`;
+            reason = `+${pnlPct.toFixed(1)}% â†’ SL to lock +1% at ${newStop}`;
           }
         }
         if (pnlPct >= 5) {
           const lockStop = pos.direction === 'BUY' ? entryPx * 1.02 : entryPx * 0.98;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lockStop : pos.stopLevel > lockStop)) {
             newStop = Math.round(lockStop * 100) / 100;
-            reason = `+${pnlPct.toFixed(1)}% → SL to lock +2% at ${newStop}`;
+            reason = `+${pnlPct.toFixed(1)}% â†’ SL to lock +2% at ${newStop}`;
           }
         }
 
@@ -1955,7 +1875,7 @@ export function IGStrategyTrader() {
         }
       }
 
-      // [AUTO] Trim excess positions — if over effective max, close worst P&L first
+      // [AUTO] Trim excess positions â€” if over effective max, close worst P&L first
       if (strat.autoClose) {
         const botMode2 = strat.mode ?? 'BOTH';
         const ownedDir2 = botMode2 === 'LONG_ONLY' ? 'BUY' : botMode2 === 'SHORT_ONLY' ? 'SELL' : null;
@@ -1971,14 +1891,14 @@ export function IGStrategyTrader() {
             .sort((a, b) => (a.upl ?? 0) - (b.upl ?? 0))   // worst P&L first
             .slice(0, ownedNow.length - effectiveMax2);
           for (const weak of excess) {
-            slog(strat.id, 'info', `[AUTO] Trimming: ${weak.instrumentName ?? weak.epic} (P&L £${(weak.upl ?? 0).toFixed(2)}) — over limit of ${effectiveMax2}…`);
+            slog(strat.id, 'info', `[AUTO] Trimming: ${weak.instrumentName ?? weak.epic} (P&L Â£${(weak.upl ?? 0).toFixed(2)}) â€” over limit of ${effectiveMax2}â€¦`);
             const cr = await closePos(env, weak);
             if (cr.ok) {
               const exitPx = weak.direction === 'BUY' ? (weak.bid ?? weak.level) : (weak.offer ?? weak.level);
               const closedPnl = weak.upl ?? 0;
               todayPnLRef.current += closedPnl;
               setTodayPnL(todayPnLRef.current);
-              slog(strat.id, 'close', `[AUTO] ✓ Trimmed ${weak.instrumentName ?? weak.epic} — portfolio capped — P&L: £${closedPnl.toFixed(2)}`);
+              slog(strat.id, 'close', `[AUTO] âœ“ Trimmed ${weak.instrumentName ?? weak.epic} â€” portfolio capped â€” P&L: Â£${closedPnl.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, weak.dealId, exitPx, closedPnl, 'STRATEGY', new Date().toISOString()));
               recentlyClosedRef.current.set(`${weak.epic}:${weak.direction}`, Date.now());
             } else slog(strat.id, 'error', `[${env.toUpperCase()}] Trim close failed: ${cr.error ?? 'unknown'}`);
@@ -1989,7 +1909,7 @@ export function IGStrategyTrader() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, positions, scans]);
 
-  // ── Start / stop auto-run ──────────────────────────────────────────────────
+  // â”€â”€ Start / stop auto-run â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   function startAutoRun(strat: IGSavedStrategy) {
     // Clear any existing timers for this strategy
     const prev = stratTimersRef.current[strat.id];
@@ -2027,9 +1947,9 @@ export function IGStrategyTrader() {
 
     const sScanMs = strat.signalScanMs ?? signalScanMs;
     const pMonMs  = strat.posMonitorMs ?? posMonitorMs;
-    const modeLabel = strat.accounts.includes('live') ? '⚠️ LIVE' : 'demo';
+    const modeLabel = strat.accounts.includes('live') ? 'âš ï¸ LIVE' : 'demo';
 
-    slog(strat.id, 'info', `▶ Auto-trader started — "${strat.name}" · ${modeLabel} · signals every ${Math.round(sScanMs/60_000)}min · positions every ${Math.round(pMonMs/1000)}s`);
+    slog(strat.id, 'info', `â–¶ Auto-trader started â€” "${strat.name}" Â· ${modeLabel} Â· signals every ${Math.round(sScanMs/60_000)}min Â· positions every ${Math.round(pMonMs/1000)}s`);
 
     // Capture starting balance for 15% capital floor check
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
@@ -2059,13 +1979,13 @@ export function IGStrategyTrader() {
     if (serverMode) void startServerStrategy(strat);
   }
 
-  // ── Test run: one scan cycle, max 1 position opened, then stops ───────────
+  // â”€â”€ Test run: one scan cycle, max 1 position opened, then stops â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function runTestScan(strat: IGSavedStrategy) {
     if (testRunning || getStratState(strat.id) !== 'STOPPED') return;
     setTestRunning(true);
     runningRef.current = true;
     const testStrat: IGSavedStrategy = { ...strat, maxPositions: 1 };
-    slog(strat.id, 'info', `🧪 Test run started — "${strat.name}" · max 1 position · scanning…`);
+    slog(strat.id, 'info', `ðŸ§ª Test run started â€” "${strat.name}" Â· max 1 position Â· scanningâ€¦`);
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
     let placed = 0;
     for (let i = 0; i < markets.length; i++) {
@@ -2080,8 +2000,8 @@ export function IGStrategyTrader() {
     runningRef.current = false;
     setTestRunning(false);
     slog(strat.id, 'info', placed > 0
-      ? `🧪 Test complete — ${placed} position opened. Check Positions tab.`
-      : `🧪 Test complete — no signals met the ${strat.minStrength}% threshold this scan.`
+      ? `ðŸ§ª Test complete â€” ${placed} position opened. Check Positions tab.`
+      : `ðŸ§ª Test complete â€” no signals met the ${strat.minStrength}% threshold this scan.`
     );
   }
 
@@ -2091,13 +2011,13 @@ export function IGStrategyTrader() {
       status: 'paused', pausedAt: new Date().toISOString(), tradesCount: completedTradesRef.current, error: null,
     }));
     const name = strategies.find(s => s.id === stratId)?.name ?? stratId;
-    slog(stratId, 'info', `⏸ "${name}" PAUSED — monitoring open positions, no new entries until resumed`);
+    slog(stratId, 'info', `â¸ "${name}" PAUSED â€” monitoring open positions, no new entries until resumed`);
   }
 
   function resumeAutoRun(stratId: string) {
     setStratState(stratId, 'RUNNING');
     const name = strategies.find(s => s.id === stratId)?.name ?? stratId;
-    slog(stratId, 'info', `▶ "${name}" RESUMED — scanning for new entries`);
+    slog(stratId, 'info', `â–¶ "${name}" RESUMED â€” scanning for new entries`);
   }
 
   function stopAutoRun(stratId?: string, reason?: string) {
@@ -2123,13 +2043,13 @@ export function IGStrategyTrader() {
     const now = new Date().toISOString();
     setStoppedAt(now);
     if (reason) setStopError(reason);
-    log('info', `⏹ ${ids.length > 1 ? 'All strategies' : 'Strategy'} stopped — ${completedTradesRef.current} trades · Today P&L: ${todayPnLRef.current >= 0 ? '+' : ''}£${todayPnLRef.current.toFixed(2)}`);
+    log('info', `â¹ ${ids.length > 1 ? 'All strategies' : 'Strategy'} stopped â€” ${completedTradesRef.current} trades Â· Today P&L: ${todayPnLRef.current >= 0 ? '+' : ''}Â£${todayPnLRef.current.toFixed(2)}`);
     if (serverRunning) stopServerStrategy();
   }
 
   async function stopAutoRunAndCloseAll() {
     stopAutoRun(undefined);
-    log('info', '🔴 STOP + CLOSE ALL — closing all open positions…');
+    log('info', 'ðŸ”´ STOP + CLOSE ALL â€” closing all open positionsâ€¦');
     const allPos: Array<{p: IGPosition; env: 'demo'|'live'}> = [
       ...positions.demo.map(p => ({p, env: 'demo' as const})),
       ...positions.live.map(p => ({p, env: 'live' as const})),
@@ -2138,7 +2058,7 @@ export function IGStrategyTrader() {
       const cr = await closePos(env, p);
       if (cr.ok) {
         const exitPx = p.direction === 'BUY' ? (p.bid ?? p.level) : (p.offer ?? p.level);
-        log('close', `[${env.toUpperCase()}] Force-closed ${p.instrumentName ?? p.epic} — P&L: £${(p.upl??0).toFixed(2)}`);
+        log('close', `[${env.toUpperCase()}] Force-closed ${p.instrumentName ?? p.epic} â€” P&L: Â£${(p.upl??0).toFixed(2)}`);
         setTradeHistory(prev => recordTradeClose(prev, p.dealId, exitPx, p.upl??0, 'MANUAL', new Date().toISOString()));
       } else {
         log('error', `[${env.toUpperCase()}] Force-close failed: ${cr.error ?? 'unknown'}`);
@@ -2156,7 +2076,7 @@ export function IGStrategyTrader() {
     if (posRefreshRef.current) clearInterval(posRefreshRef.current);
   }, []);
 
-  // ── Test Order: 5-step full diagnostic ────────────────────────────────────
+  // â”€â”€ Test Order: 5-step full diagnostic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function runTestOrder() {
     if (testOrderBusy) return;
     setTestOrderBusy(true);
@@ -2169,35 +2089,35 @@ export function IGStrategyTrader() {
     setDiagLines([]);
     setDiagModal(true);
 
-    diag('══════════════════════════════════════════');
-    diag('🧪 IG DIAGNOSTIC — ' + new Date().toLocaleTimeString('en-GB'));
-    diag('══════════════════════════════════════════');
+    diag('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+    diag('ðŸ§ª IG DIAGNOSTIC â€” ' + new Date().toLocaleTimeString('en-GB'));
+    diag('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
 
-    // ── STEP 1: Read stored credentials ──────────────────────────────────
+    // â”€â”€ STEP 1: Read stored credentials â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     diag('');
-    diag('STEP 1 — Read stored credentials');
+    diag('STEP 1 â€” Read stored credentials');
     let creds: { username: string; password: string; apiKey: string } | null = null;
     try {
       const raw = typeof window !== 'undefined' ? localStorage.getItem('ig_demo_credentials') : null;
       if (!raw) {
-        diag('  ✗ No credentials found in localStorage (key: ig_demo_credentials)');
-        diag('    → Go to Settings → Accounts → IG Demo and connect first');
+        diag('  âœ— No credentials found in localStorage (key: ig_demo_credentials)');
+        diag('    â†’ Go to Settings â†’ Accounts â†’ IG Demo and connect first');
         setTestOrderBusy(false);
         return;
       }
       creds = JSON.parse(raw) as { username: string; password: string; apiKey: string };
-      diag(`  ✓ Found: username="${creds.username}", apiKey="${creds.apiKey.slice(0, 8)}…"`);
+      diag(`  âœ“ Found: username="${creds.username}", apiKey="${creds.apiKey.slice(0, 8)}â€¦"`);
     } catch (e) {
-      diag(`  ✗ Failed to read credentials: ${e instanceof Error ? e.message : String(e)}`);
+      diag(`  âœ— Failed to read credentials: ${e instanceof Error ? e.message : String(e)}`);
       setTestOrderBusy(false);
       return;
     }
 
-    // ── STEP 2: Fresh login ───────────────────────────────────────────────
+    // â”€â”€ STEP 2: Fresh login â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     diag('');
-    diag('STEP 2 — Fresh login');
-    diag(`  → POST https://demo-api.ig.com/gateway/deal/session`);
-    diag(`     identifier: "${creds.username}", apiKey: "${creds.apiKey.slice(0, 8)}…"`);
+    diag('STEP 2 â€” Fresh login');
+    diag(`  â†’ POST https://demo-api.ig.com/gateway/deal/session`);
+    diag(`     identifier: "${creds.username}", apiKey: "${creds.apiKey.slice(0, 8)}â€¦"`);
     let cst = '';
     let secToken = '';
     try {
@@ -2207,31 +2127,31 @@ export function IGStrategyTrader() {
         body: JSON.stringify({ username: creds.username, password: creds.password, apiKey: creds.apiKey, env: 'demo', forceRefresh: true }),
       });
       const loginData = await loginRes.json() as { ok: boolean; cst?: string; securityToken?: string; accountId?: string; spreadbetAccountId?: string; accounts?: { accountId: string; accountName: string; accountType: string }[]; error?: string };
-      diag(`  ← HTTP ${loginRes.status}`);
+      diag(`  â† HTTP ${loginRes.status}`);
       if (!loginData.ok || !loginData.cst) {
-        diag(`  ✗ Login FAILED: ${loginData.error ?? 'unknown error'}`);
+        diag(`  âœ— Login FAILED: ${loginData.error ?? 'unknown error'}`);
         setTestOrderBusy(false);
         return;
       }
       cst      = loginData.cst;
       secToken = loginData.securityToken ?? '';
-      diag(`  ✓ CST: "${cst.slice(0, 10)}…"`);
-      diag(`  ✓ X-SECURITY-TOKEN: "${secToken.slice(0, 10)}…"`);
-      diag(`  ✓ accountId: ${loginData.accountId ?? 'n/a'}`);
-      if (loginData.spreadbetAccountId) diag(`  ✓ Switched to SPREADBET: ${loginData.spreadbetAccountId}`);
+      diag(`  âœ“ CST: "${cst.slice(0, 10)}â€¦"`);
+      diag(`  âœ“ X-SECURITY-TOKEN: "${secToken.slice(0, 10)}â€¦"`);
+      diag(`  âœ“ accountId: ${loginData.accountId ?? 'n/a'}`);
+      if (loginData.spreadbetAccountId) diag(`  âœ“ Switched to SPREADBET: ${loginData.spreadbetAccountId}`);
       if (loginData.accounts?.length) {
-        diag(`  ✓ All accounts: ${loginData.accounts.map(a => `${a.accountId}(${a.accountType})`).join(', ')}`);
+        diag(`  âœ“ All accounts: ${loginData.accounts.map(a => `${a.accountId}(${a.accountType})`).join(', ')}`);
       }
     } catch (e) {
-      diag(`  ✗ Login exception: ${e instanceof Error ? e.message : String(e)}`);
+      diag(`  âœ— Login exception: ${e instanceof Error ? e.message : String(e)}`);
       setTestOrderBusy(false);
       return;
     }
 
-    // ── STEP 3: Fetch accounts list ───────────────────────────────────────
+    // â”€â”€ STEP 3: Fetch accounts list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     diag('');
-    diag('STEP 3 — Fetch all accounts');
-    diag(`  → GET https://demo-api.ig.com/gateway/deal/accounts`);
+    diag('STEP 3 â€” Fetch all accounts');
+    diag(`  â†’ GET https://demo-api.ig.com/gateway/deal/accounts`);
     type AccEntry = { accountId: string; accountName: string; accountType: string; preferred: boolean; balance: { balance: number; available: number } };
     let accountsList: AccEntry[] = [];
     try {
@@ -2241,26 +2161,26 @@ export function IGStrategyTrader() {
         body: JSON.stringify({ apiKey: creds.apiKey, cst, securityToken: secToken, env: 'demo' }),
       });
       const accData = await accRes.json() as { ok: boolean; accounts?: AccEntry[]; positions?: unknown[]; summary?: { positionCount: number } };
-      diag(`  ← HTTP ${accRes.status}`);
+      diag(`  â† HTTP ${accRes.status}`);
       if (accData.accounts?.length) {
         accountsList = accData.accounts;
         accData.accounts.forEach(a => {
-          diag(`  · ${a.accountId} | ${a.accountType.padEnd(12)} | ${a.accountName} | balance: £${a.balance?.balance?.toFixed(2) ?? 'n/a'} | avail: £${a.balance?.available?.toFixed(2) ?? 'n/a'}${a.preferred ? ' ★ preferred' : ''}`);
+          diag(`  Â· ${a.accountId} | ${a.accountType.padEnd(12)} | ${a.accountName} | balance: Â£${a.balance?.balance?.toFixed(2) ?? 'n/a'} | avail: Â£${a.balance?.available?.toFixed(2) ?? 'n/a'}${a.preferred ? ' â˜… preferred' : ''}`);
         });
       } else {
         diag('  (no accounts returned)');
       }
       if (accData.summary) {
-        diag(`  → Total positions across all accounts: ${accData.summary.positionCount}`);
+        diag(`  â†’ Total positions across all accounts: ${accData.summary.positionCount}`);
       }
     } catch (e) {
-      diag(`  ✗ Accounts fetch exception: ${e instanceof Error ? e.message : String(e)}`);
+      diag(`  âœ— Accounts fetch exception: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    // ── STEP 4: Positions on current account (no switching) ───────────────
+    // â”€â”€ STEP 4: Positions on current account (no switching) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     diag('');
-    diag('STEP 4 — Fetch positions (direct, no account switching)');
-    diag(`  → GET https://demo-api.ig.com/gateway/deal/positions/otc`);
+    diag('STEP 4 â€” Fetch positions (direct, no account switching)');
+    diag(`  â†’ GET https://demo-api.ig.com/gateway/deal/positions/otc`);
     let sess = sessions.demo;
     if (!sess) {
       // Build a fresh session object from the tokens we just got
@@ -2275,27 +2195,27 @@ export function IGStrategyTrader() {
           'x-ig-env':            'demo',
         },
       });
-      diag(`  ← HTTP ${posRes.status}`);
+      diag(`  â† HTTP ${posRes.status}`);
       const posData = await posRes.json() as { ok: boolean; positions?: { dealId: string; direction: string; instrumentName: string; size: number; level: number; upl: number }[]; error?: string };
       if (posData.ok) {
-        diag(`  ✓ ${posData.positions?.length ?? 0} position(s) found`);
+        diag(`  âœ“ ${posData.positions?.length ?? 0} position(s) found`);
         (posData.positions ?? []).slice(0, 5).forEach(p => {
-          diag(`  · ${p.dealId} | ${p.direction} ${p.size} | ${p.instrumentName} | entry ${p.level} | UPL ${p.upl >= 0 ? '+' : ''}${p.upl.toFixed(2)}`);
+          diag(`  Â· ${p.dealId} | ${p.direction} ${p.size} | ${p.instrumentName} | entry ${p.level} | UPL ${p.upl >= 0 ? '+' : ''}${p.upl.toFixed(2)}`);
         });
-        if ((posData.positions?.length ?? 0) > 5) diag(`  … and ${(posData.positions?.length ?? 0) - 5} more`);
+        if ((posData.positions?.length ?? 0) > 5) diag(`  â€¦ and ${(posData.positions?.length ?? 0) - 5} more`);
       } else {
-        diag(`  ✗ Error: ${posData.error ?? 'unknown'}`);
+        diag(`  âœ— Error: ${posData.error ?? 'unknown'}`);
       }
     } catch (e) {
-      diag(`  ✗ Positions fetch exception: ${e instanceof Error ? e.message : String(e)}`);
+      diag(`  âœ— Positions fetch exception: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    // ── STEP 5: Test order ────────────────────────────────────────────────
+    // â”€â”€ STEP 5: Test order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     diag('');
-    diag('STEP 5 — Test order: BUY 1 unit S&P 500 (IX.D.SPTRD.DAILY.IP)');
+    diag('STEP 5 â€” Test order: BUY 1 unit S&P 500 (IX.D.SPTRD.DAILY.IP)');
     const epic   = 'IX.D.SPTRD.DAILY.IP';
     const orderBody = { epic, direction: 'BUY', size: 1, currencyCode: 'GBP' };
-    diag(`  → POST /api/ig/order`);
+    diag(`  â†’ POST /api/ig/order`);
     diag(`     body: ${JSON.stringify(orderBody)}`);
     try {
       const freshSess: IGSession = { cst, securityToken: secToken, accountId: accountsList[0]?.accountId ?? '', apiKey: creds.apiKey };
@@ -2306,35 +2226,35 @@ export function IGStrategyTrader() {
         body: JSON.stringify(orderBody),
       });
       const orderData = await orderRes.json() as { ok: boolean; dealReference?: string; dealId?: string; dealStatus?: string; level?: number; error?: string; reason?: string; sentPayload?: unknown; igBody?: unknown };
-      diag(`  ← HTTP ${orderRes.status}`);
+      diag(`  â† HTTP ${orderRes.status}`);
       if (orderData.ok) {
-        diag(`  ✓ ACCEPTED`);
+        diag(`  âœ“ ACCEPTED`);
         diag(`    dealReference: ${orderData.dealReference ?? 'n/a'}`);
         diag(`    dealId:        ${orderData.dealId ?? 'pending'}`);
         diag(`    dealStatus:    ${orderData.dealStatus ?? 'UNKNOWN'}`);
         diag(`    filled @:      ${orderData.level ?? '?'}`);
-        showToast(true, 'Test order placed — check Positions tab');
+        showToast(true, 'Test order placed â€” check Positions tab');
         await sleep(1500);
         await loadPositions('demo');
       } else {
-        diag(`  ✗ REJECTED: ${orderData.error ?? 'unknown'}${orderData.reason ? ` (${orderData.reason})` : ''}`);
+        diag(`  âœ— REJECTED: ${orderData.error ?? 'unknown'}${orderData.reason ? ` (${orderData.reason})` : ''}`);
         if (orderData.sentPayload) diag(`    sent:   ${JSON.stringify(orderData.sentPayload)}`);
         if (orderData.igBody)      diag(`    ig resp: ${JSON.stringify(orderData.igBody)}`);
         showToast(false, orderData.error ?? 'Test order rejected');
       }
     } catch (e) {
-      diag(`  ✗ Order exception: ${e instanceof Error ? e.message : String(e)}`);
+      diag(`  âœ— Order exception: ${e instanceof Error ? e.message : String(e)}`);
       showToast(false, 'Test order exception');
     }
 
     diag('');
-    diag('══════════════════════════════════════════');
-    diag('🧪 Diagnostic complete');
-    diag('══════════════════════════════════════════');
+    diag('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+    diag('ðŸ§ª Diagnostic complete');
+    diag('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
     setTestOrderBusy(false);
   }
 
-  // ── Manual close ───────────────────────────────────────────────────────────
+  // â”€â”€ Manual close â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function handleClose(env:'demo'|'live', pos: IGPosition) {
     setClosingId(pos.dealId);
     const r = await closePos(env, pos);
@@ -2349,7 +2269,7 @@ export function IGStrategyTrader() {
     setClosingId(null);
   }
 
-  // ── Update SL from modal ───────────────────────────────────────────────────
+  // â”€â”€ Update SL from modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function handleUpdateSL() {
     if (!slModal) return;
     const val = parseFloat(slInput);
@@ -2367,7 +2287,7 @@ export function IGStrategyTrader() {
     setUpdatingPos(null);
   }
 
-  // ── Update TP from modal ───────────────────────────────────────────────────
+  // â”€â”€ Update TP from modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function handleUpdateTP() {
     if (!tpModal) return;
     const val = parseFloat(tpInput);
@@ -2385,7 +2305,7 @@ export function IGStrategyTrader() {
     setUpdatingPos(null);
   }
 
-  // ── Manual open ────────────────────────────────────────────────────────────
+  // â”€â”€ Manual open â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function handleManualOpen() {
     if (!manualEpic) { showToast(false, 'Select a market first'); return; }
     if (!sessions[manualEnv]) { showToast(false, `Not connected to ${manualEnv}`); return; }
@@ -2395,7 +2315,7 @@ export function IGStrategyTrader() {
       manualLimit !== '' ? Number(manualLimit) : undefined);
     if (r.ok) {
       log(manualDir === 'BUY' ? 'buy' : 'sell',
-        `[${manualEnv.toUpperCase()}] Manual ${manualDir} £${manualSize}/pt ${manualName || manualEpic} — ${r.dealStatus ?? 'ACCEPTED'} · ref ${r.dealReference ?? 'n/a'} · dealId ${r.dealId ?? 'pending'}`);
+        `[${manualEnv.toUpperCase()}] Manual ${manualDir} Â£${manualSize}/pt ${manualName || manualEpic} â€” ${r.dealStatus ?? 'ACCEPTED'} Â· ref ${r.dealReference ?? 'n/a'} Â· dealId ${r.dealId ?? 'pending'}`);
       showToast(true, `${manualDir} placed on ${manualName || manualEpic}`);
       setTradeHistory(prev => recordTradeOpen(prev, {
         portfolioName: 'Manual', market: manualName || manualEpic, epic: manualEpic,
@@ -2415,7 +2335,7 @@ export function IGStrategyTrader() {
     setPlacingManual(false);
   }
 
-  // ── Builder helpers ────────────────────────────────────────────────────────
+  // â”€â”€ Builder helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   function openBuilder(existing?: IGSavedStrategy) {
     if (existing) {
       setEditId(existing.id); setBName(existing.name); setBTimeframe(existing.timeframe);
@@ -2476,7 +2396,7 @@ export function IGStrategyTrader() {
     showToast(true, `Strategy "${s.name}" ${editId ? 'updated' : 'saved'}`);
   }
 
-  // ── Derived ────────────────────────────────────────────────────────────────
+  // â”€â”€ Derived â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const anyConnected  = Object.values(sessions).some(Boolean);
   const isConnecting  = Object.values(connecting).some(Boolean);
   const activeStrat   = strategies.find(s => s.id === activeStratId) ?? null;
@@ -2493,13 +2413,13 @@ export function IGStrategyTrader() {
     ? activeScanMarkets.map(epic => scans[epic] ?? { epic, name: (activeStrat!.watchlist?.find(m=>m.epic===epic) ?? DEFAULT_WATCHLIST.find(m=>m.epic===epic))?.name ?? epic, signal:null, scanning:false, status:'idle' as const })
     : Object.values(scans);
 
-  // ── Not connected ──────────────────────────────────────────────────────────
+  // â”€â”€ Not connected â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (!anyConnected && !isConnecting) {
     return (
       <div className="max-w-xl space-y-4">
         <Card>
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-xl bg-orange-500/20 flex items-center justify-center text-2xl">🤖</div>
+            <div className="w-10 h-10 rounded-xl bg-orange-500/20 flex items-center justify-center text-2xl">ðŸ¤–</div>
             <div>
               <h3 className="text-sm font-semibold text-white">IG Auto-Trader</h3>
               <p className="text-xs text-gray-500">Fully automated spread-bet strategy engine</p>
@@ -2507,11 +2427,11 @@ export function IGStrategyTrader() {
           </div>
           <p className="text-xs text-gray-400 mb-4">
             Connect your IG account in{' '}
-            <a href="/settings/accounts" className="text-orange-400 hover:underline">Settings → Accounts</a>{' '}
+            <a href="/settings/accounts" className="text-orange-400 hover:underline">Settings â†’ Accounts</a>{' '}
             to start automated trading across FTSE, S&P 500, Gold, FX and more.
           </p>
           <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5 text-xs text-amber-400">
-            ⚠️ Spread bets are complex instruments. 68% of retail accounts lose money. Only trade with money you can afford to lose.
+            âš ï¸ Spread bets are complex instruments. 68% of retail accounts lose money. Only trade with money you can afford to lose.
           </div>
         </Card>
       </div>
@@ -2519,10 +2439,10 @@ export function IGStrategyTrader() {
   }
 
   if (isConnecting && !anyConnected) {
-    return <div className="flex items-center gap-3 text-gray-400 py-8"><RefreshCw className="h-5 w-5 animate-spin" /> Connecting to IG accounts…</div>;
+    return <div className="flex items-center gap-3 text-gray-400 py-8"><RefreshCw className="h-5 w-5 animate-spin" /> Connecting to IG accountsâ€¦</div>;
   }
 
-  // ── Connected view ─────────────────────────────────────────────────────────
+  // â”€â”€ Connected view â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return (
     <div className="space-y-4 max-w-3xl">
 
@@ -2536,10 +2456,10 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── Full-page fixed banner: live strategy running ────────────── */}
+      {/* â”€â”€ Full-page fixed banner: live strategy running â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {runStratEnv === 'live' && isRunning && (
         <div className="fixed top-0 left-0 right-0 z-[9998] bg-red-600 text-white text-center py-2 text-sm font-bold flex items-center justify-center gap-4">
-          ⚠️ LIVE STRATEGY RUNNING — Real money trades are being placed automatically
+          âš ï¸ LIVE STRATEGY RUNNING â€” Real money trades are being placed automatically
           <button
             onClick={() => strategies.filter(s => stratStates[s.id] === 'RUNNING').forEach(s => pauseAutoRun(s.id))}
             className="text-xs bg-white/20 hover:bg-white/30 px-2 py-0.5 rounded font-medium transition-colors">
@@ -2548,29 +2468,29 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── Env header badge ─────────────────────────────────────────────── */}
+      {/* â”€â”€ Env header badge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {activeMode === 'demo' ? (
         <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2 text-xs font-semibold text-blue-300">
-          <span>🎮</span>
-          <span>Demo — Paper Money · IG Practice Account</span>
+          <span>ðŸŽ®</span>
+          <span>Demo â€” Paper Money Â· IG Practice Account</span>
           <span className="ml-auto text-blue-500 text-[10px] font-normal">Demo strategies are fully isolated from Live</span>
         </div>
       ) : (
         <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs font-semibold text-red-300">
-          <span>⚠️</span>
-          <span>LIVE — Real Money · IG Live Account</span>
+          <span>âš ï¸</span>
+          <span>LIVE â€” Real Money Â· IG Live Account</span>
           <span className="ml-auto text-red-500 text-[10px] font-normal">All trades here use real funds</span>
         </div>
       )}
 
-      {/* ── Stock Spread Bet Opportunities ──────────────────────────────── */}
+      {/* â”€â”€ Stock Spread Bet Opportunities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <IGStockOpportunities
         session={sessions[activeMode] ?? null}
         env={activeMode}
         availableCapital={igFundsDisplay[activeMode]?.available ?? 1000}
       />
 
-      {/* ── Connection status bar ───────────────────────────────────────── */}
+      {/* â”€â”€ Connection status bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           {/* Demo / Live mode selector */}
@@ -2581,7 +2501,7 @@ export function IGStrategyTrader() {
               return (
                 <button key={env}
                   disabled={isLiveNoCredentials}
-                  title={isLiveNoCredentials ? 'Add IG Live credentials in Settings → Accounts first' : undefined}
+                  title={isLiveNoCredentials ? 'Add IG Live credentials in Settings â†’ Accounts first' : undefined}
                   onClick={() => {
                     if (env === 'live') { handleSwitchToLive(); }
                     else { setActiveMode('demo'); }
@@ -2592,7 +2512,7 @@ export function IGStrategyTrader() {
                       ? env === 'demo' ? 'bg-blue-500 text-white shadow' : 'bg-amber-500 text-black shadow'
                       : 'text-gray-500 hover:text-gray-300'
                   )}>
-                  {env === 'live' && <span className="text-[9px]">⚠️</span>}
+                  {env === 'live' && <span className="text-[9px]">âš ï¸</span>}
                   IG {env === 'demo' ? 'Demo' : 'Live'}
                   {hasSession
                     ? <span className={clsx('w-1.5 h-1.5 rounded-full', env==='demo' ? 'bg-blue-300' : 'bg-amber-300')} />
@@ -2612,20 +2532,20 @@ export function IGStrategyTrader() {
               <Wifi className="h-2.5 w-2.5" />
               #{sessions[env]!.accountId}
               {igFundsDisplay[env] && (
-                <span className="ml-1 opacity-80">£{igFundsDisplay[env]!.available.toFixed(0)} avail</span>
+                <span className="ml-1 opacity-80">Â£{igFundsDisplay[env]!.available.toFixed(0)} avail</span>
               )}
             </div>
           ))}
           <span className="text-[10px] text-gray-600 px-2 py-1 bg-gray-800/50 rounded-full">
-            Signal: Yahoo Finance · Execution: IG
+            Signal: Yahoo Finance Â· Execution: IG
           </span>
         </div>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" icon={<RefreshCw className="h-3.5 w-3.5" />} onClick={() => void loadPositions()} loading={loadingPos}>Refresh</Button>
           <Button size="sm" variant="outline" loading={testOrderBusy}
-            title="Run full 5-step diagnostic: credentials → auth → accounts → positions → test order"
+            title="Run full 5-step diagnostic: credentials â†’ auth â†’ accounts â†’ positions â†’ test order"
             onClick={() => void runTestOrder()}>
-            🧪 Diagnose
+            ðŸ§ª Diagnose
           </Button>
           {diagLines.length > 0 && !diagModal && (
             <button onClick={() => setDiagModal(true)} className="text-[10px] text-blue-400 hover:underline">View last diagnostic</button>
@@ -2635,22 +2555,22 @@ export function IGStrategyTrader() {
         </div>
       </div>
 
-      {/* ── Live mode confirmation modal (per-session) ──────────────── */}
+      {/* â”€â”€ Live mode confirmation modal (per-session) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {showLiveConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4">
           <div className="bg-gray-900 border border-red-500/50 rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <div className="flex items-center gap-3 mb-4">
-              <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center text-2xl">⚠️</div>
+              <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center text-2xl">âš ï¸</div>
               <div>
                 <h3 className="text-base font-bold text-white">Switching to Live Trading</h3>
                 <p className="text-xs text-red-400 font-semibold">Real money will be used</p>
               </div>
             </div>
             <div className="space-y-2 text-xs text-gray-300 mb-5 bg-red-500/5 border border-red-500/20 rounded-lg p-3">
-              <p>• <span className="text-white font-medium">Demo strategies are NOT shown here</span></p>
-              <p>• Any strategy you run here uses <span className="text-white font-medium">real funds</span></p>
-              <p>• Losses are real and <span className="text-white font-medium">cannot be reversed</span></p>
-              <p>• Spread bets are complex, leveraged instruments</p>
+              <p>â€¢ <span className="text-white font-medium">Demo strategies are NOT shown here</span></p>
+              <p>â€¢ Any strategy you run here uses <span className="text-white font-medium">real funds</span></p>
+              <p>â€¢ Losses are real and <span className="text-white font-medium">cannot be reversed</span></p>
+              <p>â€¢ Spread bets are complex, leveraged instruments</p>
               <p className="text-gray-500 pt-1">Your demo strategies continue running safely in the background.</p>
             </div>
             <label className="flex items-center gap-2 text-xs text-gray-400 mb-4 cursor-pointer">
@@ -2660,7 +2580,7 @@ export function IGStrategyTrader() {
             </label>
             <div className="flex gap-2">
               <Button fullWidth variant="outline" onClick={() => { setShowLiveConfirm(false); setLiveConfirmSkipSession(false); }}>
-                Cancel — Stay on Demo
+                Cancel â€” Stay on Demo
               </Button>
               <Button fullWidth className="bg-red-600 hover:bg-red-500 text-white font-bold"
                 onClick={() => {
@@ -2670,22 +2590,22 @@ export function IGStrategyTrader() {
                   setLiveConfirmSkipSession(false);
                   if (pendingRunAction) { pendingRunAction(); setPendingRunAction(null); }
                 }}>
-                I understand — Enter Live
+                I understand â€” Enter Live
               </Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ── First live trade disclaimer modal ──────────────────────────── */}
+      {/* â”€â”€ First live trade disclaimer modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {showLiveTradeDisclaimer && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
           <div className="bg-gray-900 border border-red-500/50 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
             <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center text-xl">⚠️</div>
+              <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center text-xl">âš ï¸</div>
               <div>
                 <h3 className="text-sm font-bold text-white">First Live Trade Warning</h3>
-                <p className="text-xs text-red-400">Real money — read carefully</p>
+                <p className="text-xs text-red-400">Real money â€” read carefully</p>
               </div>
             </div>
             <div className="space-y-2 text-xs text-gray-300 mb-5">
@@ -2707,7 +2627,7 @@ export function IGStrategyTrader() {
                   liveTradeResolveRef.current = null;
                   setShowLiveTradeDisclaimer(false);
                 }}>
-                I Understand — Place Trade
+                I Understand â€” Place Trade
               </Button>
             </div>
           </div>
@@ -2716,15 +2636,15 @@ export function IGStrategyTrader() {
 
       {/* Risk warning */}
       <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-400">
-        ⚠️ Spread bets are complex. 68% of retail accounts lose money. Use Demo first. Not financial advice.
+        âš ï¸ Spread bets are complex. 68% of retail accounts lose money. Use Demo first. Not financial advice.
       </div>
 
-      {/* ── Copy to Demo modal ──────────────────────────────────────────── */}
+      {/* â”€â”€ Copy to Demo modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {copyModal?.direction === 'toDemo' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
           <div className="bg-gray-900 border border-blue-500/40 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
             <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-xl bg-blue-500/20 flex items-center justify-center text-xl">📋</div>
+              <div className="w-10 h-10 rounded-xl bg-blue-500/20 flex items-center justify-center text-xl">ðŸ“‹</div>
               <div>
                 <h3 className="text-sm font-bold text-white">Copy to Demo</h3>
                 <p className="text-xs text-blue-400">No live trades affected</p>
@@ -2763,12 +2683,12 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── Copy to Live modal ──────────────────────────────────────────── */}
+      {/* â”€â”€ Copy to Live modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {copyModal?.direction === 'toLive' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4">
           <div className="bg-gray-900 border border-red-500/50 rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center text-xl">⚠️</div>
+              <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center text-xl">âš ï¸</div>
               <div>
                 <h3 className="text-sm font-bold text-white">Copy Demo Strategy to Live?</h3>
                 <p className="text-xs text-red-400">REAL money will be used when you run it</p>
@@ -2777,8 +2697,8 @@ export function IGStrategyTrader() {
             <div className="text-xs text-gray-400 space-y-1 mb-4 bg-red-500/5 border border-red-500/20 rounded-lg p-3">
               <p>Strategy: <span className="text-white font-medium">{copyModal.strat.name}</span></p>
               <p>Markets: <span className="text-white">{(copyModal.strat.watchlist?.length ? copyModal.strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled).map(m => m.name).join(', ')}</span></p>
-              <p>Max loss: <span className="text-white">£{copyModal.strat.stopLoss ?? copyModal.strat.stopPct ?? 5}</span> · Target gain: <span className="text-white">£{copyModal.strat.takeProfit ?? copyModal.strat.targetPct ?? 30}</span></p>
-              <p className="text-gray-600 pt-1">The strategy will NOT start automatically — you must run it manually on the Live tab.</p>
+              <p>Max loss: <span className="text-white">Â£{copyModal.strat.stopLoss ?? copyModal.strat.stopPct ?? 5}</span> Â· Target gain: <span className="text-white">Â£{copyModal.strat.takeProfit ?? copyModal.strat.targetPct ?? 30}</span></p>
+              <p className="text-gray-600 pt-1">The strategy will NOT start automatically â€” you must run it manually on the Live tab.</p>
             </div>
             <div className="mb-4">
               <label className="text-xs text-gray-400 mb-1.5 block">Type <span className="text-white font-mono font-bold">CONFIRM</span> to proceed:</label>
@@ -2809,33 +2729,33 @@ export function IGStrategyTrader() {
                   saveStrategy(copy);
                   setCopyModal(null);
                   setCopyConfirmText('');
-                  showToast(true, 'Strategy copied to Live tab — go to Live tab to run it');
+                  showToast(true, 'Strategy copied to Live tab â€” go to Live tab to run it');
                 }}>
-                I understand — Copy to Live
+                I understand â€” Copy to Live
               </Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ── Sync Settings modal ─────────────────────────────────────────── */}
+      {/* â”€â”€ Sync Settings modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {syncModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
           <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
-            <h3 className="text-sm font-bold text-white mb-3">⟳ Sync Settings</h3>
+            <h3 className="text-sm font-bold text-white mb-3">âŸ³ Sync Settings</h3>
             <p className="text-xs text-gray-400 mb-3">The following settings from the Demo strategy will be applied to the Live copy:</p>
             <div className="space-y-1 text-xs mb-5 bg-gray-800 rounded-lg p-3">
               {[
-                ['Max loss', `£${syncModal.demo.stopLoss ?? syncModal.demo.stopPct ?? 5}`, `£${syncModal.live.stopLoss ?? syncModal.live.stopPct ?? 5}`],
-                ['Target gain', `£${syncModal.demo.takeProfit ?? syncModal.demo.targetPct ?? 30}`, `£${syncModal.live.takeProfit ?? syncModal.live.targetPct ?? 30}`],
-                ['Size', `£${syncModal.demo.size}/pt`, `£${syncModal.live.size}/pt`],
+                ['Max loss', `Â£${syncModal.demo.stopLoss ?? syncModal.demo.stopPct ?? 5}`, `Â£${syncModal.live.stopLoss ?? syncModal.live.stopPct ?? 5}`],
+                ['Target gain', `Â£${syncModal.demo.takeProfit ?? syncModal.demo.targetPct ?? 30}`, `Â£${syncModal.live.takeProfit ?? syncModal.live.targetPct ?? 30}`],
+                ['Size', `Â£${syncModal.demo.size}/pt`, `Â£${syncModal.live.size}/pt`],
                 ['Min signal', `${syncModal.demo.minStrength ?? 55}%`, `${syncModal.live.minStrength ?? 55}%`],
                 ['Max positions', String(syncModal.demo.maxPositions), String(syncModal.live.maxPositions)],
               ].map(([label, demoVal, liveVal]) => (
                 <div key={label} className="flex items-center justify-between">
                   <span className="text-gray-500">{label}</span>
                   <span className={clsx('font-mono', demoVal !== liveVal ? 'text-amber-400' : 'text-gray-600')}>
-                    {demoVal !== liveVal ? `${liveVal} → ${demoVal}` : `${demoVal} (unchanged)`}
+                    {demoVal !== liveVal ? `${liveVal} â†’ ${demoVal}` : `${demoVal} (unchanged)`}
                   </span>
                 </div>
               ))}
@@ -2865,7 +2785,7 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── Manual trade panel ─────────────────────────────────────────── */}
+      {/* â”€â”€ Manual trade panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {showManual && (
         <Card>
           <CardHeader title="Manual Trade" subtitle="Open a position directly on any market"
@@ -2881,7 +2801,7 @@ export function IGStrategyTrader() {
                     manualEnv === env
                       ? env==='demo' ? 'bg-blue-500/20 text-blue-300 border-blue-500/40' : 'bg-red-500/20 text-red-300 border-red-500/40'
                       : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-gray-200'
-                  )}>{env==='demo' ? 'Demo' : '⚠️ Live'}</button>
+                  )}>{env==='demo' ? 'Demo' : 'âš ï¸ Live'}</button>
               ))}
             </div>
             <div>
@@ -2909,7 +2829,7 @@ export function IGStrategyTrader() {
                 </div>
               </div>
               <div>
-                <label className="text-xs text-gray-400 mb-1.5 block">£/pt</label>
+                <label className="text-xs text-gray-400 mb-1.5 block">Â£/pt</label>
                 <input type="number" min={0.5} step={0.5} value={manualSize} onChange={e => setManualSize(Number(e.target.value))}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
               </div>
@@ -2927,20 +2847,20 @@ export function IGStrategyTrader() {
             </div>
             {manualEnv === 'live' && (
               <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400">
-                ⚠️ This opens a REAL position on your live IG account.
+                âš ï¸ This opens a REAL position on your live IG account.
               </div>
             )}
             <Button fullWidth loading={placingManual} disabled={!manualEpic}
               className={manualDir==='BUY' ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-red-600 hover:bg-red-500 text-white'}
               icon={manualDir==='BUY' ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
               onClick={handleManualOpen}>
-              {manualDir} £{manualSize}/pt {manualName || (manualEpic ? `(${manualEpic})` : '— pick market')} ({manualEnv})
+              {manualDir} Â£{manualSize}/pt {manualName || (manualEpic ? `(${manualEpic})` : 'â€” pick market')} ({manualEnv})
             </Button>
           </div>
         </Card>
       )}
 
-      {/* ── Strategy builder ───────────────────────────────────────────── */}
+      {/* â”€â”€ Strategy builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {showBuilder && (
         <Card>
           <CardHeader title={editId ? 'Edit Strategy' : 'New Auto-Strategy'}
@@ -2954,8 +2874,8 @@ export function IGStrategyTrader() {
             <div className={clsx('flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold',
               activeMode === 'live' ? 'bg-red-500/10 border border-red-500/30 text-red-300' : 'bg-blue-500/10 border border-blue-500/20 text-blue-300'
             )}>
-              {activeMode === 'live' ? '⚠️' : '🎮'}
-              This strategy will run on: <span className="font-bold">{activeMode === 'live' ? 'LIVE — Real Money' : 'Demo — Paper Money'}</span>
+              {activeMode === 'live' ? 'âš ï¸' : 'ðŸŽ®'}
+              This strategy will run on: <span className="font-bold">{activeMode === 'live' ? 'LIVE â€” Real Money' : 'Demo â€” Paper Money'}</span>
               {editId && <span className="ml-auto text-[10px] opacity-60">(env locked after creation)</span>}
             </div>
 
@@ -2970,17 +2890,17 @@ export function IGStrategyTrader() {
                 <label className="text-xs text-gray-400 mb-1.5 block">Trading Timeframe</label>
                 <select value={bTimeframe} onChange={e => setBTimeframe(e.target.value as Timeframe)}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
-                  <option value="hourly">⚡ Intraday (Hours) — tight stops, exit same session</option>
-                  <option value="daily">📅 Day Trade — sized for daily range, exit same day</option>
-                  <option value="weekly">📆 Swing (Days–Weeks) — wider stops, hold several days</option>
-                  <option value="longterm">📈 Long-term Trend — very wide stops, hold weeks/months</option>
-                  <option value="rsi2">⭐ RSI(2) Mean Reversion — lowest API usage</option>
+                  <option value="hourly">âš¡ Intraday (Hours) â€” tight stops, exit same session</option>
+                  <option value="daily">ðŸ“… Day Trade â€” sized for daily range, exit same day</option>
+                  <option value="weekly">ðŸ“† Swing (Daysâ€“Weeks) â€” wider stops, hold several days</option>
+                  <option value="longterm">ðŸ“ˆ Long-term Trend â€” very wide stops, hold weeks/months</option>
+                  <option value="rsi2">â­ RSI(2) Mean Reversion â€” lowest API usage</option>
                 </select>
               </div>
             </div>
 
             <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 px-3 py-2.5 space-y-1">
-              <p className="text-xs text-orange-300 font-semibold">{TIMEFRAME_CONFIG[bTimeframe].label} — stop &amp; TP sizing</p>
+              <p className="text-xs text-orange-300 font-semibold">{TIMEFRAME_CONFIG[bTimeframe].label} â€” stop &amp; TP sizing</p>
               <p className="text-[11px] text-orange-300/70">{TIMEFRAME_CONFIG[bTimeframe].stopNote}</p>
               <p className="text-[10px] text-gray-500">{TIMEFRAME_CONFIG[bTimeframe].description}</p>
             </div>
@@ -2988,18 +2908,18 @@ export function IGStrategyTrader() {
             {/* Risk per trade + max positions */}
             <div className="grid grid-cols-3 gap-3">
               <div>
-                <label className="text-xs text-gray-400 mb-1.5 block">Size £/point</label>
-                <div className="w-full bg-gray-800/60 border border-orange-500/30 rounded-lg px-3 py-2 text-sm text-orange-300 font-mono cursor-default" title="Auto-calculated per market from your £ stop loss">
+                <label className="text-xs text-gray-400 mb-1.5 block">Size Â£/point</label>
+                <div className="w-full bg-gray-800/60 border border-orange-500/30 rounded-lg px-3 py-2 text-sm text-orange-300 font-mono cursor-default" title="Auto-calculated per market from your Â£ stop loss">
                   Auto
                 </div>
-                <p className="text-[10px] text-gray-600 mt-1">£{bStopLoss} ÷ stop pts</p>
+                <p className="text-[10px] text-gray-600 mt-1">Â£{bStopLoss} Ã· stop pts</p>
               </div>
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-xs text-gray-400">Max positions</label>
                   <button onClick={() => setBAutoMaxPos(v => !v)}
                     className={clsx('flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors', bAutoMaxPos ? 'bg-violet-500/20 border-violet-500/50 text-violet-300' : 'bg-gray-800 border-gray-700 text-gray-500')}>
-                    <span>{bAutoMaxPos ? '⚡ Auto' : 'Manual'}</span>
+                    <span>{bAutoMaxPos ? 'âš¡ Auto' : 'Manual'}</span>
                   </button>
                 </div>
                 {bAutoMaxPos
@@ -3007,8 +2927,8 @@ export function IGStrategyTrader() {
                   : <input type="number" min={0} max={20} value={bMaxPos} onChange={e => setBMaxPos(Number(e.target.value))}
                       className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
                 }
-                {!bAutoMaxPos && bMaxPos === 0 && <p className="text-[10px] text-orange-400 mt-1">∞ No position limit</p>}
-                {bAutoMaxPos && <p className="text-[10px] text-gray-500 mt-1">£500→2 · £1k→3 · £2k→4 · £3k→5 · +1 if signals strong</p>}
+                {!bAutoMaxPos && bMaxPos === 0 && <p className="text-[10px] text-orange-400 mt-1">âˆž No position limit</p>}
+                {bAutoMaxPos && <p className="text-[10px] text-gray-500 mt-1">Â£500â†’2 Â· Â£1kâ†’3 Â· Â£2kâ†’4 Â· Â£3kâ†’5 Â· +1 if signals strong</p>}
               </div>
               <div>
                 <label className="text-xs text-gray-400 mb-1.5 block">Min signal strength</label>
@@ -3033,7 +2953,7 @@ export function IGStrategyTrader() {
                         ? acc==='demo' ? 'bg-blue-500/20 text-blue-300 border-blue-500/40' : 'bg-red-500/20 text-red-300 border-red-500/40'
                         : 'bg-gray-800 text-gray-500 border-gray-700 hover:text-gray-300'
                     )}>
-                    {acc==='demo' ? 'Demo' : '⚠️ Live (real money)'}
+                    {acc==='demo' ? 'Demo' : 'âš ï¸ Live (real money)'}
                     {!sessions[acc] && <span className="block text-[10px] opacity-50">not connected</span>}
                   </button>
                 ))}
@@ -3045,9 +2965,9 @@ export function IGStrategyTrader() {
               <label className="text-xs text-gray-400 mb-1.5 block">Direction mode</label>
               <div className="grid grid-cols-3 gap-2">
                 {([
-                  { value: 'LONG_ONLY',  label: '📈 Long only',  desc: 'BUY entries only, close on reversal' },
-                  { value: 'SHORT_ONLY', label: '📉 Short only', desc: 'SELL entries only, close on reversal' },
-                  { value: 'BOTH',       label: '↕ Both',        desc: 'Long and short entries' },
+                  { value: 'LONG_ONLY',  label: 'ðŸ“ˆ Long only',  desc: 'BUY entries only, close on reversal' },
+                  { value: 'SHORT_ONLY', label: 'ðŸ“‰ Short only', desc: 'SELL entries only, close on reversal' },
+                  { value: 'BOTH',       label: 'â†• Both',        desc: 'Long and short entries' },
                 ] as const).map(opt => (
                   <button key={opt.value} onClick={() => setBMode(opt.value)}
                     className={clsx('rounded-lg border px-2 py-2 text-left transition-all',
@@ -3102,31 +3022,31 @@ export function IGStrategyTrader() {
               </div>
             </div>
 
-            {/* Fixed £ stop loss and take profit */}
+            {/* Fixed Â£ stop loss and take profit */}
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs text-gray-400 mb-1.5 block">Max Loss (£)</label>
+                  <label className="text-xs text-gray-400 mb-1.5 block">Max Loss (Â£)</label>
                   <div className="flex items-center gap-2">
                     <input type="range" min={1} max={50} step={1} value={bStopLoss}
                       onChange={e => setBStopLoss(Number(e.target.value))}
                       className="flex-1 accent-red-500" />
-                    <span className="text-sm font-mono text-red-400 w-10">£{bStopLoss}</span>
+                    <span className="text-sm font-mono text-red-400 w-10">Â£{bStopLoss}</span>
                   </div>
                 </div>
                 <div>
-                  <label className="text-xs text-gray-400 mb-1.5 block">Target Gain (£)</label>
+                  <label className="text-xs text-gray-400 mb-1.5 block">Target Gain (Â£)</label>
                   <div className="flex items-center gap-2">
                     <input type="range" min={5} max={200} step={5} value={bTakeProfit}
                       onChange={e => setBTakeProfit(Number(e.target.value))}
                       className="flex-1 accent-emerald-500" />
-                    <span className="text-sm font-mono text-emerald-400 w-10">£{bTakeProfit}</span>
+                    <span className="text-sm font-mono text-emerald-400 w-10">Â£{bTakeProfit}</span>
                   </div>
                 </div>
               </div>
               <div className="bg-gray-800/40 rounded-lg px-3 py-2 text-[11px] space-y-0.5">
-                <p className="text-gray-300">Risk/Reward: 1:{(bTakeProfit/bStopLoss).toFixed(1)} — risking £{bStopLoss} to gain £{bTakeProfit}</p>
-                <p className="text-gray-500">Position size auto-calculated per market (e.g. FTSE stop ~24pt → £{(bStopLoss/24).toFixed(2)}/pt). IG sets SL/TP immediately after fill.</p>
+                <p className="text-gray-300">Risk/Reward: 1:{(bTakeProfit/bStopLoss).toFixed(1)} â€” risking Â£{bStopLoss} to gain Â£{bTakeProfit}</p>
+                <p className="text-gray-500">Position size auto-calculated per market (e.g. FTSE stop ~24pt â†’ Â£{(bStopLoss/24).toFixed(2)}/pt). IG sets SL/TP immediately after fill.</p>
               </div>
             </div>
 
@@ -3149,16 +3069,16 @@ export function IGStrategyTrader() {
                       ? 'bg-orange-500/40 border border-orange-500/60'
                       : 'bg-gray-700 border border-gray-600',
                   )}>
-                  {bWatchlist.every(m => m.enabled) && <span className="text-white text-[8px] font-bold">✓</span>}
+                  {bWatchlist.every(m => m.enabled) && <span className="text-white text-[8px] font-bold">âœ“</span>}
                   {!bWatchlist.every(m => m.enabled) && bWatchlist.some(m => m.enabled) && (
-                    <span className="text-orange-400 text-[8px] font-bold">−</span>
+                    <span className="text-orange-400 text-[8px] font-bold">âˆ’</span>
                   )}
                 </button>
                 <label className="text-xs text-gray-400 flex-1">Markets to scan</label>
                 <span className="text-[10px] text-orange-400 font-medium">
                   {bWatchlist.filter(m => m.enabled).length} enabled
                 </span>
-                <span className="text-[10px] text-gray-700">·</span>
+                <span className="text-[10px] text-gray-700">Â·</span>
                 <button
                   onClick={() => setBWatchlist(p => p.map(m => ({ ...m, enabled: true })))}
                   className="text-[10px] text-gray-500 hover:text-orange-400 transition-colors">
@@ -3178,7 +3098,7 @@ export function IGStrategyTrader() {
                       <button onClick={() => setBWatchlist(p => p.map((x,xi) => xi===i ? {...x,enabled:!x.enabled} : x))}
                         className={clsx('w-4 h-4 rounded flex items-center justify-center flex-shrink-0 transition-all',
                           m.enabled ? 'bg-orange-500' : 'bg-gray-700 border border-gray-600')}>
-                        {m.enabled && <span className="text-white text-[8px] font-bold">✓</span>}
+                        {m.enabled && <span className="text-white text-[8px] font-bold">âœ“</span>}
                       </button>
                       <div className="min-w-0 flex-1">
                         <p className="text-xs text-white font-medium">{m.name}</p>
@@ -3219,7 +3139,7 @@ export function IGStrategyTrader() {
 
             {bAccounts.includes('live') && (
               <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400">
-                ⚠️ Auto-trading on LIVE will open real positions with real money. Always test on Demo first.
+                âš ï¸ Auto-trading on LIVE will open real positions with real money. Always test on Demo first.
               </div>
             )}
 
@@ -3230,7 +3150,7 @@ export function IGStrategyTrader() {
         </Card>
       )}
 
-      {/* ── Strategies + run controls ───────────────────────────────────── */}
+      {/* â”€â”€ Strategies + run controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {strategies.length === 0 && !showBuilder ? (
         <div className="text-center py-10 text-gray-500 border border-dashed border-gray-800 rounded-xl">
           <Target className="h-12 w-12 mx-auto mb-3 opacity-20" />
@@ -3262,23 +3182,23 @@ export function IGStrategyTrader() {
                       <p className="text-sm font-bold text-white">{strat.name}</p>
                       {/* Env badge */}
                       {isLiveStrat
-                        ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400 font-semibold">⚠️ Live</span>
-                        : <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-400 font-semibold">🎮 Demo</span>
+                        ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400 font-semibold">âš ï¸ Live</span>
+                        : <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-400 font-semibold">ðŸŽ® Demo</span>
                       }
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300">{cfg.label}</span>
                       {strat.autoClose && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-400">AutoClose</span>}
-                      {strat.mode === 'LONG_ONLY'  && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400">📈 Long only</span>}
-                      {strat.mode === 'SHORT_ONLY' && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400">📉 Short only</span>}
+                      {strat.mode === 'LONG_ONLY'  && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400">ðŸ“ˆ Long only</span>}
+                      {strat.mode === 'SHORT_ONLY' && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400">ðŸ“‰ Short only</span>}
                       {strat.copiedFrom && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-700 text-gray-400">
-                          📋 Copied from {strat.copiedFrom}{strat.copiedAt ? ` · ${new Date(strat.copiedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
+                          ðŸ“‹ Copied from {strat.copiedFrom}{strat.copiedAt ? ` Â· ${new Date(strat.copiedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
                         </span>
                       )}
                     </div>
                     <p className="text-[11px] text-gray-500">
-                      {enabledMarkets.length} markets · {strat.maxPositions === 0 ? '∞ no pos limit' : `max ${strat.maxPositions} pos`} · min {strat.minStrength ?? 55}% signal · {cfg.stopNote}
+                      {enabledMarkets.length} markets Â· {strat.maxPositions === 0 ? 'âˆž no pos limit' : `max ${strat.maxPositions} pos`} Â· min {strat.minStrength ?? 55}% signal Â· {cfg.stopNote}
                       {strat.lastRunAt && (
-                        <span> · last {fmtTime(strat.lastRunAt)}
+                        <span> Â· last {fmtTime(strat.lastRunAt)}
                           {strat.lastRunEnv && (
                             <span className={strat.lastRunEnv === 'live' ? ' text-red-400' : ' text-blue-400'}>
                               {' '}on {strat.lastRunEnv === 'live' ? 'LIVE' : 'demo'}
@@ -3289,7 +3209,7 @@ export function IGStrategyTrader() {
                     </p>
                   </button>
 
-                  {/* Controls — per-strategy */}
+                  {/* Controls â€” per-strategy */}
                   <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap">
                     {/* Running state badge */}
                     {stratState !== 'STOPPED' && (
@@ -3334,10 +3254,10 @@ export function IGStrategyTrader() {
                         onClick={() => {
                           const doRun = () => { setActiveStratId(strat.id); startAutoRun(strat); };
                           if (isLiveStrat) {
-                            if (confirm(`▶ Run LIVE strategy "${strat.name}" with real money? This will place real spread-bet orders.`)) doRun();
+                            if (confirm(`â–¶ Run LIVE strategy "${strat.name}" with real money? This will place real spread-bet orders.`)) doRun();
                           } else { doRun(); }
                         }}>
-                        {isLiveStrat ? '▶ Run LIVE — Real Money' : '▶ Run on Demo'}
+                        {isLiveStrat ? 'â–¶ Run LIVE â€” Real Money' : 'â–¶ Run on Demo'}
                       </Button>
                     ) : (
                       <span className="text-[10px] text-gray-600 px-2 py-1 border border-gray-800 rounded italic">
@@ -3350,7 +3270,7 @@ export function IGStrategyTrader() {
                           loading={testRunning && strat.id === activeStratId}
                           disabled={testRunning}
                           onClick={() => { setActiveStratId(strat.id); void runTestScan(strat); }}
-                          title="Run one scan cycle — opens max 1 position">
+                          title="Run one scan cycle â€” opens max 1 position">
                           Test
                         </Button>
                         <button onClick={() => openBuilder(strat)} className="p-1.5 text-gray-600 hover:text-orange-400 transition-colors"><Edit2 className="h-3.5 w-3.5" /></button>
@@ -3363,18 +3283,18 @@ export function IGStrategyTrader() {
                       isLiveStrat ? (
                         <button onClick={() => { setCopyModal({ strat, direction: 'toDemo' }); setCopyConfirmText(''); }}
                           className="text-[10px] px-2 py-1 rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors whitespace-nowrap">
-                          📋 Copy to Demo
+                          ðŸ“‹ Copy to Demo
                         </button>
                       ) : (
                         <button onClick={() => { setCopyModal({ strat, direction: 'toLive' }); setCopyConfirmText(''); }}
                           className="text-[10px] px-2 py-1 rounded border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors whitespace-nowrap">
-                          🔴 Copy to Live
+                          ðŸ”´ Copy to Live
                         </button>
                       )
                     )}
-                    {/* Server mode toggle — keeps strategy alive even when browser is closed */}
+                    {/* Server mode toggle â€” keeps strategy alive even when browser is closed */}
                     {stratState === 'STOPPED' && canRun && (
-                      <label className="flex items-center gap-1.5 cursor-pointer select-none" title="Run on Oracle VM server — strategy continues even if you close the browser">
+                      <label className="flex items-center gap-1.5 cursor-pointer select-none" title="Run on Oracle VM server â€” strategy continues even if you close the browser">
                         <input
                           type="checkbox"
                           checked={serverMode}
@@ -3388,7 +3308,7 @@ export function IGStrategyTrader() {
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-violet-500/20 border border-violet-500/30 text-violet-300">VM running</span>
                     )}
 
-                    {/* Sync settings button — only for copied strategies */}
+                    {/* Sync settings button â€” only for copied strategies */}
                     {stratState === 'STOPPED' && strat.copiedFrom && (
                       (() => {
                         const srcEnv = strat.copiedFrom as 'demo' | 'live';
@@ -3398,7 +3318,7 @@ export function IGStrategyTrader() {
                         return (
                           <button onClick={() => setSyncModal(strat.env === 'live' ? { demo: srcStrat, live: strat } : { demo: strat, live: srcStrat })}
                             className="text-[10px] px-2 py-1 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600 transition-colors whitespace-nowrap">
-                            ⟳ Sync Settings
+                            âŸ³ Sync Settings
                           </button>
                         );
                       })()
@@ -3406,7 +3326,7 @@ export function IGStrategyTrader() {
                   </div>
                 </div>
 
-                {/* ── Status display (RUNNING / PAUSED / STOPPED / not-started) ── */}
+                {/* â”€â”€ Status display (RUNNING / PAUSED / STOPPED / not-started) â”€â”€ */}
                 {stratState === 'RUNNING' && (
                   <div className="mt-2 rounded-lg px-3 py-2.5 space-y-2 border bg-emerald-500/[0.06] border-emerald-500/25">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -3415,23 +3335,23 @@ export function IGStrategyTrader() {
                         <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
                       </span>
                       <span className="text-xs font-bold text-emerald-300">
-                        ● LIVE — {scanProgress ? `Scanning: ${scanProgress}` : 'Running'}
+                        â— LIVE â€” {scanProgress ? `Scanning: ${scanProgress}` : 'Running'}
                       </span>
                       {runtimeDisplay && <span className="text-[10px] text-gray-500 ml-auto font-mono">Runtime: {runtimeDisplay}</span>}
                     </div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-gray-500">
                       {runtimeStartDisplay && <span>Running since <span className="text-gray-300 font-mono">{runtimeStartDisplay}</span></span>}
                       {lastSignalDisplay ? <span>Last signal: <span className="text-amber-400 font-mono">{lastSignalDisplay}</span></span>
-                        : <span className="text-gray-600">Last signal: awaiting…</span>}
+                        : <span className="text-gray-600">Last signal: awaitingâ€¦</span>}
                       <span>Trades today: <span className="text-white font-semibold">{completedTrades}</span></span>
-                      <span>Today P&L: <span className={clsx('font-semibold', todayPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>{todayPnL >= 0 ? '+' : ''}£{Math.abs(todayPnL).toFixed(2)}</span></span>
+                      <span>Today P&L: <span className={clsx('font-semibold', todayPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>{todayPnL >= 0 ? '+' : ''}Â£{Math.abs(todayPnL).toFixed(2)}</span></span>
                       {strat.accounts.map(env => igFundsDisplay[env] && (
-                        <span key={env}>Deployed: <span className="text-emerald-400 font-semibold">£{(igFundsDisplay[env]!.balance - igFundsDisplay[env]!.available).toFixed(0)} / £{igFundsDisplay[env]!.balance.toFixed(0)}</span></span>
+                        <span key={env}>Deployed: <span className="text-emerald-400 font-semibold">Â£{(igFundsDisplay[env]!.balance - igFundsDisplay[env]!.available).toFixed(0)} / Â£{igFundsDisplay[env]!.balance.toFixed(0)}</span></span>
                       ))}
                       {signalCountdown && <span>Next scan: <span className="text-emerald-400 font-mono">{signalCountdown}</span></span>}
                       {posCountdown && <span>Pos check: <span className="text-blue-400 font-mono">{posCountdown}</span></span>}
                     </div>
-                    {/* Mini activity log — last 5 entries for this strategy */}
+                    {/* Mini activity log â€” last 5 entries for this strategy */}
                     {(stratLogs[strat.id] ?? []).slice(0, 5).length > 0 && (
                       <div className="pt-1.5 border-t border-emerald-500/10 space-y-0.5">
                         {(stratLogs[strat.id] ?? []).slice(0, 5).map(entry => (
@@ -3455,7 +3375,7 @@ export function IGStrategyTrader() {
                       <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
                         <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500" />
                       </span>
-                      <span className="text-xs font-bold text-amber-300">● PAUSED — monitoring only, no new entries</span>
+                      <span className="text-xs font-bold text-amber-300">â— PAUSED â€” monitoring only, no new entries</span>
                       {runtimeDisplay && <span className="text-[10px] text-gray-500 ml-auto font-mono">Runtime: {runtimeDisplay}</span>}
                     </div>
                     <div className="flex gap-4 text-[11px] text-gray-500 flex-wrap">
@@ -3470,16 +3390,16 @@ export function IGStrategyTrader() {
                       <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
                         <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
                       </span>
-                      <span className="text-xs font-bold text-red-300">● STOPPED</span>
+                      <span className="text-xs font-bold text-red-300">â— STOPPED</span>
                       <span className="text-[10px] text-gray-500">Last run: {fmtTime(stoppedAt)}</span>
                     </div>
                     {stopError && <p className="text-[11px] text-red-400">Error: {stopError}</p>}
-                    {!stopError && <p className="text-[11px] text-gray-500">Stopped by user · {completedTrades} trades · P&L: {todayPnL >= 0 ? '+' : ''}£{Math.abs(todayPnL).toFixed(2)} today</p>}
+                    {!stopError && <p className="text-[11px] text-gray-500">Stopped by user Â· {completedTrades} trades Â· P&L: {todayPnL >= 0 ? '+' : ''}Â£{Math.abs(todayPnL).toFixed(2)} today</p>}
                   </div>
                 )}
                 {!strat.lastRunAt && !isRunning && (
                   <div className="mt-2 rounded-lg px-3 py-2 border border-gray-800/60 bg-gray-800/20">
-                    <span className="text-[11px] text-gray-600">○ Not started — click Start to begin scanning</span>
+                    <span className="text-[11px] text-gray-600">â—‹ Not started â€” click Start to begin scanning</span>
                   </div>
                 )}
               </Card>
@@ -3488,7 +3408,7 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── Market Scanner Grid ─────────────────────────────────────────── */}
+      {/* â”€â”€ Market Scanner Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {scanEntries.length > 0 && (
         <Card>
           <CardHeader
@@ -3497,11 +3417,11 @@ export function IGStrategyTrader() {
               const botCount   = scanEntries.filter(s => s.status === 'ok' && (s.source === 'yahoo+bot' || s.source === 'bot-server')).length;
               const okCount    = scanEntries.filter(s => s.status === 'ok').length;
               const src = botCount > 0
-                ? `Yahoo Finance · ⚡ ${botCount} bot-verified`
+                ? `Yahoo Finance Â· âš¡ ${botCount} bot-verified`
                 : 'Yahoo Finance';
               return scanEntries.some(s => s.status === 'ok')
-                ? `${src} · ${okCount}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
-                : `${src} · ${scanEntries.length} markets ready — click Run to start`;
+                ? `${src} Â· ${okCount}/${scanEntries.length} markets Â· last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
+                : `${src} Â· ${scanEntries.length} markets ready â€” click Run to start`;
             })()}
             icon={<Settings className="h-4 w-4" />}
           />
@@ -3530,7 +3450,7 @@ export function IGStrategyTrader() {
 
                 {/* Idle */}
                 {scan.status === 'idle' && !scan.scanning && (
-                  <p className="text-[10px] text-gray-600">Waiting for scan…</p>
+                  <p className="text-[10px] text-gray-600">Waiting for scanâ€¦</p>
                 )}
 
                 {/* OK: price + daily change + bot indicators + source badge */}
@@ -3544,7 +3464,7 @@ export function IGStrategyTrader() {
                           : scan.price.toFixed(4)}
                       </p>
                     )}
-                    {/* Daily change % — always shown (Yahoo primary) */}
+                    {/* Daily change % â€” always shown (Yahoo primary) */}
                     {scan.changePercent !== undefined && (
                       <p className={clsx('text-[11px] font-semibold flex items-center gap-0.5',
                         scan.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400'
@@ -3555,7 +3475,7 @@ export function IGStrategyTrader() {
                         {scan.changePercent >= 0 ? '+' : ''}{scan.changePercent.toFixed(2)}% daily
                       </p>
                     )}
-                    {/* Bot server RSI/MACD — shown when available as secondary check */}
+                    {/* Bot server RSI/MACD â€” shown when available as secondary check */}
                     {(scan.source === 'yahoo+bot' || scan.source === 'bot-server') && (() => {
                       const rsiInd  = scan.signal.indicators?.find(i => i.label === 'RSI (live)' || i.label === 'RSI');
                       const macdInd = scan.signal.indicators?.find(i => i.label === 'MACD (live)' || i.label === 'MACD');
@@ -3586,7 +3506,7 @@ export function IGStrategyTrader() {
                         ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                         : 'bg-gray-800 text-gray-500 border-gray-700/50'
                     )}>
-                      {scan.source === 'yahoo+bot' ? '⚡ Bot verified' : scan.source === 'bot-server' ? '⚡ Live' : 'Yahoo Finance'}
+                      {scan.source === 'yahoo+bot' ? 'âš¡ Bot verified' : scan.source === 'bot-server' ? 'âš¡ Live' : 'Yahoo Finance'}
                     </span>
                   </div>
                 )}
@@ -3603,18 +3523,18 @@ export function IGStrategyTrader() {
           </div>
           {scanEntries.some(s => s.status === 'error') && (
             <p className="text-[11px] text-amber-400 mt-3 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-              ⚠️ Some markets failed to load from Yahoo Finance. Market may be closed or temporarily unavailable. The bot will retry on the next scan.
+              âš ï¸ Some markets failed to load from Yahoo Finance. Market may be closed or temporarily unavailable. The bot will retry on the next scan.
             </p>
           )}
         </Card>
       )}
 
-      {/* ── SL Modal ──────────────────────────────────────────────────── */}
+      {/* â”€â”€ SL Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {slModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
           <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
             <h3 className="text-sm font-bold text-white mb-1">Move Stop-Loss</h3>
-            <p className="text-xs text-gray-500 mb-4">{slModal.pos.instrumentName ?? slModal.pos.epic} · current SL: {slModal.pos.stopLevel ?? 'none'}</p>
+            <p className="text-xs text-gray-500 mb-4">{slModal.pos.instrumentName ?? slModal.pos.epic} Â· current SL: {slModal.pos.stopLevel ?? 'none'}</p>
             <input type="number" value={slInput} onChange={e => setSlInput(e.target.value)}
               placeholder="New stop-loss price" autoFocus
               className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500 mb-3" />
@@ -3627,12 +3547,12 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── TP Modal ──────────────────────────────────────────────────── */}
+      {/* â”€â”€ TP Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {tpModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
           <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
             <h3 className="text-sm font-bold text-white mb-1">Move Take-Profit</h3>
-            <p className="text-xs text-gray-500 mb-4">{tpModal.pos.instrumentName ?? tpModal.pos.epic} · current TP: {tpModal.pos.limitLevel ?? 'none'}</p>
+            <p className="text-xs text-gray-500 mb-4">{tpModal.pos.instrumentName ?? tpModal.pos.epic} Â· current TP: {tpModal.pos.limitLevel ?? 'none'}</p>
             <input type="number" value={tpInput} onChange={e => setTpInput(e.target.value)}
               placeholder="New take-profit price" autoFocus
               className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-orange-500 mb-3" />
@@ -3645,7 +3565,7 @@ export function IGStrategyTrader() {
         </div>
       )}
 
-      {/* ── Positions + Working Orders + Trade History ──────────────────── */}
+      {/* â”€â”€ Positions + Working Orders + Trade History â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <Card>
         {/* Tab bar */}
         <div className="flex items-center gap-0.5 mb-4 bg-gray-800/50 rounded-lg p-1 w-fit flex-wrap">
@@ -3673,7 +3593,7 @@ export function IGStrategyTrader() {
         {posTab === 'positions' && (
           <>
             <div className="flex items-center justify-between mb-3">
-              <p className="text-xs text-gray-500">{allPositions.length} open · P&L: <span className={clsx('font-semibold', totalPnL>=0?'text-emerald-400':'text-red-400')}>{totalPnL>=0?'+':''}{fmt(totalPnL)}</span></p>
+              <p className="text-xs text-gray-500">{allPositions.length} open Â· P&L: <span className={clsx('font-semibold', totalPnL>=0?'text-emerald-400':'text-red-400')}>{totalPnL>=0?'+':''}{fmt(totalPnL)}</span></p>
               <span className="text-[10px] text-gray-600">Auto-refresh every 30s</span>
             </div>
             {posError && (
@@ -3731,16 +3651,16 @@ export function IGStrategyTrader() {
                             <div className="min-w-0">
                               <p className="text-xs font-semibold text-white truncate">{wo.instrumentName || wo.epic}</p>
                               <p className="text-[10px] text-gray-500">
-                                £{wo.size}/pt · trigger @ {wo.level}
-                                {wo.stopLevel ? ` · SL ${wo.stopLevel}` : ''}
-                                {wo.limitLevel ? ` · TP ${wo.limitLevel}` : ''}
+                                Â£{wo.size}/pt Â· trigger @ {wo.level}
+                                {wo.stopLevel ? ` Â· SL ${wo.stopLevel}` : ''}
+                                {wo.limitLevel ? ` Â· TP ${wo.limitLevel}` : ''}
                               </p>
                             </div>
                           </div>
                           <button onClick={() => void cancelWorkingOrder(env, wo.dealId)}
                             disabled={cancellingOrder === wo.dealId}
                             className="text-xs text-red-400 border border-red-500/30 px-2 py-1 rounded-lg hover:bg-red-500/10 transition-colors shrink-0 disabled:opacity-50">
-                            {cancellingOrder === wo.dealId ? '…' : 'Cancel'}
+                            {cancellingOrder === wo.dealId ? 'â€¦' : 'Cancel'}
                           </button>
                         </div>
                       ))}
@@ -3770,12 +3690,12 @@ export function IGStrategyTrader() {
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
                   {[
                     { label: 'Total Trades', value: tradeHistory.length.toString() },
-                    { label: 'Win Rate',     value: closed.length > 0 ? `${winRate}%` : '—', color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
-                    { label: 'Total P&L',    value: `${totalPnLH >= 0 ? '+' : ''}£${Math.abs(totalPnLH).toFixed(2)}`, color: totalPnLH >= 0 ? 'text-emerald-400' : 'text-red-400' },
-                    { label: 'Avg Win',      value: avgWin  > 0 ? `+£${avgWin.toFixed(2)}`  : '—', color: 'text-emerald-400' },
-                    { label: 'Avg Loss',     value: avgLoss < 0 ? `-£${Math.abs(avgLoss).toFixed(2)}` : '—', color: 'text-red-400' },
-                    { label: 'Best Trade',   value: bestPnL  > 0 ? `+£${bestPnL.toFixed(2)}`  : '—', color: 'text-emerald-400' },
-                    { label: 'Worst Trade',  value: worstPnL < 0 ? `-£${Math.abs(worstPnL).toFixed(2)}` : '—', color: 'text-red-400' },
+                    { label: 'Win Rate',     value: closed.length > 0 ? `${winRate}%` : 'â€”', color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
+                    { label: 'Total P&L',    value: `${totalPnLH >= 0 ? '+' : ''}Â£${Math.abs(totalPnLH).toFixed(2)}`, color: totalPnLH >= 0 ? 'text-emerald-400' : 'text-red-400' },
+                    { label: 'Avg Win',      value: avgWin  > 0 ? `+Â£${avgWin.toFixed(2)}`  : 'â€”', color: 'text-emerald-400' },
+                    { label: 'Avg Loss',     value: avgLoss < 0 ? `-Â£${Math.abs(avgLoss).toFixed(2)}` : 'â€”', color: 'text-red-400' },
+                    { label: 'Best Trade',   value: bestPnL  > 0 ? `+Â£${bestPnL.toFixed(2)}`  : 'â€”', color: 'text-emerald-400' },
+                    { label: 'Worst Trade',  value: worstPnL < 0 ? `-Â£${Math.abs(worstPnL).toFixed(2)}` : 'â€”', color: 'text-red-400' },
                     { label: 'Open',         value: tradeHistory.filter(r=>r.status==='OPEN').length.toString() },
                   ].map(s => (
                     <div key={s.label} className="bg-gray-800/40 rounded-lg px-3 py-2">
@@ -3799,7 +3719,7 @@ export function IGStrategyTrader() {
               )}
 
               {tradeHistory.length === 0 ? (
-                <p className="text-sm text-gray-500 py-6 text-center">No trades recorded yet — run a strategy to start building history</p>
+                <p className="text-sm text-gray-500 py-6 text-center">No trades recorded yet â€” run a strategy to start building history</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left">
@@ -3826,17 +3746,17 @@ export function IGStrategyTrader() {
                               r.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
                             )}>{r.direction}</span>
                           </td>
-                          <td className="px-2 py-2 text-gray-300 tabular-nums">£{r.size}</td>
-                          <td className="px-2 py-2 text-gray-300 tabular-nums">{r.entryLevel > 0 ? r.entryLevel.toLocaleString() : '—'}</td>
+                          <td className="px-2 py-2 text-gray-300 tabular-nums">Â£{r.size}</td>
+                          <td className="px-2 py-2 text-gray-300 tabular-nums">{r.entryLevel > 0 ? r.entryLevel.toLocaleString() : 'â€”'}</td>
                           <td className="px-2 py-2 text-gray-300 tabular-nums">
                             {r.exitLevel != null ? r.exitLevel.toLocaleString() : <span className="text-blue-400">Open</span>}
                           </td>
                           <td className="px-2 py-2">
                             {r.pnl != null ? (
                               <span className={clsx('font-semibold tabular-nums', r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                                {r.pnl >= 0 ? '+' : ''}£{Math.abs(r.pnl).toFixed(2)}
+                                {r.pnl >= 0 ? '+' : ''}Â£{Math.abs(r.pnl).toFixed(2)}
                               </span>
-                            ) : <span className="text-gray-600">—</span>}
+                            ) : <span className="text-gray-600">â€”</span>}
                           </td>
                           <td className="px-2 py-2">
                             <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded',
@@ -3846,9 +3766,9 @@ export function IGStrategyTrader() {
                             )}>{r.status}</span>
                           </td>
                           <td className="px-2 py-2 text-[10px] text-gray-500">
-                            {r.closeReason ? r.closeReason.replace('_', ' ') : '—'}
+                            {r.closeReason ? r.closeReason.replace('_', ' ') : 'â€”'}
                           </td>
-                          <td className="px-2 py-2 text-[9px] text-gray-600 font-mono truncate max-w-[70px]">{r.dealReference || '—'}</td>
+                          <td className="px-2 py-2 text-[9px] text-gray-600 font-mono truncate max-w-[70px]">{r.dealReference || 'â€”'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -3860,12 +3780,12 @@ export function IGStrategyTrader() {
         })()}
       </Card>
 
-      {/* ── Live Activity Feed ──────────────────────────────────────────── */}
+      {/* â”€â”€ Live Activity Feed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {runLog.length > 0 && (
         <Card>
           <CardHeader
             title="Live Activity Feed"
-            subtitle={`${runLog.length} entries · last 100 visible`}
+            subtitle={`${runLog.length} entries Â· last 100 visible`}
             icon={<Activity className="h-4 w-4" />}
             action={<button onClick={() => setRunLog([])} className="text-xs text-gray-500 hover:text-white">Clear</button>}
           />
@@ -3891,7 +3811,7 @@ export function IGStrategyTrader() {
         <Card>
           <CardHeader
             title="Server Strategy Log"
-            subtitle="Oracle VM — runs independently of browser"
+            subtitle="Oracle VM â€” runs independently of browser"
             icon={<Activity className="h-4 w-4 text-violet-400" />}
             action={
               serverRunning
@@ -3914,24 +3834,24 @@ export function IGStrategyTrader() {
       )}
 
       <p className="text-[10px] text-gray-600 text-center">
-        Spread betting profits are exempt from UK CGT and Income Tax · Losses cannot be offset against gains
+        Spread betting profits are exempt from UK CGT and Income Tax Â· Losses cannot be offset against gains
       </p>
 
-      {/* ── Diagnostic modal ─────────────────────────────────────────────── */}
+      {/* â”€â”€ Diagnostic modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {diagModal && (
         <div className="fixed inset-0 z-[9999] flex items-start justify-center bg-black/80 px-4 overflow-y-auto" onClick={e => { if (e.target === e.currentTarget) setDiagModal(false); }}>
           <div className="bg-gray-950 border border-gray-700 rounded-2xl w-full max-w-2xl mt-[80px] mb-8 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-bold text-white">🧪 IG Diagnostic</span>
-                {testOrderBusy && <span className="text-[10px] text-blue-400 animate-pulse">Running…</span>}
+                <span className="text-sm font-bold text-white">ðŸ§ª IG Diagnostic</span>
+                {testOrderBusy && <span className="text-[10px] text-blue-400 animate-pulse">Runningâ€¦</span>}
               </div>
               <button onClick={() => setDiagModal(false)} className="text-gray-500 hover:text-white p-1 rounded-lg hover:bg-gray-800 transition-colors">
                 <X className="h-4 w-4" />
               </button>
             </div>
             <pre className="p-4 text-[11px] font-mono text-gray-300 whitespace-pre-wrap break-all leading-relaxed max-h-[60vh] overflow-y-auto bg-gray-950">
-              {diagLines.length ? diagLines.join('\n') : 'Starting diagnostic…'}
+              {diagLines.length ? diagLines.join('\n') : 'Starting diagnosticâ€¦'}
             </pre>
             {!testOrderBusy && (
               <div className="px-4 py-3 border-t border-gray-800 flex gap-2">
@@ -3950,7 +3870,7 @@ export function IGStrategyTrader() {
   );
 }
 
-// ── Position card ─────────────────────────────────────────────────────────────
+// â”€â”€ Position card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function PositionCard({ pos, env, closingId, reversingId, onClose, onMoveSL, onMoveTP, onReverse }: {
   pos:        IGPosition;
@@ -3980,7 +3900,7 @@ function PositionCard({ pos, env, closingId, reversingId, onClose, onMoveSL, onM
           <div className="min-w-0 flex-1">
             <p className="text-xs font-semibold text-white truncate">{pos.instrumentName ?? pos.epic}</p>
             <div className="flex items-center gap-3 flex-wrap mt-0.5">
-              <span className="text-[10px] text-gray-500">£{pos.size}/pt</span>
+              <span className="text-[10px] text-gray-500">Â£{pos.size}/pt</span>
               <span className="text-[10px] text-gray-500">Entry: <span className="text-white font-mono">{entryPx}</span></span>
               <span className="text-[10px] text-gray-500">Now: <span className="font-mono text-white">{currentPx}</span></span>
               {pos.stopLevel  && <span className="text-[10px] text-red-400">SL: {pos.stopLevel}</span>}
@@ -4018,7 +3938,7 @@ function PositionCard({ pos, env, closingId, reversingId, onClose, onMoveSL, onM
         </button>
         <button onClick={() => onReverse(env, pos)} disabled={reversingId === pos.dealId}
           className="text-[11px] px-2 py-1 rounded-lg border border-gray-700 text-gray-400 hover:text-purple-400 hover:border-purple-500/30 transition-colors disabled:opacity-50">
-          {reversingId === pos.dealId ? '…' : 'Reverse'}
+          {reversingId === pos.dealId ? 'â€¦' : 'Reverse'}
         </button>
       </div>
 
@@ -4028,9 +3948,9 @@ function PositionCard({ pos, env, closingId, reversingId, onClose, onMoveSL, onM
           <div><p className="text-gray-600">Bid</p><p className="text-white font-mono">{pos.bid}</p></div>
           <div><p className="text-gray-600">Offer</p><p className="text-white font-mono">{pos.offer}</p></div>
           <div><p className="text-gray-600">Currency</p><p className="text-white">{pos.currency} <span className="text-emerald-400 text-[9px]">TAX FREE</span></p></div>
-          <div><p className="text-gray-600">Stop</p><p className={clsx('font-mono', pos.stopLevel ? 'text-red-400' : 'text-gray-600')}>{pos.stopLevel ?? '—'}</p></div>
-          <div><p className="text-gray-600">Limit</p><p className={clsx('font-mono', pos.limitLevel ? 'text-emerald-400' : 'text-gray-600')}>{pos.limitLevel ?? '—'}</p></div>
-          <div><p className="text-gray-600">Risk:Reward</p><p className="text-white">{pos.stopLevel && pos.limitLevel && pos.level ? `1:${((Math.abs(pos.limitLevel-pos.level))/(Math.abs(pos.stopLevel-pos.level))).toFixed(1)}` : '—'}</p></div>
+          <div><p className="text-gray-600">Stop</p><p className={clsx('font-mono', pos.stopLevel ? 'text-red-400' : 'text-gray-600')}>{pos.stopLevel ?? 'â€”'}</p></div>
+          <div><p className="text-gray-600">Limit</p><p className={clsx('font-mono', pos.limitLevel ? 'text-emerald-400' : 'text-gray-600')}>{pos.limitLevel ?? 'â€”'}</p></div>
+          <div><p className="text-gray-600">Risk:Reward</p><p className="text-white">{pos.stopLevel && pos.limitLevel && pos.level ? `1:${((Math.abs(pos.limitLevel-pos.level))/(Math.abs(pos.stopLevel-pos.level))).toFixed(1)}` : 'â€”'}</p></div>
           <div className="col-span-3"><p className="text-gray-600">Deal ID</p><p className="text-gray-400 font-mono text-[10px] break-all">{pos.dealId}</p></div>
         </div>
       )}
