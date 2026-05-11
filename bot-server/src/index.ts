@@ -116,6 +116,34 @@ app.post('/accounts/:account/inject', auth, (req: Request, res: Response) => {
   res.status(result.ok ? 200 : 400).json(result);
 });
 
+// GET /prices — real-time bid + session changePercent for all tracked epics (both bots)
+app.get('/prices', auth, (_req: Request, res: Response) => {
+  type PriceEntry = { bid: number; mid: number; changePercent: number; candleCount: number };
+  const prices: Record<string, PriceEntry> = {};
+
+  for (const bot of [demoBot, liveBot]) {
+    const st         = bot.status();
+    const allCandles = bot.candles();
+    for (const [epic, candles] of Object.entries(allCandles)) {
+      if (prices[epic]) continue; // demo takes priority
+      const bid = st.epicStatuses[epic]?.lastPrice
+               ?? (candles.length ? candles[candles.length - 1].bidClose : 0);
+      if (!bid && !candles.length) continue;
+
+      let changePercent = 0;
+      if (candles.length >= 2) {
+        const firstOpen = candles[0].open;
+        const lastClose = candles[candles.length - 1].close;
+        if (firstOpen > 0) changePercent = (lastClose - firstOpen) / firstOpen * 100;
+      }
+
+      prices[epic] = { bid, mid: bid, changePercent, candleCount: candles.length };
+    }
+  }
+
+  res.json({ ok: true, prices, ts: new Date().toISOString() });
+});
+
 // ── Legacy single-account routes (backward compat — delegate to demo bot) ─────
 
 app.get('/status', auth, (_req: Request, res: Response) => {

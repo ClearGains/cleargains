@@ -38,6 +38,7 @@ export async function GET(req: NextRequest) {
   if (action === 'health')          return proxyTo('/health',    'GET');
   if (action === 'accounts')        return proxyTo('/accounts',  'GET');
   if (action === 'strategy-status') return proxyTo('/strategy/status', 'GET');
+  if (action === 'prices')          return proxyTo('/prices',    'GET');
 
   // Per-account status
   if (action === 'account-status' && validAccount(account)) {

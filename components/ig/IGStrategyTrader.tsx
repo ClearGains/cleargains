@@ -541,6 +541,9 @@ export function IGStrategyTrader() {
   // ── Market scanner state ───────────────────────────────────────────────────
   const [scans, setScans] = useState<Record<string, MarketScan>>({});
   const [scanProgress, setScanProgress] = useState<string>('');
+  // Bot server real-time prices cache — refreshed once per scan cycle
+  type BotPriceEntry = { bid: number; mid: number; changePercent: number; candleCount: number };
+  const botPricesRef = useRef<Record<string, BotPriceEntry>>({});
 
   // ── Working orders ─────────────────────────────────────────────────────────
   const [workingOrders, setWorkingOrders] = useState<Record<'demo'|'live', IGWorkingOrder[]>>({ demo:[], live:[] });
@@ -1000,21 +1003,31 @@ export function IGStrategyTrader() {
     return null;
   }
 
-  // ── Fetch market snapshot via server-side proxy (handles crumb auth for forex/crypto) ──
-  async function fetchSnapshot(name: string): Promise<{price:number;changePercent:number;signal:'BUY'|'SELL'|'NEUTRAL';source:string;error?:string}|null> {
+  // ── Fetch market snapshot — bot server (Lightstreamer) first, Yahoo fallback ──
+  async function fetchSnapshot(name: string, epic?: string): Promise<{price:number;changePercent:number;signal:'BUY'|'SELL'|'NEUTRAL';source:string;error?:string}|null> {
+    // Use bot server real-time data when available (cached from start of scan cycle)
+    if (epic) {
+      const bp = botPricesRef.current[epic];
+      if (bp && bp.candleCount >= 5 && bp.mid > 0) {
+        const signal: 'BUY'|'SELL'|'NEUTRAL' = bp.changePercent > 0.3 ? 'BUY' : bp.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
+        return { price: bp.mid, changePercent: bp.changePercent, signal, source: 'bot-server' };
+      }
+    }
+
+    // Fallback: Yahoo Finance
     const { YAHOO_SYMBOL_MAP } = await import('@/lib/yahooClient');
     const symbol = YAHOO_SYMBOL_MAP[name];
-    if (!symbol) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'proxy', error: `No symbol mapping for "${name}"` };
+    if (!symbol) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo', error: `No symbol mapping for "${name}"` };
     try {
       const r = await fetch(`/api/market/quotes?symbols=${encodeURIComponent(symbol)}`);
-      if (!r.ok) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'proxy', error: `Quotes API ${r.status}` };
+      if (!r.ok) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo', error: `Quotes API ${r.status}` };
       const data = await r.json() as Array<{ symbol: string; price: number; changePercent: number }>;
-      if (!Array.isArray(data) || !data.length) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'proxy', error: 'No data returned' };
+      if (!Array.isArray(data) || !data.length) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo', error: 'No data returned' };
       const q = data[0];
       const signal: 'BUY' | 'SELL' | 'NEUTRAL' = q.changePercent > 0.3 ? 'BUY' : q.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
-      return { price: q.price, changePercent: q.changePercent, signal, source: 'proxy' };
+      return { price: q.price, changePercent: q.changePercent, signal, source: 'yahoo' };
     } catch (e) {
-      return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'proxy', error: e instanceof Error ? e.message : 'Failed to fetch' };
+      return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo', error: e instanceof Error ? e.message : 'Failed to fetch' };
     }
   }
 
@@ -1068,7 +1081,7 @@ export function IGStrategyTrader() {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
     const envs = strat.accounts.filter(e => sessions[e]);
 
-    const snapshot = await fetchSnapshot(market.name);
+    const snapshot = await fetchSnapshot(market.name, market.epic);
 
     if (!snapshot || snapshot.error) {
       const errMsg = snapshot?.error ?? 'Failed to fetch market data';
@@ -1350,6 +1363,19 @@ export function IGStrategyTrader() {
       const funds = await fetchIGFunds(env);
       if (funds) slog(strat.id, 'info', `[${env.toUpperCase()}] 💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
     }
+
+    // Pre-fetch real-time prices from bot server (one call for all markets)
+    try {
+      const pr = await fetch('/api/ig/bot?action=prices');
+      if (pr.ok) {
+        const pd = await pr.json() as { ok: boolean; prices: Record<string, { bid: number; mid: number; changePercent: number; candleCount: number }> };
+        if (pd.ok && pd.prices) {
+          botPricesRef.current = pd.prices;
+          const liveCount = Object.keys(pd.prices).length;
+          if (liveCount > 0) slog(strat.id, 'info', `📡 Bot server: ${liveCount} live price(s) from Lightstreamer`);
+        }
+      }
+    } catch { /* bot server offline — Yahoo fallback will be used */ }
 
     slog(strat.id, 'info', `📡 Signal scan — ${markets.length} markets… (fetching news)`);
     await fetchNewsSignals(markets, positions);
@@ -2950,11 +2976,14 @@ export function IGStrategyTrader() {
         <Card>
           <CardHeader
             title="Market Scanner"
-            subtitle={
-              scanEntries.some(s => s.status === 'ok')
-                ? `Yahoo Finance · ${scanEntries.filter(s=>s.status==='ok').length}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
-                : `Yahoo Finance · ${scanEntries.length} markets ready — click Run to start`
-            }
+            subtitle={(() => {
+              const liveCount = scanEntries.filter(s => s.status === 'ok' && s.source === 'bot-server').length;
+              const okCount   = scanEntries.filter(s => s.status === 'ok').length;
+              const src = liveCount > 0 ? `⚡ ${liveCount} live · ${okCount - liveCount} Yahoo` : 'Yahoo Finance';
+              return scanEntries.some(s => s.status === 'ok')
+                ? `${src} · ${okCount}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
+                : `${src} · ${scanEntries.length} markets ready — click Run to start`;
+            })()}
             icon={<Settings className="h-4 w-4" />}
           />
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -3008,8 +3037,13 @@ export function IGStrategyTrader() {
                       </p>
                     )}
                     {/* Source badge */}
-                    <span className="inline-block text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700/50">
-                      Yahoo Finance
+                    <span className={clsx(
+                      'inline-block text-[9px] px-1.5 py-0.5 rounded border',
+                      scan.source === 'bot-server'
+                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                        : 'bg-gray-800 text-gray-500 border-gray-700/50'
+                    )}>
+                      {scan.source === 'bot-server' ? '⚡ Live' : 'Yahoo Finance'}
                     </span>
                   </div>
                 )}

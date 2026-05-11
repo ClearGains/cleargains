@@ -22,6 +22,7 @@ export type AccountBotHandle = {
   resume:  () => void;
   inject:  (p: InjectParams) => { ok: boolean; error?: string };
   status:  () => BotStatus & { accountKey: AccountKey };
+  candles: (epic?: string) => Record<string, CandleTick[]>;
 };
 
 function resolveCredentials(accountKey: AccountKey) {
@@ -395,7 +396,17 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
     };
   }
 
-  return { start, stop, pause, resume, inject, status };
+  function candles(epic?: string): Record<string, CandleTick[]> {
+    if (epic) {
+      const arr = monitorCandles.get(epic);
+      return arr ? { [epic]: arr } : {};
+    }
+    const result: Record<string, CandleTick[]> = {};
+    for (const [k, v] of monitorCandles) result[k] = v;
+    return result;
+  }
+
+  return { start, stop, pause, resume, inject, status, candles };
 }
 
 // ── Singleton instances ───────────────────────────────────────────────────────
