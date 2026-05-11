@@ -282,6 +282,20 @@ function calcAutoSizing(
   return { stopDist, limitDist, size };
 }
 
+/**
+ * Dynamic position cap — scales with available funds and average signal quality.
+ * Ensures the strategy self-limits when capital is tight or signals are weak.
+ */
+function calcAutoMaxPositions(available: number, avgStrength: number): number {
+  const byFunds =
+    available >= 3000 ? 5 :
+    available >= 2000 ? 4 :
+    available >= 1000 ? 3 :
+    available >= 500  ? 2 : 1;
+  const confAdj = avgStrength >= 80 ? 1 : avgStrength < 60 ? -1 : 0;
+  return Math.max(1, byFunds + confAdj);
+}
+
 function isEpicTradeable(epic: string): boolean {
   const now  = new Date();
   const day  = now.getUTCDay();   // 0=Sun 6=Sat
@@ -609,6 +623,7 @@ export function IGStrategyTrader() {
   const [bTimeframe, setBTimeframe]         = useState<Timeframe>('daily');
   const [bSize, setBSize]                   = useState(1);
   const [bMaxPos, setBMaxPos]               = useState(3);
+  const [bAutoMaxPos, setBAutoMaxPos]       = useState(false);
   const [bMinStrength, setBMinStrength]     = useState(55);
   const [bAccounts, setBAccounts]           = useState<('demo'|'live')[]>(['demo']);
   const [bAutoClose, setBAutoClose]         = useState(true);
@@ -1309,10 +1324,16 @@ export function IGStrategyTrader() {
         // Don't open if already same direction
         if (positions[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
-        // Enforce max positions cap (0 = no limit)
+        // Enforce max positions cap — static or auto-discretionary
         const ownedPositions = positions[env].filter(p => ownedDir === null || p.direction === ownedDir);
-        if (strat.maxPositions > 0 && ownedPositions.length >= strat.maxPositions) {
-          slog(strat.id, 'signal', `[SKIP] ${market.name} — max positions (${strat.maxPositions}) reached on ${env.toUpperCase()}`);
+        const fundsForMax = igFundsRef.current[env]?.available ?? 0;
+        const scanStrengths = Object.values(scans).map(s => s.signal?.strength ?? 0).filter(Boolean);
+        const avgScanStrength = scanStrengths.length ? scanStrengths.reduce((a, b) => a + b, 0) / scanStrengths.length : 60;
+        const effectiveMax = strat.autoMaxPositions
+          ? calcAutoMaxPositions(fundsForMax, avgScanStrength)
+          : strat.maxPositions;
+        if (effectiveMax > 0 && ownedPositions.length >= effectiveMax) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — max positions (${effectiveMax}${strat.autoMaxPositions ? ' auto' : ''}) reached on ${env.toUpperCase()}`);
           continue;
         }
 
@@ -1488,7 +1509,7 @@ export function IGStrategyTrader() {
       const m = markets[i];
       setScanProgress(`${m.name} (${i+1}/${markets.length})`);
       await scanMarket(strat, m);
-      if (i < markets.length - 1) await sleep(800);
+      if (i < markets.length - 1) await sleep(300);
     }
 
     setScanProgress('');
@@ -1627,6 +1648,37 @@ export function IGStrategyTrader() {
         if (newStop !== null) {
           const r = await updatePositionSL(env, pos, newStop, pos.limitLevel ?? null);
           if (r.ok) slog(strat.id, 'info', `[${env.toUpperCase()}] ${pos.instrumentName ?? pos.epic}: ${reason}`);
+        }
+      }
+
+      // [AUTO] Trim excess positions — if over effective max, close worst P&L first
+      if (strat.autoClose) {
+        const botMode2 = strat.mode ?? 'BOTH';
+        const ownedDir2 = botMode2 === 'LONG_ONLY' ? 'BUY' : botMode2 === 'SHORT_ONLY' ? 'SELL' : null;
+        const ownedNow = positions[env].filter(p => ownedDir2 === null || p.direction === ownedDir2);
+        const fundsNow2 = igFundsRef.current[env]?.available ?? 0;
+        const scanStrengths2 = Object.values(scans).map(s => s.signal?.strength ?? 0).filter(Boolean);
+        const avgStr2 = scanStrengths2.length ? scanStrengths2.reduce((a, b) => a + b, 0) / scanStrengths2.length : 60;
+        const effectiveMax2 = strat.autoMaxPositions
+          ? calcAutoMaxPositions(fundsNow2, avgStr2)
+          : strat.maxPositions;
+        if (effectiveMax2 > 0 && ownedNow.length > effectiveMax2) {
+          const excess = [...ownedNow]
+            .sort((a, b) => (a.upl ?? 0) - (b.upl ?? 0))   // worst P&L first
+            .slice(0, ownedNow.length - effectiveMax2);
+          for (const weak of excess) {
+            slog(strat.id, 'info', `[AUTO] Trimming: ${weak.instrumentName ?? weak.epic} (P&L £${(weak.upl ?? 0).toFixed(2)}) — over limit of ${effectiveMax2}…`);
+            const cr = await closePos(env, weak);
+            if (cr.ok) {
+              const exitPx = weak.direction === 'BUY' ? (weak.bid ?? weak.level) : (weak.offer ?? weak.level);
+              const closedPnl = weak.upl ?? 0;
+              todayPnLRef.current += closedPnl;
+              setTodayPnL(todayPnLRef.current);
+              slog(strat.id, 'close', `[AUTO] ✓ Trimmed ${weak.instrumentName ?? weak.epic} — portfolio capped — P&L: £${closedPnl.toFixed(2)}`);
+              setTradeHistory(prev => recordTradeClose(prev, weak.dealId, exitPx, closedPnl, 'STRATEGY', new Date().toISOString()));
+              recentlyClosedRef.current.set(`${weak.epic}:${weak.direction}`, Date.now());
+            } else slog(strat.id, 'error', `[${env.toUpperCase()}] Trim close failed: ${cr.error ?? 'unknown'}`);
+          }
         }
       }
     }
@@ -2064,6 +2116,7 @@ export function IGStrategyTrader() {
     if (existing) {
       setEditId(existing.id); setBName(existing.name); setBTimeframe(existing.timeframe);
       setBSize(existing.size); setBMaxPos(existing.maxPositions);
+      setBAutoMaxPos(existing.autoMaxPositions ?? false);
       setBMinStrength(existing.minStrength ?? 55);
       setBAccounts(existing.accounts); setBAutoClose(existing.autoClose ?? true); setBMode(existing.mode ?? 'BOTH');
       setBWatchlist(existing.watchlist?.length ? existing.watchlist : [...DEFAULT_WATCHLIST]);
@@ -2073,6 +2126,7 @@ export function IGStrategyTrader() {
       setBTakeProfit(existing.takeProfit ?? (existing.targetPct ?? 30));
     } else {
       setEditId(null); setBName(''); setBTimeframe('daily'); setBSize(1); setBMaxPos(3);
+      setBAutoMaxPos(false);
       setBMinStrength(55);
       // Only default to live if we actually have a live session
       setBAccounts([sessions[activeMode] ? activeMode : 'demo']);
@@ -2101,6 +2155,7 @@ export function IGStrategyTrader() {
       timeframe: bTimeframe,
       size: bSize,
       maxPositions: bMaxPos,
+      autoMaxPositions: bAutoMaxPos,
       accounts: bAccounts,
       autoTrade: true,
       autoClose: bAutoClose,
@@ -2636,10 +2691,20 @@ export function IGStrategyTrader() {
                 <p className="text-[10px] text-gray-600 mt-1">£{bStopLoss} ÷ stop pts</p>
               </div>
               <div>
-                <label className="text-xs text-gray-400 mb-1.5 block">Max positions</label>
-                <input type="number" min={0} max={20} value={bMaxPos} onChange={e => setBMaxPos(Number(e.target.value))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
-                {bMaxPos === 0 && <p className="text-[10px] text-orange-400 mt-1">∞ No position limit</p>}
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs text-gray-400">Max positions</label>
+                  <button onClick={() => setBAutoMaxPos(v => !v)}
+                    className={clsx('flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors', bAutoMaxPos ? 'bg-violet-500/20 border-violet-500/50 text-violet-300' : 'bg-gray-800 border-gray-700 text-gray-500')}>
+                    <span>{bAutoMaxPos ? '⚡ Auto' : 'Manual'}</span>
+                  </button>
+                </div>
+                {bAutoMaxPos
+                  ? <div className="w-full bg-gray-800/60 border border-violet-500/30 rounded-lg px-3 py-2 text-sm text-violet-300 font-mono cursor-default">Scales with funds + signal quality</div>
+                  : <input type="number" min={0} max={20} value={bMaxPos} onChange={e => setBMaxPos(Number(e.target.value))}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+                }
+                {!bAutoMaxPos && bMaxPos === 0 && <p className="text-[10px] text-orange-400 mt-1">∞ No position limit</p>}
+                {bAutoMaxPos && <p className="text-[10px] text-gray-500 mt-1">£500→2 · £1k→3 · £2k→4 · £3k→5 · +1 if signals strong</p>}
               </div>
               <div>
                 <label className="text-xs text-gray-400 mb-1.5 block">Min signal strength</label>
@@ -2713,6 +2778,9 @@ export function IGStrategyTrader() {
                 <label className="text-xs text-gray-400 mb-1.5 block">Signal scan interval</label>
                 <select value={bSignalScanMs} onChange={e => setBSignalScanMs(Number(e.target.value))}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                  <option value={90_000}>90 seconds</option>
+                  <option value={2 * 60_000}>2 minutes</option>
+                  <option value={3 * 60_000}>3 minutes</option>
                   <option value={5 * 60_000}>5 minutes</option>
                   <option value={10 * 60_000}>10 minutes</option>
                   <option value={15 * 60_000}>15 minutes</option>

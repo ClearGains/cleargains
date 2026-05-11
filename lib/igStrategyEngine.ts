@@ -64,6 +64,7 @@ export type IGSavedStrategy = {
   accounts: ('demo' | 'live')[];
   autoTrade: boolean;
   autoClose: boolean;
+  autoMaxPositions?: boolean;  // when true, max positions scales dynamically with funds + signal quality
   mode?: 'LONG_ONLY' | 'SHORT_ONLY' | 'BOTH';  // default BOTH
   createdAt: string;
   lastRunAt?: string;
