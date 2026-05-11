@@ -2287,6 +2287,16 @@ export default function DemoTraderPage() {
 
   // ── Run strategy ───────────────────────────────────────────────────────────
   async function runStrategy() {
+    // Market closed guard — Finnhub returns c:0 for all stocks when closed,
+    // causing every quote to be skipped and showing a confusing error.
+    const usStatus = getMarketStatus();
+    const ukOpen   = isUKMarketOpen();
+    if (usStatus.status !== 'open' && !ukOpen) {
+      const next = usStatus.nextOpenStr ?? 'next session';
+      setScanError(`Markets are currently closed — scanner uses live Finnhub quotes which are unavailable outside trading hours. Next US open: ${next}.`);
+      return;
+    }
+
     setScanning(true);
     setScanError(null);
     setRunLog([]);

@@ -713,6 +713,16 @@ export function IGStrategyTrader() {
 
   // ── Trade history ──────────────────────────────────────────────────────────
   const [tradeHistory, setTradeHistory] = useState<IGTradeRecord[]>([]);
+  type IGActivityRecord = {
+    date: string; epic: string; dealId: string; dealRef: string;
+    direction: string; size: number; level: number; marketName: string;
+    currency: string; description: string;
+  };
+  const [igActivityOpened, setIgActivityOpened] = useState<IGActivityRecord[]>([]);
+  const [igActivityClosed, setIgActivityClosed] = useState<IGActivityRecord[]>([]);
+  const [igHistoryLoading, setIgHistoryLoading] = useState(false);
+  const [igHistoryError,   setIgHistoryError]   = useState<string|null>(null);
+  const [igHistoryTs,      setIgHistoryTs]       = useState<string|null>(null);
 
   // ── Builder ────────────────────────────────────────────────────────────────
   const [showBuilder, setShowBuilder]       = useState(false);
@@ -782,6 +792,33 @@ export function IGStrategyTrader() {
     stratLogsRef.current[stratId] = [entry, ...prev].slice(0, 200);
     setStratLogs(p => ({ ...p, [stratId]: [entry, ...(p[stratId] ?? [])].slice(0, 200) }));
   }
+
+  // ── IG activity history fetch (trade history tab) ────────────────────────
+  async function fetchIGHistory() {
+    const env = activeMode;
+    const sess = sessions[env];
+    if (!sess) { setIgHistoryError('No IG session — connect first'); return; }
+    setIgHistoryLoading(true);
+    setIgHistoryError(null);
+    try {
+      const r = await fetch('/api/ig/history?pageSize=100', { headers: makeHeaders(sess, env) });
+      const d = await r.json() as { ok: boolean; opened?: IGActivityRecord[]; closed?: IGActivityRecord[]; error?: string };
+      if (!d.ok) { setIgHistoryError(d.error ?? 'Failed'); return; }
+      setIgActivityOpened(d.opened ?? []);
+      setIgActivityClosed(d.closed ?? []);
+      setIgHistoryTs(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }));
+    } catch (e) {
+      setIgHistoryError(e instanceof Error ? e.message : 'Fetch failed');
+    } finally {
+      setIgHistoryLoading(false);
+    }
+  }
+
+  // Auto-fetch IG history when the history tab is opened
+  useEffect(() => {
+    if (posTab === 'history') void fetchIGHistory();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posTab, activeMode]);
 
   // ── Per-strategy state helpers ────────────────────────────────────────────
   function getStratState(id: string): RunState {
@@ -3729,29 +3766,88 @@ export function IGStrategyTrader() {
 
         {/* Trade History tab */}
         {posTab === 'history' && (() => {
-          const closed   = tradeHistory.filter(r => r.status === 'CLOSED');
-          const wins     = closed.filter(r => (r.pnl ?? 0) > 0);
-          const losses   = closed.filter(r => (r.pnl ?? 0) < 0);
+          const fmtDt = (iso: string) =>
+            new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+          // ── IG activity history (primary — real data from IG) ──────────────
+          const hasIGData = igActivityOpened.length > 0 || igActivityClosed.length > 0;
+
+          // Build merged view: pair opens with their closes by dealId
+          type MergedRow = {
+            key: string; market: string; epic: string;
+            direction: string; size: number; level: number;
+            openedAt: string; closedAt: string | null;
+            closeLevel: number | null; closeDesc: string;
+          };
+          const closeMap = new Map(igActivityClosed.map(c => [c.dealId, c]));
+          const mergedRows: MergedRow[] = igActivityOpened.map(o => {
+            const cl = closeMap.get(o.dealId);
+            return {
+              key: o.dealId || o.dealRef,
+              market: o.marketName || o.epic,
+              epic: o.epic,
+              direction: o.direction,
+              size: o.size,
+              level: o.level,
+              openedAt: o.date,
+              closedAt: cl?.date ?? null,
+              closeLevel: cl?.level ?? null,
+              closeDesc: cl?.description ?? '',
+            };
+          });
+
+          // Stats from local bot records (bot-placed trades have P&L)
+          const closed    = tradeHistory.filter(r => r.status === 'CLOSED');
+          const wins      = closed.filter(r => (r.pnl ?? 0) > 0);
+          const losses    = closed.filter(r => (r.pnl ?? 0) < 0);
           const totalPnLH = closed.reduce((s, r) => s + (r.pnl ?? 0), 0);
-          const winRate  = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
-          const avgWin   = wins.length   > 0 ? wins.reduce((s, r) => s + (r.pnl ?? 0), 0) / wins.length : 0;
-          const avgLoss  = losses.length > 0 ? losses.reduce((s, r) => s + (r.pnl ?? 0), 0) / losses.length : 0;
-          const bestPnL  = closed.length > 0 ? Math.max(...closed.map(r => r.pnl ?? 0)) : 0;
-          const worstPnL = closed.length > 0 ? Math.min(...closed.map(r => r.pnl ?? 0)) : 0;
+          const winRate   = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
+          const avgWin    = wins.length   > 0 ? wins.reduce((s, r)   => s + (r.pnl ?? 0), 0) / wins.length   : 0;
+          const avgLoss   = losses.length > 0 ? losses.reduce((s, r) => s + (r.pnl ?? 0), 0) / losses.length : 0;
+          const bestPnL   = closed.length > 0 ? Math.max(...closed.map(r => r.pnl ?? 0)) : 0;
+          const worstPnL  = closed.length > 0 ? Math.min(...closed.map(r => r.pnl ?? 0)) : 0;
+
           return (
             <>
-              {/* Stats */}
-              {tradeHistory.length > 0 && (
+              {/* Sync header */}
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <p className="text-xs font-semibold text-white">IG Activity History</p>
+                  {igHistoryTs && <span className="text-[10px] text-gray-600">synced {igHistoryTs}</span>}
+                  {igHistoryError && <span className="text-[10px] text-red-400">{igHistoryError}</span>}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void fetchIGHistory()}
+                    disabled={igHistoryLoading}
+                    className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-white border border-gray-700 rounded px-2 py-1 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={clsx('h-2.5 w-2.5', igHistoryLoading && 'animate-spin')} />
+                    {igHistoryLoading ? 'Syncing…' : 'Sync from IG'}
+                  </button>
+                  {tradeHistory.length > 0 && (
+                    <button
+                      onClick={() => { if (confirm('Clear local bot trade history?')) { setTradeHistory([]); saveIGTradeHistory([]); } }}
+                      className="text-[10px] text-gray-600 hover:text-red-400 transition-colors"
+                    >
+                      Clear local
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* P&L stats (from bot-recorded trades that have P&L) */}
+              {closed.length > 0 && (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
                   {[
-                    { label: 'Total Trades', value: tradeHistory.length.toString() },
-                    { label: 'Win Rate',     value: closed.length > 0 ? `${winRate}%` : '—', color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
-                    { label: 'Total P&L',    value: `${totalPnLH >= 0 ? '+' : ''}£${Math.abs(totalPnLH).toFixed(2)}`, color: totalPnLH >= 0 ? 'text-emerald-400' : 'text-red-400' },
-                    { label: 'Avg Win',      value: avgWin  > 0 ? `+£${avgWin.toFixed(2)}`  : '—', color: 'text-emerald-400' },
-                    { label: 'Avg Loss',     value: avgLoss < 0 ? `-£${Math.abs(avgLoss).toFixed(2)}` : '—', color: 'text-red-400' },
-                    { label: 'Best Trade',   value: bestPnL  > 0 ? `+£${bestPnL.toFixed(2)}`  : '—', color: 'text-emerald-400' },
-                    { label: 'Worst Trade',  value: worstPnL < 0 ? `-£${Math.abs(worstPnL).toFixed(2)}` : '—', color: 'text-red-400' },
-                    { label: 'Open',         value: tradeHistory.filter(r=>r.status==='OPEN').length.toString() },
+                    { label: 'Bot Trades',  value: tradeHistory.length.toString() },
+                    { label: 'Win Rate',    value: `${winRate}%`,                                                      color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
+                    { label: 'Total P&L',   value: `${totalPnLH >= 0 ? '+' : ''}£${Math.abs(totalPnLH).toFixed(2)}`,  color: totalPnLH >= 0 ? 'text-emerald-400' : 'text-red-400' },
+                    { label: 'Avg Win',     value: avgWin  > 0 ? `+£${avgWin.toFixed(2)}`              : '—',          color: 'text-emerald-400' },
+                    { label: 'Avg Loss',    value: avgLoss < 0 ? `-£${Math.abs(avgLoss).toFixed(2)}`   : '—',          color: 'text-red-400' },
+                    { label: 'Best Trade',  value: bestPnL  > 0 ? `+£${bestPnL.toFixed(2)}`            : '—',          color: 'text-emerald-400' },
+                    { label: 'Worst Trade', value: worstPnL < 0 ? `-£${Math.abs(worstPnL).toFixed(2)}` : '—',          color: 'text-red-400' },
+                    { label: 'Open',        value: tradeHistory.filter(r => r.status === 'OPEN').length.toString() },
                   ].map(s => (
                     <div key={s.label} className="bg-gray-800/40 rounded-lg px-3 py-2">
                       <p className="text-[9px] text-gray-500 uppercase tracking-wider">{s.label}</p>
@@ -3761,39 +3857,28 @@ export function IGStrategyTrader() {
                 </div>
               )}
 
-              {/* Clear button */}
-              {tradeHistory.length > 0 && (
-                <div className="flex justify-end mb-3">
-                  <button
-                    onClick={() => { if (confirm('Clear all trade history?')) { setTradeHistory([]); saveIGTradeHistory([]); } }}
-                    className="text-[10px] text-gray-600 hover:text-red-400 transition-colors"
-                  >
-                    Clear history
-                  </button>
-                </div>
-              )}
-
-              {tradeHistory.length === 0 ? (
-                <p className="text-sm text-gray-500 py-6 text-center">No trades recorded yet — run a strategy to start building history</p>
-              ) : (
-                <div className="overflow-x-auto">
+              {/* ── IG activity table (real data) ── */}
+              {hasIGData ? (
+                <div className="overflow-x-auto mb-4">
                   <table className="w-full text-left">
                     <thead>
                       <tr className="border-b border-gray-800">
-                        {['Opened', 'Strategy', 'Market', 'Dir', 'Size', 'Entry', 'Exit', 'P&L', 'Status', 'Reason', 'Ref'].map(h => (
+                        {['Opened', 'Closed', 'Market', 'Dir', 'Size', 'Entry', 'Exit', 'Status'].map(h => (
                           <th key={h} className="px-2 py-2 text-[9px] text-gray-500 font-medium uppercase tracking-wider whitespace-nowrap">{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {tradeHistory.map(r => (
-                        <tr key={r.id} className="border-t border-gray-800/50 hover:bg-gray-800/20 text-xs">
-                          <td className="px-2 py-2 text-[10px] text-gray-500 whitespace-nowrap">
-                            {new Date(r.openedAt).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}
+                      {mergedRows.map(r => (
+                        <tr key={r.key} className="border-t border-gray-800/50 hover:bg-gray-800/20">
+                          <td className="px-2 py-2 text-[10px] text-gray-400 whitespace-nowrap tabular-nums">{fmtDt(r.openedAt)}</td>
+                          <td className="px-2 py-2 text-[10px] whitespace-nowrap tabular-nums">
+                            {r.closedAt
+                              ? <span className="text-gray-400">{fmtDt(r.closedAt)}</span>
+                              : <span className="text-blue-400">Open</span>}
                           </td>
-                          <td className="px-2 py-2 text-[10px] text-gray-400 max-w-[80px] truncate">{r.portfolioName}</td>
                           <td className="px-2 py-2">
-                            <p className="text-white font-medium truncate max-w-[100px]">{r.market}</p>
+                            <p className="text-white text-xs font-medium truncate max-w-[110px]">{r.market}</p>
                             <p className="text-[9px] text-gray-600 font-mono">{r.epic}</p>
                           </td>
                           <td className="px-2 py-2">
@@ -3801,34 +3886,73 @@ export function IGStrategyTrader() {
                               r.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
                             )}>{r.direction}</span>
                           </td>
-                          <td className="px-2 py-2 text-gray-300 tabular-nums">£{r.size}</td>
-                          <td className="px-2 py-2 text-gray-300 tabular-nums">{r.entryLevel > 0 ? r.entryLevel.toLocaleString() : '—'}</td>
-                          <td className="px-2 py-2 text-gray-300 tabular-nums">
-                            {r.exitLevel != null ? r.exitLevel.toLocaleString() : <span className="text-blue-400">Open</span>}
-                          </td>
-                          <td className="px-2 py-2">
-                            {r.pnl != null ? (
-                              <span className={clsx('font-semibold tabular-nums', r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                                {r.pnl >= 0 ? '+' : ''}£{Math.abs(r.pnl).toFixed(2)}
-                              </span>
-                            ) : <span className="text-gray-600">—</span>}
-                          </td>
-                          <td className="px-2 py-2">
-                            <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded',
-                              r.status === 'OPEN'     ? 'bg-blue-500/20 text-blue-400' :
-                              r.status === 'CLOSED'   ? 'bg-gray-700 text-gray-300' :
-                              'bg-red-500/20 text-red-400'
-                            )}>{r.status}</span>
-                          </td>
-                          <td className="px-2 py-2 text-[10px] text-gray-500">
-                            {r.closeReason ? r.closeReason.replace('_', ' ') : '—'}
-                          </td>
-                          <td className="px-2 py-2 text-[9px] text-gray-600 font-mono truncate max-w-[70px]">{r.dealReference || '—'}</td>
+                          <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">{r.size}</td>
+                          <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">{r.level > 0 ? r.level.toLocaleString() : '—'}</td>
+                          <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">{r.closeLevel != null ? r.closeLevel.toLocaleString() : '—'}</td>
+                          <td className="px-2 py-2 text-[10px] text-gray-500 max-w-[100px] truncate">{r.closedAt ? (r.closeDesc || 'Closed') : 'Open'}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+              ) : igHistoryLoading ? (
+                <p className="text-xs text-gray-500 py-4 text-center">Loading IG activity…</p>
+              ) : (
+                <p className="text-xs text-gray-500 py-4 text-center">
+                  {igHistoryError ? igHistoryError : 'No IG activity found — click Sync from IG to load'}
+                </p>
+              )}
+
+              {/* ── Bot-recorded trades (local, has P&L) ── */}
+              {tradeHistory.length > 0 && (
+                <>
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2 mt-2">Bot-recorded trades (with P&L)</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead>
+                        <tr className="border-b border-gray-800">
+                          {['Opened', 'Closed', 'Market', 'Dir', 'Size', 'Entry', 'Exit', 'P&L', 'Reason'].map(h => (
+                            <th key={h} className="px-2 py-2 text-[9px] text-gray-500 font-medium uppercase tracking-wider whitespace-nowrap">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {tradeHistory.map(r => (
+                          <tr key={r.id} className="border-t border-gray-800/50 hover:bg-gray-800/20">
+                            <td className="px-2 py-2 text-[10px] text-gray-400 whitespace-nowrap tabular-nums">{fmtDt(r.openedAt)}</td>
+                            <td className="px-2 py-2 text-[10px] whitespace-nowrap tabular-nums">
+                              {r.closedAt
+                                ? <span className="text-gray-400">{fmtDt(r.closedAt)}</span>
+                                : <span className="text-blue-400">Open</span>}
+                            </td>
+                            <td className="px-2 py-2">
+                              <p className="text-white text-xs font-medium truncate max-w-[100px]">{r.market}</p>
+                              <p className="text-[9px] text-gray-600 font-mono">{r.epic}</p>
+                            </td>
+                            <td className="px-2 py-2">
+                              <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded',
+                                r.direction === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                              )}>{r.direction}</span>
+                            </td>
+                            <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">£{r.size}</td>
+                            <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">{r.entryLevel > 0 ? r.entryLevel.toLocaleString() : '—'}</td>
+                            <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">
+                              {r.exitLevel != null ? r.exitLevel.toLocaleString() : '—'}
+                            </td>
+                            <td className="px-2 py-2">
+                              {r.pnl != null ? (
+                                <span className={clsx('text-xs font-semibold tabular-nums', r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                                  {r.pnl >= 0 ? '+' : ''}£{Math.abs(r.pnl).toFixed(2)}
+                                </span>
+                              ) : <span className="text-gray-600">—</span>}
+                            </td>
+                            <td className="px-2 py-2 text-[10px] text-gray-500">{r.closeReason ? r.closeReason.replace('_', ' ') : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </>
           );
