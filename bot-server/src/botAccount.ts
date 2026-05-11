@@ -1,17 +1,15 @@
 import {
-  authenticate, openPosition, closePosition, fetchPositions,
+  authenticate,
   type IGSession,
 } from './igApi';
 import { createStreamManager } from './igStream';
 import {
   initEpicState, processTick, recordFill,
   DEFAULT_CONFIG,
-  calcRsi, calcMacdHist, calcAtr, isGreen, isRed,
   type CandleTick, type ScalperEpicState, type ScalperConfig,
 } from './scalperStrategy';
 import { isMarketOpen } from './marketHours';
-import { askGemini, type EntrySignal } from './gemini';
-import type { BotStartParams, InjectParams, LogEntry, BotStatus, EpicStatus } from './bot';
+import type { BotStartParams, LogEntry, BotStatus, EpicStatus } from './bot';
 
 export type AccountKey = 'demo' | 'live';
 
@@ -20,7 +18,6 @@ export type AccountBotHandle = {
   stop:    () => void;
   pause:   () => void;
   resume:  () => void;
-  inject:  (p: InjectParams) => { ok: boolean; error?: string };
   status:  () => BotStatus & { accountKey: AccountKey };
   candles: (epic?: string) => Record<string, CandleTick[]>;
 };
@@ -34,7 +31,6 @@ function resolveCredentials(accountKey: AccountKey) {
       env:      'live' as const,
     };
   }
-  // demo — fall back to generic vars for backward compat
   return {
     apiKey:   process.env.IG_DEMO_API_KEY  ?? process.env.IG_API_KEY   ?? '',
     username: process.env.IG_DEMO_USERNAME ?? process.env.IG_USERNAME  ?? '',
@@ -57,12 +53,10 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
   let currentEpics: string[]  = [];
   let currentConfig: ScalperConfig = { ...DEFAULT_CONFIG };
   let epicStates: Record<string, ScalperEpicState> = {};
-  let pendingEpics = new Set<string>();
   const log: LogEntry[] = [];
   const monitorCandles = new Map<string, CandleTick[]>();
 
   let sessionRefreshTimer: ReturnType<typeof setTimeout>  | null = null;
-  let signalMonitorTimer:  ReturnType<typeof setInterval> | null = null;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -76,86 +70,13 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
     console[level](`[${tag}] [${type.toUpperCase()}] [${epic}] ${msg}`);
   }
 
-  // ── Signal monitor (per-instance) ─────────────────────────────────────────
+  // ── Candle accumulator ─────────────────────────────────────────────────────
   function feedCandle(epic: string, tick: CandleTick) {
     if (!tick.candleClosed) return;
     const arr = monitorCandles.get(epic) ?? [];
     arr.push(tick);
-    if (arr.length > 40) arr.splice(0, arr.length - 40);
+    if (arr.length > 60) arr.splice(0, arr.length - 60);
     monitorCandles.set(epic, arr);
-  }
-
-  async function runSignalCheck() {
-    if (!session) return;
-    let positions;
-    try { positions = await fetchPositions(session); } catch { return; }
-    if (!positions.length) return;
-
-    for (const pos of positions) {
-      const { epic, direction, dealId, size } = pos;
-      const shortName = epic.split('.').slice(0, 3).join('.');
-      if (currentEpics.includes(epic)) continue;  // scalper manages this
-
-      const candles = monitorCandles.get(epic);
-      if (!candles) { monitorCandles.set(epic, []); continue; }
-      if (candles.length < 15) continue;
-
-      const rsi  = calcRsi(candles);
-      const macd = calcMacdHist(candles);
-      const atr  = calcAtr(candles);
-      const last5Green = candles.slice(-5).filter(isGreen).length;
-      const last = candles[candles.length - 1];
-      const isLong = direction === 'BUY';
-
-      let score = 0;
-      const reasons: string[] = [];
-      if (isLong) {
-        if (rsi !== null && rsi > 68)  { score++; reasons.push(`RSI overbought ${rsi.toFixed(0)}`); }
-        if (rsi !== null && rsi > 75)  { score++; reasons.push('RSI very overbought'); }
-        if (macd !== null && macd < 0) { score++; reasons.push('MACD bearish'); }
-        if (last5Green <= 1)           { score++; reasons.push(`only ${last5Green}/5 green`); }
-        if (isRed(last))               { score++; reasons.push('last candle red'); }
-      } else {
-        if (rsi !== null && rsi < 32)  { score++; reasons.push(`RSI oversold ${rsi.toFixed(0)}`); }
-        if (rsi !== null && rsi < 25)  { score++; reasons.push('RSI very oversold'); }
-        if (macd !== null && macd > 0) { score++; reasons.push('MACD bullish'); }
-        if (last5Green >= 4)           { score++; reasons.push(`${last5Green}/5 green`); }
-        if (isGreen(last))             { score++; reasons.push('last candle green'); }
-      }
-
-      if (score < 2) continue;
-
-      addLog('info', shortName, `Signal monitor: ${isLong ? 'LONG' : 'SHORT'} — ${reasons.join(', ')} (score ${score})`);
-      const closeDir = isLong ? 'SELL' : 'BUY';
-      const verdict = await askGemini({
-        instrumentName: shortName, epic, rsi, macd, atr,
-        greenCount: last5Green, suggestedDir: closeDir,
-        lastCandles: candles.slice(-5).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
-      });
-      addLog('info', shortName, `Gemini signal monitor: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
-
-      if (verdict.direction !== closeDir || verdict.confidence < 60) {
-        addLog('wait', shortName, `Gemini not convinced — holding`);
-        continue;
-      }
-
-      try {
-        await closePosition(session, dealId, direction, size);
-        addLog('exit', shortName, `Signal monitor closed ${direction} deal ${dealId}`);
-      } catch (e) {
-        addLog('error', shortName, `Signal monitor close failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-  }
-
-  function startSignalMonitor() {
-    if (signalMonitorTimer) clearInterval(signalMonitorTimer);
-    signalMonitorTimer = setInterval(() => { void runSignalCheck(); }, 5 * 60_000);
-    addLog('info', '—', 'Signal monitor started');
-  }
-
-  function stopSignalMonitor() {
-    if (signalMonitorTimer) { clearInterval(signalMonitorTimer); signalMonitorTimer = null; }
   }
 
   // ── Session refresh ────────────────────────────────────────────────────────
@@ -182,14 +103,13 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
     }
   }
 
-  // ── Tick handler ───────────────────────────────────────────────────────────
+  // ── Tick handler — signal generation only, no trade execution ─────────────
   function handleTick(tick: CandleTick) {
     if (!running) return;
     feedCandle(tick.epic, tick);
 
     const st = epicStates[tick.epic];
     if (!st) return;
-    if (pendingEpics.has(tick.epic)) return;
 
     const decision = processTick(st, tick, currentConfig);
 
@@ -201,83 +121,46 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
 
     switch (decision.action) {
       case 'ENTER': {
-        if (paused) { if (tick.candleClosed) addLog('wait', name, 'Paused — skipping entry'); break; }
+        if (paused) { if (tick.candleClosed) addLog('wait', name, 'Paused — skipping signal'); break; }
 
         const mkt = isMarketOpen(tick.epic);
         if (!mkt.open) { st.state = 'FLAT'; addLog('wait', name, `Market closed — ${mkt.reason}`); break; }
 
-        const active = Object.values(epicStates).filter(s => s.state === 'IN_POSITION').length + pendingEpics.size;
-        if (active >= MAX_CONCURRENT) { st.state = 'FLAT'; addLog('wait', name, `Max positions (${MAX_CONCURRENT}) reached`); break; }
+        const active = Object.values(epicStates).filter(s => s.state === 'IN_POSITION').length;
+        if (active >= MAX_CONCURRENT) { st.state = 'FLAT'; addLog('wait', name, `Max active signals (${MAX_CONCURRENT}) reached`); break; }
 
-        addLog('info', name, `Signal ${decision.direction} — ${decision.reason}`);
-        pendingEpics.add(tick.epic);
+        // Compute volatility-adjusted stop/TP from ATR
+        const atr     = decision.indicators.atr ?? 20;
+        const stopPts = Math.max(5, Math.round(atr * currentConfig.atrStopMult));
+        const tpPts   = Math.round(stopPts * 2);
+        const rsiStr  = decision.indicators.rsi?.toFixed(0) ?? '—';
+        const macdStr = decision.indicators.macd !== null
+          ? (decision.indicators.macd >= 0 ? '+' : '') + decision.indicators.macd.toFixed(4)
+          : '—';
 
-        if (!session) { addLog('error', name, 'No session — cannot open'); st.state = 'FLAT'; pendingEpics.delete(tick.epic); break; }
+        // Record virtual fill so strategy state machine tracks signal lifecycle
+        recordFill(st, tick.bidClose, stopPts, tpPts);
+        st.dealId = `sig-${uid()}`;
+        st.size   = 0;
 
-        const entrySignal: EntrySignal = {
-          instrumentName: name, epic: tick.epic,
-          rsi: decision.indicators.rsi, macd: decision.indicators.macd,
-          atr: decision.indicators.atr, greenCount: decision.indicators.greenCount,
-          suggestedDir: decision.direction,
-          lastCandles: st.closedCandles.slice(-5).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
-        };
-
-        void askGemini(entrySignal).then(async verdict => {
-          addLog('info', name, `Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
-
-          if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {
-            st.state = 'FLAT';
-            addLog('wait', name, `Skipped (${verdict.direction}, ${verdict.confidence}%)`);
-            pendingEpics.delete(tick.epic);
-            return;
-          }
-
-          st.direction = verdict.direction;
-
-          try {
-            await new Promise(r => setTimeout(r, Math.random() * 2000));
-            if (!running || !session) { st.state = 'FLAT'; pendingEpics.delete(tick.epic); return; }
-
-            const stopLevel  = verdict.direction === 'BUY' ? tick.bidClose - verdict.stopPoints : tick.bidClose + verdict.stopPoints;
-            const limitLevel = verdict.direction === 'BUY' ? tick.bidClose + verdict.takeProfitPoints : tick.bidClose - verdict.takeProfitPoints;
-
-            const { dealId, level } = await openPosition(session, tick.epic, verdict.betSize, verdict.direction, stopLevel, limitLevel);
-            recordFill(st, level, verdict.stopPoints, verdict.takeProfitPoints);
-            st.dealId = dealId;
-            st.size   = verdict.betSize;
-            addLog('enter', name, `${verdict.direction} £${verdict.betSize}/pt @ ${level} | stop −${verdict.stopPoints}pts | TP +${verdict.takeProfitPoints}pts | deal ${dealId}`);
-          } catch (e) {
-            st.state = 'FLAT';
-            addLog('error', name, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
-          } finally {
-            pendingEpics.delete(tick.epic);
-          }
-        });
+        addLog('enter', name, `↑ SIGNAL ${decision.direction} @ ${tick.bidClose.toFixed(1)} · RSI ${rsiStr} MACD ${macdStr} · stop ${stopPts}pt TP ${tpPts}pt`);
         break;
       }
 
       case 'EXIT': {
-        addLog('exit', name, `EXIT${decision.urgency === 'immediate' ? ' [IMMEDIATE]' : ''} — ${decision.reason}`);
-
         const isLoss = /stop|reversal|red/i.test(decision.reason);
         if (isLoss) {
           recentLosses++;
           const autoCooldown = recentLosses >= 3 ? 60 * 60_000 : recentLosses >= 2 ? 30 * 60_000 : 15 * 60_000;
           if (autoCooldown !== currentConfig.cooldownMs) {
             currentConfig = { ...currentConfig, cooldownMs: autoCooldown };
-            addLog('info', name, `Auto-cooldown → ${autoCooldown / 60_000} min (${recentLosses} recent losses)`);
+            addLog('info', name, `Auto-cooldown → ${autoCooldown / 60_000} min (${recentLosses} losses)`);
           }
         } else { recentLosses = 0; }
 
-        const { dealId } = st;
-        if (!dealId) { addLog('info', name, 'No dealId — may already be closed'); break; }
-        pendingEpics.add(tick.epic);
-        if (!session) { addLog('error', name, 'No session — cannot close'); pendingEpics.delete(tick.epic); break; }
-
-        void closePosition(session, dealId, st.direction, st.size)
-          .then(() => { st.dealId = ''; st.size = 0; addLog('exit', name, `Closed deal ${dealId}`); })
-          .catch(e => addLog('error', name, `Close failed: ${e instanceof Error ? e.message : String(e)}`))
-          .finally(() => pendingEpics.delete(tick.epic));
+        st.dealId = '';
+        st.size   = 0;
+        addLog('exit', name, `↓ EXIT${decision.urgency === 'immediate' ? ' [immediate]' : ''} — ${decision.reason}`);
         break;
       }
 
@@ -297,7 +180,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
     }
 
     try {
-      addLog('info', '—', `Starting ${accountKey} bot — epics: ${params.epics.join(', ')}`);
+      addLog('info', '—', `Starting ${accountKey} data stream — epics: ${params.epics.join(', ')}`);
       session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, accountKey);
 
       currentEpics  = params.epics;
@@ -309,10 +192,9 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
 
       running = true;
       stream.connect(session, params.epics, handleTick, '1MINUTE');
-      startSignalMonitor();
       scheduleRefresh(session);
 
-      addLog('info', '—', `Bot started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+      addLog('info', '—', `Stream started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
       return { ok: true };
     } catch (e) {
       running = false;
@@ -326,44 +208,31 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
     running = false;
     paused  = false;
     stream.disconnect();
-    stopSignalMonitor();
     if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
     session = null;
-    if (log.length) addLog('info', '—', `${accountKey} bot stopped`);
+    if (log.length) addLog('info', '—', `${accountKey} stream stopped`);
   }
 
   function pause() {
     if (!running) return;
     paused = true;
-    addLog('info', '—', 'Paused — monitoring open positions, no new entries');
+    addLog('info', '—', 'Paused — monitoring candles, signals suppressed');
   }
 
   function resume() {
     if (!running) return;
     paused = false;
-    addLog('info', '—', 'Resumed — will enter on next signal');
+    addLog('info', '—', 'Resumed — will emit signals on next trigger');
   }
 
-  function inject(params: InjectParams): { ok: boolean; error?: string } {
-    if (!running) return { ok: false, error: 'Bot is not running' };
-    const { epic, dealId, direction, size, entryPrice, stopPoints, tpPoints } = params;
-
-    if (!epicStates[epic]) {
-      epicStates[epic] = initEpicState(epic);
-      if (session && !currentEpics.includes(epic)) {
-        currentEpics = [...currentEpics, epic];
-        stream.connect(session, currentEpics, handleTick, '1MINUTE');
-      }
+  function candles(epic?: string): Record<string, CandleTick[]> {
+    if (epic) {
+      const arr = monitorCandles.get(epic);
+      return arr ? { [epic]: arr } : {};
     }
-
-    const st = epicStates[epic];
-    st.state = 'IN_POSITION'; st.direction = direction;
-    st.dealId = dealId;       st.size      = size;
-    recordFill(st, entryPrice, stopPoints, tpPoints);
-
-    const name = epic.split('.').slice(0, 3).join('.');
-    addLog('info', name, `[DEBUG] Injected ${direction} — dealId=${dealId} entry=${entryPrice} stop±${stopPoints} tp±${tpPoints}`);
-    return { ok: true };
+    const result: Record<string, CandleTick[]> = {};
+    for (const [k, v] of monitorCandles) result[k] = v;
+    return result;
   }
 
   function status(): BotStatus & { accountKey: AccountKey } {
@@ -376,9 +245,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
         lastPrice:    tick?.bidClose ?? 0,
         reds:         st.consecutiveReds,
         formingIsRed: tick ? tick.close < tick.open : null,
-        pnlPct: st.entryPrice > 0 && (tick?.bidClose ?? 0) > 0
-          ? (tick!.bidClose - st.entryPrice) / st.entryPrice * 100
-          : null,
+        pnlPct: null, // signal-only: no real P&L
       };
     }
     return {
@@ -396,17 +263,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
     };
   }
 
-  function candles(epic?: string): Record<string, CandleTick[]> {
-    if (epic) {
-      const arr = monitorCandles.get(epic);
-      return arr ? { [epic]: arr } : {};
-    }
-    const result: Record<string, CandleTick[]> = {};
-    for (const [k, v] of monitorCandles) result[k] = v;
-    return result;
-  }
-
-  return { start, stop, pause, resume, inject, status, candles };
+  return { start, stop, pause, resume, status, candles };
 }
 
 // ── Singleton instances ───────────────────────────────────────────────────────

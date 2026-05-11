@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
-import { startBot, stopBot, getBotStatus, loadSavedState, injectPosition, pauseBot, resumeBot, type InjectParams } from './bot';
+import { startBot, stopBot, getBotStatus, loadSavedState, pauseBot, resumeBot } from './bot';
 import { startStrategyRunner, stopStrategyRunner, getStrategyRunnerStatus, type StrategyRunnerConfig } from './strategyRunner';
 import { demoBot, liveBot, getAccountBot, type AccountKey } from './botAccount';
+import { calcRsi, calcMacdHist, calcAtr } from './scalperStrategy';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -97,28 +98,15 @@ app.post('/accounts/:account/resume', auth, (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// POST /accounts/:account/inject
-app.post('/accounts/:account/inject', auth, (req: Request, res: Response) => {
-  const bot = resolveBot(req, res);
-  if (!bot) return;
+// /accounts/:account/inject removed — bot no longer executes trades
 
-  const body = req.body as Partial<InjectParams>;
-  const { epic, dealId, direction, size, entryPrice, stopPoints, tpPoints } = body;
-  if (!epic || !dealId || !direction || !size || !entryPrice || !stopPoints || !tpPoints) {
-    res.status(400).json({ ok: false, error: 'Required: epic, dealId, direction, size, entryPrice, stopPoints, tpPoints' });
-    return;
-  }
-  if (direction !== 'BUY' && direction !== 'SELL') {
-    res.status(400).json({ ok: false, error: 'direction must be BUY or SELL' });
-    return;
-  }
-  const result = bot.inject({ epic, dealId, direction, size, entryPrice, stopPoints, tpPoints });
-  res.status(result.ok ? 200 : 400).json(result);
-});
-
-// GET /prices — real-time bid + session changePercent for all tracked epics (both bots)
+// GET /prices — real-time bid + session change + technical indicators for all tracked epics
 app.get('/prices', auth, (_req: Request, res: Response) => {
-  type PriceEntry = { bid: number; mid: number; changePercent: number; candleCount: number };
+  type PriceEntry = {
+    bid: number; mid: number; changePercent: number; candleCount: number;
+    rsi: number | null; macd: number | null; atr: number | null;
+    signal: 'BUY' | 'SELL' | 'NEUTRAL'; signalState: string;
+  };
   const prices: Record<string, PriceEntry> = {};
 
   for (const bot of [demoBot, liveBot]) {
@@ -137,7 +125,28 @@ app.get('/prices', auth, (_req: Request, res: Response) => {
         if (firstOpen > 0) changePercent = (lastClose - firstOpen) / firstOpen * 100;
       }
 
-      prices[epic] = { bid, mid: bid, changePercent, candleCount: candles.length };
+      const rsi  = candles.length >= 14 ? calcRsi(candles)      : null;
+      const macd = candles.length >= 26 ? calcMacdHist(candles) : null;
+      const atr  = candles.length >= 14 ? calcAtr(candles)      : null;
+
+      // Derive signal from RSI primary, MACD secondary, changePercent fallback
+      let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
+      if (rsi !== null) {
+        if (rsi < 35) signal = 'BUY';
+        else if (rsi > 65) signal = 'SELL';
+      } else {
+        signal = changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
+      }
+      if (signal === 'NEUTRAL' && macd !== null) {
+        if (macd < -0.0002) signal = 'BUY';
+        else if (macd > 0.0002) signal = 'SELL';
+      }
+
+      prices[epic] = {
+        bid, mid: bid, changePercent, candleCount: candles.length,
+        rsi, macd, atr, signal,
+        signalState: st.epicStatuses[epic]?.state ?? 'FLAT',
+      };
     }
   }
 
@@ -163,20 +172,7 @@ app.post('/stop', auth, (_req: Request, res: Response) => { stopBot(); res.json(
 app.post('/pause', auth, (_req: Request, res: Response) => { pauseBot(); res.json({ ok: true }); });
 app.post('/resume', auth, (_req: Request, res: Response) => { resumeBot(); res.json({ ok: true }); });
 
-app.post('/debug/inject', auth, (req: Request, res: Response) => {
-  const body = req.body as Partial<InjectParams>;
-  const { epic, dealId, direction, size, entryPrice, stopPoints, tpPoints } = body;
-  if (!epic || !dealId || !direction || !size || !entryPrice || !stopPoints || !tpPoints) {
-    res.status(400).json({ ok: false, error: 'Required: epic, dealId, direction, size, entryPrice, stopPoints, tpPoints' });
-    return;
-  }
-  if (direction !== 'BUY' && direction !== 'SELL') {
-    res.status(400).json({ ok: false, error: 'direction must be BUY or SELL' });
-    return;
-  }
-  const result = injectPosition({ epic, dealId, direction, size, entryPrice, stopPoints, tpPoints });
-  res.status(result.ok ? 200 : 400).json(result);
-});
+// /debug/inject removed — bot no longer executes trades
 
 // ── Strategy runner routes ────────────────────────────────────────────────────
 app.post('/strategy/start', auth, (req: Request, res: Response) => {
