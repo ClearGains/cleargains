@@ -716,20 +716,13 @@ export function IGStrategyTrader() {
 
   // ── Trade history ──────────────────────────────────────────────────────────
   const [tradeHistory, setTradeHistory] = useState<IGTradeRecord[]>([]);
-  type IGMergedTrade = {
-    positionDealId: string;
-    epic:           string;
-    marketName:     string;
-    direction:      string;
-    size:           number;
-    openLevel:      number;
-    closeLevel:     number | null;
-    openedAt:       string;
-    closedAt:       string | null;
-    currency:       string;
-    status:         'OPEN' | 'CLOSED';
+  type IGActivityRecord = {
+    date: string; epic: string; dealId: string; dealRef: string;
+    direction: string; size: number; level: number; marketName: string;
+    currency: string; description: string;
   };
-  const [igTrades, setIgTrades]         = useState<IGMergedTrade[]>([]);
+  const [igActivityOpened, setIgActivityOpened] = useState<IGActivityRecord[]>([]);
+  const [igActivityClosed, setIgActivityClosed] = useState<IGActivityRecord[]>([]);
   const [igHistoryLoading, setIgHistoryLoading] = useState(false);
   const [igHistoryError,   setIgHistoryError]   = useState<string|null>(null);
   const [igHistoryTs,      setIgHistoryTs]       = useState<string|null>(null);
@@ -812,9 +805,10 @@ export function IGStrategyTrader() {
     setIgHistoryError(null);
     try {
       const r = await fetch('/api/ig/history?pageSize=100', { headers: makeHeaders(sess, env) });
-      const d = await r.json() as { ok: boolean; trades?: IGMergedTrade[]; error?: string };
+      const d = await r.json() as { ok: boolean; opened?: IGActivityRecord[]; closed?: IGActivityRecord[]; error?: string };
       if (!d.ok) { setIgHistoryError(d.error ?? 'Failed'); return; }
-      setIgTrades(d.trades ?? []);
+      setIgActivityOpened(d.opened ?? []);
+      setIgActivityClosed(d.closed ?? []);
       setIgHistoryTs(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }));
     } catch (e) {
       setIgHistoryError(e instanceof Error ? e.message : 'Fetch failed');
@@ -3800,7 +3794,32 @@ export function IGStrategyTrader() {
           const fmtDt = (iso: string) =>
             new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
-          const hasIGData = igTrades.length > 0;
+          // ── IG activity history (primary — real data from IG) ──────────────
+          const hasIGData = igActivityOpened.length > 0 || igActivityClosed.length > 0;
+
+          // Build merged view: pair opens with their closes by dealId
+          type MergedRow = {
+            key: string; market: string; epic: string;
+            direction: string; size: number; level: number;
+            openedAt: string; closedAt: string | null;
+            closeLevel: number | null; closeDesc: string;
+          };
+          const closeMap = new Map(igActivityClosed.map(c => [c.dealId, c]));
+          const mergedRows: MergedRow[] = igActivityOpened.map(o => {
+            const cl = closeMap.get(o.dealId);
+            return {
+              key: o.dealId || o.dealRef,
+              market: o.marketName || o.epic,
+              epic: o.epic,
+              direction: o.direction,
+              size: o.size,
+              level: o.level,
+              openedAt: o.date,
+              closedAt: cl?.date ?? null,
+              closeLevel: cl?.level ?? null,
+              closeDesc: cl?.description ?? '',
+            };
+          });
 
           // Stats from local bot records (bot-placed trades have P&L)
           const closed    = tradeHistory.filter(r => r.status === 'CLOSED');
@@ -3875,8 +3894,8 @@ export function IGStrategyTrader() {
                       </tr>
                     </thead>
                     <tbody>
-                      {igTrades.map(r => (
-                        <tr key={r.positionDealId} className="border-t border-gray-800/50 hover:bg-gray-800/20">
+                      {mergedRows.map(r => (
+                        <tr key={r.key} className="border-t border-gray-800/50 hover:bg-gray-800/20">
                           <td className="px-2 py-2 text-[10px] text-gray-400 whitespace-nowrap tabular-nums">{fmtDt(r.openedAt)}</td>
                           <td className="px-2 py-2 text-[10px] whitespace-nowrap tabular-nums">
                             {r.closedAt
@@ -3884,7 +3903,7 @@ export function IGStrategyTrader() {
                               : <span className="text-blue-400">Open</span>}
                           </td>
                           <td className="px-2 py-2">
-                            <p className="text-white text-xs font-medium truncate max-w-[110px]">{r.marketName}</p>
+                            <p className="text-white text-xs font-medium truncate max-w-[110px]">{r.market}</p>
                             <p className="text-[9px] text-gray-600 font-mono">{r.epic}</p>
                           </td>
                           <td className="px-2 py-2">
@@ -3893,13 +3912,9 @@ export function IGStrategyTrader() {
                             )}>{r.direction}</span>
                           </td>
                           <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">{r.size}</td>
-                          <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">{r.openLevel > 0 ? r.openLevel.toLocaleString() : '—'}</td>
+                          <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">{r.level > 0 ? r.level.toLocaleString() : '—'}</td>
                           <td className="px-2 py-2 text-xs text-gray-300 tabular-nums">{r.closeLevel != null ? r.closeLevel.toLocaleString() : '—'}</td>
-                          <td className="px-2 py-2">
-                            <span className={clsx('text-[9px] font-bold px-1.5 py-0.5 rounded',
-                              r.status === 'OPEN' ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-700 text-gray-400'
-                            )}>{r.status}</span>
-                          </td>
+                          <td className="px-2 py-2 text-[10px] text-gray-500 max-w-[100px] truncate">{r.closedAt ? (r.closeDesc || 'Closed') : 'Open'}</td>
                         </tr>
                       ))}
                     </tbody>
