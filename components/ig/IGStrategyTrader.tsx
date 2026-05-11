@@ -250,11 +250,11 @@ function calcAutoSizing(
 ): { stopDist: number; limitDist: number; size: number } {
   // Per-timeframe: how much wider than the daily baseline, and target R:R
   const TF_PROFILE: Record<string, { mult: number; rr: number }> = {
-    hourly:   { mult: 0.5,  rr: 1.5 },
-    daily:    { mult: 1.0,  rr: 2.0 },
-    weekly:   { mult: 2.5,  rr: 2.5 },
-    longterm: { mult: 5.0,  rr: 3.0 },
-    rsi2:     { mult: 1.2,  rr: 2.0 },
+    hourly:   { mult: 0.5,  rr: 2.0 },  // same-session exits — 2:1 realistic
+    daily:    { mult: 1.0,  rr: 3.0 },  // intraday swings — 3:1 achievable with trailing
+    weekly:   { mult: 2.5,  rr: 3.5 },  // multi-day trends — 3.5:1 lets winners run
+    longterm: { mult: 5.0,  rr: 4.0 },  // trend following — 4:1 for big macro moves
+    rsi2:     { mult: 1.2,  rr: 2.5 },  // mean reversion — 2.5:1 with tight stop
   };
   const { mult, rr } = TF_PROFILE[timeframe] ?? TF_PROFILE.daily;
 
@@ -414,16 +414,45 @@ function calibrateSignal(
   return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
 }
 
-// ── Signal calibration from bot server indicators (frontend decides, server just supplies data) ──
-// High-conviction entry only: candle streak + MACD must agree. No low-quality signals.
+// ── Session prime-time bonus — highest-probability trading windows by asset class ──
+// London open / NY open / overlap sessions have institutional participation,
+// tight spreads, and reliable follow-through. Off-peak hours are thin and noisy.
+function sessionPrimeScore(mType: MarketType): number {
+  const now    = new Date();
+  const utcH   = now.getUTCHours();
+  const utcM   = now.getUTCMinutes();
+  const ukMins = (utcH * 60 + utcM + 60) % (24 * 60); // approx UK local time
+
+  switch (mType) {
+    case 'INDEX':
+    case 'SHARES':
+      if (ukMins >= 480 && ukMins < 570) return 10;  // London open 08:00–09:30 UK
+      if (ukMins >= 870 && ukMins < 930) return 10;  // NY open 14:30–15:30 UK
+      if (ukMins >= 780 && ukMins < 1050) return 5;  // overlap 13:00–17:30 UK
+      return 0;
+    case 'FOREX':
+      if (ukMins >= 480 && ukMins < 540) return 10;  // London open 08:00–09:00 UK
+      if (ukMins >= 810 && ukMins < 900) return 10;  // NY open 13:30–15:00 UK
+      if (ukMins >= 780 && ukMins < 1020) return 5;  // London/NY overlap
+      return 0;
+    case 'COMMODITY':
+      if (ukMins >= 810 && ukMins < 960) return 10;  // NY session 13:30–16:00 UK
+      if (ukMins >= 480 && ukMins < 720) return 4;   // London morning
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+// ── Signal calibration from bot server indicators ──────────────────────────────
+// Composite confluence scoring — each factor contributes points. Entry requires
+// multiple factors agreeing, not just one indicator crossing a threshold.
 //
-// RSI gates — stricter, mid-range only:
-//   BUY  allowed when RSI 35–62 (early in upswing, not yet overextended)
-//   SELL allowed when RSI 38–65 (early in downswing, room still to fall)
-//   Both are BLOCKED outside these bands — don't chase exhausted moves.
-//
-// SHORT logic: requires MACD clearly negative + RSI well above oversold (≥40).
-//   Shorting near RSI 30 is shorting the bottom — very high reversal risk.
+// Philosophy: The best long entry is an RSI recovering from 40 heading toward 60
+// (momentum resuming after pullback). The best short is RSI rolling over from 60.
+// MACD magnitude (not just direction) tells us the force behind the move.
+// Daily trend alignment gives the macro tailwind. Session timing tells us whether
+// institutions are active. All factors together determine trade quality.
 function calibrateFromIndicators(
   rsi:           number | null,
   macd:          number | null,
@@ -432,53 +461,113 @@ function calibrateFromIndicators(
   consRed   = 0,
   consGreen = 0,
 ): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
+  // No indicators at all — price action only fallback
   if (rsi === null && macd === null && consRed === 0 && consGreen === 0) {
     return calibrateSignal(changePercent, changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL', mType);
   }
 
-  const macdBullish  = macd !== null && macd > 0;
-  const macdBearish  = macd !== null && macd < 0;
-  const macdStrong   = (dir: 'BUY' | 'SELL') => dir === 'BUY' ? (macd !== null && macd > 0.001) : (macd !== null && macd < -0.001);
-  const dailyUp      = changePercent >  0.15;
-  const dailyDown    = changePercent < -0.15;
-  // RSI mid-range gates: enter early in the move, not after it's already exhausted
-  const okForBuy     = rsi === null || (rsi > 35 && rsi < 62);
-  const okForSell    = rsi === null || (rsi > 40 && rsi < 65);
+  // ── 1. RSI Zone Scoring ───────────────────────────────────────────────────
+  // Zone scoring, not a binary gate. Enter early in the move, not after it has run.
+  // BUY: best when recovering from oversold (35–48). SELL: best when rolling from overbought (52–65).
+  let rsiLong = 0, rsiShort = 0;
+  if (rsi !== null) {
+    // Long zones
+    if      (rsi >= 36 && rsi < 46) rsiLong = 15;  // prime: recovering from dip, momentum turning
+    else if (rsi >= 46 && rsi < 54) rsiLong = 10;  // good: mid-range upward momentum
+    else if (rsi >= 54 && rsi < 61) rsiLong = 4;   // ok: trending but getting extended
+    else if (rsi >= 61 && rsi < 67) rsiLong = -2;  // caution: late entry, limited upside
+    else if (rsi >= 67)             rsiLong = -999; // BLOCK: overbought — never chase tops
+    else if (rsi < 36)              rsiLong = -6;   // still falling — wait for turn confirmation
+
+    // Short zones
+    if      (rsi > 54 && rsi <= 64) rsiShort = 15; // prime: extended, starting to roll over
+    else if (rsi > 46 && rsi <= 54) rsiShort = 10; // good: mid-range with room to fall
+    else if (rsi > 39 && rsi <= 46) rsiShort = 3;  // marginal: oversold territory approaching
+    else if (rsi > 33 && rsi <= 39) rsiShort = -6; // caution: near oversold, snap-back risk
+    else if (rsi <= 33)             rsiShort = -999; // BLOCK: oversold — never short bottoms
+    else if (rsi > 64 && rsi <= 72) rsiShort = 12; // very extended — prime distribution zone
+    else if (rsi > 72)              rsiShort = 5;   // extreme overbought — risky but valid fade
+  }
+
+  // ── 2. MACD Quality Scoring ───────────────────────────────────────────────
+  // Magnitude matters — a barely-positive MACD is noise, a strongly-positive one
+  // means real institutional buying pressure. Thresholds tuned for forex/index spread.
+  let macdLong = 0, macdShort = 0;
+  if (macd !== null) {
+    if      (macd > 0.010)  macdLong = 20;  // very strong upward thrust
+    else if (macd > 0.003)  macdLong = 14;  // strong momentum
+    else if (macd > 0.001)  macdLong = 8;   // confirmed positive
+    else if (macd > 0)      macdLong = 3;   // barely above zero — weak signal
+    else if (macd < -0.001) macdLong = -15; // counter-direction, penalise hard
+    else                    macdLong = -5;
+
+    if      (macd < -0.010) macdShort = 20;
+    else if (macd < -0.003) macdShort = 14;
+    else if (macd < -0.001) macdShort = 8;
+    else if (macd < 0)      macdShort = 3;
+    else if (macd > 0.001)  macdShort = -15;
+    else                    macdShort = -5;
+  }
+
+  // ── 3. Candle Streak Quality ──────────────────────────────────────────────
+  // Consecutive closes in one direction show accumulation/distribution in progress.
+  // 4+ candles = strong institutional footprint. 2 candles alone = insufficient.
+  let candleLong = 0, candleShort = 0;
+  if      (consGreen >= 5) candleLong = 20;
+  else if (consGreen >= 4) candleLong = 15;
+  else if (consGreen >= 3) candleLong = 10;
+  else if (consGreen >= 2) candleLong = 5;
+
+  if      (consRed >= 5)   candleShort = 20;
+  else if (consRed >= 4)   candleShort = 15;
+  else if (consRed >= 3)   candleShort = 10;
+  else if (consRed >= 2)   candleShort = 5;
+
+  // ── 4. Daily Trend Alignment ──────────────────────────────────────────────
+  // Trading with the macro trend is the single biggest structural edge.
+  // Thresholds scaled per asset class since forex moves less than equities.
+  const thr: Record<MarketType, [number, number]> = {
+    INDEX:     [0.40, 0.15],
+    FOREX:     [0.20, 0.08],
+    COMMODITY: [0.80, 0.30],
+    CRYPTO:    [2.00, 0.80],
+    SHARES:    [0.80, 0.30],
+  };
+  const [strongThr, mildThr] = thr[mType] ?? [0.50, 0.15];
+  const dailyLong  = changePercent >  strongThr ? 10 : changePercent >  mildThr ? 5 : changePercent < -mildThr ? -8 : 0;
+  const dailyShort = changePercent < -strongThr ? 10 : changePercent < -mildThr ? 5 : changePercent >  mildThr ? -8 : 0;
+
+  // ── 5. Session Prime-Time Bonus ───────────────────────────────────────────
+  const sessionBonus = sessionPrimeScore(mType);
+
+  // ── Composite scores ──────────────────────────────────────────────────────
+  const rawLong  = rsiLong  + macdLong  + candleLong  + dailyLong  + sessionBonus;
+  const rawShort = rsiShort + macdShort + candleShort + dailyShort + sessionBonus;
+
+  const longBlocked  = rsiLong  <= -999;
+  const shortBlocked = rsiShort <= -999;
+
+  // Require at least 2 independent positive factors (prevents single-indicator entries)
+  const longFactors  = [rsiLong > 0, macdLong > 0, candleLong > 0, dailyLong > 0].filter(Boolean).length;
+  const shortFactors = [rsiShort > 0, macdShort > 0, candleShort > 0, dailyShort > 0].filter(Boolean).length;
+
+  // Minimum composite score: 25 (RSI sweet-spot + candles decent + mild daily = 30 → passes)
+  const MIN_RAW = 25;
 
   let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-  let strength = 0;
+  let rawScore = 0;
 
-  // ── LONG entries ──
-  if (consGreen >= 3 && okForBuy && macdBullish) {
-    // 3+ green candles + MACD bullish — high conviction
-    direction = 'BUY'; strength = 82;
-    if (dailyUp) strength = Math.min(95, strength + 6);
-    if (consGreen >= 4) strength = Math.min(95, strength + 4);
-  } else if (consGreen >= 2 && okForBuy && macdStrong('BUY')) {
-    // 2 green candles only when MACD is decisively positive (not just barely > 0)
-    direction = 'BUY'; strength = 70;
-    if (dailyUp) strength = Math.min(95, strength + 5);
-  } else if (consGreen >= 3 && okForBuy && dailyUp) {
-    // 3 green + daily up as fallback when MACD unavailable
-    direction = 'BUY'; strength = 64;
+  if (!longBlocked  && rawLong  >= MIN_RAW && longFactors  >= 2 && rawLong  >= rawShort) {
+    direction = 'BUY';  rawScore = rawLong;
+  } else if (!shortBlocked && rawShort >= MIN_RAW && shortFactors >= 2 && rawShort > rawLong) {
+    direction = 'SELL'; rawScore = rawShort;
   }
-
-  // ── SHORT entries — stricter: RSI must confirm room to fall ──
-  else if (consRed >= 3 && okForSell && macdBearish) {
-    direction = 'SELL'; strength = 82;
-    if (dailyDown) strength = Math.min(95, strength + 6);
-    if (consRed >= 4) strength = Math.min(95, strength + 4);
-  } else if (consRed >= 2 && okForSell && macdStrong('SELL')) {
-    // 2 red candles only when MACD is decisively negative
-    direction = 'SELL'; strength = 70;
-    if (dailyDown) strength = Math.min(95, strength + 5);
-  } else if (consRed >= 3 && okForSell && dailyDown) {
-    direction = 'SELL'; strength = 64;
-  }
-
 
   if (direction === 'HOLD') return { direction: 'HOLD', strength: 0 };
-  return { direction, strength: Math.min(99, Math.max(0, strength)) };
+
+  // Map raw score (25–80) → strength (62–99). Score of 50 = ~76%, score of 70 = ~92%.
+  const strength = Math.min(99, Math.max(62, Math.round(62 + ((rawScore - MIN_RAW) / 55) * 37)));
+  return { direction, strength };
 }
 
 // ── Trade history ─────────────────────────────────────────────────────────────
@@ -1376,11 +1465,14 @@ export function IGStrategyTrader() {
       }
     }
 
-    // ATR-based stop/TP when real-time ATR available (3×ATR stop, 6×ATR TP → 2:1 R:R)
+    // ATR-based stop/TP when real-time ATR available.
+    // Stop at 2.5×ATR (just outside typical candle noise) → TP at 7.5×ATR → 3:1 R:R.
+    // 3:1 means we only need to be right 25% of the time to break even; at 40% win rate
+    // the strategy is robustly profitable even through drawdown periods.
     let { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, strat.timeframe);
     if (atrVal !== null && atrVal > 0) {
-      const atrStop = Math.round(atrVal * 3);
-      const atrTP   = Math.round(atrVal * 6);
+      const atrStop = Math.round(atrVal * 2.5);
+      const atrTP   = Math.round(atrVal * 7.5);
       if (atrStop > 0 && atrTP > 0) { stopDist = atrStop; limitDist = atrTP; }
     }
 
@@ -1858,33 +1950,54 @@ export function IGStrategyTrader() {
           }
         }
 
-        // [AUTO] Trailing stop ladder — activates much earlier to protect gains:
-        //  +1.5% → SL to breakeven (was +3%): more positions reach this threshold
-        //  +3%   → SL locks +1% profit (new intermediate step)
-        //  +5%   → SL locks +2% profit (unchanged)
+        // [AUTO] 1R trailing stop ladder — uses the position's own stop distance as
+        // the profit unit (1R). This adapts to each position's actual risk rather than
+        // using arbitrary % thresholds that ignore volatility.
+        //
+        //  +1R  → SL to breakeven — zero risk, house money from here
+        //  +2R  → trail SL at 1R behind price — capture meaningful gains
+        //  +3R  → trail SL at 0.5R behind price — approaching target, lock most gains
+        //
+        // Great traders protect gains quickly and let the trailing stop do the work.
+        const oneR = pos.stopLevel
+          ? Math.abs(pos.level - pos.stopLevel)   // actual stop distance placed with trade
+          : Math.abs(pos.level * 0.015);           // fallback: 1.5% of entry price
+
+        const priceGain = pos.direction === 'BUY'
+          ? currentPx - pos.level
+          : pos.level - currentPx;
+        const rMultiple = oneR > 0 ? priceGain / oneR : 0;
+
         let newStop: number | null = null;
         let reason = '';
 
-        if (pnlPct >= 1.5 && pnlPct < 3) {
-          const breakevenStop = entryPx;
+        if (rMultiple >= 1.0) {
+          // +1R → move to breakeven: position is free, no further downside risk
+          const breakevenStop = pos.level;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < breakevenStop : pos.stopLevel > breakevenStop)) {
             newStop = breakevenStop;
-            reason = `+${pnlPct.toFixed(1)}% → SL to breakeven ${breakevenStop}`;
+            reason  = `+${rMultiple.toFixed(1)}R → SL to breakeven @ ${breakevenStop}`;
           }
         }
-        if (pnlPct >= 3 && pnlPct < 5) {
-          const lockStop = pos.direction === 'BUY' ? entryPx * 1.01 : entryPx * 0.99;
-          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lockStop : pos.stopLevel > lockStop)) {
-            newStop = Math.round(lockStop * 100) / 100;
-            reason = `+${pnlPct.toFixed(1)}% → SL to lock +1% at ${newStop}`;
-          }
+        if (rMultiple >= 2.0) {
+          // +2R → trail at 1R behind current price: capturing real gains
+          const trailStop = pos.direction === 'BUY'
+            ? Math.round((currentPx - oneR) * 100) / 100
+            : Math.round((currentPx + oneR) * 100) / 100;
+          const improved = pos.direction === 'BUY'
+            ? trailStop > (pos.stopLevel ?? -Infinity)
+            : trailStop < (pos.stopLevel ?? Infinity);
+          if (improved) { newStop = trailStop; reason = `+${rMultiple.toFixed(1)}R → trail 1R @ ${newStop}`; }
         }
-        if (pnlPct >= 5) {
-          const lockStop = pos.direction === 'BUY' ? entryPx * 1.02 : entryPx * 0.98;
-          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lockStop : pos.stopLevel > lockStop)) {
-            newStop = Math.round(lockStop * 100) / 100;
-            reason = `+${pnlPct.toFixed(1)}% → SL to lock +2% at ${newStop}`;
-          }
+        if (rMultiple >= 3.0) {
+          // +3R → tight trail at 0.5R: near target, lock in most of the profit
+          const tightStop = pos.direction === 'BUY'
+            ? Math.round((currentPx - oneR * 0.5) * 100) / 100
+            : Math.round((currentPx + oneR * 0.5) * 100) / 100;
+          const improved = pos.direction === 'BUY'
+            ? tightStop > (pos.stopLevel ?? -Infinity)
+            : tightStop < (pos.stopLevel ?? Infinity);
+          if (improved) { newStop = tightStop; reason = `+${rMultiple.toFixed(1)}R → tight trail 0.5R @ ${newStop}`; }
         }
 
         if (newStop !== null) {
