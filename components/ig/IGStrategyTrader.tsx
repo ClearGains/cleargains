@@ -365,8 +365,15 @@ function calibrateSignal(
 }
 
 // ── Signal calibration from bot server indicators (frontend decides, server just supplies data) ──
-// Priority: (1) consecutive candle streak, (2) MACD momentum, (3) daily change fallback.
-// RSI prevents entering already-exhausted moves. consRed/consGreen come from bot server /prices.
+// High-conviction entry only: candle streak + MACD must agree. No low-quality signals.
+//
+// RSI gates — stricter, mid-range only:
+//   BUY  allowed when RSI 35–62 (early in upswing, not yet overextended)
+//   SELL allowed when RSI 38–65 (early in downswing, room still to fall)
+//   Both are BLOCKED outside these bands — don't chase exhausted moves.
+//
+// SHORT logic: requires MACD clearly negative + RSI well above oversold (≥40).
+//   Shorting near RSI 30 is shorting the bottom — very high reversal risk.
 function calibrateFromIndicators(
   rsi:           number | null,
   macd:          number | null,
@@ -379,41 +386,53 @@ function calibrateFromIndicators(
     return calibrateSignal(changePercent, changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL', mType);
   }
 
-  const macdBullish   = macd !== null && macd > 0;
-  const macdBearish   = macd !== null && macd < 0;
-  const dailyUp       = changePercent >  0.15;
-  const dailyDown     = changePercent < -0.15;
-  const notOverbought = rsi === null || rsi < 70;
-  const notOversold   = rsi === null || rsi > 30;
+  const macdBullish  = macd !== null && macd > 0;
+  const macdBearish  = macd !== null && macd < 0;
+  const macdStrong   = (dir: 'BUY' | 'SELL') => dir === 'BUY' ? (macd !== null && macd > 0.001) : (macd !== null && macd < -0.001);
+  const dailyUp      = changePercent >  0.15;
+  const dailyDown    = changePercent < -0.15;
+  // RSI mid-range gates: enter early in the move, not after it's already exhausted
+  const okForBuy     = rsi === null || (rsi > 35 && rsi < 62);
+  const okForSell    = rsi === null || (rsi > 40 && rsi < 65);
 
   let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
   let strength = 0;
 
-  // (1) Primary: consecutive same-direction candles — clearest momentum signal
-  if (consGreen >= 2 && notOverbought) {
-    direction = 'BUY';   strength = 65;
-    if (macdBullish)          strength = Math.min(95, strength + 15);
-    if (dailyUp)              strength = Math.min(95, strength + 8);
-    if (consGreen >= 3)       strength = Math.min(95, strength + 5);
-  } else if (consRed >= 2 && notOversold) {
-    direction = 'SELL';  strength = 65;
-    if (macdBearish)          strength = Math.min(95, strength + 15);
-    if (dailyDown)            strength = Math.min(95, strength + 8);
-    if (consRed >= 3)         strength = Math.min(95, strength + 5);
+  // ── LONG entries ──
+  if (consGreen >= 3 && okForBuy && macdBullish) {
+    // 3+ green candles + MACD bullish — high conviction
+    direction = 'BUY'; strength = 82;
+    if (dailyUp) strength = Math.min(95, strength + 6);
+    if (consGreen >= 4) strength = Math.min(95, strength + 4);
+  } else if (consGreen >= 2 && okForBuy && macdStrong('BUY')) {
+    // 2 green candles only when MACD is decisively positive (not just barely > 0)
+    direction = 'BUY'; strength = 70;
+    if (dailyUp) strength = Math.min(95, strength + 5);
+  } else if (consGreen >= 3 && okForBuy && dailyUp) {
+    // 3 green + daily up as fallback when MACD unavailable
+    direction = 'BUY'; strength = 64;
   }
-  // (2) Secondary: MACD + daily trend confirm each other
-  else if (macdBullish && dailyUp && notOverbought) {
-    direction = 'BUY';   strength = 60;
-    if (macd! > 0.002)        strength = Math.min(95, strength + 8);
-  } else if (macdBearish && dailyDown && notOversold) {
-    direction = 'SELL';  strength = 60;
-    if (macd! < -0.002)       strength = Math.min(95, strength + 8);
+
+  // ── SHORT entries — stricter: RSI must confirm room to fall ──
+  else if (consRed >= 3 && okForSell && macdBearish) {
+    direction = 'SELL'; strength = 82;
+    if (dailyDown) strength = Math.min(95, strength + 6);
+    if (consRed >= 4) strength = Math.min(95, strength + 4);
+  } else if (consRed >= 2 && okForSell && macdStrong('SELL')) {
+    // 2 red candles only when MACD is decisively negative
+    direction = 'SELL'; strength = 70;
+    if (dailyDown) strength = Math.min(95, strength + 5);
+  } else if (consRed >= 3 && okForSell && dailyDown) {
+    direction = 'SELL'; strength = 64;
   }
-  // (3) Tertiary: MACD alone with RSI gate
-  else if (macdBullish && notOverbought) {
-    direction = 'BUY';   strength = 54;
-  } else if (macdBearish && notOversold) {
-    direction = 'SELL';  strength = 54;
+
+  // ── Fallback: MACD + daily trend, no candle data from bot server ──
+  else if (macdBullish && dailyUp && okForBuy) {
+    direction = 'BUY';  strength = 58;
+    if (macdStrong('BUY')) strength = Math.min(95, strength + 6);
+  } else if (macdBearish && dailyDown && okForSell) {
+    direction = 'SELL'; strength = 58;
+    if (macdStrong('SELL')) strength = Math.min(95, strength + 6);
   }
 
   if (direction === 'HOLD') return { direction: 'HOLD', strength: 0 };
@@ -1248,9 +1267,10 @@ export function IGStrategyTrader() {
           if (macd !== null && macd <  0)     strength = Math.min(99, strength + 10); // bearish MACD confirms SELL
           if (macd !== null && macd >  0.001) strength = Math.max(0,  strength - 15); // bullish MACD contradicts SELL
         }
-        // Block overbought BUY and oversold SELL — momentum fighting the entry
-        if (direction === 'BUY'  && rsi !== null && rsi > 70) { direction = 'HOLD'; strength = 0; }
-        if (direction === 'SELL' && rsi !== null && rsi < 30) { direction = 'HOLD'; strength = 0; }
+        // Block entries when RSI is outside the acceptable mid-range.
+        // Matching calibrateFromIndicators: BUY only RSI<62, SELL only RSI>40.
+        if (direction === 'BUY'  && rsi !== null && rsi > 62) { direction = 'HOLD'; strength = 0; }
+        if (direction === 'SELL' && rsi !== null && rsi < 40) { direction = 'HOLD'; strength = 0; }
       }
     }
 
@@ -1308,12 +1328,12 @@ export function IGStrategyTrader() {
     const forceOpen = market.forceOpen === true;
     const highConf  = strength >= 90;
 
-    // Dynamic signal threshold — lower when portfolio is sparse so we fill it faster.
-    // Compute fill ratio across all envs combined.
-    const botModeGlobal = strat.mode ?? 'BOTH';
+    // Signal threshold — fixed, no adaptive lowering. Quality over quantity:
+    // a sparse portfolio does not justify taking weaker signals.
+    const botModeGlobal  = strat.mode ?? 'BOTH';
     const ownedDirGlobal = botModeGlobal === 'LONG_ONLY' ? 'BUY' : botModeGlobal === 'SHORT_ONLY' ? 'SELL' : null;
     const ssGlobal = Object.values(scans).map(s => s.signal?.strength ?? 0).filter(Boolean);
-    const asGlobal = ssGlobal.length ? ssGlobal.reduce((a, b) => a + b, 0) / ssGlobal.length : 60;
+    const asGlobal = ssGlobal.length ? ssGlobal.reduce((a, b) => a + b, 0) / ssGlobal.length : 65;
     const totalAllowed = envs.reduce((sum, e) => {
       const f = igFundsRef.current[e]?.available ?? 0;
       return sum + (strat.autoMaxPositions ? calcAutoMaxPositions(f, asGlobal) : strat.maxPositions);
@@ -1321,9 +1341,7 @@ export function IGStrategyTrader() {
     const totalOwned = envs.reduce((sum, e) =>
       sum + positions[e].filter(p => ownedDirGlobal === null || p.direction === ownedDirGlobal).length, 0);
     const globalFillRatio = totalAllowed > 0 ? totalOwned / totalAllowed : 1;
-    const dynamicMinStrength = globalFillRatio < 0.7
-      ? Math.max(45, (strat.minStrength ?? 55) - 10)
-      : (strat.minStrength ?? 55);
+    const dynamicMinStrength = strat.minStrength ?? 65; // raised default; no adaptive lowering
 
     const tradeDir: 'BUY' | 'SELL' | null =
       newsDir
@@ -1335,7 +1353,7 @@ export function IGStrategyTrader() {
 
     if (!strat.autoTrade || !tradeDir) {
       if (direction !== 'HOLD' && !forceOpen)
-        log('signal', `${market.name} → ${direction} ${strength}% (need ${dynamicMinStrength}%${globalFillRatio < 0.7 ? ' adaptive' : ''} — no trade)`);
+        log('signal', `${market.name} → ${direction} ${strength}% (need ${dynamicMinStrength}% — no trade)`);
     } else {
       for (const env of envs) {
         const envPos = positions[env];
