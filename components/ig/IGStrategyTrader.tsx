@@ -562,6 +562,9 @@ export function IGStrategyTrader() {
 
   // ── Positions ──────────────────────────────────────────────────────────────
   const [positions, setPositions] = useState<PositionMap>({ demo:[], live:[] });
+  // positionsRef mirrors state but is updated synchronously — scanMarket reads
+  // this so it never sees stale positions after a trade is placed mid-scan.
+  const positionsRef = useRef<PositionMap>({ demo:[], live:[] });
   const [loadingPos, setLoadingPos] = useState(false);
   const [closingId, setClosingId]   = useState<string|null>(null);
   const [posError, setPosError]     = useState<string|null>(null);
@@ -975,7 +978,9 @@ export function IGStrategyTrader() {
         }
         const d = await r.json() as { ok:boolean; positions?: IGPosition[]; error?:string; detail?:string };
         if (d.ok) {
-          setPositions(p => ({...p, [env]: d.positions ?? []}));
+          const newList = d.positions ?? [];
+          positionsRef.current = { ...positionsRef.current, [env]: newList };
+          setPositions(p => ({...p, [env]: newList}));
         } else {
           const msg = `[${env.toUpperCase()}] Positions error: ${d.error ?? 'unknown'}${d.detail ? ` — ${d.detail}` : ''}`;
           setPosError(msg);
@@ -1483,7 +1488,9 @@ export function IGStrategyTrader() {
         log('signal', `${market.name} → ${direction} ${strength}% (need ${dynamicMinStrength}% — no trade)`);
     } else {
       for (const env of envs) {
-        const envPos = positions[env];
+        // Always read the ref — not the stale React state — so checks see positions
+        // placed earlier in the same scan loop without waiting for a re-render.
+        const envPos = positionsRef.current[env];
         const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
         const botMode  = strat.mode ?? 'BOTH';
         const ownedDir = botMode === 'LONG_ONLY' ? 'BUY' : botMode === 'SHORT_ONLY' ? 'SELL' : null;
@@ -1512,7 +1519,7 @@ export function IGStrategyTrader() {
         if (botMode === 'SHORT_ONLY' && tradeDir === 'BUY') continue;
 
         // Don't double up in same direction on same instrument
-        if (positions[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
+        if (positionsRef.current[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
         // ── Per-type concentration cap ──────────────────────────────────────────
         // Indices (FTSE/S&P/NASDAQ/DOW/DAX) are highly correlated — capped at 2.
@@ -1526,7 +1533,7 @@ export function IGStrategyTrader() {
           COMMODITY: 1,
           CRYPTO:    1,
         };
-        const typeCount = positions[env].filter(p => getMarketType(p.epic) === mType).length;
+        const typeCount = positionsRef.current[env].filter(p => getMarketType(p.epic) === mType).length;
         if (typeCount >= typeMax[mType]) {
           slog(strat.id, 'signal', `[SKIP] ${market.name} — ${mType} cap (${typeCount}/${typeMax[mType]} positions)`);
           continue;
@@ -1535,7 +1542,7 @@ export function IGStrategyTrader() {
         // ── Portfolio cap + one-for-one rotation ───────────────────────────────
         // When at cap, swap out the single worst losing position (held >30min) to make room.
         // We never close a profitable position just to open a new one.
-        const ownedPositions = positions[env].filter(p => ownedDir === null || p.direction === ownedDir);
+        const ownedPositions = positionsRef.current[env].filter(p => ownedDir === null || p.direction === ownedDir);
         const fundsForMax    = igFundsRef.current[env]?.available ?? 0;
         const effectiveMax   = strat.autoMaxPositions
           ? calcAutoMaxPositions(fundsForMax, asGlobal)
@@ -1795,7 +1802,7 @@ export function IGStrategyTrader() {
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
     const botMode = strat.mode ?? 'BOTH';
     for (const env of envs) {
-      for (const pos of positions[env]) {
+      for (const pos of positionsRef.current[env]) {
         // Mode filter: each bot only manages its own direction positions
         if (botMode === 'LONG_ONLY'  && pos.direction === 'SELL') continue;
         if (botMode === 'SHORT_ONLY' && pos.direction === 'BUY')  continue;
@@ -1989,7 +1996,7 @@ export function IGStrategyTrader() {
       if (strat.autoClose) {
         const botMode2 = strat.mode ?? 'BOTH';
         const ownedDir2 = botMode2 === 'LONG_ONLY' ? 'BUY' : botMode2 === 'SHORT_ONLY' ? 'SELL' : null;
-        const ownedNow = positions[env].filter(p => ownedDir2 === null || p.direction === ownedDir2);
+        const ownedNow = positionsRef.current[env].filter(p => ownedDir2 === null || p.direction === ownedDir2);
         const fundsNow2 = igFundsRef.current[env]?.available ?? 0;
         const scanStrengths2 = Object.values(scans).map(s => s.signal?.strength ?? 0).filter(Boolean);
         const avgStr2 = scanStrengths2.length ? scanStrengths2.reduce((a, b) => a + b, 0) / scanStrengths2.length : 60;
