@@ -1184,9 +1184,9 @@ export function IGStrategyTrader() {
     }
 
     const pctStr  = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
-    const rsiVal  = snapshot.indicators?.rsi;
-    const macdVal = snapshot.indicators?.macd;
-    const atrVal  = snapshot.indicators?.atr;
+    const rsiVal  = snapshot.indicators?.rsi  ?? null;
+    const macdVal = snapshot.indicators?.macd ?? null;
+    const atrVal  = snapshot.indicators?.atr  ?? null;
     const hasBotCheck = snapshot.source === 'yahoo+bot';
     const reason  = hasBotCheck && rsiVal !== null
       ? `Daily ${pctStr} (${mType}) · RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? '✓' : '⚠') : (rsiVal > 50 ? '✓' : '⚠')}`
