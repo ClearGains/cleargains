@@ -1,4 +1,4 @@
-import { fetchPositions, closePosition, getSession, type IGPosition } from './igApi';
+import { fetchPositions, closePosition, getSession, type IGSession, type IGPosition } from './igApi';
 import { calcRsi, calcMacdHist, calcAtr, isRed, isGreen, type CandleTick } from './scalperStrategy';
 import { askGemini } from './gemini';
 
@@ -18,9 +18,9 @@ type LogFn = (type: 'info' | 'exit' | 'error' | 'wait', epic: string, msg: strin
 export async function runSignalCheck(
   scalperManagedEpics: string[],
   addLog: LogFn,
+  sessionOverride?: IGSession | null,
 ): Promise<string[]> {
-  // Returns any new position epics not yet in the stream (caller should add them)
-  const session = getSession();
+  const session = sessionOverride ?? getSession();
   if (!session) return [];
 
   let positions: IGPosition[];

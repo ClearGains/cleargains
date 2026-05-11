@@ -21,7 +21,7 @@ export type IGPosition = {
   level:     number;
 };
 
-let activeSession: IGSession | null = null;
+const sessions = new Map<string, IGSession>();
 
 function headers(session: IGSession, version = '1'): Record<string, string> {
   return {
@@ -35,10 +35,11 @@ function headers(session: IGSession, version = '1'): Record<string, string> {
 }
 
 export async function authenticate(
-  apiKey:   string,
-  username: string,
-  password: string,
-  env:      'demo' | 'live',
+  apiKey:      string,
+  username:    string,
+  password:    string,
+  env:         'demo' | 'live',
+  accountKey?: string,
 ): Promise<IGSession> {
   const base = BASE[env];
   const res = await fetch(`${base}/session`, {
@@ -98,14 +99,26 @@ export async function authenticate(
     lightstreamerEndpoint: lsEndpoint,
     expiresAt: Date.now() + 5.5 * 60 * 60 * 1000,
   };
-  activeSession = session;
-  console.log(`[igApi] Authenticated — account=${accountId} env=${env} ls=${lsEndpoint}`);
+  const key = accountKey ?? env;
+  sessions.set(key, session);
+  console.log(`[igApi] Authenticated — account=${accountId} env=${env} key=${key} ls=${lsEndpoint}`);
   return session;
 }
 
-export function getSession(): IGSession | null { return activeSession; }
+export function getSession(accountKey?: string): IGSession | null {
+  if (accountKey) return sessions.get(accountKey) ?? null;
+  // backward compat: return the first available session
+  return sessions.values().next().value ?? null;
+}
 
-export function clearSession() { activeSession = null; }
+export function setSession(session: IGSession, accountKey?: string): void {
+  sessions.set(accountKey ?? session.env, session);
+}
+
+export function clearSession(accountKey?: string): void {
+  if (accountKey) sessions.delete(accountKey);
+  else sessions.clear();
+}
 
 export async function openPosition(
   session:    IGSession,
