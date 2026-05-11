@@ -9,6 +9,7 @@ import {
   type CandleTick, type ScalperEpicState, type ScalperConfig,
 } from './scalperStrategy';
 import { isMarketOpen } from './marketHours';
+import { askGemini, type EntrySignal } from './gemini';
 import type { BotStartParams, LogEntry, BotStatus, EpicStatus } from './bot';
 
 export type AccountKey = 'demo' | 'live';
@@ -129,21 +130,48 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
         const active = Object.values(epicStates).filter(s => s.state === 'IN_POSITION').length;
         if (active >= MAX_CONCURRENT) { st.state = 'FLAT'; addLog('wait', name, `Max active signals (${MAX_CONCURRENT}) reached`); break; }
 
-        // Compute volatility-adjusted stop/TP from ATR
+        // Compute ATR-based stop/TP as initial estimate
         const atr     = decision.indicators.atr ?? 20;
         const stopPts = Math.max(5, Math.round(atr * currentConfig.atrStopMult));
         const tpPts   = Math.round(stopPts * 2);
         const rsiStr  = decision.indicators.rsi?.toFixed(0) ?? '—';
-        const macdStr = decision.indicators.macd !== null
-          ? (decision.indicators.macd >= 0 ? '+' : '') + decision.indicators.macd.toFixed(4)
-          : '—';
 
-        // Record virtual fill so strategy state machine tracks signal lifecycle
+        addLog('info', name, `Strategy: ${decision.direction} · RSI ${rsiStr} · ${decision.reason} — asking Gemini…`);
+
+        // Optimistic virtual fill to block duplicate signals while Gemini responds
         recordFill(st, tick.bidClose, stopPts, tpPts);
         st.dealId = `sig-${uid()}`;
         st.size   = 0;
 
-        addLog('enter', name, `↑ SIGNAL ${decision.direction} @ ${tick.bidClose.toFixed(1)} · RSI ${rsiStr} MACD ${macdStr} · stop ${stopPts}pt TP ${tpPts}pt`);
+        const entrySignal: EntrySignal = {
+          instrumentName: name,
+          epic:           tick.epic,
+          rsi:            decision.indicators.rsi,
+          macd:           decision.indicators.macd,
+          atr:            decision.indicators.atr,
+          greenCount:     decision.indicators.greenCount,
+          suggestedDir:   decision.direction,
+          lastCandles:    st.closedCandles.slice(-5).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+        };
+
+        void askGemini(entrySignal).then(verdict => {
+          addLog('info', name, `Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
+
+          if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {
+            st.state  = 'FLAT';
+            st.dealId = '';
+            addLog('wait', name, `Gemini skipped signal (${verdict.direction}, ${verdict.confidence}%)`);
+            return;
+          }
+
+          // Refine virtual fill with Gemini's validated stop/TP
+          recordFill(st, tick.bidClose, verdict.stopPoints, verdict.takeProfitPoints);
+          st.direction = verdict.direction;
+
+          addLog('enter', name,
+            `↑ SIGNAL ${verdict.direction} @ ${tick.bidClose.toFixed(1)} · Gemini ${verdict.confidence}% · stop ${verdict.stopPoints}pt TP ${verdict.takeProfitPoints}pt`
+          );
+        });
         break;
       }
 
