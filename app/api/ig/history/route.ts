@@ -1,18 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-/**
- * GET /api/ig/history
- * Headers: x-ig-cst, x-ig-security-token, x-ig-api-key, x-ig-env
- * Query:   ?pageSize=50
- *
- * Returns recent activity (deal confirmations) from IG.
- */
 export async function GET(request: NextRequest) {
   const cst   = request.headers.get('x-ig-cst') ?? '';
   const token = request.headers.get('x-ig-security-token') ?? '';
   const key   = request.headers.get('x-ig-api-key') ?? '';
   const env   = (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live';
-  const pageSize = request.nextUrl.searchParams.get('pageSize') ?? '50';
+  const pageSize = request.nextUrl.searchParams.get('pageSize') ?? '100';
 
   if (!cst || !token || !key) {
     return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 401 });
@@ -23,88 +16,110 @@ export async function GET(request: NextRequest) {
     : 'https://api.ig.com/gateway/deal';
 
   const commonHeaders = {
-    'X-IG-API-KEY': key,
-    'CST': cst,
+    'X-IG-API-KEY':     key,
+    'CST':              cst,
     'X-SECURITY-TOKEN': token,
-    'Accept': 'application/json; charset=UTF-8',
+    'Accept':           'application/json; charset=UTF-8',
   };
 
   try {
-    // Fetch activity log (deal confirmations — opens and closes)
     const activityRes = await fetch(
       `${base}/history/activity?pageSize=${pageSize}`,
       { headers: { ...commonHeaders, 'Version': '3' }, signal: AbortSignal.timeout(10_000) },
     );
 
+    type Action = { actionType: string; affectedDealId: string };
+    type ActivityDetails = {
+      actions?:    Action[];
+      currency:    string;
+      direction:   string;
+      level:       number;
+      marketName:  string;
+      size:        number;
+      stopLevel:   number | null;
+      limitLevel:  number | null;
+    };
     type ActivityItem = {
-      date: string;
-      epic: string;
-      period: string;
-      dealId: string;
-      channel: string;
+      date:         string;
+      epic:         string;
+      dealId:       string;
       dealReference: string;
-      status: string;
-      type: string;
-      description: string;
-      details?: {
-        actions?: { actionType: string; affectedDealId: string }[];
-        currency: string;
-        dealReference: string;
-        direction: string;
-        goodTillDate: string | null;
-        guaranteedStop: boolean;
-        level: number;
-        limitLevel: number | null;
-        limitedRiskPremium: number | null;
-        marketName: string;
-        size: number;
-        stopLevel: number | null;
-        trailingStep: number | null;
-        trailingStopDistance: number | null;
-      };
+      status:       string;
+      type:         string;
+      description:  string;
+      details?:     ActivityDetails;
     };
 
     let activities: ActivityItem[] = [];
     if (activityRes.ok) {
       const d = await activityRes.json() as { activities?: ActivityItem[] };
       activities = d.activities ?? [];
+    } else {
+      const body = await activityRes.text().catch(() => '');
+      return NextResponse.json(
+        { ok: false, error: `IG activity ${activityRes.status}: ${body.slice(0, 200)}` },
+        { status: 502 },
+      );
     }
 
-    // Derive closed positions from POSITION_CLOSED activity entries
-    const closed = activities
-      .filter(a => a.type === 'POSITION' && a.status === 'ACCEPTED' &&
-        (a.details?.actions ?? []).some(x => x.actionType === 'POSITION_CLOSED' || x.actionType === 'POSITION_PARTIALLY_CLOSED'))
-      .map(a => ({
-        date:       a.date,
-        epic:       a.epic,
-        dealId:     a.dealId,
-        dealRef:    a.dealReference,
-        direction:  a.details?.direction ?? '',
-        size:       a.details?.size ?? 0,
-        level:      a.details?.level ?? 0,
-        marketName: a.details?.marketName ?? a.epic,
-        currency:   a.details?.currency ?? 'GBP',
-        description: a.description,
-      }));
+    // Build maps keyed by the actual position dealId (= affectedDealId from the action).
+    // IG's activity API assigns a new dealId to every confirmation (open, close, amend),
+    // so we must look inside actions[] to find which position was affected.
+    const openMap  = new Map<string, ActivityItem>();
+    const closeMap = new Map<string, ActivityItem>();
 
-    // Opened entries (for source-tagging open positions)
-    const opened = activities
-      .filter(a => a.type === 'POSITION' && a.status === 'ACCEPTED' &&
-        (a.details?.actions ?? []).some(x => x.actionType === 'POSITION_OPENED'))
-      .map(a => ({
-        date:       a.date,
-        epic:       a.epic,
-        dealId:     a.dealId,
-        direction:  a.details?.direction ?? '',
-        size:       a.details?.size ?? 0,
-        level:      a.details?.level ?? 0,
-        marketName: a.details?.marketName ?? a.epic,
-      }));
+    for (const a of activities) {
+      if (a.type !== 'POSITION' || a.status !== 'ACCEPTED') continue;
+      for (const action of (a.details?.actions ?? [])) {
+        if (action.actionType === 'POSITION_OPENED') {
+          openMap.set(action.affectedDealId, a);
+        } else if (
+          action.actionType === 'POSITION_CLOSED' ||
+          action.actionType === 'POSITION_PARTIALLY_CLOSED'
+        ) {
+          closeMap.set(action.affectedDealId, a);
+        }
+      }
+    }
 
-    return NextResponse.json({ ok: true, closed, opened, raw: activities });
+    type MergedTrade = {
+      positionDealId: string;
+      epic:           string;
+      marketName:     string;
+      direction:      string;
+      size:           number;
+      openLevel:      number;
+      closeLevel:     number | null;
+      openedAt:       string;
+      closedAt:       string | null;
+      currency:       string;
+      status:         'OPEN' | 'CLOSED';
+    };
+
+    const trades: MergedTrade[] = [];
+    for (const [posId, openA] of openMap) {
+      const closeA = closeMap.get(posId);
+      trades.push({
+        positionDealId: posId,
+        epic:           openA.epic,
+        marketName:     openA.details?.marketName ?? openA.epic,
+        direction:      openA.details?.direction  ?? '',
+        size:           openA.details?.size        ?? 0,
+        openLevel:      openA.details?.level       ?? 0,
+        closeLevel:     closeA?.details?.level     ?? null,
+        openedAt:       openA.date,
+        closedAt:       closeA?.date               ?? null,
+        currency:       openA.details?.currency    ?? 'GBP',
+        status:         closeA ? 'CLOSED' : 'OPEN',
+      });
+    }
+
+    trades.sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
+
+    return NextResponse.json({ ok: true, trades });
   } catch (err) {
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : 'Unknown error', closed: [], opened: [] },
+      { ok: false, error: err instanceof Error ? err.message : 'Unknown error' },
       { status: 500 },
     );
   }
