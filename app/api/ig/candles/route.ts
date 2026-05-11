@@ -25,7 +25,6 @@ const YAHOO_MAP: Record<string, string> = {
   'Germany 40':    '^GDAXI',
   'Wall Street':   '^DJI',
   'Japan 225':     '^N225',
-  'Australia 200': '^AXJO',
   // Commodities
   'Gold':          'GC=F',
   'Oil (WTI)':     'CL=F',
@@ -38,7 +37,6 @@ const YAHOO_MAP: Record<string, string> = {
   'EUR/GBP':       'EURGBP=X',
   'USD/JPY':       'JPY=X',
   'AUD/USD':       'AUDUSD=X',
-  'USD/CHF':       'USDCHF=X',
   // Crypto
   'Bitcoin':       'BTC-USD',
   'Ethereum':      'ETH-USD',

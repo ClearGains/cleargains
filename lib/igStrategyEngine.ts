@@ -114,14 +114,12 @@ export const DEFAULT_WATCHLIST: WatchlistMarket[] = [
   { epic: 'IX.D.DOW.DAILY.IP',    name: 'Wall Street',   enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40',    enabled: true,  marketType: 'INDEX' },
   { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225',     enabled: true,  marketType: 'INDEX' },
-  { epic: 'IX.D.ASX.DAILY.IP',    name: 'Australia 200', enabled: false, marketType: 'INDEX' },
   // ── Forex (spread bet TODAY instruments — CS.D.*.TODAY.IP) ──────────────────
   { epic: 'CS.D.GBPUSD.TODAY.IP', name: 'GBP/USD',       enabled: true,  marketType: 'FOREX' },
   { epic: 'CS.D.EURUSD.TODAY.IP', name: 'EUR/USD',       enabled: true,  marketType: 'FOREX' },
   { epic: 'CS.D.USDJPY.TODAY.IP', name: 'USD/JPY',       enabled: true,  marketType: 'FOREX' },
   { epic: 'CS.D.EURGBP.TODAY.IP', name: 'EUR/GBP',       enabled: true,  marketType: 'FOREX' },
   { epic: 'CS.D.AUDUSD.TODAY.IP', name: 'AUD/USD',       enabled: true,  marketType: 'FOREX' },
-  { epic: 'CS.D.USDCHF.TODAY.IP', name: 'USD/CHF',       enabled: true,  marketType: 'FOREX' },
 ];
 
 // ── Technical indicators ──────────────────────────────────────────────────────

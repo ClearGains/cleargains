@@ -13,7 +13,6 @@ const INDEX_SESSIONS: Record<string, Session> = {
   'IX.D.DAX.DAILY.IP':    { openH: 8,  openM: 0,  closeH: 22, closeM: 0  },
   // Asian indices (overnight UTC — next calendar day open)
   'IX.D.NIKKEI.DAILY.IP': { openH: 23, openM: 0,  closeH: 6,  closeM: 0  },
-  'IX.D.ASX.DAILY.IP':    { openH: 23, openM: 50, closeH: 6,  closeM: 30 },
 };
 
 // CS.D.*.TODAY.IP forex/commodity spread bet epics — open Sun 22:00 to Fri 22:00 UTC
@@ -23,7 +22,6 @@ const FOREX_EPICS = new Set([
   'CS.D.USDJPY.TODAY.IP',
   'CS.D.EURGBP.TODAY.IP',
   'CS.D.AUDUSD.TODAY.IP',
-  'CS.D.USDCHF.TODAY.IP',
 ]);
 
 function minutesSinceMidnightUTC(): number {

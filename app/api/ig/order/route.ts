@@ -10,14 +10,12 @@ const VERIFIED_EPICS: Record<string, string> = {
   'Wall Street':   'IX.D.DOW.DAILY.IP',
   'Germany 40':    'IX.D.DAX.DAILY.IP',
   'Japan 225':     'IX.D.NIKKEI.DAILY.IP',
-  'Australia 200': 'IX.D.ASX.DAILY.IP',
   // Forex — spread bet
   'GBP/USD':       'CS.D.GBPUSD.TODAY.IP',
   'EUR/USD':       'CS.D.EURUSD.TODAY.IP',
   'USD/JPY':       'CS.D.USDJPY.TODAY.IP',
   'EUR/GBP':       'CS.D.EURGBP.TODAY.IP',
   'AUD/USD':       'CS.D.AUDUSD.TODAY.IP',
-  'USD/CHF':       'CS.D.USDCHF.TODAY.IP',
   // Commodities — spread bet  (NOT the CFD CS.D.CFDGOLD / CS.D.CRUDEOIL variants)
   'Gold':          'CS.D.GOLD.TODAY.IP',
   'Silver':        'CS.D.SLVR.TODAY.IP',

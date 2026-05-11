@@ -40,7 +40,6 @@ const INDICES = [
   { name: 'Wall Street',   epic: 'IX.D.DOW.DAILY.IP',     currency: 'USD' },
   { name: 'Germany 40',    epic: 'IX.D.DAX.DAILY.IP',     currency: 'EUR' },
   { name: 'Japan 225',     epic: 'IX.D.NIKKEI.DAILY.IP',  currency: 'USD' },
-  { name: 'Australia 200', epic: 'IX.D.ASX.DAILY.IP',     currency: 'AUD' },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

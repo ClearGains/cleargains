@@ -119,7 +119,6 @@ const EPIC_OPTIONS = [
   { label: 'Wall Street',   value: 'IX.D.DOW.DAILY.IP'      },
   { label: 'Germany 40',    value: 'IX.D.DAX.DAILY.IP'      },
   { label: 'Japan 225',     value: 'IX.D.NIKKEI.DAILY.IP'   },
-  { label: 'Australia 200', value: 'IX.D.ASX.DAILY.IP'      },
   // Commodities
   { label: 'Gold',          value: 'CS.D.GOLD.TODAY.IP'     },
   { label: 'Silver',        value: 'CS.D.SILVER.TODAY.IP'   },
@@ -131,7 +130,6 @@ const EPIC_OPTIONS = [
   { label: 'USD/JPY',       value: 'CS.D.USDJPY.TODAY.IP'  },
   { label: 'EUR/GBP',       value: 'CS.D.EURGBP.TODAY.IP'  },
   { label: 'AUD/USD',       value: 'CS.D.AUDUSD.TODAY.IP'  },
-  { label: 'USD/CHF',       value: 'CS.D.USDCHF.TODAY.IP'  },
   // Crypto
   { label: 'Bitcoin',       value: 'CS.D.BITCOIN.TODAY.IP' },
 ];

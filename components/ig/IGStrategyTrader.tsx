@@ -91,7 +91,7 @@ function calcDynamicSize(requestedSize: number, available: number, startingBalan
 // Correlated instrument groups for signal confirmation (+50% size boost)
 const CORRELATED_GROUPS: string[][] = [
   ['EUR/USD', 'GBP/USD', 'AUD/USD'],          // USD-weakness cluster
-  ['USD/JPY', 'USD/CHF'],                      // USD-strength cluster
+  ['USD/JPY'],                                  // USD-strength cluster
   ['S&P 500', 'NASDAQ 100', 'Wall Street'],    // US equity cluster
   ['FTSE 100', 'Germany 40'],                  // European equity cluster
 ];
@@ -297,7 +297,6 @@ function isEpicTradeable(epic: string): boolean {
     'IX.D.DOW.DAILY.IP':    [14, 30, 21, 0 ],
     'IX.D.DAX.DAILY.IP':    [8,  0,  22, 0 ],
     'IX.D.NIKKEI.DAILY.IP': [23, 0,  6,  0 ],
-    'IX.D.ASX.DAILY.IP':    [23, 50, 6,  30],
   };
   const s = sessions[epic];
   if (!s) return true;
