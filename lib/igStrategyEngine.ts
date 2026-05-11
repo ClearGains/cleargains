@@ -60,7 +60,7 @@ export type IGSavedStrategy = {
   minStrength: number;            // min signal strength to open (0-100), default 60
   timeframe: Timeframe;
   size: number;
-  maxPositions: number;
+  maxPositions: number;   // 0 = no limit
   accounts: ('demo' | 'live')[];
   autoTrade: boolean;
   autoClose: boolean;

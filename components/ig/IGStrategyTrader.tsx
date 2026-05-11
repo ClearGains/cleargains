@@ -606,14 +606,27 @@ export function IGStrategyTrader() {
   const [stopError, setStopError]                 = useState<string|null>(null);
   const [runtimeStartDisplay, setRuntimeStartDisplay] = useState<string>('');
 
-  // ── Log ────────────────────────────────────────────────────────────────────
+  // ── Log ─────────────────────────────────────────────────────────────────────
+  // Global log: manual trades, position management, system messages
   const [runLog, setRunLog] = useState<RunLog[]>([]);
+  // Per-strategy log: one entry list per strategy ID
+  const stratLogsRef = useRef<Record<string, RunLog[]>>({});
+  const [stratLogs, setStratLogs] = useState<Record<string, RunLog[]>>({});
 
   // ── Toast ──────────────────────────────────────────────────────────────────
   const [toast, setToast] = useState<{ok:boolean;msg:string}|null>(null);
   function showToast(ok:boolean, msg:string) { setToast({ok,msg}); setTimeout(() => setToast(null), 4000); }
+
+  // Global log (manual/UI actions)
   function log(type: RunLog['type'], msg: string) {
     setRunLog(p => [{ id:uid(), ts:new Date().toISOString(), type, msg }, ...p].slice(0, 100));
+  }
+  // Per-strategy log (bot activity — each card shows its own)
+  function slog(stratId: string, type: RunLog['type'], msg: string) {
+    const entry: RunLog = { id: uid(), ts: new Date().toISOString(), type, msg };
+    const prev = stratLogsRef.current[stratId] ?? [];
+    stratLogsRef.current[stratId] = [entry, ...prev].slice(0, 200);
+    setStratLogs(p => ({ ...p, [stratId]: [entry, ...(p[stratId] ?? [])].slice(0, 200) }));
   }
 
   // ── Per-strategy state helpers ────────────────────────────────────────────
@@ -1117,61 +1130,73 @@ export function IGStrategyTrader() {
       for (const env of envs) {
         const envPos = positions[env];
         const opposite = tradeDir === 'BUY' ? 'SELL' : 'BUY';
+        const botMode = strat.mode ?? 'BOTH';
+        // Each directional bot only manages positions it owns:
+        // LONG_ONLY closes BUY positions, SHORT_ONLY closes SELL positions, BOTH closes either.
+        const ownedDir = botMode === 'LONG_ONLY' ? 'BUY' : botMode === 'SHORT_ONLY' ? 'SELL' : null;
 
-        // [AUTO] Close opposing positions (signal reversal)
+        // [AUTO] Close own positions when signal reverses against this bot's direction
         if (strat.autoClose) {
-          for (const opp of envPos.filter(p => p.epic === market.epic && p.direction === opposite)) {
+          const toClose = envPos.filter(p =>
+            p.epic === market.epic &&
+            p.direction === opposite &&
+            (ownedDir === null || p.direction === ownedDir)
+          );
+          for (const opp of toClose) {
             const exitPnl = opp.upl ?? 0;
-            log('info', `[AUTO] Closing ${market.name} — signal reversed to ${tradeDir}…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${market.name} — signal reversed to ${tradeDir}…`);
             const cr = await closePos(env, opp);
             if (cr.ok) {
               const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
-              log('close', `[AUTO] ✓ Closed ${market.name} — signal reversed to ${tradeDir} — P&L: £${exitPnl.toFixed(2)}`);
+              slog(strat.id, 'close', `[AUTO] ✓ Closed ${market.name} — signal reversed to ${tradeDir} — P&L: £${exitPnl.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, opp.dealId, exitPx, exitPnl, 'STRATEGY', new Date().toISOString()));
               recentlyClosedRef.current.set(`${market.epic}:${opp.direction}`, Date.now());
-            } else log('error', `[${env.toUpperCase()}] Close failed: ${cr.error ?? 'unknown'}`);
+            } else slog(strat.id, 'error', `[${env.toUpperCase()}] Close failed: ${cr.error ?? 'unknown'}`);
           }
           await loadPositions(env);
         }
 
-        // [AUTO] Override weaker positions — if current signal is 15%+ stronger than an existing position
+        // [AUTO] Override weaker own-mode positions — if signal is 15%+ stronger
         if (strat.autoClose) {
-          const currentPositions = positions[env].filter(p => p.epic !== market.epic);
+          // Only override positions this bot owns (by direction)
+          const currentPositions = positions[env].filter(p =>
+            p.epic !== market.epic &&
+            (ownedDir === null || p.direction === ownedDir)
+          );
           for (const weakPos of currentPositions) {
             const weakScan = Object.values(scans).find(s => s.epic === weakPos.epic);
             const weakStrength = weakScan?.signal?.strength ?? 100;
             if (strength >= weakStrength + 15) {
               const weakPnl = weakPos.upl ?? 0;
-              log('info', `[AUTO] Closing ${weakPos.instrumentName ?? weakPos.epic} — overriding with stronger signal ${market.name} (${strength}%)…`);
+              slog(strat.id, 'info', `[AUTO] Closing ${weakPos.instrumentName ?? weakPos.epic} — overriding with stronger signal ${market.name} (${strength}%)…`);
               const cr = await closePos(env, weakPos);
               if (cr.ok) {
                 const exitPx = weakPos.direction === 'BUY' ? (weakPos.bid ?? weakPos.level) : (weakPos.offer ?? weakPos.level);
-                log('close', `[AUTO] ✓ Closed ${weakPos.instrumentName ?? weakPos.epic} (${weakStrength}%) for ${market.name} (${strength}%) — P&L: £${weakPnl.toFixed(2)}`);
+                slog(strat.id, 'close', `[AUTO] ✓ Closed ${weakPos.instrumentName ?? weakPos.epic} (${weakStrength}%) for ${market.name} (${strength}%) — P&L: £${weakPnl.toFixed(2)}`);
                 setTradeHistory(prev => recordTradeClose(prev, weakPos.dealId, exitPx, weakPnl, 'STRATEGY', new Date().toISOString()));
-              } else log('error', `[${env.toUpperCase()}] Override close failed: ${cr.error ?? 'unknown'}`);
+              } else slog(strat.id, 'error', `[${env.toUpperCase()}] Override close failed: ${cr.error ?? 'unknown'}`);
             }
           }
           await loadPositions(env);
         }
 
         // Mode filter — LONG_ONLY bots never open shorts; SHORT_ONLY never open longs.
-        // Opposing positions above were still closed (reversal close still fires).
-        const botMode = strat.mode ?? 'BOTH';
         if (botMode === 'LONG_ONLY' && tradeDir === 'SELL') {
-          log('signal', `[LONG_ONLY] ${market.name} — SELL signal: closed opposites, no new short entry`);
+          slog(strat.id, 'signal', `[LONG_ONLY] ${market.name} — SELL signal: closed own longs, staying flat`);
           continue;
         }
         if (botMode === 'SHORT_ONLY' && tradeDir === 'BUY') {
-          log('signal', `[SHORT_ONLY] ${market.name} — BUY signal: closed opposites, no new long entry`);
+          slog(strat.id, 'signal', `[SHORT_ONLY] ${market.name} — BUY signal: closed own shorts, staying flat`);
           continue;
         }
 
         // Don't open if already same direction
         if (positions[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
 
-        // Enforce max positions cap
-        if (positions[env].length >= strat.maxPositions) {
-          log('signal', `[SKIP] ${market.name} — max positions (${strat.maxPositions}) reached on ${env.toUpperCase()}`);
+        // Enforce max positions cap (0 = no limit)
+        const ownedPositions = positions[env].filter(p => ownedDir === null || p.direction === ownedDir);
+        if (strat.maxPositions > 0 && ownedPositions.length >= strat.maxPositions) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — max positions (${strat.maxPositions}) reached on ${env.toUpperCase()}`);
           continue;
         }
 
@@ -1181,26 +1206,25 @@ export function IGStrategyTrader() {
         if (recentlyClosedAt && Date.now() - recentlyClosedAt < TWO_HOURS) {
           const newsConf = newsSignalsRef.current.get(market.name);
           if (!newsConf || newsConf !== tradeDir) {
-            log('signal', `[SKIP] ${market.name} ${tradeDir} — recently closed, waiting for ≥70% news confirmation before re-entry`);
+            slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} — recently closed, waiting for news confirmation`);
             continue;
           }
-          log('info', `[RE-ENTRY] ${market.name} ${tradeDir} — news confirms direction after recent close`);
+          slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} — news confirms direction after recent close`);
         }
 
         // Skip new trades when paused — monitor only
         if (getStratState(strat.id) === 'PAUSED') {
-          log('signal', `[PAUSED] ${market.name} → ${tradeDir} ${strength}% — no new entries while paused`);
+          slog(strat.id, 'signal', `[PAUSED] ${market.name} → ${tradeDir} ${strength}% — no new entries while paused`);
           continue;
         }
 
         // One-time disclaimer before first live trade
         if (env === 'live') {
           const ok = await confirmLiveTrade();
-          if (!ok) { log('info', `[LIVE] Disclaimer declined — skipping ${market.name}`); continue; }
+          if (!ok) { slog(strat.id, 'info', `[LIVE] Disclaimer declined — skipping ${market.name}`); continue; }
         }
 
         // PERMISSION: Dynamic position sizing — cap size to 5% of available funds.
-        // Pauses at <15% of starting balance (prevents over-trading on a drawdown).
         const fundsNow = igFundsRef.current[env];
         const available = fundsNow?.available ?? Infinity;
         const startBal  = startingBalanceRef.current[env];
@@ -1208,7 +1232,7 @@ export function IGStrategyTrader() {
 
         if (orderSizeRaw === 0) {
           const floorPct = startBal ? ` (floor: 15% of starting £${startBal.toFixed(0)})` : '';
-          log('error', `[${env.toUpperCase()}] ⚠️ Insufficient funds (£${available.toFixed(2)} available${floorPct}) — pausing trades. Top up at ig.com.`);
+          slog(strat.id, 'error', `[${env.toUpperCase()}] ⚠️ Insufficient funds (£${available.toFixed(2)} available${floorPct}) — pausing trades. Top up at ig.com.`);
           showToast(false, `⚠️ Low funds in IG ${env} — skipping`);
           continue;
         }
@@ -1216,38 +1240,30 @@ export function IGStrategyTrader() {
         // [AUTO] +50% size boost when a correlated instrument confirms the signal
         const corroborated = hasCorrelatedConfirmation(market.name, tradeDir, scans);
         const orderSize = corroborated ? Math.round(orderSizeRaw * 1.5 * 10) / 10 : orderSizeRaw;
-        if (corroborated) {
-          log('info', `[AUTO] Increased size — correlated signal confirmation for ${market.name} → £${orderSize}/pt`);
-        }
+        if (corroborated) slog(strat.id, 'info', `[AUTO] Correlated confirmation — size boosted to £${orderSize}/pt`);
 
-        // PERMISSION: Intelligent order management — if funds are tight (< £500),
-        // close the worst-losing open position (open > 24h) to free capital.
-        if (available < 500 && positions[env].length > 0) {
+        // Capital-floor: if funds tight (< £500), close worst own-mode loser to free capital
+        if (available < 500 && ownedPositions.length > 0) {
           const now = Date.now();
-          const oldLosers = positions[env]
+          const oldLosers = ownedPositions
             .filter(p => p.upl < 0 && p.createdDate && (now - new Date(p.createdDate).getTime()) > 24 * 3_600_000)
-            .sort((a, b) => a.upl - b.upl); // most negative first
+            .sort((a, b) => a.upl - b.upl);
           if (oldLosers.length > 0) {
             const worst = oldLosers[0];
-            log('info', `[AUTO] Closing ${worst.instrumentName ?? worst.epic} — capital below £500 threshold…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${worst.instrumentName ?? worst.epic} — capital below £500…`);
             const cr = await closePos(env, worst);
             if (cr.ok) {
               const exitPx = worst.direction === 'BUY' ? (worst.bid ?? worst.level) : (worst.offer ?? worst.level);
-              log('close', `[AUTO] ✓ Closed ${worst.instrumentName ?? worst.epic} — capital below £500 — P&L: £${(worst.upl ?? 0).toFixed(2)}`);
+              slog(strat.id, 'close', `[AUTO] ✓ Closed ${worst.instrumentName ?? worst.epic} — capital floor — P&L: £${(worst.upl ?? 0).toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, worst.dealId, exitPx, worst.upl ?? 0, 'STRATEGY', new Date().toISOString()));
-              await loadPositions(env);
-              await fetchIGFunds(env);
-            } else log('error', `[${env.toUpperCase()}] Capital-floor close failed: ${cr.error ?? 'unknown'}`);
+              await loadPositions(env); await fetchIGFunds(env);
+            } else slog(strat.id, 'error', `[${env.toUpperCase()}] Capital-floor close failed: ${cr.error ?? 'unknown'}`);
           }
         }
 
-        // [AUTO] Immediate entry on 90%+ confidence signal (bypass minStrength threshold)
-        const isHighConf = strength >= 90;
-        if (isHighConf) {
-          log('info', `[AUTO] Opened ${market.name} — strong signal override — confidence ${strength}%`);
-        }
+        if (strength >= 90) slog(strat.id, 'info', `[AUTO] High-confidence signal (${strength}%) — proceeding`);
 
-        // Gemini second opinion — runs server-side so API key is never exposed
+        // Gemini second opinion
         let effectiveDir: 'BUY' | 'SELL' = tradeDir as 'BUY' | 'SELL';
         try {
           const gRes = await fetch('/api/gemini/verdict', {
@@ -1267,9 +1283,9 @@ export function IGStrategyTrader() {
           });
           if (gRes.ok) {
             const gv = await gRes.json() as { direction: 'BUY' | 'SELL' | 'SKIP'; confidence: number; reason: string; engine: string };
-            log('info', `[GEMINI] ${market.name} → ${gv.direction} ${gv.confidence}% — ${gv.reason} (${gv.engine})`);
+            slog(strat.id, 'info', `[GEMINI] ${market.name} → ${gv.direction} ${gv.confidence}% — ${gv.reason} (${gv.engine})`);
             if (gv.direction === 'SKIP' || gv.confidence < (strat.minStrength ?? 50)) {
-              log('info', `[GEMINI] Skipped ${market.name} — ${gv.direction} ${gv.confidence}%`);
+              slog(strat.id, 'info', `[GEMINI] Skipped ${market.name} — ${gv.direction} ${gv.confidence}%`);
               continue;
             }
             if (gv.direction === 'BUY' || gv.direction === 'SELL') effectiveDir = gv.direction;
@@ -1277,18 +1293,17 @@ export function IGStrategyTrader() {
         } catch { /* Gemini unavailable — proceed with original signal */ }
 
         const maxLoss = orderSize * stopDist;
-        log(effectiveDir === 'BUY' ? 'buy' : 'sell',
-          `[${env.toUpperCase()}] → ${effectiveDir} ${market.name} | epic: ${market.epic} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | signal ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
+        slog(strat.id, effectiveDir === 'BUY' ? 'buy' : 'sell',
+          `[${env.toUpperCase()}] → ${effectiveDir} ${market.name} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
 
         const or = await placeOrder(env, market.epic, effectiveDir, orderSize, stopDist, limitDist);
 
         if (or.ok) {
           completedTradesRef.current += 1;
           setCompletedTrades(completedTradesRef.current);
-          log(tradeDir === 'BUY' ? 'buy' : 'sell',
-            `[${env.toUpperCase()}] ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · dealId ${or.dealId ?? 'pending'} · filled @ ${or.level ?? '?'} · epic: ${or.epic ?? market.epic}`);
+          slog(strat.id, tradeDir === 'BUY' ? 'buy' : 'sell',
+            `[${env.toUpperCase()}] ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · filled @ ${or.level ?? '?'}`);
           showToast(true, `[${env}] ${tradeDir} ${market.name}`);
-          // Record open trade in history
           setTradeHistory(prev => recordTradeOpen(prev, {
             portfolioName: strat.name, market: market.name, epic: market.epic,
             direction: tradeDir, size: orderSize, entryLevel: or.level ?? 0,
@@ -1296,23 +1311,19 @@ export function IGStrategyTrader() {
             status: 'OPEN', dealReference: or.dealReference ?? '', dealId: or.dealId ?? '',
             pnl: null, closeReason: null, accountType: env,
           }));
-          // Small delay then refresh so IG has time to register the position
           await sleep(1500);
           await loadPositions(env);
           await loadWorkingOrders(env);
         } else {
-          // ── Special-case: insufficient funds ──────────────────────────────
           const errStr = (or.error ?? '').toLowerCase();
           if (errStr.includes('insufficient_funds') || errStr.includes('insufficient funds') || errStr.includes('insufficient fund')) {
-            log('error', `[${env.toUpperCase()}] ⚠️ IG ${env === 'demo' ? 'Demo' : 'Live'} has insufficient funds. Go to ig.com → ${env === 'demo' ? 'Demo account →' : ''} My Account → Add virtual funds`);
+            slog(strat.id, 'error', `[${env.toUpperCase()}] ⚠️ Insufficient funds — top up at ig.com`);
             showToast(false, `⚠️ Insufficient funds in IG ${env} — skipping`);
-            continue; // skip this market, continue scanning others
+            continue;
           }
-          log('error', `[${env.toUpperCase()}] ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}`);
-          log('error', `  epic: ${or.epic ?? market.epic}${or.reason ? ` | reason: ${or.reason}` : ''}`);
-          if (or.sentPayload) log('error', `  sent: ${JSON.stringify(or.sentPayload)}`);
-          if (or.igBody)      log('error', `  ig:   ${JSON.stringify(or.igBody)}`);
-          // Record rejected trade
+          slog(strat.id, 'error', `[${env.toUpperCase()}] ❌ ${market.name} FAILED — ${or.error ?? 'unknown'}${or.reason ? ` (${or.reason})` : ''}`);
+          if (or.sentPayload) slog(strat.id, 'error', `  sent: ${JSON.stringify(or.sentPayload)}`);
+          if (or.igBody)      slog(strat.id, 'error', `  ig:   ${JSON.stringify(or.igBody)}`);
           setTradeHistory(prev => recordTradeOpen(prev, {
             portfolioName: strat.name, market: market.name, epic: market.epic,
             direction: tradeDir, size: orderSize, entryLevel: 0,
@@ -1337,10 +1348,10 @@ export function IGStrategyTrader() {
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
     for (const env of envs) {
       const funds = await fetchIGFunds(env);
-      if (funds) log('info', `[${env.toUpperCase()}] 💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
+      if (funds) slog(strat.id, 'info', `[${env.toUpperCase()}] 💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
     }
 
-    log('info', `📡 Signal scan — ${markets.length} markets… (fetching news)`);
+    slog(strat.id, 'info', `📡 Signal scan — ${markets.length} markets… (fetching news)`);
     await fetchNewsSignals(markets, positions);
 
     for (let i = 0; i < markets.length; i++) {
@@ -1359,7 +1370,7 @@ export function IGStrategyTrader() {
     const scanMs = strat.signalScanMs ?? signalScanMs;
     lastSignalAtRef.current = Date.now();
     setLastSignalAt(Date.now());
-    log('info', `Signal scan complete — next in ${Math.round(scanMs / 60_000)}min`);
+    slog(strat.id, 'info', `Signal scan complete — next in ${Math.round(scanMs / 60_000)}min`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, positions, signalScanMs]);
 
@@ -1368,8 +1379,13 @@ export function IGStrategyTrader() {
     if (getStratState(strat.id) === 'STOPPED') return;
     await loadPositions();
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
+    const botMode = strat.mode ?? 'BOTH';
     for (const env of envs) {
       for (const pos of positions[env]) {
+        // Mode filter: each bot only manages its own direction positions
+        if (botMode === 'LONG_ONLY'  && pos.direction === 'SELL') continue;
+        if (botMode === 'SHORT_ONLY' && pos.direction === 'BUY')  continue;
+
         if (!pos.level || !pos.bid || !pos.offer) continue;
         const currentPx = pos.direction === 'BUY' ? pos.bid : pos.offer;
         const entryPx   = pos.level;
@@ -1382,16 +1398,16 @@ export function IGStrategyTrader() {
           const ageMs = Date.now() - new Date(pos.createdDate).getTime();
           if (ageMs > 48 * 3_600_000 && Math.abs(pnlPct) < 0.5) {
             const ageLabel = ageMs > 86_400_000 ? `${Math.floor(ageMs / 86_400_000)}d` : `${Math.floor(ageMs / 3_600_000)}h`;
-            log('info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — stale (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L)…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — stale (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L)…`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
               const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
-              log('close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${(pos.upl ?? 0).toFixed(2)}`);
+              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${(pos.upl ?? 0).toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STALE', new Date().toISOString()));
               recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
             } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
-              log('info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG (stop/limit/rollover)`);
-            } else log('error', `[${env.toUpperCase()}] Stale close failed: ${cr.error ?? 'unknown'}`);
+              slog(strat.id, 'info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG (stop/limit/rollover)`);
+            } else slog(strat.id, 'error', `[${env.toUpperCase()}] Stale close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
         }
@@ -1404,17 +1420,17 @@ export function IGStrategyTrader() {
           const isMovingTowardTP = pos.direction === 'BUY' ? currentPx > entryPx : currentPx < entryPx;
           if (isMovingTowardTP && tpDist > 0 && currentDist >= tpDist * 0.75) {
             const pnlStr = `£${(pos.upl ?? 0).toFixed(2)}`;
-            log('info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — 75% of TP reached (${((currentDist / tpDist) * 100).toFixed(0)}%)…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — 75% of TP reached (${((currentDist / tpDist) * 100).toFixed(0)}%)…`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
-              log('close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} — 75% TP — P&L: ${pnlStr}`);
+              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} — 75% TP — P&L: ${pnlStr}`);
               const closedPnl = pos.upl ?? 0;
               todayPnLRef.current += closedPnl;
               setTodayPnL(todayPnLRef.current);
-              log('close', `💰 Capital redeployment: closed +${closedPnl >= 0 ? '+' : ''}£${closedPnl.toFixed(2)} — available for next signal`);
+              slog(strat.id, 'close', `💰 Capital redeployment: closed +${closedPnl >= 0 ? '+' : ''}£${closedPnl.toFixed(2)} — available for next signal`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'TAKE_PROFIT', new Date().toISOString()));
               recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
-            } else log('error', `[${env.toUpperCase()}] 75% TP close failed: ${cr.error ?? 'unknown'}`);
+            } else slog(strat.id, 'error', `[${env.toUpperCase()}] 75% TP close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
         }
@@ -1439,7 +1455,7 @@ export function IGStrategyTrader() {
 
         if (newStop !== null) {
           const r = await updatePositionSL(env, pos, newStop, pos.limitLevel ?? null);
-          if (r.ok) log('info', `[${env.toUpperCase()}] ${pos.instrumentName ?? pos.epic}: ${reason}`);
+          if (r.ok) slog(strat.id, 'info', `[${env.toUpperCase()}] ${pos.instrumentName ?? pos.epic}: ${reason}`);
         }
       }
     }
@@ -1486,7 +1502,7 @@ export function IGStrategyTrader() {
     const pMonMs  = strat.posMonitorMs ?? posMonitorMs;
     const modeLabel = strat.accounts.includes('live') ? '⚠️ LIVE' : 'demo';
 
-    log('info', `▶ Auto-trader started — "${strat.name}" · ${modeLabel} · signals every ${Math.round(sScanMs/60_000)}min · positions every ${Math.round(pMonMs/1000)}s`);
+    slog(strat.id, 'info', `▶ Auto-trader started — "${strat.name}" · ${modeLabel} · signals every ${Math.round(sScanMs/60_000)}min · positions every ${Math.round(pMonMs/1000)}s`);
 
     // Capture starting balance for 15% capital floor check
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
@@ -1522,7 +1538,7 @@ export function IGStrategyTrader() {
     setTestRunning(true);
     runningRef.current = true;
     const testStrat: IGSavedStrategy = { ...strat, maxPositions: 1 };
-    log('info', `🧪 Test run started — "${strat.name}" · max 1 position · scanning…`);
+    slog(strat.id, 'info', `🧪 Test run started — "${strat.name}" · max 1 position · scanning…`);
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
     let placed = 0;
     for (let i = 0; i < markets.length; i++) {
@@ -1536,7 +1552,7 @@ export function IGStrategyTrader() {
     setScanProgress('');
     runningRef.current = false;
     setTestRunning(false);
-    log('info', placed > 0
+    slog(strat.id, 'info', placed > 0
       ? `🧪 Test complete — ${placed} position opened. Check Positions tab.`
       : `🧪 Test complete — no signals met the ${strat.minStrength}% threshold this scan.`
     );
@@ -1548,13 +1564,13 @@ export function IGStrategyTrader() {
       status: 'paused', pausedAt: new Date().toISOString(), tradesCount: completedTradesRef.current, error: null,
     }));
     const name = strategies.find(s => s.id === stratId)?.name ?? stratId;
-    log('info', `⏸ "${name}" PAUSED — monitoring open positions, no new entries until resumed`);
+    slog(stratId, 'info', `⏸ "${name}" PAUSED — monitoring open positions, no new entries until resumed`);
   }
 
   function resumeAutoRun(stratId: string) {
     setStratState(stratId, 'RUNNING');
     const name = strategies.find(s => s.id === stratId)?.name ?? stratId;
-    log('info', `▶ "${name}" RESUMED — scanning for new entries`);
+    slog(stratId, 'info', `▶ "${name}" RESUMED — scanning for new entries`);
   }
 
   function stopAutoRun(stratId?: string, reason?: string) {
@@ -2450,8 +2466,9 @@ export function IGStrategyTrader() {
               </div>
               <div>
                 <label className="text-xs text-gray-400 mb-1.5 block">Max positions</label>
-                <input type="number" min={1} max={20} value={bMaxPos} onChange={e => setBMaxPos(Number(e.target.value))}
+                <input type="number" min={0} max={20} value={bMaxPos} onChange={e => setBMaxPos(Number(e.target.value))}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500" />
+                {bMaxPos === 0 && <p className="text-[10px] text-orange-400 mt-1">∞ No position limit</p>}
               </div>
               <div>
                 <label className="text-xs text-gray-400 mb-1.5 block">Min signal strength</label>
@@ -2716,7 +2733,7 @@ export function IGStrategyTrader() {
                       )}
                     </div>
                     <p className="text-[11px] text-gray-500">
-                      {enabledMarkets.length} markets · max {strat.maxPositions} pos · min {strat.minStrength ?? 55}% signal · {cfg.stopNote}
+                      {enabledMarkets.length} markets · {strat.maxPositions === 0 ? '∞ no pos limit' : `max ${strat.maxPositions} pos`} · min {strat.minStrength ?? 55}% signal · {cfg.stopNote}
                       {strat.lastRunAt && (
                         <span> · last {fmtTime(strat.lastRunAt)}
                           {strat.lastRunEnv && (
@@ -2871,10 +2888,10 @@ export function IGStrategyTrader() {
                       {signalCountdown && <span>Next scan: <span className="text-emerald-400 font-mono">{signalCountdown}</span></span>}
                       {posCountdown && <span>Pos check: <span className="text-blue-400 font-mono">{posCountdown}</span></span>}
                     </div>
-                    {/* Mini activity log — last 5 entries */}
-                    {runLog.slice(0, 5).length > 0 && (
+                    {/* Mini activity log — last 5 entries for this strategy */}
+                    {(stratLogs[strat.id] ?? []).slice(0, 5).length > 0 && (
                       <div className="pt-1.5 border-t border-emerald-500/10 space-y-0.5">
-                        {runLog.slice(0, 5).map(entry => (
+                        {(stratLogs[strat.id] ?? []).slice(0, 5).map(entry => (
                           <p key={entry.id} className={clsx('text-[10px] leading-tight truncate',
                             entry.type === 'buy' ? 'text-emerald-400' :
                             entry.type === 'sell' || entry.type === 'close' ? 'text-red-400' :
