@@ -1,10 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  authenticate, openPosition, closePosition,
+  authenticate,
   getSession, clearSession,
   type IGSession,
 } from './igApi';
+// openPosition / closePosition intentionally removed — this bot is data-only.
+// All trade execution is handled by the frontend IG Spread Bet tab.
 import { connect, disconnect, isConnected } from './igStream';
 import {
   initEpicState, processTick, recordFill,
@@ -241,37 +243,14 @@ function handleTick(tick: CandleTick) {
         // Gemini may override technical direction
         st.direction = verdict.direction;
 
-        try {
-          // Stagger concurrent orders — random 0-2s delay so multiple instruments
-          // don't all hit IG's API simultaneously
-          await new Promise(r => setTimeout(r, Math.random() * 2000));
-          if (!running) { st.state = 'FLAT'; pendingEpics.delete(tick.epic); return; }
-
-          const stopLevel  = verdict.direction === 'BUY'
-            ? tick.bidClose - verdict.stopPoints
-            : tick.bidClose + verdict.stopPoints;
-          const limitLevel = verdict.direction === 'BUY'
-            ? tick.bidClose + verdict.takeProfitPoints
-            : tick.bidClose - verdict.takeProfitPoints;
-
-          const { dealId, level } = await openPosition(
-            session, tick.epic, verdict.betSize,
-            verdict.direction, stopLevel, limitLevel,
-          );
-
-          recordFill(st, level, verdict.stopPoints, verdict.takeProfitPoints);
-          st.dealId = dealId;
-          st.size   = verdict.betSize;
-
-          addLog('enter', name,
-            `✓ ${verdict.direction} £${verdict.betSize}/pt @ ${level} | stop −${verdict.stopPoints}pts | TP +${verdict.takeProfitPoints}pts | deal ${dealId}`
-          );
-        } catch (e) {
-          st.state = 'FLAT';
-          addLog('error', name, `✗ Order failed: ${e instanceof Error ? e.message : String(e)}`);
-        } finally {
-          pendingEpics.delete(tick.epic);
-        }
+        // DATA-ONLY: log the signal but do not place any order.
+        recordFill(st, tick.bidClose, verdict.stopPoints, verdict.takeProfitPoints);
+        st.dealId = `sig-${Math.random().toString(36).slice(2, 9)}`;
+        st.size   = 0;
+        addLog('enter', name,
+          `↑ SIGNAL ${verdict.direction} @ ${tick.bidClose.toFixed(1)} | stop −${verdict.stopPoints}pts | TP +${verdict.takeProfitPoints}pts (no order placed)`
+        );
+        pendingEpics.delete(tick.epic);
       });
       break;
     }
@@ -295,30 +274,10 @@ function handleTick(tick: CandleTick) {
         recentLosses = 0;  // reset on profitable exit
       }
 
-      // Use dealId stored on entry — no position poll needed
-      const dealId = st.dealId;
-      const size   = st.size;
-      if (!dealId) {
-        addLog('info', name, 'No dealId on record — position may already be closed');
-        break;
-      }
-      pendingEpics.add(tick.epic);
-      const session = getSession();
-      if (!session) {
-        addLog('error', name, '✗ No session — cannot close position');
-        pendingEpics.delete(tick.epic);
-        break;
-      }
-      void closePosition(session, dealId, st.direction, size)
-        .then(() => {
-          st.dealId = '';
-          st.size   = 0;
-          addLog('exit', name, `✓ Closed deal ${dealId}`);
-        })
-        .catch(e => {
-          addLog('error', name, `✗ Close failed: ${e instanceof Error ? e.message : String(e)}`);
-        })
-        .finally(() => pendingEpics.delete(tick.epic));
+      // DATA-ONLY: reset virtual state, no real close sent to IG.
+      st.dealId = '';
+      st.size   = 0;
+      addLog('exit', name, `↓ SIGNAL EXIT — ${decision.reason} (no order placed)`);
       break;
     }
 

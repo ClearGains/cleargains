@@ -1,7 +1,6 @@
-import {
-  authenticate, openPosition, closePosition,
-  getSession,
-} from './igApi';
+// strategyRunner — DATA-ONLY mode.
+// openPosition / closePosition removed. This file generates signals only;
+// all trade execution is handled by the frontend IG Spread Bet tab.
 
 export type StrategyMarket = {
   epic:        string;
@@ -12,19 +11,17 @@ export type StrategyMarket = {
 
 export type StrategyRunnerConfig = {
   markets:        StrategyMarket[];
-  minStrength:    number;   // 0-100
-  betSize:        number;   // £/pt per trade
-  scanIntervalMs: number;   // default 5 min
+  minStrength:    number;
+  betSize:        number;
+  scanIntervalMs: number;
 };
 
 type RunnerLog = { id: string; ts: string; type: string; msg: string };
-type OpenTrade = { dealId: string; epic: string; direction: 'BUY' | 'SELL' };
 
-let running     = false;
-let config:     StrategyRunnerConfig | null = null;
-let scanTimer:  ReturnType<typeof setInterval> | null = null;
-const openTrades = new Map<string, OpenTrade>();  // keyed by epic
-const runLog:   RunnerLog[] = [];
+let running    = false;
+let config:    StrategyRunnerConfig | null = null;
+let scanTimer: ReturnType<typeof setInterval> | null = null;
+const runLog:  RunnerLog[] = [];
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
 
@@ -72,10 +69,7 @@ async function fetchPrice(market: StrategyMarket): Promise<{ price: number; chan
   try {
     const r = await fetch(
       `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(market.yahooSymbol)}`,
-      {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NexusTrade/1.0)', 'Accept': 'application/json' },
-        signal:  AbortSignal.timeout(8_000),
-      }
+      { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, signal: AbortSignal.timeout(8_000) }
     );
     if (!r.ok) return null;
     const data = await r.json() as {
@@ -83,55 +77,18 @@ async function fetchPrice(market: StrategyMarket): Promise<{ price: number; chan
     };
     const q = data.quoteResponse?.result?.[0];
     if (!q) return null;
-    return {
-      price:         q.regularMarketPrice         ?? 0,
-      changePercent: q.regularMarketChangePercent ?? 0,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function calcStopAndLimit(price: number, mType: StrategyMarket['marketType']): { stopDist: number; limitDist: number } {
-  const pct = mType === 'FOREX' ? 0.002 : mType === 'INDEX' ? 0.005 : 0.01;
-  const stopDist  = Math.max(0.0001, price * pct);
-  const limitDist = stopDist * 1.5;
-  return { stopDist, limitDist };
+    return { price: q.regularMarketPrice ?? 0, changePercent: q.regularMarketChangePercent ?? 0 };
+  } catch { return null; }
 }
 
 async function runScan() {
   if (!config || !running) return;
-
-  let session = getSession();
-  if (!session) {
-    // Try to authenticate using env vars
-    const apiKey   = process.env.IG_API_KEY   ?? '';
-    const username = process.env.IG_USERNAME  ?? '';
-    const password = process.env.IG_PASSWORD  ?? '';
-    const env      = (process.env.IG_ENV ?? 'demo') as 'demo' | 'live';
-    if (!apiKey || !username || !password) {
-      addLog('error', 'No IG session and env vars not set — cannot scan');
-      return;
-    }
-    try {
-      session = await authenticate(apiKey, username, password, env);
-      addLog('info', 'Authenticated to IG for strategy runner');
-    } catch (e) {
-      addLog('error', `Auth failed: ${e instanceof Error ? e.message : String(e)}`);
-      return;
-    }
-  }
-
-  addLog('info', `Scanning ${config.markets.length} market(s)...`);
+  addLog('info', `Scanning ${config.markets.length} market(s) — signal only, no orders`);
 
   for (const market of config.markets) {
     if (!running) break;
-
     const snap = await fetchPrice(market);
-    if (!snap) {
-      addLog('error', `${market.name}: price fetch failed`);
-      continue;
-    }
+    if (!snap) { addLog('error', `${market.name}: price fetch failed`); continue; }
 
     const { direction, strength } = calibrateSignal(snap.changePercent, market.marketType);
     const pctStr = `${snap.changePercent >= 0 ? '+' : ''}${snap.changePercent.toFixed(2)}%`;
@@ -141,55 +98,18 @@ async function runScan() {
       continue;
     }
 
-    const existing = openTrades.get(market.epic);
-
-    // Close opposing position if signal reversed
-    if (existing && existing.direction !== direction) {
-      addLog('info', `${market.name}: signal reversed → ${direction}, closing ${existing.direction}`);
-      try {
-        await closePosition(session, existing.dealId, existing.direction, config.betSize);
-        openTrades.delete(market.epic);
-        addLog('info', `${market.name}: closed ${existing.direction} deal ${existing.dealId}`);
-      } catch (e) {
-        addLog('error', `${market.name}: close failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-
-    // Skip if already in same direction
-    if (existing && existing.direction === direction) {
-      addLog('info', `${market.name}: already ${direction} — holding`);
-      continue;
-    }
-
-    // Open new position
-    const { stopDist, limitDist } = calcStopAndLimit(snap.price, market.marketType);
-    const stopLevel  = direction === 'BUY' ? snap.price - stopDist : snap.price + stopDist;
-    const limitLevel = direction === 'BUY' ? snap.price + limitDist : snap.price - limitDist;
-
-    try {
-      addLog('info', `${market.name}: → ${direction} @ ${snap.price.toFixed(2)} (${pctStr} ${strength}%) stop±${stopDist.toFixed(4)} tp±${limitDist.toFixed(4)}`);
-      const { dealId, level } = await openPosition(session, market.epic, config.betSize, direction, stopLevel, limitLevel);
-      openTrades.set(market.epic, { dealId, epic: market.epic, direction });
-      addLog('info', `${market.name}: ✓ ${direction} deal ${dealId} @ ${level}`);
-    } catch (e) {
-      addLog('error', `${market.name}: open failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    addLog('info', `${market.name}: ↑ SIGNAL ${direction} ${strength}% @ ${snap.price.toFixed(2)} (${pctStr}) — no order placed`);
   }
 }
 
 export function startStrategyRunner(cfg: StrategyRunnerConfig): { ok: boolean; error?: string } {
   stopStrategyRunner();
-
   config  = cfg;
   running = true;
-  openTrades.clear();
   runLog.length = 0;
-
-  addLog('info', `Started — ${cfg.markets.length} market(s), min ${cfg.minStrength}% strength, £${cfg.betSize}/pt, scan every ${cfg.scanIntervalMs / 60_000}min`);
-
+  addLog('info', `Started (signal-only) — ${cfg.markets.length} market(s), min ${cfg.minStrength}%, scan every ${cfg.scanIntervalMs / 60_000}min`);
   void runScan();
   scanTimer = setInterval(() => { void runScan(); }, cfg.scanIntervalMs);
-
   return { ok: true };
 }
 
@@ -201,10 +121,5 @@ export function stopStrategyRunner() {
 }
 
 export function getStrategyRunnerStatus() {
-  return {
-    running,
-    config,
-    log:        runLog.slice(0, 100),
-    openTrades: [...openTrades.values()],
-  };
+  return { running, config, log: runLog.slice(0, 100), openTrades: [] };
 }
