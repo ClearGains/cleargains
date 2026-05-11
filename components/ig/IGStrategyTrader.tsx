@@ -363,36 +363,62 @@ function calibrateSignal(
   return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
 }
 
-// ── RSI/MACD-based signal calibration (used when bot server data is available) ──
+// ── RSI/MACD-based signal calibration (bot server real-time data is primary) ──
+// Strategy: RSI mean reversion with trend alignment + MACD momentum gate.
+// RSI identifies oversold/overbought extremes; MACD confirms the turn is actually starting;
+// Yahoo daily % filters out signals that fight a strong established trend.
 function calibrateFromIndicators(
   rsi:           number | null,
   macd:          number | null,
   changePercent: number,
   mType:         MarketType,
 ): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
+  if (rsi === null) {
+    return calibrateSignal(changePercent, changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL', mType);
+  }
+
+  const strongDailyUp   = changePercent >  1.5;
+  const strongDailyDown = changePercent < -1.5;
+
   let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
   let strength = 0;
 
-  // RSI drives primary direction
-  if (rsi !== null) {
-    if (rsi < 35)      { direction = 'BUY';  strength = 60 + Math.round((35 - rsi) * 1.5); }
-    else if (rsi > 65) { direction = 'SELL'; strength = 60 + Math.round((rsi - 65) * 1.5); }
+  // RSI mean reversion — tighter thresholds (30/70) catch clearer extremes only.
+  // Block signals that fight a strong established daily trend (counter-trend entries
+  // have lower win rates in spread betting due to momentum continuation).
+  if (rsi < 30) {
+    if (!strongDailyDown || rsi < 15) {
+      // Oversold: safe to buy unless in a very strong downtrend (and RSI not extreme)
+      direction = 'BUY';
+      strength  = 65 + Math.round((30 - rsi) * 2.0);  // RSI=30→65, RSI=20→85, RSI=10→105→capped
+    }
+    // else: RSI<30 in strong downtrend → likely momentum continuation, skip
+  } else if (rsi > 70) {
+    if (!strongDailyUp || rsi > 85) {
+      // Overbought: safe to sell unless in a very strong uptrend (and RSI not extreme)
+      direction = 'SELL';
+      strength  = 65 + Math.round((rsi - 70) * 2.0);
+    }
   }
 
-  // MACD confirmation: +10 when momentum confirms direction, −5 when it contradicts
-  if (macd !== null && direction !== 'HOLD') {
+  if (direction === 'HOLD') return { direction: 'HOLD', strength: 0 };
+
+  // MACD momentum gate — HARD requirement, not a soft adjustment.
+  // The RSI tells us WHERE we are (extreme); MACD tells us WHETHER the turn is starting.
+  // Trading RSI alone without MACD confirmation catches falling knives.
+  if (macd !== null) {
     const macdBullish = macd > 0;
     const macdBearish = macd < 0;
-    if (direction === 'BUY'  && macdBullish) strength = Math.min(92, strength + 10);
-    if (direction === 'SELL' && macdBearish) strength = Math.min(92, strength + 10);
-    if (direction === 'BUY'  && macdBearish) strength = Math.max(0,  strength - 5);
-    if (direction === 'SELL' && macdBullish) strength = Math.max(0,  strength - 5);
+    if (direction === 'BUY'  && macdBullish) strength = Math.min(95, strength + 15); // ideal: oversold + momentum turning up
+    if (direction === 'SELL' && macdBearish) strength = Math.min(95, strength + 15); // ideal: overbought + momentum turning down
+    if (direction === 'BUY'  && macdBearish) { strength -= 30; }  // RSI says buy but momentum still falling — risky
+    if (direction === 'SELL' && macdBullish) { strength -= 30; }  // RSI says sell but momentum still rising — risky
+    if (strength < 50) return { direction: 'HOLD', strength: 0 };  // blocked below trade threshold
   }
 
-  // No RSI signal — fall back to change-percent calibration
-  if (direction === 'HOLD') {
-    return calibrateSignal(changePercent, changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL', mType);
-  }
+  // Daily trend alignment bonus — if daily trend confirms the RSI signal, add confidence
+  if (direction === 'BUY'  && changePercent >  0.3) strength = Math.min(95, strength + 8); // pullback in uptrend
+  if (direction === 'SELL' && changePercent < -0.3) strength = Math.min(95, strength + 8); // bounce in downtrend
 
   return { direction, strength: Math.min(99, Math.max(0, strength)) };
 }
@@ -1172,42 +1198,65 @@ export function IGStrategyTrader() {
     }
 
     // ── Calibrated signal scoring ─────────────────────────────────────────────
-    // Yahoo Finance daily change % drives direction + base strength.
-    // Bot server RSI/MACD adjusts strength when it confirms or contradicts.
-    const mType = market.marketType ?? getMarketType(market.epic);
+    const mType    = market.marketType ?? getMarketType(market.epic);
     const stopLoss = strat.stopLoss ?? strat.stopPct ?? 5;
-    const { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, strat.timeframe);
 
-    // Primary: calibrate from Yahoo daily change %
-    const { direction, strength: baseStrength } = snapshot.source === 'bot-server'
-      ? calibrateFromIndicators(snapshot.indicators!.rsi, snapshot.indicators!.macd, snapshot.changePercent, mType)
-      : calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
+    const pctStr         = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
+    const rsiVal         = snapshot.indicators?.rsi  ?? null;
+    const macdVal        = snapshot.indicators?.macd ?? null;
+    const atrVal         = snapshot.indicators?.atr  ?? null;
+    const botCandleCount = botPricesRef.current[market.epic]?.candleCount ?? 0;
 
-    // Secondary: adjust strength ±10–15 pts based on bot server RSI/MACD confirmation
-    let strength = baseStrength;
-    if (snapshot.indicators && direction !== 'HOLD') {
-      const { rsi, macd } = snapshot.indicators;
-      if (direction === 'BUY') {
-        if (rsi !== null && rsi < 50)    strength = Math.min(99, strength + 10); // RSI not overbought ✓
-        if (rsi !== null && rsi > 65)    strength = Math.max(0,  strength - 15); // RSI overbought — contradicts
-        if (macd !== null && macd < 0)   strength = Math.min(99, strength + 5);  // MACD bearish momentum ✓
-        if (macd !== null && macd > 0.001) strength = Math.max(0, strength - 10); // MACD bullish — contradicts
-      } else if (direction === 'SELL') {
-        if (rsi !== null && rsi > 50)    strength = Math.min(99, strength + 10); // RSI not oversold ✓
-        if (rsi !== null && rsi < 35)    strength = Math.max(0,  strength - 15); // RSI oversold — contradicts
-        if (macd !== null && macd > 0)   strength = Math.min(99, strength + 5);  // MACD bullish momentum ✓
-        if (macd !== null && macd < -0.001) strength = Math.max(0, strength - 10); // MACD bearish — contradicts
+    // Bot server is primary when ≥20 candles available (enough for reliable RSI/MACD)
+    // or when bot is the only data source. Below 20 candles indicators are unreliable.
+    const useBotPrimary = snapshot.source === 'bot-server' ||
+                          (snapshot.source === 'yahoo+bot' && botCandleCount >= 20);
+
+    let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
+    let strength = 0;
+
+    if (useBotPrimary) {
+      const r = calibrateFromIndicators(rsiVal, macdVal, snapshot.changePercent, mType);
+      direction = r.direction;
+      strength  = r.strength;
+    } else {
+      const r = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
+      direction = r.direction;
+      strength  = r.strength;
+
+      if (snapshot.indicators && direction !== 'HOLD') {
+        const { rsi, macd } = snapshot.indicators;
+        if (direction === 'BUY') {
+          if (rsi  !== null && rsi  <  50)    strength = Math.min(99, strength + 10);
+          if (rsi  !== null && rsi  >  65)    strength = Math.max(0,  strength - 15);
+          if (macd !== null && macd >  0)     strength = Math.min(99, strength + 10); // bullish MACD confirms BUY
+          if (macd !== null && macd < -0.001) strength = Math.max(0,  strength - 15); // bearish MACD contradicts BUY
+        } else {
+          if (rsi  !== null && rsi  >  50)    strength = Math.min(99, strength + 10);
+          if (rsi  !== null && rsi  <  35)    strength = Math.max(0,  strength - 15);
+          if (macd !== null && macd <  0)     strength = Math.min(99, strength + 10); // bearish MACD confirms SELL
+          if (macd !== null && macd >  0.001) strength = Math.max(0,  strength - 15); // bullish MACD contradicts SELL
+        }
+        // Block overbought BUY and oversold SELL — momentum fighting the entry
+        if (direction === 'BUY'  && rsi !== null && rsi > 70) { direction = 'HOLD'; strength = 0; }
+        if (direction === 'SELL' && rsi !== null && rsi < 30) { direction = 'HOLD'; strength = 0; }
       }
     }
 
-    const pctStr  = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
-    const rsiVal  = snapshot.indicators?.rsi  ?? null;
-    const macdVal = snapshot.indicators?.macd ?? null;
-    const atrVal  = snapshot.indicators?.atr  ?? null;
-    const hasBotCheck = snapshot.source === 'yahoo+bot';
-    const reason  = hasBotCheck && rsiVal !== null
-      ? `Daily ${pctStr} (${mType}) · RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? '✓' : '⚠') : (rsiVal > 50 ? '✓' : '⚠')}`
-      : `Daily ${pctStr} (${mType})`;
+    // ATR-based stop/TP when real-time ATR available (3×ATR stop, 6×ATR TP → 2:1 R:R)
+    let { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, strat.timeframe);
+    if (atrVal !== null && atrVal > 0) {
+      const atrStop = Math.round(atrVal * 3);
+      const atrTP   = Math.round(atrVal * 6);
+      if (atrStop > 0 && atrTP > 0) { stopDist = atrStop; limitDist = atrTP; }
+    }
+
+    const hasBotData = snapshot.source === 'yahoo+bot' || snapshot.source === 'bot-server';
+    const reason = useBotPrimary && rsiVal !== null
+      ? `RSI ${rsiVal.toFixed(0)} (${mType}) · Daily ${pctStr} [${botCandleCount}c]`
+      : hasBotData && rsiVal !== null
+        ? `Daily ${pctStr} (${mType}) · RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? '✓' : '⚠') : (rsiVal > 50 ? '✓' : '⚠')}`
+        : `Daily ${pctStr} (${mType})`;
 
     const sig: StrategySignal = {
       direction,
@@ -1217,14 +1266,14 @@ export function IGStrategyTrader() {
       targetPoints: limitDist,
       riskReward:   `1:${(limitDist / stopDist).toFixed(1)}`,
       indicators: [
-        { label: 'Daily Change', value: pctStr,                   status: (direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral') as 'bullish'|'bearish'|'neutral' },
-        hasBotCheck && rsiVal !== null
+        { label: 'Daily Change', value: pctStr, status: (direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral') as 'bullish'|'bearish'|'neutral' },
+        hasBotData && rsiVal !== null
           ? { label: 'RSI (live)',  value: rsiVal.toFixed(0),     status: (direction === 'BUY' ? (rsiVal < 50 ? 'bullish' : 'bearish') : (rsiVal > 50 ? 'bearish' : 'bullish')) as 'bullish'|'bearish'|'neutral' }
           : { label: 'Type',        value: mType,                 status: 'neutral' as const },
-        hasBotCheck && macdVal !== null
+        hasBotData && macdVal !== null
           ? { label: 'MACD (live)', value: macdVal > 0 ? '↑ bullish' : '↓ bearish', status: (macdVal > 0 ? 'bullish' : 'bearish') as 'bullish'|'bearish'|'neutral' }
           : { label: 'Type',        value: mType,                 status: 'neutral' as const },
-        hasBotCheck && atrVal !== null
+        hasBotData && atrVal !== null
           ? { label: 'ATR (live)',  value: atrVal.toFixed(1),     status: 'neutral' as const }
           : { label: 'Type',        value: mType,                 status: 'neutral' as const },
         { label: 'Stop dist',  value: `${stopDist}pt`,            status: 'neutral' as const },
