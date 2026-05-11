@@ -1,5 +1,6 @@
 import {
   authenticate,
+  getSession,
   type IGSession,
 } from './igApi';
 import { createStreamManager } from './igStream';
@@ -209,7 +210,16 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
 
     try {
       addLog('info', '—', `Starting ${accountKey} data stream — epics: ${params.epics.join(', ')}`);
-      session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, accountKey);
+
+      // Reuse an existing valid session (e.g. from the legacy bot) — avoids a fresh
+      // IG auth request that can 500 when the IP is rate-limited from rapid logins.
+      const existing = getSession(accountKey);
+      if (existing && Date.now() < existing.expiresAt - 2 * 60_000) {
+        session = existing;
+        addLog('info', '—', `Reusing existing ${accountKey} session — expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+      } else {
+        session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, accountKey);
+      }
 
       currentEpics  = params.epics;
       recentLosses  = 0;
