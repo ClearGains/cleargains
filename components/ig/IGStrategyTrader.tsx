@@ -363,10 +363,10 @@ function calibrateFromIndicators(
     else if (rsi > 65) { direction = 'SELL'; strength = 60 + Math.round((rsi - 65) * 1.5); }
   }
 
-  // MACD confirmation: +10 when it agrees, −5 when it disagrees
+  // MACD confirmation: +10 when momentum confirms direction, −5 when it contradicts
   if (macd !== null && direction !== 'HOLD') {
-    const macdBullish = macd < 0;
-    const macdBearish = macd > 0;
+    const macdBullish = macd > 0;
+    const macdBearish = macd < 0;
     if (direction === 'BUY'  && macdBullish) strength = Math.min(92, strength + 10);
     if (direction === 'SELL' && macdBearish) strength = Math.min(92, strength + 10);
     if (direction === 'BUY'  && macdBearish) strength = Math.max(0,  strength - 5);
@@ -1047,37 +1047,52 @@ export function IGStrategyTrader() {
     indicators?: { rsi: number|null; macd: number|null; atr: number|null };
   };
 
-  // ── Fetch market snapshot — bot server (Lightstreamer) first, Yahoo fallback ──
+  // ── Fetch market snapshot — Yahoo Finance primary, bot server as validation layer ──
+  // Yahoo drives the signal (daily change % → BUY/SELL threshold).
+  // Bot server RSI/MACD is attached when available — used in scanMarket to
+  // boost or reduce strength based on whether indicators confirm the direction.
   async function fetchSnapshot(name: string, epic?: string): Promise<SnapshotResult|null> {
-    // Use bot server real-time indicators when available (cached from start of scan cycle)
-    if (epic) {
-      const bp = botPricesRef.current[epic];
-      if (bp && bp.candleCount >= 5 && bp.mid > 0) {
-        return {
-          price: bp.mid,
-          changePercent: bp.changePercent,
-          signal: bp.signal,
-          source: 'bot-server',
-          indicators: { rsi: bp.rsi, macd: bp.macd, atr: bp.atr },
-        };
-      }
-    }
-
-    // Fallback: Yahoo Finance
+    // ── Step 1: Yahoo Finance (primary signal source) ──
     const { YAHOO_SYMBOL_MAP } = await import('@/lib/yahooClient');
     const symbol = YAHOO_SYMBOL_MAP[name];
-    if (!symbol) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo', error: `No symbol mapping for "${name}"` };
-    try {
-      const r = await fetch(`/api/market/quotes?symbols=${encodeURIComponent(symbol)}`);
-      if (!r.ok) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo', error: `Quotes API ${r.status}` };
-      const data = await r.json() as Array<{ symbol: string; price: number; changePercent: number }>;
-      if (!Array.isArray(data) || !data.length) return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo', error: 'No data returned' };
-      const q = data[0];
-      const signal: 'BUY'|'SELL'|'NEUTRAL' = q.changePercent > 0.3 ? 'BUY' : q.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
-      return { price: q.price, changePercent: q.changePercent, signal, source: 'yahoo' };
-    } catch (e) {
-      return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo', error: e instanceof Error ? e.message : 'Failed to fetch' };
+    let yahooResult: SnapshotResult | null = null;
+
+    if (symbol) {
+      try {
+        const r = await fetch(`/api/market/quotes?symbols=${encodeURIComponent(symbol)}`);
+        if (r.ok) {
+          const data = await r.json() as Array<{ symbol: string; price: number; changePercent: number }>;
+          if (Array.isArray(data) && data.length) {
+            const q = data[0];
+            const signal: 'BUY'|'SELL'|'NEUTRAL' = q.changePercent > 0.3 ? 'BUY' : q.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
+            yahooResult = { price: q.price, changePercent: q.changePercent, signal, source: 'yahoo' };
+          }
+        }
+      } catch {}
     }
+
+    // ── Step 2: Bot server (secondary — real-time RSI/MACD/ATR from Lightstreamer) ──
+    const botData  = epic ? botPricesRef.current[epic] : null;
+    const hasBot   = !!(botData && botData.candleCount >= 5 && botData.mid > 0);
+    const botInds  = hasBot ? { rsi: botData!.rsi, macd: botData!.macd, atr: botData!.atr } : undefined;
+
+    // ── Return: Yahoo result with bot indicators attached, or bot-only, or error ──
+    if (yahooResult) {
+      return hasBot
+        ? { ...yahooResult, source: 'yahoo+bot', indicators: botInds }
+        : yahooResult;
+    }
+
+    // No Yahoo data — fall back to bot server alone if available
+    if (hasBot) {
+      return {
+        price: botData!.mid, changePercent: botData!.changePercent, signal: botData!.signal,
+        source: 'bot-server', indicators: botInds,
+      };
+    }
+
+    return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo',
+             error: symbol ? 'No data returned' : `No symbol mapping for "${name}"` };
   }
 
   // ── Fetch news signals once per scan cycle ────────────────────────────────
@@ -1139,23 +1154,43 @@ export function IGStrategyTrader() {
       return null;
     }
 
-    // ── Calibrated signal scoring — use RSI/MACD from bot server when available ──
+    // ── Calibrated signal scoring ─────────────────────────────────────────────
+    // Yahoo Finance daily change % drives direction + base strength.
+    // Bot server RSI/MACD adjusts strength when it confirms or contradicts.
     const mType = market.marketType ?? getMarketType(market.epic);
-    const stopLoss   = strat.stopLoss   ?? strat.stopPct   ?? 5;
+    const stopLoss = strat.stopLoss ?? strat.stopPct ?? 5;
     const { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, strat.timeframe);
 
-    const { direction, strength } = snapshot.indicators
-      ? calibrateFromIndicators(snapshot.indicators.rsi, snapshot.indicators.macd, snapshot.changePercent, mType)
+    // Primary: calibrate from Yahoo daily change %
+    const { direction, strength: baseStrength } = snapshot.source === 'bot-server'
+      ? calibrateFromIndicators(snapshot.indicators!.rsi, snapshot.indicators!.macd, snapshot.changePercent, mType)
       : calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
 
-    const pctStr = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
-    const isLive  = snapshot.source === 'bot-server';
+    // Secondary: adjust strength ±10–15 pts based on bot server RSI/MACD confirmation
+    let strength = baseStrength;
+    if (snapshot.indicators && direction !== 'HOLD') {
+      const { rsi, macd } = snapshot.indicators;
+      if (direction === 'BUY') {
+        if (rsi !== null && rsi < 50)    strength = Math.min(99, strength + 10); // RSI not overbought ✓
+        if (rsi !== null && rsi > 65)    strength = Math.max(0,  strength - 15); // RSI overbought — contradicts
+        if (macd !== null && macd < 0)   strength = Math.min(99, strength + 5);  // MACD bearish momentum ✓
+        if (macd !== null && macd > 0.001) strength = Math.max(0, strength - 10); // MACD bullish — contradicts
+      } else if (direction === 'SELL') {
+        if (rsi !== null && rsi > 50)    strength = Math.min(99, strength + 10); // RSI not oversold ✓
+        if (rsi !== null && rsi < 35)    strength = Math.max(0,  strength - 15); // RSI oversold — contradicts
+        if (macd !== null && macd > 0)   strength = Math.min(99, strength + 5);  // MACD bullish momentum ✓
+        if (macd !== null && macd < -0.001) strength = Math.max(0, strength - 10); // MACD bearish — contradicts
+      }
+    }
+
+    const pctStr  = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
     const rsiVal  = snapshot.indicators?.rsi;
     const macdVal = snapshot.indicators?.macd;
     const atrVal  = snapshot.indicators?.atr;
-    const reason  = isLive && rsiVal !== null
-      ? `RSI ${rsiVal?.toFixed(0)} · ${pctStr} session · ${mType}`
-      : `${pctStr} daily · ${mType}`;
+    const hasBotCheck = snapshot.source === 'yahoo+bot';
+    const reason  = hasBotCheck && rsiVal !== null
+      ? `Daily ${pctStr} (${mType}) · RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? '✓' : '⚠') : (rsiVal > 50 ? '✓' : '⚠')}`
+      : `Daily ${pctStr} (${mType})`;
 
     const sig: StrategySignal = {
       direction,
@@ -1165,19 +1200,20 @@ export function IGStrategyTrader() {
       targetPoints: limitDist,
       riskReward:   `1:${(limitDist / stopDist).toFixed(1)}`,
       indicators: [
-        isLive && rsiVal  !== null && rsiVal  !== undefined
-          ? { label: 'RSI',     value: rsiVal.toFixed(0),                      status: (direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral') as 'bullish'|'bearish'|'neutral' }
-          : { label: 'Change',  value: pctStr,                                  status: (direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral') as 'bullish'|'bearish'|'neutral' },
-        isLive && macdVal !== null && macdVal !== undefined
-          ? { label: 'MACD',    value: macdVal > 0 ? '↑ bullish' : '↓ bearish', status: (macdVal > 0 ? 'bullish' : 'bearish') as 'bullish'|'bearish'|'neutral' }
-          : { label: 'Type',    value: mType,                                   status: 'neutral' as const },
-        isLive && atrVal  !== null && atrVal  !== undefined
-          ? { label: 'ATR',     value: atrVal.toFixed(1),                       status: 'neutral' as const }
-          : { label: 'Type',    value: mType,                                   status: 'neutral' as const },
-        { label: 'Stop dist', value: `${stopDist}pt`,                         status: 'neutral' as const },
-        { label: 'TP dist',   value: `${limitDist}pt`,                        status: 'neutral' as const },
-        { label: 'Size',      value: `£${autoSize}/pt`,                       status: 'neutral' as const },
-        { label: 'Max loss',  value: `£${(autoSize * stopDist).toFixed(2)}`,  status: 'neutral' as const },
+        { label: 'Daily Change', value: pctStr,                   status: (direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral') as 'bullish'|'bearish'|'neutral' },
+        hasBotCheck && rsiVal !== null
+          ? { label: 'RSI (live)',  value: rsiVal.toFixed(0),     status: (direction === 'BUY' ? (rsiVal < 50 ? 'bullish' : 'bearish') : (rsiVal > 50 ? 'bearish' : 'bullish')) as 'bullish'|'bearish'|'neutral' }
+          : { label: 'Type',        value: mType,                 status: 'neutral' as const },
+        hasBotCheck && macdVal !== null
+          ? { label: 'MACD (live)', value: macdVal > 0 ? '↑ bullish' : '↓ bearish', status: (macdVal > 0 ? 'bullish' : 'bearish') as 'bullish'|'bearish'|'neutral' }
+          : { label: 'Type',        value: mType,                 status: 'neutral' as const },
+        hasBotCheck && atrVal !== null
+          ? { label: 'ATR (live)',  value: atrVal.toFixed(1),     status: 'neutral' as const }
+          : { label: 'Type',        value: mType,                 status: 'neutral' as const },
+        { label: 'Stop dist',  value: `${stopDist}pt`,            status: 'neutral' as const },
+        { label: 'TP dist',    value: `${limitDist}pt`,           status: 'neutral' as const },
+        { label: 'Size',       value: `£${autoSize}/pt`,          status: 'neutral' as const },
+        { label: 'Max loss',   value: `£${(autoSize * stopDist).toFixed(2)}`, status: 'neutral' as const },
       ],
     };
 
@@ -1485,18 +1521,48 @@ export function IGStrategyTrader() {
         const pnlPct    = pos.direction === 'BUY'
           ? ((currentPx - entryPx) / entryPx) * 100
           : ((entryPx - currentPx) / entryPx) * 100;
+        const ageMs = pos.createdDate ? Date.now() - new Date(pos.createdDate).getTime() : 0;
+        const ageLabel = ageMs > 86_400_000 ? `${Math.floor(ageMs / 86_400_000)}d` : `${Math.floor(ageMs / 3_600_000)}h`;
 
-        // [AUTO] Stale position recycling — close positions open > 48h with <±0.5% P&L
+        // [AUTO] Emergency soft stop — cut losses before IG's hard stop fires.
+        // Activates at -1.5%; faster than waiting for the wider ATR-based stop.
+        if (strat.autoClose && pnlPct < -1.5) {
+          const pnlStr = `£${(pos.upl ?? 0).toFixed(2)}`;
+          slog(strat.id, 'info', `[AUTO] Emergency stop: ${pos.instrumentName ?? pos.epic} at ${pnlPct.toFixed(2)}% — cutting loss…`);
+          const cr = await closePos(env, pos);
+          if (cr.ok) {
+            const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+            const closedPnl = pos.upl ?? 0;
+            todayPnLRef.current += closedPnl;
+            setTodayPnL(todayPnLRef.current);
+            slog(strat.id, 'close', `[AUTO] ✓ Emergency stop fired: ${pos.instrumentName ?? pos.epic} — P&L: ${pnlStr}`);
+            setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STOP_LOSS', new Date().toISOString()));
+            recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
+          } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
+            slog(strat.id, 'info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG`);
+          } else slog(strat.id, 'error', `[${env.toUpperCase()}] Emergency stop failed: ${cr.error ?? 'unknown'}`);
+          continue;
+        }
+
+        // [AUTO] Stale position recycling — tiered by P&L:
+        //   24h if losing (>0.5% down) — don't let small losers become big ones overnight
+        //   48h if neutral (<1% gain) — stagnant capital redeployment
+        //   72h if profitable (≥1%) — let winners run a bit longer
         if (pos.createdDate && strat.autoClose) {
-          const ageMs = Date.now() - new Date(pos.createdDate).getTime();
-          if (ageMs > 48 * 3_600_000 && Math.abs(pnlPct) < 0.5) {
-            const ageLabel = ageMs > 86_400_000 ? `${Math.floor(ageMs / 86_400_000)}d` : `${Math.floor(ageMs / 3_600_000)}h`;
+          const staleThreshold =
+            pnlPct < -0.5  ? 24 * 3_600_000 :
+            pnlPct >= 1.0   ? 72 * 3_600_000 :
+                              48 * 3_600_000;
+          if (ageMs > staleThreshold && pnlPct < 1.0) {
             slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — stale (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L)…`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
               const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
-              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${(pos.upl ?? 0).toFixed(2)}`);
-              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, pos.upl ?? 0, 'STALE', new Date().toISOString()));
+              const closedPnl = pos.upl ?? 0;
+              todayPnLRef.current += closedPnl;
+              setTodayPnL(todayPnLRef.current);
+              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${closedPnl.toFixed(2)}`);
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STALE', new Date().toISOString()));
               recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
             } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
               slog(strat.id, 'info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG (stop/limit/rollover)`);
@@ -1505,37 +1571,49 @@ export function IGStrategyTrader() {
           }
         }
 
-        // [AUTO] Early TP at 75% of target — lock gains before full reversal
+        // [AUTO] Early TP at 65% of target — lock gains before a reversal erases them.
+        // 65% is more responsive than 75%; by 65% we've captured the bulk of the move.
         if (strat.autoClose && pos.limitLevel) {
           const tpTarget = pos.limitLevel;
           const tpDist = Math.abs(tpTarget - entryPx);
           const currentDist = Math.abs(currentPx - entryPx);
           const isMovingTowardTP = pos.direction === 'BUY' ? currentPx > entryPx : currentPx < entryPx;
-          if (isMovingTowardTP && tpDist > 0 && currentDist >= tpDist * 0.75) {
+          if (isMovingTowardTP && tpDist > 0 && currentDist >= tpDist * 0.65) {
             const pnlStr = `£${(pos.upl ?? 0).toFixed(2)}`;
-            slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — 75% of TP reached (${((currentDist / tpDist) * 100).toFixed(0)}%)…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — 65% of TP reached (${((currentDist / tpDist) * 100).toFixed(0)}%)…`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
-              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} — 75% TP — P&L: ${pnlStr}`);
+              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} — 65% TP — P&L: ${pnlStr}`);
               const closedPnl = pos.upl ?? 0;
               todayPnLRef.current += closedPnl;
               setTodayPnL(todayPnLRef.current);
-              slog(strat.id, 'close', `💰 Capital redeployment: closed +${closedPnl >= 0 ? '+' : ''}£${closedPnl.toFixed(2)} — available for next signal`);
+              slog(strat.id, 'close', `💰 Capital redeployment: +£${closedPnl.toFixed(2)} — available for next signal`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'TAKE_PROFIT', new Date().toISOString()));
               recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, Date.now());
-            } else slog(strat.id, 'error', `[${env.toUpperCase()}] 75% TP close failed: ${cr.error ?? 'unknown'}`);
+            } else slog(strat.id, 'error', `[${env.toUpperCase()}] 65% TP close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
         }
 
+        // [AUTO] Trailing stop ladder — activates much earlier to protect gains:
+        //  +1.5% → SL to breakeven (was +3%): more positions reach this threshold
+        //  +3%   → SL locks +1% profit (new intermediate step)
+        //  +5%   → SL locks +2% profit (unchanged)
         let newStop: number | null = null;
         let reason = '';
 
-        if (pnlPct >= 3 && pnlPct < 5) {
+        if (pnlPct >= 1.5 && pnlPct < 3) {
           const breakevenStop = entryPx;
           if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < breakevenStop : pos.stopLevel > breakevenStop)) {
             newStop = breakevenStop;
             reason = `+${pnlPct.toFixed(1)}% → SL to breakeven ${breakevenStop}`;
+          }
+        }
+        if (pnlPct >= 3 && pnlPct < 5) {
+          const lockStop = pos.direction === 'BUY' ? entryPx * 1.01 : entryPx * 0.99;
+          if (!pos.stopLevel || (pos.direction === 'BUY' ? pos.stopLevel < lockStop : pos.stopLevel > lockStop)) {
+            newStop = Math.round(lockStop * 100) / 100;
+            reason = `+${pnlPct.toFixed(1)}% → SL to lock +1% at ${newStop}`;
           }
         }
         if (pnlPct >= 5) {
@@ -3044,9 +3122,11 @@ export function IGStrategyTrader() {
           <CardHeader
             title="Market Scanner"
             subtitle={(() => {
-              const liveCount = scanEntries.filter(s => s.status === 'ok' && s.source === 'bot-server').length;
-              const okCount   = scanEntries.filter(s => s.status === 'ok').length;
-              const src = liveCount > 0 ? `⚡ ${liveCount} live · ${okCount - liveCount} Yahoo` : 'Yahoo Finance';
+              const botCount   = scanEntries.filter(s => s.status === 'ok' && (s.source === 'yahoo+bot' || s.source === 'bot-server')).length;
+              const okCount    = scanEntries.filter(s => s.status === 'ok').length;
+              const src = botCount > 0
+                ? `Yahoo Finance · ⚡ ${botCount} bot-verified`
+                : 'Yahoo Finance';
               return scanEntries.some(s => s.status === 'ok')
                 ? `${src} · ${okCount}/${scanEntries.length} markets · last ${fmtTime(scanEntries.find(s=>s.lastScanned)?.lastScanned ?? new Date().toISOString())}`
                 : `${src} · ${scanEntries.length} markets ready — click Run to start`;
@@ -3081,7 +3161,7 @@ export function IGStrategyTrader() {
                   <p className="text-[10px] text-gray-600">Waiting for scan…</p>
                 )}
 
-                {/* OK: price + indicators/change + source badge */}
+                {/* OK: price + daily change + bot indicators + source badge */}
                 {scan.status === 'ok' && scan.signal && !scan.scanning && (
                   <div className="space-y-1">
                     {/* Price */}
@@ -3092,11 +3172,22 @@ export function IGStrategyTrader() {
                           : scan.price.toFixed(4)}
                       </p>
                     )}
-                    {/* RSI/MACD from bot server, or daily change from Yahoo */}
-                    {scan.source === 'bot-server' && scan.signal.indicators ? (() => {
-                      const rsiInd  = scan.signal.indicators.find(i => i.label === 'RSI');
-                      const macdInd = scan.signal.indicators.find(i => i.label === 'MACD');
-                      const atrInd  = scan.signal.indicators.find(i => i.label === 'ATR');
+                    {/* Daily change % — always shown (Yahoo primary) */}
+                    {scan.changePercent !== undefined && (
+                      <p className={clsx('text-[11px] font-semibold flex items-center gap-0.5',
+                        scan.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400'
+                      )}>
+                        {scan.changePercent >= 0
+                          ? <TrendingUp className="h-3 w-3" />
+                          : <TrendingDown className="h-3 w-3" />}
+                        {scan.changePercent >= 0 ? '+' : ''}{scan.changePercent.toFixed(2)}% daily
+                      </p>
+                    )}
+                    {/* Bot server RSI/MACD — shown when available as secondary check */}
+                    {(scan.source === 'yahoo+bot' || scan.source === 'bot-server') && (() => {
+                      const rsiInd  = scan.signal.indicators?.find(i => i.label === 'RSI (live)' || i.label === 'RSI');
+                      const macdInd = scan.signal.indicators?.find(i => i.label === 'MACD (live)' || i.label === 'MACD');
+                      if (!rsiInd && !macdInd) return null;
                       return (
                         <div className="flex gap-2 flex-wrap">
                           {rsiInd && (
@@ -3111,29 +3202,19 @@ export function IGStrategyTrader() {
                               macdInd.status === 'bearish' ? 'text-red-400' : 'text-gray-400'
                             )}>{macdInd.value}</span>
                           )}
-                          {atrInd && <span className="text-[10px] text-gray-500">ATR {atrInd.value}</span>}
                         </div>
                       );
-                    })() : (
-                      scan.changePercent !== undefined && (
-                        <p className={clsx('text-[11px] font-semibold flex items-center gap-0.5',
-                          scan.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400'
-                        )}>
-                          {scan.changePercent >= 0
-                            ? <TrendingUp className="h-3 w-3" />
-                            : <TrendingDown className="h-3 w-3" />}
-                          {scan.changePercent >= 0 ? '+' : ''}{scan.changePercent.toFixed(2)}%
-                        </p>
-                      )
-                    )}
+                    })()}
                     {/* Source badge */}
                     <span className={clsx(
                       'inline-block text-[9px] px-1.5 py-0.5 rounded border',
-                      scan.source === 'bot-server'
+                      scan.source === 'yahoo+bot'
+                        ? 'bg-purple-500/10 text-purple-400 border-purple-500/20'
+                        : scan.source === 'bot-server'
                         ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                         : 'bg-gray-800 text-gray-500 border-gray-700/50'
                     )}>
-                      {scan.source === 'bot-server' ? '⚡ Live' : 'Yahoo Finance'}
+                      {scan.source === 'yahoo+bot' ? '⚡ Bot verified' : scan.source === 'bot-server' ? '⚡ Live' : 'Yahoo Finance'}
                     </span>
                   </div>
                 )}
@@ -3150,7 +3231,7 @@ export function IGStrategyTrader() {
           </div>
           {scanEntries.some(s => s.status === 'error') && (
             <p className="text-[11px] text-amber-400 mt-3 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-              ⚠️ Some markets have no data. Start the Server Bot to get real-time Lightstreamer prices, or wait for Yahoo Finance fallback data.
+              ⚠️ Some markets failed to load from Yahoo Finance. Market may be closed or temporarily unavailable. The bot will retry on the next scan.
             </p>
           )}
         </Card>
