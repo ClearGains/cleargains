@@ -159,15 +159,14 @@ export function processTick(
     if (st.state === 'IN_POSITION') {
       const isLong = st.direction === 'BUY';
 
-      // Two consecutive candles in wrong direction → cooldown
+      // Two consecutive candles in wrong direction → exit and flip immediately (no cooldown)
       const wrongDir = isLong ? st.consecutiveReds >= 2 : st.consecutiveGreens >= 2;
       if (wrongDir) {
-        st.state = 'COOLDOWN';
-        st.cooldownUntil = now + cfg.cooldownMs;
+        st.state = 'FLAT'; // no cooldown — ready to enter opposite direction on next candle
         st.entryPrice = 0; st.dynamicStopPrice = 0; st.takeProfitPrice = 0;
         return {
           action: 'EXIT',
-          reason: `${isLong ? st.consecutiveReds + ' reds' : st.consecutiveGreens + ' greens'} — reversal. ${cfg.cooldownMs / 60_000} min cooldown.`,
+          reason: `${isLong ? st.consecutiveReds + ' reds' : st.consecutiveGreens + ' greens'} — momentum reversed, flip ready`,
           urgency: 'on_close',
         };
       }

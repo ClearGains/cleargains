@@ -106,6 +106,7 @@ app.get('/prices', auth, (_req: Request, res: Response) => {
     bid: number; mid: number; changePercent: number; candleCount: number;
     rsi: number | null; macd: number | null; atr: number | null;
     signal: 'BUY' | 'SELL' | 'NEUTRAL'; signalState: string;
+    consecutiveReds: number; consecutiveGreens: number;
   };
   const prices: Record<string, PriceEntry> = {};
 
@@ -129,23 +130,38 @@ app.get('/prices', auth, (_req: Request, res: Response) => {
       const macd = candles.length >= 26 ? calcMacdHist(candles) : null;
       const atr  = candles.length >= 14 ? calcAtr(candles)      : null;
 
-      // Derive signal from RSI primary, MACD secondary, changePercent fallback
-      let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
-      if (rsi !== null) {
-        if (rsi < 35) signal = 'BUY';
-        else if (rsi > 65) signal = 'SELL';
-      } else {
-        signal = changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
+      // Count consecutive same-direction closed candles (momentum streaks)
+      let consRed = 0, consGreen = 0;
+      for (let i = candles.length - 1; i >= 0; i--) {
+        const c = candles[i];
+        if (c.close < c.open) {        // red candle
+          if (consGreen > 0) break;
+          consRed++;
+        } else {                       // green candle
+          if (consRed > 0) break;
+          consGreen++;
+        }
+        if (consRed + consGreen >= 6) break;
       }
-      if (signal === 'NEUTRAL' && macd !== null) {
-        if (macd < -0.0002) signal = 'BUY';
-        else if (macd > 0.0002) signal = 'SELL';
+
+      // Momentum signal: consecutive candle direction confirmed by MACD.
+      // 2+ same-direction candles = confirmed momentum, 1 + MACD = probable momentum.
+      let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
+      if (consGreen >= 2 && (rsi === null || rsi < 72) && (macd === null || macd > -0.0005)) {
+        signal = 'BUY';
+      } else if (consRed >= 2 && (rsi === null || rsi > 28) && (macd === null || macd < 0.0005)) {
+        signal = 'SELL';
+      } else if (consGreen >= 1 && macd !== null && macd > 0 && (rsi === null || rsi < 68)) {
+        signal = 'BUY';
+      } else if (consRed >= 1 && macd !== null && macd < 0 && (rsi === null || rsi > 32)) {
+        signal = 'SELL';
       }
 
       prices[epic] = {
         bid, mid: bid, changePercent, candleCount: candles.length,
         rsi, macd, atr, signal,
         signalState: st.epicStatuses[epic]?.state ?? 'FLAT',
+        consecutiveReds: consRed, consecutiveGreens: consGreen,
       };
     }
   }

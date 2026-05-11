@@ -73,6 +73,7 @@ type BotPriceEntry = {
   bid: number; mid: number; changePercent: number; candleCount: number;
   rsi: number | null; macd: number | null; atr: number | null;
   signal: 'BUY' | 'SELL' | 'NEUTRAL'; signalState: string;
+  consecutiveReds?: number; consecutiveGreens?: number;
 };
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -363,63 +364,51 @@ function calibrateSignal(
   return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
 }
 
-// ── RSI/MACD-based signal calibration (bot server real-time data is primary) ──
-// Strategy: RSI mean reversion with trend alignment + MACD momentum gate.
-// RSI identifies oversold/overbought extremes; MACD confirms the turn is actually starting;
-// Yahoo daily % filters out signals that fight a strong established trend.
+// ── Momentum-based signal calibration (bot server real-time data is primary) ──
+// Strategy: enter in direction of current price momentum.
+// MACD drives direction; RSI gates extremes; daily change confirms.
+// Positions are flipped in runPositionMonitor when bot server detects candle reversal.
 function calibrateFromIndicators(
   rsi:           number | null,
   macd:          number | null,
   changePercent: number,
   mType:         MarketType,
 ): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
-  if (rsi === null) {
+  if (rsi === null && macd === null) {
     return calibrateSignal(changePercent, changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL', mType);
   }
 
-  const strongDailyUp   = changePercent >  1.5;
-  const strongDailyDown = changePercent < -1.5;
+  const macdBullish = macd !== null && macd > 0;
+  const macdBearish = macd !== null && macd < 0;
+  const dailyUp     = changePercent >  0.15;
+  const dailyDown   = changePercent < -0.15;
 
   let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
   let strength = 0;
 
-  // RSI mean reversion — tighter thresholds (30/70) catch clearer extremes only.
-  // Block signals that fight a strong established daily trend (counter-trend entries
-  // have lower win rates in spread betting due to momentum continuation).
-  if (rsi < 30) {
-    if (!strongDailyDown || rsi < 15) {
-      // Oversold: safe to buy unless in a very strong downtrend (and RSI not extreme)
-      direction = 'BUY';
-      strength  = 65 + Math.round((30 - rsi) * 2.0);  // RSI=30→65, RSI=20→85, RSI=10→105→capped
-    }
-    // else: RSI<30 in strong downtrend → likely momentum continuation, skip
-  } else if (rsi > 70) {
-    if (!strongDailyUp || rsi > 85) {
-      // Overbought: safe to sell unless in a very strong uptrend (and RSI not extreme)
-      direction = 'SELL';
-      strength  = 65 + Math.round((rsi - 70) * 2.0);
-    }
+  // MACD drives direction: bullish momentum = BUY, bearish momentum = SELL.
+  // RSI gates: don't enter when momentum is already exhausted at extremes.
+  if (macdBullish && (rsi === null || rsi < 70)) {
+    direction = 'BUY';
+    strength  = 62;
+    if (dailyUp)                    strength = Math.min(95, strength + 10);
+    if (macd! > 0.002)             strength = Math.min(95, strength + 8);
+    if (rsi !== null && rsi > 45)  strength = Math.min(95, strength + 5);
+  } else if (macdBearish && (rsi === null || rsi > 30)) {
+    direction = 'SELL';
+    strength  = 62;
+    if (dailyDown)                  strength = Math.min(95, strength + 10);
+    if (macd! < -0.002)            strength = Math.min(95, strength + 8);
+    if (rsi !== null && rsi < 55)  strength = Math.min(95, strength + 5);
+  }
+
+  // MACD flat or unavailable — use daily change with RSI gate as fallback
+  if (direction === 'HOLD') {
+    if (dailyUp   && (rsi === null || rsi < 68)) { direction = 'BUY';  strength = 54; }
+    if (dailyDown && (rsi === null || rsi > 32)) { direction = 'SELL'; strength = 54; }
   }
 
   if (direction === 'HOLD') return { direction: 'HOLD', strength: 0 };
-
-  // MACD momentum gate — HARD requirement, not a soft adjustment.
-  // The RSI tells us WHERE we are (extreme); MACD tells us WHETHER the turn is starting.
-  // Trading RSI alone without MACD confirmation catches falling knives.
-  if (macd !== null) {
-    const macdBullish = macd > 0;
-    const macdBearish = macd < 0;
-    if (direction === 'BUY'  && macdBullish) strength = Math.min(95, strength + 15); // ideal: oversold + momentum turning up
-    if (direction === 'SELL' && macdBearish) strength = Math.min(95, strength + 15); // ideal: overbought + momentum turning down
-    if (direction === 'BUY'  && macdBearish) { strength -= 30; }  // RSI says buy but momentum still falling — risky
-    if (direction === 'SELL' && macdBullish) { strength -= 30; }  // RSI says sell but momentum still rising — risky
-    if (strength < 50) return { direction: 'HOLD', strength: 0 };  // blocked below trade threshold
-  }
-
-  // Daily trend alignment bonus — if daily trend confirms the RSI signal, add confidence
-  if (direction === 'BUY'  && changePercent >  0.3) strength = Math.min(95, strength + 8); // pullback in uptrend
-  if (direction === 'SELL' && changePercent < -0.3) strength = Math.min(95, strength + 8); // bounce in downtrend
-
   return { direction, strength: Math.min(99, Math.max(0, strength)) };
 }
 
@@ -1587,6 +1576,16 @@ export function IGStrategyTrader() {
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
     if (getStratState(strat.id) === 'STOPPED') return;
     await loadPositions();
+
+    // Refresh bot server prices — needed for real-time momentum flip detection
+    try {
+      const pr = await fetch('/api/ig/bot?action=prices');
+      if (pr.ok) {
+        const pd = await pr.json() as { ok: boolean; prices: Record<string, BotPriceEntry> };
+        if (pd.ok && pd.prices) botPricesRef.current = pd.prices;
+      }
+    } catch { /* bot server offline — skip flip logic */ }
+
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
     const botMode = strat.mode ?? 'BOTH';
     for (const env of envs) {
@@ -1603,6 +1602,70 @@ export function IGStrategyTrader() {
           : ((entryPx - currentPx) / entryPx) * 100;
         const ageMs = pos.createdDate ? Date.now() - new Date(pos.createdDate).getTime() : 0;
         const ageLabel = ageMs > 86_400_000 ? `${Math.floor(ageMs / 86_400_000)}d` : `${Math.floor(ageMs / 3_600_000)}h`;
+        const posName  = pos.instrumentName ?? pos.epic;
+
+        // [FLIP] Core momentum strategy: close and immediately open opposite when
+        // the bot server detects that candle momentum has reversed direction.
+        // Minimum 2-minute hold prevents flipping on tiny noise candles.
+        if (strat.autoClose && strat.autoTrade && ageMs > 2 * 60_000) {
+          const botData = botPricesRef.current[pos.epic];
+          if (botData && botData.candleCount >= 15 && botData.signal !== 'NEUTRAL') {
+            const shouldFlip = (pos.direction === 'BUY'  && botData.signal === 'SELL') ||
+                               (pos.direction === 'SELL' && botData.signal === 'BUY');
+            if (shouldFlip) {
+              const flipDir  = (pos.direction === 'BUY' ? 'SELL' : 'BUY') as 'BUY' | 'SELL';
+              const canFlip  = !(botMode === 'LONG_ONLY' && flipDir === 'SELL') &&
+                               !(botMode === 'SHORT_ONLY' && flipDir === 'BUY');
+              const consTag  = flipDir === 'SELL'
+                ? `${botData.consecutiveReds ?? '?'}×red`
+                : `${botData.consecutiveGreens ?? '?'}×green`;
+              const rsiTag   = botData.rsi  !== null ? ` RSI:${botData.rsi.toFixed(0)}` : '';
+              const macdTag  = botData.macd !== null ? ` MACD:${botData.macd > 0 ? '+' : ''}${botData.macd.toFixed(4)}` : '';
+              slog(strat.id, 'info', `[FLIP] ${posName}: ${pos.direction}→${canFlip ? flipDir : 'CLOSE'} (${consTag}${rsiTag}${macdTag} P&L:£${(pos.upl ?? 0).toFixed(2)})`);
+
+              const cr = await closePos(env, pos);
+              if (cr.ok) {
+                const closedPnl = pos.upl ?? 0;
+                todayPnLRef.current += closedPnl;
+                setTodayPnL(todayPnLRef.current);
+                slog(strat.id, 'close', `[FLIP] ✓ Closed ${posName} ${pos.direction} @ ${currentPx.toFixed(2)} — P&L: £${closedPnl.toFixed(2)}`);
+                setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'STRATEGY', new Date().toISOString()));
+
+                if (canFlip) {
+                  // Clear cooldown so we can open opposite immediately
+                  recentlyClosedRef.current.delete(`${pos.epic}:${flipDir}`);
+                  const funds    = igFundsRef.current[env]?.available ?? 0;
+                  const startBal = startingBalanceRef.current[env];
+                  const flipSize = calcDynamicSize(pos.size, funds, startBal);
+                  if (flipSize > 0 && funds >= 100) {
+                    const atr      = botData.atr ?? null;
+                    const flipStop = atr !== null ? Math.max(2, Math.round(atr * 2))  : 15;
+                    const flipTP   = atr !== null ? Math.max(4, Math.round(atr * 4))  : 30;
+                    const or = await placeOrder(env, pos.epic, flipDir, flipSize, flipStop, flipTP);
+                    if (or.ok) {
+                      slog(strat.id, flipDir === 'BUY' ? 'buy' : 'sell',
+                        `[FLIP] ✓ Opened ${flipDir} ${posName} @ ${or.level ?? currentPx} — £${flipSize}/pt stop:${flipStop}pt TP:${flipTP}pt`);
+                      setTradeHistory(prev => recordTradeOpen(prev, {
+                        portfolioName: strat.name, market: posName, epic: pos.epic,
+                        direction: flipDir, size: flipSize, entryLevel: or.level ?? currentPx,
+                        exitLevel: null, openedAt: new Date().toISOString(), closedAt: null,
+                        status: 'OPEN', dealReference: or.dealReference ?? '', dealId: or.dealId ?? '',
+                        pnl: null, closeReason: null, accountType: env,
+                      }));
+                    } else {
+                      slog(strat.id, 'error', `[FLIP] Open ${flipDir} failed: ${or.error ?? 'unknown'}`);
+                    }
+                  }
+                }
+              } else if ((cr as { alreadyClosed?: boolean }).alreadyClosed) {
+                slog(strat.id, 'info', `[FLIP] ${posName} already closed by IG`);
+              } else {
+                slog(strat.id, 'error', `[FLIP] Close failed: ${cr.error ?? 'unknown'}`);
+              }
+              continue;
+            }
+          }
+        }
 
         // [AUTO] Emergency soft stop — cut losses at -1.5%, but only after 30min hold.
         // The 30min gate prevents whipsawing freshly-opened positions on normal noise.
