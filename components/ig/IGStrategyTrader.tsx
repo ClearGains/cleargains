@@ -1370,23 +1370,29 @@ export function IGStrategyTrader() {
   // Bot server RSI/MACD is attached when available — used in scanMarket to
   // boost or reduce strength based on whether indicators confirm the direction.
   async function fetchSnapshot(name: string, epic?: string): Promise<SnapshotResult|null> {
-    // ── Step 1: Yahoo Finance (primary signal source) ──
-    const { YAHOO_SYMBOL_MAP } = await import('@/lib/yahooClient');
+    // ── Step 1: Yahoo Finance (browser-side — bypasses Vercel server blocking) ──
+    // Yahoo blocks server-side / datacenter requests (429/401) but allows browser
+    // CORS requests. fetchYahooQuotes calls Yahoo directly from the browser — no
+    // server proxy, no crumb authentication needed. This is the reliable path.
+    const { YAHOO_SYMBOL_MAP, fetchYahooQuotes } = await import('@/lib/yahooClient');
     const symbol = YAHOO_SYMBOL_MAP[name];
     let yahooResult: SnapshotResult | null = null;
 
     if (symbol) {
       try {
-        const r = await fetch(`/api/market/quotes?symbols=${encodeURIComponent(symbol)}`);
-        if (r.ok) {
-          const data = await r.json() as Array<{ symbol: string; price: number; changePercent: number }>;
-          if (Array.isArray(data) && data.length) {
-            const q = data[0];
-            const signal: 'BUY'|'SELL'|'NEUTRAL' = q.changePercent > 0.3 ? 'BUY' : q.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
-            yahooResult = { price: q.price, changePercent: q.changePercent, signal, source: 'yahoo' };
-          }
+        const quotes = await fetchYahooQuotes([symbol]);
+        if (quotes.length) {
+          const q = quotes[0];
+          const signal: 'BUY'|'SELL'|'NEUTRAL' = q.changePercent > 0.3 ? 'BUY' : q.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
+          yahooResult = { price: q.price, changePercent: q.changePercent, signal, source: 'yahoo' };
+        } else {
+          log('error', `[Yahoo] ${name} (${symbol}): empty response — market may be closed or symbol invalid`);
         }
-      } catch {}
+      } catch (e) {
+        log('error', `[Yahoo] ${name} (${symbol}): ${e instanceof Error ? e.message : 'fetch failed'}`);
+      }
+    } else {
+      log('error', `[Scanner] No Yahoo symbol mapping for "${name}" — add it to YAHOO_SYMBOL_MAP`);
     }
 
     // ── Step 2: Bot server (secondary — real-time RSI/MACD/ATR from Lightstreamer) ──
