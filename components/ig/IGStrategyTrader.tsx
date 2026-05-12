@@ -754,6 +754,8 @@ export function IGStrategyTrader() {
   const runningRef  = useRef(false); // test-scan only
   const newsSignalsRef     = useRef<Map<string, 'BUY'|'SELL'>>(new Map());
   const recentlyClosedRef  = useRef<Map<string, { closedAt: number; wasLoss: boolean }>>(new Map());
+  // Tracks peak UPL (£) seen for each open position — used for trailing profit lock
+  const peakProfitRef      = useRef<Map<string, number>>(new Map());
   // Tracks orders placed but not yet confirmed in positionsRef (race-condition guard).
   // Prevents the same epic:direction being opened twice during the ~2s loadPositions delay.
   const pendingOrdersRef   = useRef<Set<string>>(new Set());
@@ -2063,6 +2065,39 @@ export function IGStrategyTrader() {
           }
         }
 
+        // [AUTO] Trailing profit lock — protects gains once a position has run.
+        // Rule 1 — Breakeven protection: once profit >= £2, never let it become a loss.
+        // Rule 2 — Trail at 50%: once profit >= £4, close if it retraces to 50% of peak.
+        if (strat.autoClose) {
+          const uplNow  = pos.upl ?? 0;
+          const peak    = peakProfitRef.current.get(pos.dealId) ?? 0;
+          const newPeak = Math.max(peak, uplNow);
+          if (newPeak !== peak) peakProfitRef.current.set(pos.dealId, newPeak);
+
+          const breakevenTrigger = newPeak >= 2 && uplNow <= 0;
+          const trailTrigger     = newPeak >= 4 && uplNow < newPeak * 0.5;
+
+          if (breakevenTrigger || trailTrigger) {
+            const reason = breakevenTrigger
+              ? `Breakeven protection — peaked at +£${newPeak.toFixed(2)}, now £${uplNow.toFixed(2)}`
+              : `Trail stop — peaked at +£${newPeak.toFixed(2)}, retraced to £${uplNow.toFixed(2)}`;
+            slog(strat.id, 'info', `[TRAIL] ${posName}: ${reason}`);
+            const cr = await closePos(env, pos);
+            if (cr.ok) {
+              const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
+              todayPnLRef.current += uplNow;
+              setTodayPnL(todayPnLRef.current);
+              peakProfitRef.current.delete(pos.dealId);
+              slog(strat.id, 'close', `[TRAIL] ✓ ${posName} closed — P&L: £${uplNow.toFixed(2)}`);
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, uplNow, 'TAKE_PROFIT', new Date().toISOString()));
+              recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: uplNow < 0 });
+            } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
+              peakProfitRef.current.delete(pos.dealId);
+            } else slog(strat.id, 'error', `[TRAIL] Close failed: ${cr.error ?? 'unknown'}`);
+            continue;
+          }
+        }
+
         // [AUTO] Hard £5 loss limit — the only reason we close a losing position.
         // Positions between 0 and -£5 are held for recovery. Only at -£5 do we cut.
         // This prevents death-by-a-thousand-cuts from closing losers repeatedly.
@@ -2076,6 +2111,7 @@ export function IGStrategyTrader() {
             setTodayPnL(todayPnLRef.current);
             slog(strat.id, 'close', `[AUTO] ✓ £5 limit closed: ${posName} — P&L: £${closedPnl.toFixed(2)}`);
             setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STOP_LOSS', new Date().toISOString()));
+            peakProfitRef.current.delete(pos.dealId);
             recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: true });
           } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
             slog(strat.id, 'info', `[AUTO] ${posName} already closed by IG`);
@@ -2100,6 +2136,7 @@ export function IGStrategyTrader() {
               setTodayPnL(todayPnLRef.current);
               slog(strat.id, 'close', `[AUTO] ✓ Stale profit taken: ${posName} — P&L: £${uplNow.toFixed(2)}`);
               setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, uplNow, 'STALE', new Date().toISOString()));
+              peakProfitRef.current.delete(pos.dealId);
               recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: false });
             } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
               slog(strat.id, 'info', `[AUTO] ${posName} already closed by IG (stop/limit/rollover)`);
