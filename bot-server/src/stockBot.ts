@@ -464,7 +464,9 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
       const stopDist  = Math.max(1, Math.round(atr * settings.stopAtrMult * 10) / 10);
       const limitDist = Math.max(1, Math.round(stopDist * settings.targetRR * 10) / 10);
       const rawSize   = Math.max(info.minSize, Math.round((settings.riskPerTrade / stopDist) * 10) / 10);
-      const pctCap    = available !== null ? Math.floor((available * 0.05) * 10) / 10 : rawSize;
+      // Cap so notional (size × price) ≤ 5% of available funds
+      const maxNotional = available !== null ? available * 0.05 : settings.riskPerTrade * 20;
+      const pctCap    = Math.max(info.minSize, Math.floor((maxNotional / Math.max(sig.price, 1)) * 10) / 10);
       const size      = Math.max(info.minSize, Math.min(rawSize, pctCap));
 
       try {
