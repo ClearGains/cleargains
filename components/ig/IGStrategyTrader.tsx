@@ -1407,6 +1407,7 @@ export function IGStrategyTrader() {
 
     if (useBotPrimary) {
       // All signal logic in the frontend — bot server supplies raw indicators only
+      // (sessionPrimeScore is already baked into calibrateFromIndicators)
       const r = calibrateFromIndicators(rsiVal, macdVal, snapshot.changePercent, mType, consRed, consGreen);
       direction = r.direction;
       strength  = r.strength;
@@ -1420,18 +1421,22 @@ export function IGStrategyTrader() {
         if (direction === 'BUY') {
           if (rsi  !== null && rsi  <  50)    strength = Math.min(99, strength + 10);
           if (rsi  !== null && rsi  >  65)    strength = Math.max(0,  strength - 15);
-          if (macd !== null && macd >  0)     strength = Math.min(99, strength + 10); // bullish MACD confirms BUY
-          if (macd !== null && macd < -0.001) strength = Math.max(0,  strength - 15); // bearish MACD contradicts BUY
+          if (macd !== null && macd >  0)     strength = Math.min(99, strength + 10);
+          if (macd !== null && macd < -0.001) strength = Math.max(0,  strength - 15);
         } else {
           if (rsi  !== null && rsi  >  50)    strength = Math.min(99, strength + 10);
           if (rsi  !== null && rsi  <  35)    strength = Math.max(0,  strength - 15);
-          if (macd !== null && macd <  0)     strength = Math.min(99, strength + 10); // bearish MACD confirms SELL
-          if (macd !== null && macd >  0.001) strength = Math.max(0,  strength - 15); // bullish MACD contradicts SELL
+          if (macd !== null && macd <  0)     strength = Math.min(99, strength + 10);
+          if (macd !== null && macd >  0.001) strength = Math.max(0,  strength - 15);
         }
-        // Block entries when RSI is outside the acceptable mid-range.
-        // Matching calibrateFromIndicators: BUY only RSI<62, SELL only RSI>40.
         if (direction === 'BUY'  && rsi !== null && rsi > 62) { direction = 'HOLD'; strength = 0; }
         if (direction === 'SELL' && rsi !== null && rsi < 40) { direction = 'HOLD'; strength = 0; }
+      }
+
+      // Apply session prime-time bonus to Yahoo-only path too — without this,
+      // markets lacking bot-server data never benefit from the session timing edge.
+      if (direction !== 'HOLD') {
+        strength = Math.min(99, strength + sessionPrimeScore(mType));
       }
     }
 
@@ -1548,6 +1553,8 @@ export function IGStrategyTrader() {
     if (!strat.autoTrade || !tradeDir) {
       if (direction !== 'HOLD' && !forceOpen)
         log('signal', `${market.name} → ${direction} ${strength}% (need ${dynamicMinStrength}% — no trade)`);
+      else if (direction === 'HOLD' && !forceOpen && strength === 0)
+        log('signal', `${market.name} → watching (${snapshot.source}: ${pctStr} — no clear signal yet)`);
     } else {
       for (const env of envs) {
         // Always read the ref — not the stale React state — so checks see positions
