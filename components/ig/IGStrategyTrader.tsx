@@ -1920,6 +1920,9 @@ export function IGStrategyTrader() {
     if (getStratState(strat.id) === 'STOPPED') return;
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
 
+    // Refresh positions at scan start so cap checks (INDEX max 2, etc.) always use live data.
+    await loadPositions();
+
     // PERMISSION: Fetch account balances at the start of each scan cycle so
     // calcDynamicSize() has up-to-date fund data when sizing positions.
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
@@ -1983,7 +1986,7 @@ export function IGStrategyTrader() {
     setLastSignalAt(Date.now());
     slog(strat.id, 'info', `Signal scan complete — next in ${Math.round(scanMs / 60_000)}min`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, positions, signalScanMs]);
+  }, [sessions, positions, signalScanMs, loadPositions]);
 
   // ── Position monitor: trailing stops + SL/TP refresh + stale recycling ────
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
