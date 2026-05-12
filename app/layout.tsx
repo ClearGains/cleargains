@@ -8,6 +8,7 @@ import { T212AutoConnect } from '@/components/t212/T212AutoConnect';
 import { ToastProvider } from '@/components/ui/Toast';
 import { TaxMonitorService } from '@/components/tax/TaxMonitorService';
 import { AutoSaveService } from '@/components/sync/AutoSaveService';
+import { IGStockBotProvider } from '@/contexts/IGStockBotContext';
 
 const geist = Geist({
   variable: '--font-geist-sans',
@@ -29,6 +30,7 @@ export default function RootLayout({
     <html lang="en" className={`${geist.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col bg-gray-950 text-gray-100">
         <ToastProvider>
+          <IGStockBotProvider>
           <T212AutoConnect />
           <TaxMonitorService />
           <AutoSaveService />
@@ -40,6 +42,7 @@ export default function RootLayout({
               <Disclaimer />
             </main>
           </div>
+          </IGStockBotProvider>
         </ToastProvider>
       </body>
     </html>
