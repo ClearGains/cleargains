@@ -14,7 +14,7 @@ export type IGStockInfo = {
 };
 
 export const IG_STOCK_EPICS: Record<string, IGStockInfo> = {
-  // ── US Technology (NASDAQ) ─────────────────────────────────────────────────
+  // ── US Mega-cap Tech (NASDAQ) ──────────────────────────────────────────────
   'AAPL':  { epic: 'UC.D.AAPL.DAILY.IP',  name: 'Apple Inc',          exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
   'MSFT':  { epic: 'UC.D.MSFT.DAILY.IP',  name: 'Microsoft',          exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
   'GOOGL': { epic: 'UC.D.GOOGL.DAILY.IP', name: 'Alphabet',           exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
@@ -25,14 +25,32 @@ export const IG_STOCK_EPICS: Record<string, IGStockInfo> = {
   'NFLX':  { epic: 'UC.D.NFLX.DAILY.IP',  name: 'Netflix',            exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
   'AMD':   { epic: 'UC.D.AMD.DAILY.IP',   name: 'AMD',                exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
   'INTC':  { epic: 'UC.D.INTC.DAILY.IP',  name: 'Intel',              exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
-  // ── US Finance (NYSE) ──────────────────────────────────────────────────────
+  'MU':    { epic: 'UC.D.MU.DAILY.IP',    name: 'Micron Technology',  exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'QCOM':  { epic: 'UC.D.QCOM.DAILY.IP',  name: 'Qualcomm',           exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'CRM':   { epic: 'UC.D.CRM.DAILY.IP',   name: 'Salesforce',         exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'ORCL':  { epic: 'UC.D.ORCL.DAILY.IP',  name: 'Oracle',             exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  // ── US High-beta / Screener regulars ──────────────────────────────────────
+  'PLTR':  { epic: 'UC.D.PLTR.DAILY.IP',  name: 'Palantir',           exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'COIN':  { epic: 'UC.D.COIN.DAILY.IP',  name: 'Coinbase',           exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'SNAP':  { epic: 'UC.D.SNAP.DAILY.IP',  name: 'Snap Inc',           exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'UBER':  { epic: 'UC.D.UBER.DAILY.IP',  name: 'Uber',               exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'SHOP':  { epic: 'UC.D.SHOP.DAILY.IP',  name: 'Shopify',            exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'SQ':    { epic: 'UC.D.SQ.DAILY.IP',    name: 'Block Inc',          exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'PYPL':  { epic: 'UC.D.PYPL.DAILY.IP',  name: 'PayPal',             exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'RBLX':  { epic: 'UC.D.RBLX.DAILY.IP',  name: 'Roblox',             exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'DKNG':  { epic: 'UC.D.DKNG.DAILY.IP',  name: 'DraftKings',         exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'RIVN':  { epic: 'UC.D.RIVN.DAILY.IP',  name: 'Rivian',             exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'NIO':   { epic: 'UC.D.NIO.DAILY.IP',   name: 'NIO Inc',            exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'GME':   { epic: 'UC.D.GME.DAILY.IP',   name: 'GameStop',           exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  // ── US Finance / Consumer (NYSE) ──────────────────────────────────────────
   'JPM':   { epic: 'UC.D.JPM.DAILY.IP',   name: 'JPMorgan Chase',     exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   'BAC':   { epic: 'UC.D.BAC.DAILY.IP',   name: 'Bank of America',    exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   'GS':    { epic: 'UC.D.GS.DAILY.IP',    name: 'Goldman Sachs',      exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
+  'DIS':   { epic: 'UC.D.DIS.DAILY.IP',   name: 'Disney',             exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   // ── US Energy (NYSE) ───────────────────────────────────────────────────────
   'XOM':   { epic: 'UC.D.XOM.DAILY.IP',   name: 'ExxonMobil',         exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   'CVX':   { epic: 'UC.D.CVX.DAILY.IP',   name: 'Chevron',            exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
-  // ── US Healthcare (NYSE) ──────────────────────────────────────────────────
+  // ── US Healthcare ─────────────────────────────────────────────────────────
   'JNJ':   { epic: 'UC.D.JNJ.DAILY.IP',   name: 'Johnson & Johnson',  exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   'PFE':   { epic: 'UC.D.PFE.DAILY.IP',   name: 'Pfizer',             exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   // ── UK Stocks (LSE) — priced in pence ─────────────────────────────────────
