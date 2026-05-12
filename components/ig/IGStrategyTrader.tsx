@@ -1500,8 +1500,14 @@ export function IGStrategyTrader() {
     // ── Gate 1: Liquid trading window ─────────────────────────────────────────
     const mType = market.marketType ?? getMarketType(market.epic);
     if (!isLiquidTradingWindow(mType)) {
-      setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:false, status:'idle' } }));
-      return null; // outside liquid hours — skip silently
+      // Show price data but no signal — market is outside liquid hours
+      setScans(p => ({ ...p, [market.epic]: {
+        epic: market.epic, name: market.name, signal: null, scanning: false, status: 'ok',
+        price: snapshot.price, changePercent: snapshot.changePercent,
+        source: snapshot.source, lastScanned: new Date().toISOString(),
+        error: 'Outside liquid trading hours — monitoring only',
+      }}));
+      return null;
     }
 
     // ── Calibrated signal scoring ─────────────────────────────────────────────
@@ -3745,6 +3751,23 @@ export function IGStrategyTrader() {
                 {/* Idle */}
                 {scan.status === 'idle' && !scan.scanning && (
                   <p className="text-[10px] text-gray-600">Waiting for scan…</p>
+                )}
+
+                {/* OK but outside liquid hours — show price only */}
+                {scan.status === 'ok' && !scan.signal && !scan.scanning && scan.price !== undefined && (
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-bold text-white tabular-nums">
+                      {scan.price > 100
+                        ? scan.price.toLocaleString('en-GB', { maximumFractionDigits: 1 })
+                        : scan.price.toFixed(4)}
+                    </p>
+                    {scan.changePercent !== undefined && (
+                      <p className={clsx('text-[11px] font-semibold', scan.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {scan.changePercent >= 0 ? '+' : ''}{scan.changePercent.toFixed(2)}%
+                      </p>
+                    )}
+                    <p className="text-[9px] text-gray-600">Pre-market · no signal</p>
+                  </div>
                 )}
 
                 {/* OK: price + daily change + bot indicators + source badge */}
