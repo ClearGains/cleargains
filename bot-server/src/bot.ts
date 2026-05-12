@@ -3,7 +3,9 @@ import * as path from 'path';
 import {
   authenticate,
   getSession, clearSession,
+  fetchCandleHistory,
   type IGSession,
+  type CandleBar,
 } from './igApi';
 // openPosition / closePosition intentionally removed — this bot is data-only.
 // All trade execution is handled by the frontend IG Spread Bet tab.
@@ -294,6 +296,47 @@ function handleTick(tick: CandleTick) {
   }
 }
 
+// ── Candle pre-warmer ─────────────────────────────────────────────────────────
+
+function barToTick(epic: string, bar: CandleBar): CandleTick {
+  return {
+    epic,
+    time:         bar.snapshotTime,
+    open:         bar.openPrice.mid  ?? bar.openPrice.bid,
+    high:         bar.highPrice.mid  ?? bar.highPrice.bid,
+    low:          bar.lowPrice.mid   ?? bar.lowPrice.bid,
+    close:        bar.closePrice.mid ?? bar.closePrice.bid,
+    bidClose:     bar.closePrice.bid,
+    offerClose:   bar.closePrice.ask,
+    candleClosed: true,
+  };
+}
+
+async function prewarmCandles(session: IGSession, epics: string[]) {
+  addLog('info', '—', `Pre-warming 5-min candles for ${epics.length} epic(s)…`);
+  let warmed = 0;
+  for (const epic of epics) {
+    try {
+      const bars = await fetchCandleHistory(session, epic, 'MINUTE_5', 35);
+      if (!bars.length) continue;
+      const st = epicStates[epic];
+      if (!st) continue;
+      for (const bar of bars) {
+        const tick = barToTick(epic, bar);
+        feedCandle(tick.epic, tick);
+        processTick(st, tick, currentConfig);
+      }
+      warmed++;
+      const name = epic.split('.').slice(0, 3).join('.');
+      addLog('info', name, `Pre-warmed ${bars.length} candles — ${st.closedCandles.length} closed, RSI ready: ${st.closedCandles.length >= 14}`);
+    } catch (e) {
+      const name = epic.split('.').slice(0, 3).join('.');
+      addLog('info', name, `Pre-warm skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  addLog('info', '—', `Pre-warm done — ${warmed}/${epics.length} epic(s) ready`);
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 export async function startBot(params: BotStartParams): Promise<{ ok: boolean; error?: string }> {
@@ -319,6 +362,8 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
     for (const epic of params.epics) {
       epicStates[epic] = initEpicState(epic);
     }
+
+    await prewarmCandles(session, params.epics);
 
     running = true;
     connect(session, params.epics, handleTick, '5MINUTE');

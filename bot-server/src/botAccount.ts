@@ -1,7 +1,9 @@
 import {
   authenticate,
   getSession,
+  fetchCandleHistory,
   type IGSession,
+  type CandleBar,
 } from './igApi';
 import { createStreamManager } from './igStream';
 import {
@@ -199,6 +201,46 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
     }
   }
 
+  // ── Candle pre-warmer ──────────────────────────────────────────────────────
+  function barToTick(epic: string, bar: CandleBar): CandleTick {
+    return {
+      epic,
+      time:         bar.snapshotTime,
+      open:         bar.openPrice.mid  ?? bar.openPrice.bid,
+      high:         bar.highPrice.mid  ?? bar.highPrice.bid,
+      low:          bar.lowPrice.mid   ?? bar.lowPrice.bid,
+      close:        bar.closePrice.mid ?? bar.closePrice.bid,
+      bidClose:     bar.closePrice.bid,
+      offerClose:   bar.closePrice.ask,
+      candleClosed: true,
+    };
+  }
+
+  async function prewarmCandles(sess: IGSession, epics: string[]) {
+    addLog('info', '—', `Pre-warming 5-min candles for ${epics.length} epic(s)…`);
+    let warmed = 0;
+    for (const epic of epics) {
+      try {
+        const bars = await fetchCandleHistory(sess, epic, 'MINUTE_5', 35);
+        if (!bars.length) continue;
+        const st = epicStates[epic];
+        if (!st) continue;
+        for (const bar of bars) {
+          const tick = barToTick(epic, bar);
+          feedCandle(epic, tick);
+          processTick(st, tick, currentConfig);
+        }
+        warmed++;
+        const name = epic.split('.').slice(0, 3).join('.');
+        addLog('info', name, `Pre-warmed ${bars.length} candles — ${st.closedCandles.length} closed, RSI ready: ${st.closedCandles.length >= 14}`);
+      } catch (e) {
+        const name = epic.split('.').slice(0, 3).join('.');
+        addLog('info', name, `Pre-warm skipped: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    addLog('info', '—', `Pre-warm done — ${warmed}/${epics.length} epic(s) ready`);
+  }
+
   // ── Public API ─────────────────────────────────────────────────────────────
   async function start(params: BotStartParams): Promise<{ ok: boolean; error?: string }> {
     stop();
@@ -227,6 +269,8 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
       epicStates    = {};
       monitorCandles.clear();
       for (const epic of params.epics) epicStates[epic] = initEpicState(epic);
+
+      await prewarmCandles(session, params.epics);
 
       running = true;
       stream.connect(session, params.epics, handleTick, '5MINUTE');

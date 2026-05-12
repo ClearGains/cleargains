@@ -211,6 +211,31 @@ export async function closePosition(
   throw new Error(`closePosition: all endpoints returned 404 for dealId=${dealId}`);
 }
 
+export type CandleBar = {
+  snapshotTime: string;
+  openPrice:    { bid: number; ask: number; mid: number | null };
+  highPrice:    { bid: number; ask: number; mid: number | null };
+  lowPrice:     { bid: number; ask: number; mid: number | null };
+  closePrice:   { bid: number; ask: number; mid: number | null };
+};
+
+export async function fetchCandleHistory(
+  session:    IGSession,
+  epic:       string,
+  resolution  = 'MINUTE_5',
+  count       = 35,
+): Promise<CandleBar[]> {
+  const base = BASE[session.env];
+  const url  = `${base}/prices/${encodeURIComponent(epic)}?resolution=${resolution}&max=${count}&pageSize=${count}&pageNumber=1`;
+  const r    = await fetch(url, { headers: headers(session, '3'), signal: AbortSignal.timeout(12_000) });
+  if (!r.ok) {
+    const txt = await r.text();
+    throw new Error(`fetchCandleHistory ${r.status}: ${txt.slice(0, 200)}`);
+  }
+  const d = await r.json() as { prices?: CandleBar[] };
+  return d.prices ?? [];
+}
+
 export async function fetchPositions(session: IGSession): Promise<IGPosition[]> {
   const base = BASE[session.env];
   const endpoints = [
