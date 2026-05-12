@@ -53,12 +53,12 @@ export type ScalperConfig = {
 };
 
 export const DEFAULT_CONFIG: ScalperConfig = {
-  stopLossPct:   0.5,
-  tinyBodyPct:   0.08,
-  cooldownMs:    15 * 60_000,
-  maxRsiEntry:   70,
-  atrStopMult:   1.5,
-  minConfidence: 55,
+  stopLossPct:   1.0,           // 1% hard stop — 5-min candles have larger swings
+  tinyBodyPct:   0.15,          // noise filter body threshold for 5-min candles
+  cooldownMs:    30 * 60_000,   // 30-min cooldown = 6 candles before re-entry
+  maxRsiEntry:   65,            // more conservative than before (was 70)
+  atrStopMult:   2.0,           // 2× ATR gives more breathing room on 5-min
+  minConfidence: 60,
 };
 
 // ── Indicators ────────────────────────────────────────────────────────────────
@@ -159,8 +159,8 @@ export function processTick(
     if (st.state === 'IN_POSITION') {
       const isLong = st.direction === 'BUY';
 
-      // Two consecutive candles in wrong direction → exit and flip immediately (no cooldown)
-      const wrongDir = isLong ? st.consecutiveReds >= 2 : st.consecutiveGreens >= 2;
+      // Three consecutive 5-min candles in wrong direction → exit (was 2 at 1-min; 5-min are less noisy)
+      const wrongDir = isLong ? st.consecutiveReds >= 3 : st.consecutiveGreens >= 3;
       if (wrongDir) {
         st.state = 'FLAT'; // no cooldown — ready to enter opposite direction on next candle
         st.entryPrice = 0; st.dynamicStopPrice = 0; st.takeProfitPrice = 0;
@@ -193,36 +193,34 @@ export function processTick(
 
     // ── FLAT entry logic ───────────────────────────────────────────────────
     if (st.state === 'FLAT') {
-      // Need enough history for RSI (15) and ATR (15) before entering
-      if (st.closedCandles.length < 15) {
-        return { action: 'WAIT', reason: `Accumulating data (${st.closedCandles.length}/15 candles)` };
+      // Need full MACD window (26 candles = ~2h at 5-min) before trusting indicators
+      if (st.closedCandles.length < 26) {
+        return { action: 'WAIT', reason: `Accumulating data (${st.closedCandles.length}/26 candles)` };
       }
 
       const ind = getIndicators(st.closedCandles);
 
-      // BUY signal: green candle, RSI not overbought, MACD not strongly bearish
-      if (isGreen(tick)) {
-        if (ind.rsi !== null && ind.rsi >= cfg.maxRsiEntry) {
-          return { action: 'WAIT', reason: `Green but RSI ${ind.rsi.toFixed(0)} overbought. Waiting.` };
-        }
-        if (ind.macd !== null && ind.macd < -0.0005 * tick.close) {
-          return { action: 'WAIT', reason: `Green but MACD bearish (${ind.macd.toFixed(4)}). Waiting.` };
-        }
+      // BUY: require 2+ consecutive green candles (momentum confirmed), RSI in
+      // the recovery zone (not overbought, not still falling), MACD not bearish.
+      if (isGreen(tick) && st.consecutiveGreens >= 2) {
+        const rsiOk  = ind.rsi === null || (ind.rsi >= 38 && ind.rsi < cfg.maxRsiEntry);
+        const macdOk = ind.macd === null || ind.macd > -0.0002 * tick.close;
+        if (!rsiOk)  return { action: 'WAIT', reason: `${st.consecutiveGreens}× green but RSI ${ind.rsi?.toFixed(0)} outside zone (38–${cfg.maxRsiEntry}). Waiting.` };
+        if (!macdOk) return { action: 'WAIT', reason: `${st.consecutiveGreens}× green but MACD bearish (${ind.macd?.toFixed(4)}). Waiting.` };
         st.state = 'IN_POSITION'; st.direction = 'BUY'; st.entryTime = tick.time;
-        return { action: 'ENTER', direction: 'BUY', reason: `Green close. RSI=${ind.rsi?.toFixed(0) ?? 'N/A'} MACD=${ind.macd !== null ? (ind.macd > 0 ? '+' : '') + ind.macd.toFixed(4) : 'N/A'}`, indicators: ind };
+        return { action: 'ENTER', direction: 'BUY', reason: `${st.consecutiveGreens}× green streak. RSI=${ind.rsi?.toFixed(0) ?? 'N/A'} MACD=${ind.macd !== null ? (ind.macd > 0 ? '+' : '') + ind.macd.toFixed(4) : 'N/A'}`, indicators: ind };
       }
 
-      // SELL signal: red candle, RSI not oversold, MACD not strongly bullish
-      if (isRed(tick)) {
-        const minRsiSell = 100 - cfg.maxRsiEntry;  // e.g. 30
-        if (ind.rsi !== null && ind.rsi <= minRsiSell) {
-          return { action: 'WAIT', reason: `Red but RSI ${ind.rsi.toFixed(0)} oversold. Waiting.` };
-        }
-        if (ind.macd !== null && ind.macd > 0.0005 * tick.close) {
-          return { action: 'WAIT', reason: `Red but MACD bullish (${ind.macd.toFixed(4)}). Waiting.` };
-        }
+      // SELL: require 2+ consecutive red candles, RSI in the distribution zone
+      // (not oversold, not still rising), MACD not bullish.
+      if (isRed(tick) && st.consecutiveReds >= 2) {
+        const minRsi = 100 - cfg.maxRsiEntry;  // e.g. 35
+        const rsiOk  = ind.rsi === null || (ind.rsi > minRsi && ind.rsi <= 62);
+        const macdOk = ind.macd === null || ind.macd < 0.0002 * tick.close;
+        if (!rsiOk)  return { action: 'WAIT', reason: `${st.consecutiveReds}× red but RSI ${ind.rsi?.toFixed(0)} outside zone (${minRsi}–62). Waiting.` };
+        if (!macdOk) return { action: 'WAIT', reason: `${st.consecutiveReds}× red but MACD bullish (${ind.macd?.toFixed(4)}). Waiting.` };
         st.state = 'IN_POSITION'; st.direction = 'SELL'; st.entryTime = tick.time;
-        return { action: 'ENTER', direction: 'SELL', reason: `Red close. RSI=${ind.rsi?.toFixed(0) ?? 'N/A'} MACD=${ind.macd !== null ? (ind.macd > 0 ? '+' : '') + ind.macd.toFixed(4) : 'N/A'}`, indicators: ind };
+        return { action: 'ENTER', direction: 'SELL', reason: `${st.consecutiveReds}× red streak. RSI=${ind.rsi?.toFixed(0) ?? 'N/A'} MACD=${ind.macd !== null ? (ind.macd > 0 ? '+' : '') + ind.macd.toFixed(4) : 'N/A'}`, indicators: ind };
       }
     }
   }

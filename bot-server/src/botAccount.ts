@@ -97,7 +97,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
       addLog('info', '—', 'Refreshing IG session...');
       session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, accountKey);
       addLog('info', '—', `Session refreshed — expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
-      if (running) stream.connect(session, currentEpics, handleTick, '1MINUTE');
+      if (running) stream.connect(session, currentEpics, handleTick, '5MINUTE');
       scheduleRefresh(session);
     } catch (e) {
       addLog('error', '—', `Session refresh failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -229,7 +229,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
       for (const epic of params.epics) epicStates[epic] = initEpicState(epic);
 
       running = true;
-      stream.connect(session, params.epics, handleTick, '1MINUTE');
+      stream.connect(session, params.epics, handleTick, '5MINUTE');
       scheduleRefresh(session);
 
       addLog('info', '—', `Stream started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);

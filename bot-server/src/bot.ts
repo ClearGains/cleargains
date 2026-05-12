@@ -115,7 +115,7 @@ function startSignalMonitor() {
         if (session) {
           const merged = [...new Set([...currentEpics, ...newEpics])];
           addLog('info', '—', `Signal monitor: adding ${newEpics.length} new epic(s) to stream`);
-          connect(session, merged, handleTick, '1MINUTE');
+          connect(session, merged, handleTick, '5MINUTE');
         }
       }
     });
@@ -153,7 +153,7 @@ async function refreshSession() {
 
     if (running) {
       // Reconnect Lightstreamer with new credentials
-      connect(session, currentEpics, handleTick, '1MINUTE');
+      connect(session, currentEpics, handleTick, '5MINUTE');
     }
     scheduleSessionRefresh(session);
   } catch (e) {
@@ -321,7 +321,7 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
     }
 
     running = true;
-    connect(session, params.epics, handleTick, '1MINUTE');
+    connect(session, params.epics, handleTick, '5MINUTE');
     startSignalMonitor();
     scheduleSessionRefresh(session);
 
@@ -370,7 +370,7 @@ export function injectPosition(params: InjectParams): { ok: boolean; error?: str
     const session = getSession();
     if (session && !currentEpics.includes(epic)) {
       currentEpics = [...currentEpics, epic];
-      connect(session, currentEpics, handleTick, '1MINUTE');
+      connect(session, currentEpics, handleTick, '5MINUTE');
     }
   }
 

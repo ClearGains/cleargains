@@ -145,26 +145,31 @@ app.get('/prices', auth, (_req: Request, res: Response) => {
         if (consRed + consGreen >= 6) break;
       }
 
-      // Momentum signal: consecutive candle direction confirmed by MACD.
-      // 2+ same-direction candles = confirmed momentum, 1 + MACD = probable momentum.
+      // Momentum signal — 5-minute candles, so requirements are stricter than before.
+      // Strong signal: 3+ same-direction candles + RSI in the right zone + MACD confirming.
+      // Moderate signal: 2+ candles + MACD confirming + RSI not extreme.
+      // No signal on a single candle — that's noise even at 5-min resolution.
       let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
-      if (consGreen >= 2 && (rsi === null || rsi < 72) && (macd === null || macd > -0.0005)) {
+      const rsiBuyZone  = rsi === null || (rsi >= 38 && rsi < 65);   // recovering, not extended
+      const rsiSellZone = rsi === null || (rsi > 35 && rsi <= 62);   // rolling over, not oversold
+      if (consGreen >= 3 && rsiBuyZone  && (macd === null || macd > 0)) {
         signal = 'BUY';
-      } else if (consRed >= 2 && (rsi === null || rsi > 28) && (macd === null || macd < 0.0005)) {
+      } else if (consRed >= 3 && rsiSellZone && (macd === null || macd < 0)) {
         signal = 'SELL';
-      } else if (consGreen >= 1 && macd !== null && macd > 0 && (rsi === null || rsi < 68)) {
+      } else if (consGreen >= 2 && macd !== null && macd > 0 && rsiBuyZone) {
         signal = 'BUY';
-      } else if (consRed >= 1 && macd !== null && macd < 0 && (rsi === null || rsi > 32)) {
+      } else if (consRed >= 2 && macd !== null && macd < 0 && rsiSellZone) {
         signal = 'SELL';
       }
 
-      // 5-minute trend: compare avg close of last 5 candles vs previous 5
+      // 25-minute trend: compare avg close of last 5 candles vs previous 5
+      // (5 × 5-min = 25min each window, so comparing the last 25min vs prior 25min)
       let trend5m: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
       if (candles.length >= 10) {
         const last5 = candles.slice(-5).reduce((s, c) => s + c.close, 0) / 5;
         const prev5 = candles.slice(-10, -5).reduce((s, c) => s + c.close, 0) / 5;
-        if (last5 > prev5 * 1.0002) trend5m = 'UP';
-        else if (last5 < prev5 * 0.9998) trend5m = 'DOWN';
+        if (last5 > prev5 * 1.0003) trend5m = 'UP';       // tighter threshold for 5-min candles
+        else if (last5 < prev5 * 0.9997) trend5m = 'DOWN';
       }
 
       prices[epic] = {
