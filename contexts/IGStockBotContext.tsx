@@ -30,10 +30,11 @@ export type BotStatus = 'stopped' | 'running' | 'paused';
 
 export const DEFAULT_SETTINGS: BotSettings = {
   riskPerTrade: 50, maxPositions: 3, stopAtrMult: 2.0, targetRR: 2.5,
-  minStrength: 65, scanIntervalMins: 15, earningsBlackout: true,
+  minStrength: 70, scanIntervalMins: 15, earningsBlackout: true,
 };
 
-const DEFAULT_ENABLED  = ['NVDA', 'AAPL', 'TSLA', 'MSFT', 'BARC', 'LLOY'];
+// High-volatility names only — blue chips move too slowly to justify minimum 1pt bet
+const DEFAULT_ENABLED  = ['NVDA', 'TSLA', 'AMD', 'META', 'NFLX'];
 const STORAGE_KEY      = 'ig_stock_auto_trader_v1';
 const POLL_INTERVAL_MS = 8_000;
 

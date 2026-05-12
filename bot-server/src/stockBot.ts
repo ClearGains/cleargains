@@ -278,22 +278,33 @@ async function computeSignal(ticker: string, earningsBlackout: boolean): Promise
 
     let bull = 0, bear = 0;
     const reasons: string[] = [];
+
+    // MACD cross is the primary trigger — without it signals are too weak for stocks
+    if      (macdCross === 'bullish') { bull += 45; reasons.push('MACD bullish cross'); }
+    else if (macdCross === 'bearish') { bear += 45; reasons.push('MACD bearish cross'); }
+    else if (lastH > 0) bull += 8;
+    else if (lastH < 0) bear += 8;
+
+    // RSI — extreme readings only count as meaningful confirmation
     if (rsi !== null) {
-      if (rsi < 25)      { bull += 40; reasons.push(`RSI ${rsi.toFixed(0)} deeply oversold`); }
-      else if (rsi < 35) { bull += 22; reasons.push(`RSI ${rsi.toFixed(0)} oversold`); }
-      else if (rsi > 75) { bear += 40; reasons.push(`RSI ${rsi.toFixed(0)} deeply overbought`); }
-      else if (rsi > 65) { bear += 22; reasons.push(`RSI ${rsi.toFixed(0)} overbought`); }
+      if      (rsi < 25) { bull += 45; reasons.push(`RSI ${rsi.toFixed(0)} deeply oversold`); }
+      else if (rsi < 35) { bull += 25; reasons.push(`RSI ${rsi.toFixed(0)} oversold`); }
+      else if (rsi > 75) { bear += 45; reasons.push(`RSI ${rsi.toFixed(0)} deeply overbought`); }
+      else if (rsi > 65) { bear += 25; reasons.push(`RSI ${rsi.toFixed(0)} overbought`); }
+      // Counter-signal: cross in one direction but RSI opposing — reduce conviction
+      else if (rsi > 60 && macdCross === 'bullish') { bear += 20; }
+      else if (rsi < 40 && macdCross === 'bearish') { bull += 20; }
     }
-    if (macdCross === 'bullish') { bull += 35; reasons.push('MACD bullish cross'); }
-    else if (macdCross === 'bearish') { bear += 35; reasons.push('MACD bearish cross'); }
-    else if (lastH > 0) bull += 15; else if (lastH < 0) bear += 15;
+
+    // SMA20 — trend confirmation
     if (sma20 !== null) { if (price > sma20) bull += 10; else bear += 10; }
 
-    const total    = bull + bear;
-    const strength = total > 0 ? Math.round((Math.max(bull, bear) / total) * 100) : 0;
+    // Strength out of 100 (max possible: 45+45+10 = 100)
+    // Both MACD cross AND confirming RSI needed to clear 70% threshold
+    const strength = Math.round((Math.max(bull, bear) / 100) * 100);
     const direction: 'BUY'|'SELL'|'NEUTRAL' =
-      bull > bear + 20 && strength >= 60 ? 'BUY'  :
-      bear > bull + 20 && strength >= 60 ? 'SELL' : 'NEUTRAL';
+      bull > bear + 25 && strength >= 60 ? 'BUY'  :
+      bear > bull + 25 && strength >= 60 ? 'SELL' : 'NEUTRAL';
 
     return {
       ...base, price, rsi, macdHist: lastH, macdCross, sma20, direction, strength,

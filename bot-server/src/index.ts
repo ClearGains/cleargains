@@ -222,7 +222,9 @@ app.post('/accounts/:account/stock/start', auth, (req: Request, res: Response) =
   if (!Array.isArray(params.tickers) || !params.tickers.length) {
     res.status(400).json({ ok: false, error: 'tickers array is required' }); return;
   }
-  void getStockBot(key).start(params).then(r => res.status(r.ok ? 200 : 500).json(r));
+  void getStockBot(key).start(params)
+    .then(r => res.status(r.ok ? 200 : 500).json(r))
+    .catch((e: unknown) => res.status(500).json({ ok: false, error: String(e) }));
 });
 
 app.post('/accounts/:account/stock/stop', auth, (req: Request, res: Response) => {
