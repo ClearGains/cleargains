@@ -29,14 +29,28 @@ const VERIFIED_EPICS: Record<string, string> = {
 
 const VERIFIED_EPIC_SET = new Set(Object.values(VERIFIED_EPICS));
 
-/** If the epic isn't in our verified set, search IG and return the best match. */
+/** Validate and resolve an epic against the live IG account. */
 async function resolveEpic(
   epic: string,
   apiKey: string, cst: string, securityToken: string,
   base: string,
 ): Promise<{ epic: string; resolvedVia: string }> {
   if (VERIFIED_EPIC_SET.has(epic)) return { epic, resolvedVia: 'verified' };
-  // Try searching by epic string itself
+
+  // 1. Direct epic lookup — IG validates it against the actual account
+  try {
+    const r = await fetch(`${base}/markets/${encodeURIComponent(epic)}`, {
+      headers: igHeaders(apiKey, cst, securityToken, '1'),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (r.ok) {
+      const d = await r.json() as { instrument?: { epic?: string } };
+      const resolvedEpic = d.instrument?.epic ?? epic;
+      return { epic: resolvedEpic, resolvedVia: 'lookup' };
+    }
+  } catch { /* fall through */ }
+
+  // 2. Text search fallback (covers partial/mistyped epics)
   try {
     const r = await fetch(`${base}/markets?searchTerm=${encodeURIComponent(epic)}&pageSize=5`, {
       headers: igHeaders(apiKey, cst, securityToken, '1'),
@@ -48,6 +62,7 @@ async function resolveEpic(
       if (match) return { epic: match.epic, resolvedVia: 'search' };
     }
   } catch { /* ignore */ }
+
   return { epic, resolvedVia: 'unresolved' };
 }
 

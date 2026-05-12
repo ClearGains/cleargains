@@ -335,7 +335,10 @@ export function IGStockAutoTrader() {
   const settingsRef = useRef(settings);
   const enabledRef  = useRef(enabled);
   const envRef      = useRef(env);
-  const scanTimer   = useRef<ReturnType<typeof setTimeout>|null>(null);
+  const workerRef   = useRef<Worker | null>(null);
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+  const scanningRef = useRef(false);
+  const lastScanRef = useRef(0);
 
   useEffect(() => { statusRef.current    = status;    }, [status]);
   useEffect(() => { sessionRef.current   = session;   }, [session]);
@@ -492,7 +495,7 @@ export function IGStockAutoTrader() {
     if (avail < 100)                              return { size: 0, blocked: true, reason: `Available funds critically low (£${avail.toFixed(0)})` };
     if (start !== null && avail < start * 0.15)  return { size: 0, blocked: true, reason: `Available below 15% of starting balance (£${avail.toFixed(0)} / £${start.toFixed(0)})` };
     const pctCap  = Math.floor((avail * 0.05) * 10) / 10; // cap at 5% of available per trade
-    const capped  = Math.max(0.1, Math.min(requestedSize, pctCap));
+    const capped  = Math.max(1, Math.min(requestedSize, pctCap)); // min 1 — IG minimum for shares
     return { size: capped, blocked: false };
   }
 
@@ -513,7 +516,8 @@ export function IGStockAutoTrader() {
     const atr       = sig.price * 0.02; // ~2% of price as ATR fallback for sizing
     const stopDist  = Math.max(1, Math.round(atr * cfg.stopAtrMult * 10) / 10);
     const limitDist = Math.max(1, Math.round(stopDist * cfg.targetRR * 10) / 10);
-    const rawSize   = Math.max(0.1, Math.round((cfg.riskPerTrade / stopDist) * 10) / 10);
+    const minSize   = info.minSize ?? 1;
+    const rawSize   = Math.max(minSize, Math.round((cfg.riskPerTrade / stopDist) * 10) / 10);
 
     // Apply fund cap before placing
     const { size, blocked, reason } = fundCapSize(rawSize);
@@ -542,10 +546,13 @@ export function IGStockAutoTrader() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...makeHeaders(sess, envRef.current) },
         body: JSON.stringify({
-          epic: info.epic, direction, size,
-          stopLevel:  Math.round(stopLevel  * 10) / 10,
-          limitLevel: Math.round(limitLevel * 10) / 10,
-          currency: info.currency,
+          epic:          info.epic,
+          direction,
+          size,
+          // Send as distances — route applies them via PUT after deal is confirmed ACCEPTED
+          stopDistance:   Math.round(stopDist  * 10) / 10,
+          profitDistance: Math.round(limitDist * 10) / 10,
+          currencyCode:  info.currency,  // 'GBP' for LSE, 'USD' for US stocks
         }),
       });
       const d = await r.json() as { ok: boolean; dealId?: string; error?: string };
@@ -568,6 +575,8 @@ export function IGStockAutoTrader() {
 
   const runScan = useCallback(async () => {
     if (statusRef.current !== 'running') return;
+    if (scanningRef.current) return; // already scanning
+    scanningRef.current = true;
     const cfg     = settingsRef.current;
     const sess    = sessionRef.current;
     const tickers = [...enabledRef.current];
@@ -580,9 +589,7 @@ export function IGStockAutoTrader() {
     const avail = availableRef.current;
     if (avail !== null && avail < 100) {
       addLog('warn', `Scan skipped — available funds £${avail.toFixed(0)} too low to trade`);
-      if (statusRef.current === 'running') {
-        scanTimer.current = setTimeout(() => void runScan(), settingsRef.current.scanIntervalMins * 60_000);
-      }
+      scanningRef.current = false;
       return;
     }
 
@@ -611,7 +618,7 @@ export function IGStockAutoTrader() {
       if (!full.marketOpen)                                 continue;
       if (full.direction === 'NEUTRAL')                     continue;
       if (full.strength < cfg.minStrength)                  continue;
-      if (newTrades + positions.length >= cfg.maxPositions) { addLog('warn', `Max positions (${cfg.maxPositions}) reached`); break; }
+      if (newTrades + positionsRef.current.length >= cfg.maxPositions) { addLog('warn', `Max positions (${cfg.maxPositions}) reached`); break; }
 
       const info = IG_STOCK_EPICS[ticker];
       if (info && heldEpics.has(info.epic))                 continue; // already in this stock
@@ -626,41 +633,109 @@ export function IGStockAutoTrader() {
     }
 
     addLog('info', `Scan complete — ${newTrades} new order(s) placed`);
-
-    // Schedule next scan
-    if (statusRef.current === 'running') {
-      scanTimer.current = setTimeout(() => void runScan(), cfg.scanIntervalMins * 60_000);
-    }
-  }, [fetchPositions, positions]);
+    lastScanRef.current = Date.now();
+    scanningRef.current = false;
+  }, [fetchPositions]);
 
   // ── Status controls ───────────────────────────────────────────────────────
+
+  async function acquireWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try { wakeLockRef.current = await (navigator as unknown as { wakeLock: { request: (t: string) => Promise<{ release: () => Promise<void> }> } }).wakeLock.request('screen'); } catch { /* ignore — not critical */ }
+  }
+  function releaseWakeLock() {
+    wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
+  }
 
   async function start() {
     if (!session) { await connect(); }
     setStatus('running');
+    statusRef.current = 'running';
     addLog('info', `Bot started on ${env.toUpperCase()} · risk £${settings.riskPerTrade}/trade · max ${settings.maxPositions} positions`);
-    scanTimer.current = setTimeout(() => void runScan(), 500);
+    // Worker handles repeating ticks — immune to background-tab throttle
+    workerRef.current?.postMessage({ type: 'start', intervalMs: settings.scanIntervalMins * 60_000 });
+    await acquireWakeLock();
+    try { localStorage.setItem('ig_stock_bot_status', 'running'); } catch {}
+    setTimeout(() => void runScan(), 500);
+  }
+
+  async function resume() {
+    setStatus('running');
+    statusRef.current = 'running';
+    workerRef.current?.postMessage({ type: 'start', intervalMs: settingsRef.current.scanIntervalMins * 60_000 });
+    await acquireWakeLock();
+    try { localStorage.setItem('ig_stock_bot_status', 'running'); } catch {}
+    setTimeout(() => void runScan(), 500);
+    addLog('info', 'Bot resumed');
   }
 
   function pause() {
     setStatus('paused');
-    if (scanTimer.current) clearTimeout(scanTimer.current);
+    workerRef.current?.postMessage({ type: 'stop' });
+    releaseWakeLock();
+    try { localStorage.setItem('ig_stock_bot_status', 'paused'); } catch {}
     addLog('info', 'Bot paused — existing positions unaffected');
   }
 
   function stop() {
     setStatus('stopped');
-    if (scanTimer.current) clearTimeout(scanTimer.current);
+    workerRef.current?.postMessage({ type: 'stop' });
+    releaseWakeLock();
     setSession(null);
     peakProfitRef.current.clear();
+    try { localStorage.setItem('ig_stock_bot_status', 'stopped'); } catch {}
     addLog('info', 'Bot stopped');
   }
 
+  // Create Web Worker for throttle-resistant scan timing (background tabs safe)
   useEffect(() => {
-    if (status === 'running' && !scanTimer.current) {
-      scanTimer.current = setTimeout(() => void runScan(), 500);
+    const code = `
+      var timer = null;
+      self.onmessage = function(e) {
+        if (e.data.type === 'start') {
+          clearInterval(timer);
+          timer = setInterval(function() { self.postMessage('tick'); }, e.data.intervalMs);
+        } else if (e.data.type === 'stop') {
+          clearInterval(timer);
+          timer = null;
+        }
+      };
+    `;
+    const blob = new Blob([code], { type: 'application/javascript' });
+    const url  = URL.createObjectURL(blob);
+    const w    = new Worker(url);
+    w.onmessage = () => {
+      if (statusRef.current === 'running' && !scanningRef.current) void runScan();
+    };
+    workerRef.current = w;
+    return () => { w.terminate(); URL.revokeObjectURL(url); };
+  }, [runScan]);
+
+  // Update worker interval when scan interval setting changes while running
+  useEffect(() => {
+    if (status === 'running') {
+      workerRef.current?.postMessage({ type: 'start', intervalMs: settings.scanIntervalMins * 60_000 });
     }
-  }, [status, runScan]);
+  }, [settings.scanIntervalMins, status]);
+
+  // Re-acquire wake lock and catch up on missed scans when tab becomes visible
+  useEffect(() => {
+    async function onVisible() {
+      if (document.visibilityState !== 'visible') return;
+      if (statusRef.current === 'running') {
+        await acquireWakeLock();
+        // Catch up if last scan is overdue
+        const intervalMs = settingsRef.current.scanIntervalMins * 60_000;
+        if (!scanningRef.current && Date.now() - lastScanRef.current > intervalMs) {
+          addLog('info', 'Tab re-focused — running overdue scan');
+          void runScan();
+        }
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [runScan]);
 
   // Refresh positions + funds every 60s when running or paused, manage trailing stops
   useEffect(() => {
@@ -674,7 +749,11 @@ export function IGStockAutoTrader() {
   }, [status, fetchPositions, fetchFunds, manageTrailingStops]);
 
   // Cleanup on unmount
-  useEffect(() => () => { if (scanTimer.current) clearTimeout(scanTimer.current); }, []);
+  useEffect(() => () => {
+    workerRef.current?.postMessage({ type: 'stop' });
+    wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
+  }, []);
 
   // ── Derived state ─────────────────────────────────────────────────────────
 
@@ -752,7 +831,7 @@ export function IGStockAutoTrader() {
           )}
           {status === 'paused' && (
             <>
-              <button onClick={() => { setStatus('running'); scanTimer.current = setTimeout(() => void runScan(), 500); }}
+              <button onClick={() => void resume()}
                 className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-semibold text-white transition-all">
                 <Play className="h-3.5 w-3.5" /> Resume
               </button>
