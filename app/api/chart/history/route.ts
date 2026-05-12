@@ -1,15 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getYahooCrumb, yfHeaders } from '@/lib/yahooServer';
 
-type Resolution = '5D' | '1M' | '3M' | '6M' | '1Y' | '2Y';
+type Resolution = '5D' | '1M' | '3M' | '6M' | '1Y' | '2Y' | '5DH' | '10DH';
 
-const RESOLUTION_MAP: Record<Resolution, { interval: string; range: string }> = {
-  '5D': { interval: '1d', range: '5d'  },
-  '1M': { interval: '1d', range: '1mo' },
-  '3M': { interval: '1d', range: '3mo' },
-  '6M': { interval: '1d', range: '6mo' },
-  '1Y': { interval: '1d', range: '1y'  },
-  '2Y': { interval: '1d', range: '2y'  },
+const RESOLUTION_MAP: Record<Resolution, { interval: string; range: string; intraday?: boolean }> = {
+  '5D':  { interval: '1d',  range: '5d'  },
+  '1M':  { interval: '1d',  range: '1mo' },
+  '3M':  { interval: '1d',  range: '3mo' },
+  '6M':  { interval: '1d',  range: '6mo' },
+  '1Y':  { interval: '1d',  range: '1y'  },
+  '2Y':  { interval: '1d',  range: '2y'  },
+  // Intraday — for stock signal generation
+  '5DH': { interval: '1h',  range: '5d',  intraday: true },  // 5-day hourly (~30–40 bars)
+  '10DH':{ interval: '1h',  range: '10d', intraday: true },  // 10-day hourly (~60–80 bars)
 };
 
 type YahooRaw = {
@@ -65,9 +68,12 @@ export async function GET(req: NextRequest) {
     const timestamps = result.timestamp;
     const q = result.indicators?.quote?.[0] ?? {};
 
+    const intraday = cfg.intraday ?? false;
     const candles = timestamps
       .map((ts, i) => ({
-        time:   new Date(ts * 1000).toISOString().slice(0, 10),
+        time: intraday
+          ? new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
+          : new Date(ts * 1000).toISOString().slice(0, 10),
         open:   q.open?.[i]   ?? 0,
         high:   q.high?.[i]   ?? 0,
         low:    q.low?.[i]    ?? 0,
@@ -76,8 +82,13 @@ export async function GET(req: NextRequest) {
       }))
       .filter(c => c.close > 0);
 
+    // Shorter cache for intraday data
+    const cacheHeader = intraday
+      ? 's-maxage=300, stale-while-revalidate=120'
+      : 's-maxage=60, stale-while-revalidate=300';
+
     return NextResponse.json({ symbol, resolution, candles }, {
-      headers: { 'Cache-Control': 's-maxage=60, stale-while-revalidate=300' },
+      headers: { 'Cache-Control': cacheHeader },
     });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });

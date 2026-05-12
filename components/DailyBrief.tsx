@@ -96,9 +96,23 @@ type TradeIdea = {
   confidence:      number;
   compositeScore:  number;
   setupUsed:       'scalp' | 'swing';
+  duration:        string;  // expected holding period
 };
 
 type RawAnalysis = { market: MarketDef; row: QuoteRow; analysis: AnalysisResult };
+
+function ideaDuration(tf: Timeframe, stopDistance: number, entry: number): string {
+  if (tf === 'hourly' || tf === 'rsi2') {
+    const stopPct = entry > 0 ? (stopDistance / entry) * 100 : 0;
+    if (stopPct < 0.15) return '1–3 hours';
+    if (stopPct < 0.4)  return '2–8 hours';
+    return '4–16 hours';
+  }
+  if (tf === 'daily')    return '1–4 days';
+  if (tf === 'weekly')   return '1–3 weeks';
+  if (tf === 'longterm') return '4–12 weeks';
+  return '1–5 days';
+}
 
 function buildIdeas(raws: RawAnalysis[], tf: Timeframe, riskPerTrade: number, minConf: number): TradeIdea[] {
   const useSwing = tf === 'weekly' || tf === 'longterm';
@@ -126,6 +140,7 @@ function buildIdeas(raws: RawAnalysis[], tf: Timeframe, riskPerTrade: number, mi
       confidence:     setup.confidence,
       compositeScore: setup.confidence * setup.riskReward,
       setupUsed:      useSwing ? 'swing' : 'scalp',
+      duration:       ideaDuration(tf, stopDistance, igEntry),
     });
   }
   return ideas.sort((a, b) => b.compositeScore - a.compositeScore);
@@ -241,6 +256,7 @@ function IdeaCard({ idea, settings, rank, total }: { idea: TradeIdea; settings: 
             <span className={clsx('text-[10px] px-1.5 py-0.5 rounded border font-medium', typeColor(idea.market.type))}>{typeLabel(idea.market.type)}</span>
             <span className="text-xs text-gray-500">Confidence <span className={clsx('font-semibold', accentColor)}>{idea.confidence}/10</span></span>
             <span className="text-xs text-gray-500">R:R <span className="text-white font-semibold">{idea.riskReward.toFixed(1)}:1</span></span>
+            <span className="text-xs text-gray-500">Duration <span className="text-amber-400 font-semibold">{idea.duration}</span></span>
             {rank !== undefined && total !== undefined && (
               <span className="text-[10px] text-gray-600">#{rank} of {total}</span>
             )}
@@ -522,24 +538,41 @@ export function DailyBrief() {
       setQuotes(rows);
 
       // 2. Fetch candle history + run analysis for each market
+      // Intraday timeframes use 10-day hourly bars; daily/swing use 3-month daily.
+      const isIntraday = timeframe === 'hourly' || timeframe === 'rsi2';
+      const resolution = isIntraday ? '10DH' : '3M';
+
       const raws: RawAnalysis[] = [];
+      // bias override map: symbol → signal backed by RSI/MACD/SMA, not changePercent
+      const biasSignals = new Map<string, 'BUY' | 'SELL' | 'NEUTRAL'>();
       let done = 0;
 
       for (const row of rows) {
         setProgress(`Analysing ${row.market.name}… (${++done}/${rows.length})`);
         try {
-          const hRes = await fetch(`/api/chart/history?symbol=${encodeURIComponent(row.market.yahooSymbol)}&resolution=3M`);
+          const hRes = await fetch(`/api/chart/history?symbol=${encodeURIComponent(row.market.yahooSymbol)}&resolution=${resolution}`);
           if (!hRes.ok) continue;
           const hData = await hRes.json() as { candles?: LWCandle[] };
           const candles = hData.candles ?? [];
           if (candles.length < 20) continue;
           const analysis = ruleBasedAnalysis(row.market.yahooSymbol, candles);
+          // Override the snapshot signal with technically-derived bias
+          biasSignals.set(
+            row.market.yahooSymbol,
+            analysis.bias === 'BULLISH' ? 'BUY' : analysis.bias === 'BEARISH' ? 'SELL' : 'NEUTRAL',
+          );
           if (analysis.bias === 'NEUTRAL') continue;
           if (analysis.scalp.direction === 'FLAT' && analysis.swing.direction === 'FLAT') continue;
           raws.push({ market: row.market, row, analysis });
         } catch { /* skip market */ }
         await new Promise(r => setTimeout(r, 150));
       }
+
+      // Update snapshot signals to use technical bias (not changePercent gap-open noise)
+      setQuotes(prev => prev.map(r => {
+        const techSig = biasSignals.get(r.market.yahooSymbol);
+        return techSig ? { ...r, signal: techSig } : r;
+      }));
 
       setRawAnalyses(raws);
       setLastRefresh(new Date());
@@ -550,9 +583,10 @@ export function DailyBrief() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [timeframe]);
 
-  useEffect(() => { refresh(); }, []); // eslint-disable-line
+  // Re-run when timeframe changes so hourly/daily candles are fetched correctly
+  useEffect(() => { void refresh(); }, [refresh]);
 
   const filteredQuotes = filter === 'ALL' ? quotes : quotes.filter(r => r.market.type === filter);
   const filteredIdeas  = filter === 'ALL' ? tradeIdeas : tradeIdeas.filter(i => i.market.type === filter);
