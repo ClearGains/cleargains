@@ -2086,9 +2086,13 @@ export function IGStrategyTrader() {
 
           const breakevenTrigger = newPeak >= breakevenAt && uplNow <= 0;
           const trailTrigger     = newPeak >= trailAt     && uplNow < newPeak * trailPct;
+          // Once a position peaks above £5, protect at £5: close the moment it retreats to ≤£5.
+          const fiveFloorTrigger = newPeak > 5 && uplNow >= 0 && uplNow <= 5;
 
-          if (breakevenTrigger || trailTrigger) {
-            const reason = breakevenTrigger
+          if (breakevenTrigger || trailTrigger || fiveFloorTrigger) {
+            const reason = fiveFloorTrigger
+              ? `£5 floor — peaked +£${newPeak.toFixed(2)}, back to £${uplNow.toFixed(2)}`
+              : breakevenTrigger
               ? `Breakeven lock (≥£${breakevenAt.toFixed(2)}) — peaked +£${newPeak.toFixed(2)}, now £${uplNow.toFixed(2)}`
               : `Trail ${Math.round(trailPct * 100)}% lock (≥£${trailAt.toFixed(2)}) — peaked +£${newPeak.toFixed(2)}, now £${uplNow.toFixed(2)}`;
             slog(strat.id, 'info', `[TRAIL] ${posName}: ${reason}`);
