@@ -1029,13 +1029,15 @@ export function IGStrategyTrader() {
           const newIds = new Set(newList.map(p => p.dealId));
           for (const gone of prevList) {
             if (!newIds.has(gone.dealId)) {
-              // We can't know if it was a win (TP hit) or loss (SL hit) without an
-              // extra history call, so treat all server-side closes conservatively
-              // as losses → 4-hour cooldown blocks re-entry.
+              // Externally closed (stop / limit / rollover hit by IG).
+              // Treat conservatively as a loss → 1-hour cooldown blocks re-entry.
               recentlyClosedRef.current.set(
                 `${gone.epic}:${gone.direction}`,
                 { closedAt: Date.now(), wasLoss: true },
               );
+              // Record the close in trade history so the History tab stays current.
+              const exitPx = gone.direction === 'BUY' ? (gone.bid ?? gone.level) : (gone.offer ?? gone.level);
+              setTradeHistory(prev => recordTradeClose(prev, gone.dealId, exitPx, gone.upl ?? 0, 'STOP_LOSS', new Date().toISOString()));
             }
           }
           positionsRef.current = { ...positionsRef.current, [env]: newList };
@@ -1060,6 +1062,108 @@ export function IGStrategyTrader() {
       posRefreshRef.current = setInterval(() => { void loadPositions(); }, 30_000);
     }
     return () => { if (posRefreshRef.current) clearInterval(posRefreshRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions]);
+
+  // ── Hydrate trade history from IG activity log on session connect ─────────
+  // Fetches the last 100 activities from IG and merges them into localStorage-
+  // backed trade history so the History tab shows real data even after a
+  // browser/deployment change wipes local state.
+  useEffect(() => {
+    (['demo', 'live'] as const).forEach(env => {
+      const sess = sessions[env];
+      if (!sess) return;
+      void (async () => {
+        try {
+          type HistResp = {
+            ok: boolean;
+            opened: { date: string; epic: string; dealId: string; direction: string; size: number; level: number; marketName: string }[];
+            closed:  { date: string; epic: string; dealId: string; dealRef: string; direction: string; size: number; level: number; marketName: string; currency: string }[];
+          };
+          const r = await fetch('/api/ig/history?pageSize=100', { headers: makeHeaders(sess, env) });
+          if (!r.ok) return;
+          const d = await r.json() as HistResp;
+          if (!d.ok) return;
+
+          setTradeHistory(prev => {
+            const existingIds = new Set(prev.map(rec => rec.dealId).filter(Boolean));
+            const closedByDealId = new Map(d.closed.map(c => [c.dealId, c]));
+            const next = [...prev];
+
+            // Add opened activities not already tracked locally
+            for (const o of d.opened) {
+              if (!o.dealId || existingIds.has(o.dealId)) continue;
+              const closeInfo = closedByDealId.get(o.dealId);
+              const isClosed = !!closeInfo;
+              next.push({
+                id: `ig_${o.dealId}`,
+                portfolioName: 'IG Activity',
+                market: o.marketName,
+                epic: o.epic,
+                direction: o.direction as 'BUY' | 'SELL',
+                size: o.size,
+                entryLevel: o.level,
+                exitLevel: closeInfo?.level ?? null,
+                openedAt: o.date,
+                closedAt: closeInfo?.date ?? null,
+                status: isClosed ? 'CLOSED' : 'OPEN',
+                dealReference: closeInfo?.dealRef ?? '',
+                dealId: o.dealId,
+                pnl: null,
+                closeReason: isClosed ? 'STRATEGY' : null,
+                accountType: env,
+              });
+              existingIds.add(o.dealId);
+            }
+
+            // Update any OPEN records that IG now reports as closed
+            const updated = next.map(rec => {
+              if (rec.status !== 'OPEN' || !rec.dealId) return rec;
+              const closeInfo = closedByDealId.get(rec.dealId);
+              if (!closeInfo) return rec;
+              return {
+                ...rec,
+                exitLevel: closeInfo.level,
+                closedAt: closeInfo.date,
+                status: 'CLOSED' as const,
+                dealReference: rec.dealReference || closeInfo.dealRef,
+                closeReason: rec.closeReason ?? ('STRATEGY' as const),
+              };
+            });
+
+            // Add any closed-only activities with no matching open in our window
+            const openedIds = new Set(d.opened.map(o => o.dealId));
+            const allKnownIds = new Set(updated.map(rec => rec.dealId).filter(Boolean));
+            for (const c of d.closed) {
+              if (!c.dealId || openedIds.has(c.dealId) || allKnownIds.has(c.dealId)) continue;
+              updated.push({
+                id: `ig_closed_${c.dealId}`,
+                portfolioName: 'IG Activity',
+                market: c.marketName,
+                epic: c.epic,
+                direction: c.direction as 'BUY' | 'SELL',
+                size: c.size,
+                entryLevel: 0,
+                exitLevel: c.level,
+                openedAt: c.date,
+                closedAt: c.date,
+                status: 'CLOSED',
+                dealReference: c.dealRef,
+                dealId: c.dealId,
+                pnl: null,
+                closeReason: 'STRATEGY',
+                accountType: env,
+              });
+            }
+
+            updated.sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
+            const final = updated.slice(0, 500);
+            saveIGTradeHistory(final);
+            return final;
+          });
+        } catch {}
+      })();
+    });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
 
@@ -1624,13 +1728,13 @@ export function IGStrategyTrader() {
           continue;
         }
 
-        // Re-entry cooldown — loss closes block re-entry for 4h, profit closes for 2h.
+        // Re-entry cooldown — loss closes block re-entry for 1h, profit closes for 30min.
         // Within the cooldown window the market must show 87%+ conviction to override.
         // After the cooldown expires the normal 72% threshold applies — the market has
         // "cooled down" enough that a fresh high-quality signal is valid again.
         const recentClose = recentlyClosedRef.current.get(`${market.epic}:${tradeDir}`);
         if (recentClose) {
-          const cooldown = recentClose.wasLoss ? 4 * 60 * 60_000 : 2 * 60 * 60_000;
+          const cooldown = recentClose.wasLoss ? 60 * 60_000 : 30 * 60_000;
           if (Date.now() - recentClose.closedAt < cooldown) {
             // Still within cooldown — only a very high-conviction setup overrides
             if (strength < 87) {
