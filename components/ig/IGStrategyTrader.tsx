@@ -1618,19 +1618,21 @@ export function IGStrategyTrader() {
         }
 
         // Re-entry cooldown — loss closes block re-entry for 4h, profit closes for 2h.
-        // Portfolio fill ratio no longer shortens the cooldown: a losing instrument
-        // should not be re-entered just because there is spare capacity.
+        // Within the cooldown window the market must show 87%+ conviction to override.
+        // After the cooldown expires the normal 72% threshold applies — the market has
+        // "cooled down" enough that a fresh high-quality signal is valid again.
         const recentClose = recentlyClosedRef.current.get(`${market.epic}:${tradeDir}`);
         if (recentClose) {
           const cooldown = recentClose.wasLoss ? 4 * 60 * 60_000 : 2 * 60 * 60_000;
           if (Date.now() - recentClose.closedAt < cooldown) {
-            const newsConf = newsSignalsRef.current.get(market.name);
-            if (!newsConf || newsConf !== tradeDir) {
+            // Still within cooldown — only a very high-conviction setup overrides
+            if (strength < 87) {
               const label = recentClose.wasLoss ? 'loss' : 'profit';
-              slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} — closed at ${label}, cooldown ${Math.round(cooldown / 60_000)}min`);
+              const remaining = Math.round((cooldown - (Date.now() - recentClose.closedAt)) / 60_000);
+              slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} — closed at ${label}, ${remaining}min cooldown (need 87%+ to override, have ${strength}%)`);
               continue;
             }
-            slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} — news confirms re-entry after close`);
+            slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} — conviction ${strength}% overrides cooldown`);
           }
         }
 
@@ -1877,74 +1879,79 @@ export function IGStrategyTrader() {
             const shouldFlip = (pos.direction === 'BUY'  && reversalToSell) ||
                                (pos.direction === 'SELL' && reversalToBuy);
             if (shouldFlip) {
-              // Close on momentum reversal — do NOT immediately re-enter opposite.
-              // Instant flips churned capital on brief pullbacks. The next scan cycle
-              // evaluates whether the new direction has a strong enough signal to enter.
-              const consTag = pos.direction === 'BUY' ? `${cRed}xred` : `${cGreen}xgreen`;
-              const rsiTag  = botData.rsi  !== null ? ` RSI:${botData.rsi.toFixed(0)}` : '';
-              const macdTag = botData.macd !== null ? ` MACD:${botData.macd > 0 ? '+' : ''}${botData.macd.toFixed(4)}` : '';
-              slog(strat.id, 'info', `[REVERSAL] Closing ${posName} ${pos.direction} (${consTag}${rsiTag}${macdTag} P&L:${(pos.upl ?? 0).toFixed(2)})`);
-
-              const cr = await closePos(env, pos);
-              if (cr.ok) {
-                const closedPnl = pos.upl ?? 0;
-                todayPnLRef.current += closedPnl;
-                setTodayPnL(todayPnLRef.current);
-                slog(strat.id, 'close', `[REVERSAL] Closed ${posName} @ ${currentPx.toFixed(2)} P&L: ${closedPnl.toFixed(2)}`);
-                setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, closedPnl, 'STRATEGY', new Date().toISOString()));
-                recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: closedPnl < 0 });
-              } else if ((cr as { alreadyClosed?: boolean }).alreadyClosed) {
-                slog(strat.id, 'info', `[REVERSAL] ${posName} already closed by IG`);
+              const uplNow = pos.upl ?? 0;
+              // Only close on reversal when the position is in profit — take the gain.
+              // If it's still at a loss, hold it and let the £5 hard limit be the backstop.
+              // Closing losers on every small reversal is what destroyed P&L before.
+              if (uplNow < 0) {
+                const consTag = pos.direction === 'BUY' ? `${cRed}xred` : `${cGreen}xgreen`;
+                slog(strat.id, 'info', `[REVERSAL] Holding ${posName} despite reversal (${consTag}, P&L £${uplNow.toFixed(2)}) — waiting for recovery or £5 limit`);
+                // Don't continue — fall through to trailing stop logic
               } else {
-                slog(strat.id, 'error', `[REVERSAL] Close failed: ${cr.error ?? 'unknown'}`);
+                // In profit — take it on the reversal signal
+                const consTag = pos.direction === 'BUY' ? `${cRed}xred` : `${cGreen}xgreen`;
+                const rsiTag  = botData.rsi  !== null ? ` RSI:${botData.rsi.toFixed(0)}` : '';
+                const macdTag = botData.macd !== null ? ` MACD:${botData.macd > 0 ? '+' : ''}${botData.macd.toFixed(4)}` : '';
+                slog(strat.id, 'info', `[REVERSAL] Taking profit: ${posName} ${pos.direction} (${consTag}${rsiTag}${macdTag} P&L:£${uplNow.toFixed(2)})`);
+
+                const cr = await closePos(env, pos);
+                if (cr.ok) {
+                  todayPnLRef.current += uplNow;
+                  setTodayPnL(todayPnLRef.current);
+                  slog(strat.id, 'close', `[REVERSAL] ✓ Profit taken: ${posName} @ ${currentPx.toFixed(2)} P&L: £${uplNow.toFixed(2)}`);
+                  setTradeHistory(prev => recordTradeClose(prev, pos.dealId, currentPx, uplNow, 'STRATEGY', new Date().toISOString()));
+                  recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: false });
+                } else if ((cr as { alreadyClosed?: boolean }).alreadyClosed) {
+                  slog(strat.id, 'info', `[REVERSAL] ${posName} already closed by IG`);
+                } else {
+                  slog(strat.id, 'error', `[REVERSAL] Close failed: ${cr.error ?? 'unknown'}`);
+                }
+                continue;
               }
-              continue;
             }
           }
         }
 
-        // [AUTO] Emergency soft stop — cut losses at -1.5%, but only after 30min hold.
-        // The 30min gate prevents whipsawing freshly-opened positions on normal noise.
-        if (strat.autoClose && pnlPct < -1.5 && ageMs > 30 * 60_000) {
-          const pnlStr = `£${(pos.upl ?? 0).toFixed(2)}`;
-          slog(strat.id, 'info', `[AUTO] Emergency stop: ${pos.instrumentName ?? pos.epic} at ${pnlPct.toFixed(2)}% — cutting loss…`);
+        // [AUTO] Hard £5 loss limit — the only reason we close a losing position.
+        // Positions between 0 and -£5 are held for recovery. Only at -£5 do we cut.
+        // This prevents death-by-a-thousand-cuts from closing losers repeatedly.
+        if (strat.autoClose && (pos.upl ?? 0) < -5) {
+          const closedPnl = pos.upl ?? 0;
+          slog(strat.id, 'info', `[AUTO] £5 loss limit hit: ${posName} at £${closedPnl.toFixed(2)} — closing to cap the damage…`);
           const cr = await closePos(env, pos);
           if (cr.ok) {
             const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
-            const closedPnl = pos.upl ?? 0;
             todayPnLRef.current += closedPnl;
             setTodayPnL(todayPnLRef.current);
-            slog(strat.id, 'close', `[AUTO] ✓ Emergency stop fired: ${pos.instrumentName ?? pos.epic} — P&L: ${pnlStr}`);
+            slog(strat.id, 'close', `[AUTO] ✓ £5 limit closed: ${posName} — P&L: £${closedPnl.toFixed(2)}`);
             setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STOP_LOSS', new Date().toISOString()));
             recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: true });
           } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
-            slog(strat.id, 'info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG`);
-          } else slog(strat.id, 'error', `[${env.toUpperCase()}] Emergency stop failed: ${cr.error ?? 'unknown'}`);
+            slog(strat.id, 'info', `[AUTO] ${posName} already closed by IG`);
+          } else slog(strat.id, 'error', `[${env.toUpperCase()}] £5 limit close failed: ${cr.error ?? 'unknown'}`);
           continue;
         }
 
-        // [AUTO] Stale position recycling — tiered by P&L:
-        //   24h if losing (>0.5% down) — don't let small losers become big ones overnight
-        //   48h if neutral (<1% gain) — stagnant capital redeployment
-        //   72h if profitable (≥1%) — let winners run a bit longer
+        // [AUTO] Stale position recycling — PROFIT ONLY.
+        // We only recycle stale positions that are in profit. Stale losers are held
+        // for recovery — the £5 limit above is their only exit. Taking a stale loss
+        // would mean realising avoidable P&L, defeating the profit-only close rule.
         if (pos.createdDate && strat.autoClose) {
-          const staleThreshold =
-            pnlPct < -0.5  ? 24 * 3_600_000 :
-            pnlPct >= 1.0   ? 72 * 3_600_000 :
-                              48 * 3_600_000;
-          if (ageMs > staleThreshold && pnlPct < 1.0) {
-            slog(strat.id, 'info', `[AUTO] Closing ${pos.instrumentName ?? pos.epic} — stale (${ageLabel} open, ${pnlPct.toFixed(2)}% P&L)…`);
+          const uplNow = pos.upl ?? 0;
+          // Only act on stale positions that are in profit
+          const staleThreshold = pnlPct >= 1.0 ? 72 * 3_600_000 : 48 * 3_600_000;
+          if (uplNow > 0 && ageMs > staleThreshold) {
+            slog(strat.id, 'info', `[AUTO] Closing stale profitable position: ${posName} (${ageLabel} open, +£${uplNow.toFixed(2)})…`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
               const exitPx = pos.direction === 'BUY' ? (pos.bid ?? currentPx) : (pos.offer ?? currentPx);
-              const closedPnl = pos.upl ?? 0;
-              todayPnLRef.current += closedPnl;
+              todayPnLRef.current += uplNow;
               setTodayPnL(todayPnLRef.current);
-              slog(strat.id, 'close', `[AUTO] ✓ Closed ${pos.instrumentName ?? pos.epic} stale position — P&L: £${closedPnl.toFixed(2)}`);
-              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, closedPnl, 'STALE', new Date().toISOString()));
-              recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: closedPnl < 0 });
+              slog(strat.id, 'close', `[AUTO] ✓ Stale profit taken: ${posName} — P&L: £${uplNow.toFixed(2)}`);
+              setTradeHistory(prev => recordTradeClose(prev, pos.dealId, exitPx, uplNow, 'STALE', new Date().toISOString()));
+              recentlyClosedRef.current.set(`${pos.epic}:${pos.direction}`, { closedAt: Date.now(), wasLoss: false });
             } else if ((cr as {alreadyClosed?:boolean}).alreadyClosed) {
-              slog(strat.id, 'info', `[AUTO] ${pos.instrumentName ?? pos.epic} already closed by IG (stop/limit/rollover)`);
+              slog(strat.id, 'info', `[AUTO] ${posName} already closed by IG (stop/limit/rollover)`);
             } else slog(strat.id, 'error', `[${env.toUpperCase()}] Stale close failed: ${cr.error ?? 'unknown'}`);
             continue;
           }
@@ -2018,20 +2025,31 @@ export function IGStrategyTrader() {
           ? calcAutoMaxPositions(fundsNow2, avgStr2)
           : strat.maxPositions;
         if (effectiveMax2 > 0 && ownedNow.length > effectiveMax2) {
+          // Trim excess — PROFIT ONLY. Sort: profitable positions first (close them
+          // to take gains), then positions at the £5 limit. Never close a losing
+          // position just to make room — that locks in avoidable losses.
           const excess = [...ownedNow]
-            .sort((a, b) => (a.upl ?? 0) - (b.upl ?? 0))   // worst P&L first
+            .filter(p => (p.upl ?? 0) > 0 || (p.upl ?? 0) <= -5)  // only closeable
+            .sort((a, b) => {
+              const aProfit = (a.upl ?? 0) > 0;
+              const bProfit = (b.upl ?? 0) > 0;
+              if (aProfit && !bProfit) return -1; // close profits first
+              if (!aProfit && bProfit) return 1;
+              return (b.upl ?? 0) - (a.upl ?? 0); // among profits: largest first
+            })
             .slice(0, ownedNow.length - effectiveMax2);
           for (const weak of excess) {
-            slog(strat.id, 'info', `[AUTO] Trimming: ${weak.instrumentName ?? weak.epic} (P&L £${(weak.upl ?? 0).toFixed(2)}) — over limit of ${effectiveMax2}…`);
+            const weakUpl = weak.upl ?? 0;
+            const label = weakUpl > 0 ? 'taking profit' : '£5 limit hit';
+            slog(strat.id, 'info', `[AUTO] Trim (${label}): ${weak.instrumentName ?? weak.epic} P&L £${weakUpl.toFixed(2)} — over cap of ${effectiveMax2}`);
             const cr = await closePos(env, weak);
             if (cr.ok) {
               const exitPx = weak.direction === 'BUY' ? (weak.bid ?? weak.level) : (weak.offer ?? weak.level);
-              const closedPnl = weak.upl ?? 0;
-              todayPnLRef.current += closedPnl;
+              todayPnLRef.current += weakUpl;
               setTodayPnL(todayPnLRef.current);
-              slog(strat.id, 'close', `[AUTO] ✓ Trimmed ${weak.instrumentName ?? weak.epic} — portfolio capped — P&L: £${closedPnl.toFixed(2)}`);
-              setTradeHistory(prev => recordTradeClose(prev, weak.dealId, exitPx, closedPnl, 'STRATEGY', new Date().toISOString()));
-              recentlyClosedRef.current.set(`${weak.epic}:${weak.direction}`, { closedAt: Date.now(), wasLoss: closedPnl < 0 });
+              slog(strat.id, 'close', `[AUTO] ✓ Trimmed ${weak.instrumentName ?? weak.epic} — P&L: £${weakUpl.toFixed(2)}`);
+              setTradeHistory(prev => recordTradeClose(prev, weak.dealId, exitPx, weakUpl, 'STRATEGY', new Date().toISOString()));
+              recentlyClosedRef.current.set(`${weak.epic}:${weak.direction}`, { closedAt: Date.now(), wasLoss: weakUpl < 0 });
             } else slog(strat.id, 'error', `[${env.toUpperCase()}] Trim close failed: ${cr.error ?? 'unknown'}`);
           }
         }
