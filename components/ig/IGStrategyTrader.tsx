@@ -570,6 +570,33 @@ function calibrateFromIndicators(
   return { direction, strength };
 }
 
+// ── Market close guard ────────────────────────────────────────────────────────
+// Returns true if the market for this epic closes within the next 30 minutes.
+// Mirrors bot-server/src/marketHours.ts — keep in sync if sessions change.
+const INDEX_CLOSE_UTC: Record<string, { h: number; m: number }> = {
+  'IX.D.FTSE.DAILY.IP':   { h: 16, m: 30 },
+  'IX.D.SPTRD.DAILY.IP':  { h: 21, m: 0  },
+  'IX.D.NASDAQ.CASH.IP':  { h: 21, m: 0  },
+  'IX.D.DOW.DAILY.IP':    { h: 21, m: 0  },
+  'IX.D.DAX.DAILY.IP':    { h: 22, m: 0  },
+  'IX.D.NIKKEI.DAILY.IP': { h: 6,  m: 0  },
+  'IX.D.ASX.DAILY.IP':    { h: 6,  m: 30 },
+};
+const FOREX_EPICS_FE = new Set([
+  'CS.D.GBPUSD.TODAY.IP', 'CS.D.EURUSD.TODAY.IP', 'CS.D.USDJPY.TODAY.IP',
+  'CS.D.EURGBP.TODAY.IP', 'CS.D.AUDUSD.TODAY.IP',
+]);
+function isEpicClosingSoon(epic: string, bufferMins = 30): boolean {
+  const now = new Date();
+  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const day = now.getUTCDay();
+  if (FOREX_EPICS_FE.has(epic)) return day === 5 && utcMins >= (22 * 60 - bufferMins);
+  const close = INDEX_CLOSE_UTC[epic];
+  if (!close) return false;
+  const closeMins = close.h * 60 + close.m;
+  return utcMins >= closeMins - bufferMins && utcMins < closeMins;
+}
+
 // ── Trade history ─────────────────────────────────────────────────────────────
 
 const IG_TRADE_HISTORY_KEY = 'ig_trade_history';
@@ -1711,6 +1738,10 @@ export function IGStrategyTrader() {
         if (positionsRef.current[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
         if (pendingOrdersRef.current.has(orderKey)) {
           slog(strat.id, 'signal', `[SKIP] ${market.name} — order pending, waiting for confirmation`);
+          continue;
+        }
+        if (isEpicClosingSoon(market.epic)) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — market closes in <30min, no new entries`);
           continue;
         }
 

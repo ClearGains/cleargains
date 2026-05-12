@@ -34,6 +34,32 @@ function dayOfWeekUTC(): number {
   return new Date().getUTCDay(); // 0=Sun, 6=Sat
 }
 
+export function isClosingSoon(epic: string, bufferMins = 30): boolean {
+  const day  = dayOfWeekUTC();
+  const mins = minutesSinceMidnightUTC();
+
+  if (FOREX_EPICS.has(epic)) {
+    // Forex closes Fri 22:00 UTC
+    if (day === 5 && mins >= (22 * 60 - bufferMins)) return true;
+    return false;
+  }
+
+  if (day === 0 || day === 6) return false;
+
+  const session = INDEX_SESSIONS[epic];
+  if (!session) return false;
+
+  const closeMins = session.closeH * 60 + session.closeM;
+  const openMins  = session.openH  * 60 + session.openM;
+
+  // Overnight session — "closing soon" means approaching the daytime close
+  if (openMins > closeMins) {
+    return mins >= closeMins - bufferMins && mins < closeMins;
+  }
+
+  return mins >= closeMins - bufferMins && mins < closeMins;
+}
+
 export function isMarketOpen(epic: string): { open: boolean; reason: string } {
   const day  = dayOfWeekUTC();
   const mins = minutesSinceMidnightUTC();

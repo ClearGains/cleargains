@@ -11,7 +11,7 @@ import {
   DEFAULT_CONFIG,
   type CandleTick, type ScalperEpicState, type ScalperConfig,
 } from './scalperStrategy';
-import { isMarketOpen } from './marketHours';
+import { isMarketOpen, isClosingSoon } from './marketHours';
 import { askGemini, type EntrySignal } from './gemini';
 import type { BotStartParams, LogEntry, BotStatus, EpicStatus } from './bot';
 
@@ -129,6 +129,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
 
         const mkt = isMarketOpen(tick.epic);
         if (!mkt.open) { st.state = 'FLAT'; addLog('wait', name, `Market closed — ${mkt.reason}`); break; }
+        if (isClosingSoon(tick.epic)) { st.state = 'FLAT'; addLog('wait', name, `Market closing in <30min — no new entries`); break; }
 
         const active = Object.values(epicStates).filter(s => s.state === 'IN_POSITION').length;
         if (active >= MAX_CONCURRENT) { st.state = 'FLAT'; addLog('wait', name, `Max active signals (${MAX_CONCURRENT}) reached`); break; }
