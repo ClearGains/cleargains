@@ -57,27 +57,29 @@ export async function POST(req: NextRequest) {
   const action  = req.nextUrl.searchParams.get('action') ?? 'start';
   const account = req.nextUrl.searchParams.get('account');
 
-  // Legacy single-account routes
-  if (action === 'stop')           return proxyTo('/stop',   'POST');
-  if (action === 'pause')          return proxyTo('/pause',  'POST');
-  if (action === 'resume')         return proxyTo('/resume', 'POST');
+  // No-body routes — must be handled BEFORE req.json() to avoid parse errors.
+  if (action === 'stop')           return proxyTo('/stop',          'POST');
+  if (action === 'pause')          return proxyTo('/pause',         'POST');
+  if (action === 'resume')         return proxyTo('/resume',        'POST');
   if (action === 'strategy-stop')  return proxyTo('/strategy/stop', 'POST');
 
+  if (validAccount(account)) {
+    if (action === 'account-stop')   return proxyTo(`/accounts/${account}/stop`,         'POST');
+    if (action === 'account-pause')  return proxyTo(`/accounts/${account}/pause`,        'POST');
+    if (action === 'account-resume') return proxyTo(`/accounts/${account}/resume`,       'POST');
+    if (action === 'stock-stop')     return proxyTo(`/accounts/${account}/stock/stop`,   'POST');
+    if (action === 'stock-pause')    return proxyTo(`/accounts/${account}/stock/pause`,  'POST');
+    if (action === 'stock-resume')   return proxyTo(`/accounts/${account}/stock/resume`, 'POST');
+  }
+
+  // Body-required routes — parse JSON only for actions that send a payload.
   const body = await req.json() as unknown;
   if (action === 'strategy-start') return proxyTo('/strategy/start', 'POST', body);
   if (action === 'inject')         return proxyTo('/debug/inject',   'POST', body);
 
-  // Per-account routes
   if (validAccount(account)) {
-    if (action === 'account-start')  return proxyTo(`/accounts/${account}/start`,  'POST', body);
-    if (action === 'account-stop')   return proxyTo(`/accounts/${account}/stop`,   'POST');
-    if (action === 'account-pause')  return proxyTo(`/accounts/${account}/pause`,  'POST');
-    if (action === 'account-resume') return proxyTo(`/accounts/${account}/resume`, 'POST');
-    // Stock bot
-    if (action === 'stock-start')  return proxyTo(`/accounts/${account}/stock/start`,  'POST', body);
-    if (action === 'stock-stop')   return proxyTo(`/accounts/${account}/stock/stop`,   'POST');
-    if (action === 'stock-pause')  return proxyTo(`/accounts/${account}/stock/pause`,  'POST');
-    if (action === 'stock-resume') return proxyTo(`/accounts/${account}/stock/resume`, 'POST');
+    if (action === 'account-start') return proxyTo(`/accounts/${account}/start`,       'POST', body);
+    if (action === 'stock-start')   return proxyTo(`/accounts/${account}/stock/start`, 'POST', body);
   }
 
   return proxyTo('/start', 'POST', body);
