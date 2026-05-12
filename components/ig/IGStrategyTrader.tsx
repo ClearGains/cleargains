@@ -3855,7 +3855,7 @@ export function IGStrategyTrader() {
           {([
             { id: 'positions' as const, label: 'Positions',      icon: <BarChart3 className="h-3 w-3" />, count: allPositions.length },
             { id: 'orders'   as const, label: 'Working Orders',  icon: <Clock className="h-3 w-3" />,    count: [...workingOrders.demo, ...workingOrders.live].length },
-            { id: 'history'  as const, label: 'Trade History',   icon: <Activity className="h-3 w-3" />, count: tradeHistory.length },
+            { id: 'history'  as const, label: 'Trade History',   icon: <Activity className="h-3 w-3" />, count: tradeHistory.length + [...positions.demo, ...positions.live].filter(p => !tradeHistory.some(r => r.dealId === p.dealId)).length },
           ]).map(({ id, label, icon, count }) => (
             <button key={id} onClick={() => setPosTab(id)}
               className={clsx('px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5',
@@ -3957,29 +3957,59 @@ export function IGStrategyTrader() {
 
         {/* Trade History tab */}
         {posTab === 'history' && (() => {
-          const closed   = tradeHistory.filter(r => r.status === 'CLOSED');
-          const wins     = closed.filter(r => (r.pnl ?? 0) > 0);
-          const losses   = closed.filter(r => (r.pnl ?? 0) < 0);
+          // Merge live open positions not already recorded in local history
+          const trackedIds = new Set(tradeHistory.map(r => r.dealId).filter(Boolean));
+          const liveOpenRecords: IGTradeRecord[] = [
+            ...positions.demo.map(p => ({ env: 'demo' as const, p })),
+            ...positions.live.map(p => ({ env: 'live' as const, p })),
+          ]
+            .filter(({ p }) => p.dealId && !trackedIds.has(p.dealId))
+            .map(({ env, p }) => ({
+              id:            `live_${p.dealId}`,
+              portfolioName: env === 'live' ? 'Live Account' : 'Demo Account',
+              market:        p.instrumentName,
+              epic:          p.epic,
+              direction:     p.direction as 'BUY' | 'SELL',
+              size:          p.size,
+              entryLevel:    p.level,
+              exitLevel:     null,
+              openedAt:      p.createdDate ?? new Date().toISOString(),
+              closedAt:      null,
+              status:        'OPEN' as const,
+              dealReference: '',
+              dealId:        p.dealId,
+              pnl:           typeof p.upl === 'number' ? p.upl : null,
+              closeReason:   null,
+              accountType:   env,
+            }));
+
+          const allHistory = [...liveOpenRecords, ...tradeHistory].sort(
+            (a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime(),
+          );
+
+          const closed    = tradeHistory.filter(r => r.status === 'CLOSED');
+          const wins      = closed.filter(r => (r.pnl ?? 0) > 0);
+          const losses    = closed.filter(r => (r.pnl ?? 0) < 0);
           const totalPnLH = closed.reduce((s, r) => s + (r.pnl ?? 0), 0);
-          const winRate  = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
-          const avgWin   = wins.length   > 0 ? wins.reduce((s, r) => s + (r.pnl ?? 0), 0) / wins.length : 0;
-          const avgLoss  = losses.length > 0 ? losses.reduce((s, r) => s + (r.pnl ?? 0), 0) / losses.length : 0;
-          const bestPnL  = closed.length > 0 ? Math.max(...closed.map(r => r.pnl ?? 0)) : 0;
-          const worstPnL = closed.length > 0 ? Math.min(...closed.map(r => r.pnl ?? 0)) : 0;
+          const winRate   = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
+          const avgWin    = wins.length   > 0 ? wins.reduce((s, r) => s + (r.pnl ?? 0), 0) / wins.length : 0;
+          const avgLoss   = losses.length > 0 ? losses.reduce((s, r) => s + (r.pnl ?? 0), 0) / losses.length : 0;
+          const bestPnL   = closed.length > 0 ? Math.max(...closed.map(r => r.pnl ?? 0)) : 0;
+          const worstPnL  = closed.length > 0 ? Math.min(...closed.map(r => r.pnl ?? 0)) : 0;
           return (
             <>
               {/* Stats */}
-              {tradeHistory.length > 0 && (
+              {allHistory.length > 0 && (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
                   {[
-                    { label: 'Total Trades', value: tradeHistory.length.toString() },
+                    { label: 'Total Trades', value: allHistory.length.toString() },
                     { label: 'Win Rate',     value: closed.length > 0 ? `${winRate}%` : '—', color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
                     { label: 'Total P&L',    value: `${totalPnLH >= 0 ? '+' : ''}£${Math.abs(totalPnLH).toFixed(2)}`, color: totalPnLH >= 0 ? 'text-emerald-400' : 'text-red-400' },
                     { label: 'Avg Win',      value: avgWin  > 0 ? `+£${avgWin.toFixed(2)}`  : '—', color: 'text-emerald-400' },
                     { label: 'Avg Loss',     value: avgLoss < 0 ? `-£${Math.abs(avgLoss).toFixed(2)}` : '—', color: 'text-red-400' },
                     { label: 'Best Trade',   value: bestPnL  > 0 ? `+£${bestPnL.toFixed(2)}`  : '—', color: 'text-emerald-400' },
                     { label: 'Worst Trade',  value: worstPnL < 0 ? `-£${Math.abs(worstPnL).toFixed(2)}` : '—', color: 'text-red-400' },
-                    { label: 'Open',         value: tradeHistory.filter(r=>r.status==='OPEN').length.toString() },
+                    { label: 'Open',         value: allHistory.filter(r => r.status === 'OPEN').length.toString() },
                   ].map(s => (
                     <div key={s.label} className="bg-gray-800/40 rounded-lg px-3 py-2">
                       <p className="text-[9px] text-gray-500 uppercase tracking-wider">{s.label}</p>
@@ -4001,20 +4031,20 @@ export function IGStrategyTrader() {
                 </div>
               )}
 
-              {tradeHistory.length === 0 ? (
-                <p className="text-sm text-gray-500 py-6 text-center">No trades recorded yet — run a strategy to start building history</p>
+              {allHistory.length === 0 ? (
+                <p className="text-sm text-gray-500 py-6 text-center">No trades recorded yet — connect to an account to see positions</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left">
                     <thead>
                       <tr className="border-b border-gray-800">
-                        {['Opened', 'Strategy', 'Market', 'Dir', 'Size', 'Entry', 'Exit', 'P&L', 'Status', 'Reason', 'Ref'].map(h => (
+                        {['Opened', 'Account', 'Market', 'Dir', 'Size', 'Entry', 'Exit', 'P&L', 'Status', 'Reason'].map(h => (
                           <th key={h} className="px-2 py-2 text-[9px] text-gray-500 font-medium uppercase tracking-wider whitespace-nowrap">{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {tradeHistory.map(r => (
+                      {allHistory.map(r => (
                         <tr key={r.id} className="border-t border-gray-800/50 hover:bg-gray-800/20 text-xs">
                           <td className="px-2 py-2 text-[10px] text-gray-500 whitespace-nowrap">
                             {new Date(r.openedAt).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}
@@ -4051,7 +4081,6 @@ export function IGStrategyTrader() {
                           <td className="px-2 py-2 text-[10px] text-gray-500">
                             {r.closeReason ? r.closeReason.replace('_', ' ') : '—'}
                           </td>
-                          <td className="px-2 py-2 text-[9px] text-gray-600 font-mono truncate max-w-[70px]">{r.dealReference || '—'}</td>
                         </tr>
                       ))}
                     </tbody>
