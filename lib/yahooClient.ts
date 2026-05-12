@@ -58,14 +58,37 @@ export async function fetchYahooQuotes(symbols: string[]): Promise<QuoteResult[]
   const batch = symbols.slice(0, 50);
   // Route through our own API which handles crumb auth — Yahoo now requires it
   // even for browser requests, so direct calls return empty results.
-  const url = `/api/market/quotes?symbols=${encodeURIComponent(batch.join(','))}`;
   try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`quotes proxy ${res.status}`);
-    return await res.json() as QuoteResult[];
-  } catch {
-    return [];
-  }
+    const res = await fetch(`/api/market/quotes?symbols=${encodeURIComponent(batch.join(','))}`);
+    if (res.ok) {
+      const data = await res.json() as QuoteResult[];
+      if (data.length) return data;
+    }
+  } catch { /* fall through to chart fallback */ }
+
+  // Fallback: v8 chart endpoint — no crumb needed, works for individual symbols
+  const results: QuoteResult[] = [];
+  await Promise.allSettled(batch.map(async sym => {
+    try {
+      const r = await fetch(
+        `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=2d`,
+        { headers: { Accept: 'application/json' } },
+      );
+      if (!r.ok) return;
+      const json = await r.json() as { chart?: { result?: Array<{ meta?: { regularMarketPrice?: number; previousClose?: number; chartPreviousClose?: number; currency?: string; fullExchangeName?: string; shortName?: string } }> } };
+      const meta = json.chart?.result?.[0]?.meta;
+      if (!meta?.regularMarketPrice) return;
+      const price = meta.regularMarketPrice;
+      const prev  = meta.previousClose ?? meta.chartPreviousClose ?? price;
+      results.push({
+        symbol: sym, name: meta.shortName ?? sym,
+        price, bid: price, ask: price,
+        changePercent: prev > 0 ? ((price - prev) / prev) * 100 : 0,
+        volume: 0, currency: meta.currency ?? 'USD', exchange: meta.fullExchangeName ?? '',
+      });
+    } catch { /* skip symbol */ }
+  }));
+  return results;
 }
 
 // ── Historical OHLCV (v8 chart) ──────────────────────────────────────────────

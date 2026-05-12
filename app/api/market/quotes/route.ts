@@ -52,7 +52,7 @@ export async function GET(req: NextRequest) {
     });
 
     return NextResponse.json(results, {
-      headers: { 'Cache-Control': 's-maxage=30, stale-while-revalidate=60' },
+      headers: { 'Cache-Control': 's-maxage=10, stale-while-revalidate=5' },
     });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });

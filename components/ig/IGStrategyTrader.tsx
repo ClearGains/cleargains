@@ -1095,107 +1095,87 @@ export function IGStrategyTrader() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
 
-  // ── Hydrate trade history from IG activity log on session connect ─────────
-  // Fetches the last 100 activities from IG and merges them into localStorage-
-  // backed trade history so the History tab shows real data even after a
-  // browser/deployment change wipes local state.
-  useEffect(() => {
-    (['demo', 'live'] as const).forEach(env => {
+  // ── Hydrate trade history from IG activity log ────────────────────────────
+  const hydrateTradeHistory = useCallback(async () => {
+    type HistResp = {
+      ok: boolean;
+      opened: { date: string; epic: string; dealId: string; direction: string; size: number; level: number; marketName: string }[];
+      closed:  { date: string; epic: string; dealId: string; dealRef: string; direction: string; size: number; level: number; marketName: string; currency: string }[];
+    };
+    for (const env of ['demo', 'live'] as const) {
       const sess = sessions[env];
-      if (!sess) return;
-      void (async () => {
-        try {
-          type HistResp = {
-            ok: boolean;
-            opened: { date: string; epic: string; dealId: string; direction: string; size: number; level: number; marketName: string }[];
-            closed:  { date: string; epic: string; dealId: string; dealRef: string; direction: string; size: number; level: number; marketName: string; currency: string }[];
-          };
-          const r = await fetch('/api/ig/history?pageSize=100', { headers: makeHeaders(sess, env) });
-          if (!r.ok) return;
-          const d = await r.json() as HistResp;
-          if (!d.ok) return;
+      if (!sess) continue;
+      try {
+        const r = await fetch('/api/ig/history?pageSize=100', { headers: makeHeaders(sess, env) });
+        if (!r.ok) { log('error', `[History] IG activity fetch failed (${r.status}) for ${env}`); continue; }
+        const d = await r.json() as HistResp;
+        if (!d.ok) { log('error', `[History] IG activity returned ok:false for ${env}`); continue; }
+        if (!d.opened.length && !d.closed.length) continue;
 
-          setTradeHistory(prev => {
-            const existingIds = new Set(prev.map(rec => rec.dealId).filter(Boolean));
-            const closedByDealId = new Map(d.closed.map(c => [c.dealId, c]));
-            const next = [...prev];
+        setTradeHistory(prev => {
+          const existingIds    = new Set(prev.map(rec => rec.dealId).filter(Boolean));
+          const closedByDealId = new Map(d.closed.map(c => [c.dealId, c]));
+          const next           = [...prev];
 
-            // Add opened activities not already tracked locally
-            for (const o of d.opened) {
-              if (!o.dealId || existingIds.has(o.dealId)) continue;
-              const closeInfo = closedByDealId.get(o.dealId);
-              const isClosed = !!closeInfo;
-              next.push({
-                id: `ig_${o.dealId}`,
-                portfolioName: 'IG Activity',
-                market: o.marketName,
-                epic: o.epic,
-                direction: o.direction as 'BUY' | 'SELL',
-                size: o.size,
-                entryLevel: o.level,
-                exitLevel: closeInfo?.level ?? null,
-                openedAt: o.date,
-                closedAt: closeInfo?.date ?? null,
-                status: isClosed ? 'CLOSED' : 'OPEN',
-                dealReference: closeInfo?.dealRef ?? '',
-                dealId: o.dealId,
-                pnl: null,
-                closeReason: isClosed ? 'STRATEGY' : null,
-                accountType: env,
-              });
-              existingIds.add(o.dealId);
-            }
-
-            // Update any OPEN records that IG now reports as closed
-            const updated = next.map(rec => {
-              if (rec.status !== 'OPEN' || !rec.dealId) return rec;
-              const closeInfo = closedByDealId.get(rec.dealId);
-              if (!closeInfo) return rec;
-              return {
-                ...rec,
-                exitLevel: closeInfo.level,
-                closedAt: closeInfo.date,
-                status: 'CLOSED' as const,
-                dealReference: rec.dealReference || closeInfo.dealRef,
-                closeReason: rec.closeReason ?? ('STRATEGY' as const),
-              };
+          for (const o of d.opened) {
+            if (!o.dealId || existingIds.has(o.dealId)) continue;
+            const closeInfo = closedByDealId.get(o.dealId);
+            const isClosed  = !!closeInfo;
+            next.push({
+              id: `ig_${o.dealId}`, portfolioName: env === 'live' ? 'Live Account' : 'Demo Account',
+              market: o.marketName, epic: o.epic, direction: o.direction as 'BUY' | 'SELL',
+              size: o.size, entryLevel: o.level, exitLevel: closeInfo?.level ?? null,
+              openedAt: o.date, closedAt: closeInfo?.date ?? null,
+              status: isClosed ? 'CLOSED' : 'OPEN',
+              dealReference: closeInfo?.dealRef ?? '', dealId: o.dealId,
+              pnl: null, closeReason: isClosed ? 'STRATEGY' : null, accountType: env,
             });
+            existingIds.add(o.dealId);
+          }
 
-            // Add any closed-only activities with no matching open in our window
-            const openedIds = new Set(d.opened.map(o => o.dealId));
-            const allKnownIds = new Set(updated.map(rec => rec.dealId).filter(Boolean));
-            for (const c of d.closed) {
-              if (!c.dealId || openedIds.has(c.dealId) || allKnownIds.has(c.dealId)) continue;
-              updated.push({
-                id: `ig_closed_${c.dealId}`,
-                portfolioName: 'IG Activity',
-                market: c.marketName,
-                epic: c.epic,
-                direction: c.direction as 'BUY' | 'SELL',
-                size: c.size,
-                entryLevel: 0,
-                exitLevel: c.level,
-                openedAt: c.date,
-                closedAt: c.date,
-                status: 'CLOSED',
-                dealReference: c.dealRef,
-                dealId: c.dealId,
-                pnl: null,
-                closeReason: 'STRATEGY',
-                accountType: env,
-              });
-            }
-
-            updated.sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
-            const final = updated.slice(0, 500);
-            saveIGTradeHistory(final);
-            return final;
+          const updated = next.map(rec => {
+            if (rec.status !== 'OPEN' || !rec.dealId) return rec;
+            const closeInfo = closedByDealId.get(rec.dealId);
+            if (!closeInfo) return rec;
+            return { ...rec, exitLevel: closeInfo.level, closedAt: closeInfo.date,
+              status: 'CLOSED' as const, dealReference: rec.dealReference || closeInfo.dealRef,
+              closeReason: rec.closeReason ?? ('STRATEGY' as const) };
           });
-        } catch {}
-      })();
-    });
+
+          const openedIds    = new Set(d.opened.map(o => o.dealId));
+          const allKnownIds  = new Set(updated.map(rec => rec.dealId).filter(Boolean));
+          for (const c of d.closed) {
+            if (!c.dealId || openedIds.has(c.dealId) || allKnownIds.has(c.dealId)) continue;
+            updated.push({
+              id: `ig_closed_${c.dealId}`, portfolioName: env === 'live' ? 'Live Account' : 'Demo Account',
+              market: c.marketName, epic: c.epic, direction: c.direction as 'BUY' | 'SELL',
+              size: c.size, entryLevel: 0, exitLevel: c.level,
+              openedAt: c.date, closedAt: c.date, status: 'CLOSED',
+              dealReference: c.dealRef, dealId: c.dealId,
+              pnl: null, closeReason: 'STRATEGY', accountType: env,
+            });
+          }
+
+          updated.sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
+          const final = updated.slice(0, 500);
+          saveIGTradeHistory(final);
+          return final;
+        });
+      } catch (e) {
+        log('error', `[History] ${env} hydration failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
+
+  // Run on session connect
+  useEffect(() => { void hydrateTradeHistory(); }, [hydrateTradeHistory]);
+
+  // Re-run whenever the history tab is opened (picks up newly closed trades)
+  useEffect(() => {
+    if (posTab === 'history') void hydrateTradeHistory();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posTab]);
 
   // ── Load working orders ────────────────────────────────────────────────────
   const loadWorkingOrders = useCallback(async (envFilter?: 'demo'|'live') => {
@@ -4050,17 +4030,23 @@ export function IGStrategyTrader() {
                 </div>
               )}
 
-              {/* Clear button */}
-              {tradeHistory.length > 0 && (
-                <div className="flex justify-end mb-3">
+              {/* Actions row */}
+              <div className="flex justify-end gap-3 mb-3">
+                <button
+                  onClick={() => void hydrateTradeHistory()}
+                  className="text-[10px] text-gray-500 hover:text-white transition-colors"
+                >
+                  Refresh from IG
+                </button>
+                {tradeHistory.length > 0 && (
                   <button
                     onClick={() => { if (confirm('Clear all trade history?')) { setTradeHistory([]); saveIGTradeHistory([]); } }}
                     className="text-[10px] text-gray-600 hover:text-red-400 transition-colors"
                   >
                     Clear history
                   </button>
-                </div>
-              )}
+                )}
+              </div>
 
               {allHistory.length === 0 ? (
                 <p className="text-sm text-gray-500 py-6 text-center">No trades recorded yet — connect to an account to see positions</p>
