@@ -2065,22 +2065,29 @@ export function IGStrategyTrader() {
           }
         }
 
-        // [AUTO] Trailing profit lock — protects gains once a position has run.
-        // Rule 1 — Breakeven protection: once profit >= £2, never let it become a loss.
-        // Rule 2 — Trail at 50%: once profit >= £4, close if it retraces to 50% of peak.
+        // [AUTO] Proportional trailing profit lock — scales with position size.
+        // Bigger positions move faster in £ terms so thresholds tighten automatically.
+        //   breakevenAt = £2 / √(size / 0.2)  → £2.00 at 0.2/pt, £0.89 at 1/pt, £0.63 at 2/pt
+        //   trailAt     = breakevenAt × 2
+        //   trailPct    = 50% + 5% × log₂(size / 0.2) → 50% at 0.2/pt, 60% at 1/pt, 65% at 2/pt
         if (strat.autoClose) {
-          const uplNow  = pos.upl ?? 0;
-          const peak    = peakProfitRef.current.get(pos.dealId) ?? 0;
-          const newPeak = Math.max(peak, uplNow);
+          const uplNow    = pos.upl ?? 0;
+          const peak      = peakProfitRef.current.get(pos.dealId) ?? 0;
+          const newPeak   = Math.max(peak, uplNow);
           if (newPeak !== peak) peakProfitRef.current.set(pos.dealId, newPeak);
 
-          const breakevenTrigger = newPeak >= 2 && uplNow <= 0;
-          const trailTrigger     = newPeak >= 4 && uplNow < newPeak * 0.5;
+          const sizeRatio   = Math.max(1, pos.size / 0.2);
+          const breakevenAt = Math.max(0.50, 2.0 / Math.sqrt(sizeRatio));
+          const trailAt     = breakevenAt * 2;
+          const trailPct    = Math.min(0.75, 0.50 + 0.05 * Math.log2(sizeRatio));
+
+          const breakevenTrigger = newPeak >= breakevenAt && uplNow <= 0;
+          const trailTrigger     = newPeak >= trailAt     && uplNow < newPeak * trailPct;
 
           if (breakevenTrigger || trailTrigger) {
             const reason = breakevenTrigger
-              ? `Breakeven protection — peaked at +£${newPeak.toFixed(2)}, now £${uplNow.toFixed(2)}`
-              : `Trail stop — peaked at +£${newPeak.toFixed(2)}, retraced to £${uplNow.toFixed(2)}`;
+              ? `Breakeven lock (≥£${breakevenAt.toFixed(2)}) — peaked +£${newPeak.toFixed(2)}, now £${uplNow.toFixed(2)}`
+              : `Trail ${Math.round(trailPct * 100)}% lock (≥£${trailAt.toFixed(2)}) — peaked +£${newPeak.toFixed(2)}, now £${uplNow.toFixed(2)}`;
             slog(strat.id, 'info', `[TRAIL] ${posName}: ${reason}`);
             const cr = await closePos(env, pos);
             if (cr.ok) {
