@@ -51,52 +51,18 @@ export const YAHOO_SYMBOL_MAP: Record<string, string> = {
   'Ethereum':      'ETH-USD',
 };
 
-// ── Quote fetch (v7 batch) ────────────────────────────────────────────────────
-
-type YahooQuoteRaw = {
-  symbol:                      string;
-  shortName?:                  string;
-  longName?:                   string;
-  regularMarketPrice?:         number;
-  bid?:                        number;
-  ask?:                        number;
-  regularMarketChangePercent?: number;
-  regularMarketVolume?:        number;
-  marketCap?:                  number;
-  fiftyTwoWeekHigh?:           number;
-  fiftyTwoWeekLow?:            number;
-  currency?:                   string;
-  fullExchangeName?:           string;
-};
+// ── Quote fetch (v7 batch via server proxy) ───────────────────────────────────
 
 export async function fetchYahooQuotes(symbols: string[]): Promise<QuoteResult[]> {
   if (!symbols.length) return [];
   const batch = symbols.slice(0, 50);
-  const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(batch.join(','))}`;
+  // Route through our own API which handles crumb auth — Yahoo now requires it
+  // even for browser requests, so direct calls return empty results.
+  const url = `/api/market/quotes?symbols=${encodeURIComponent(batch.join(','))}`;
   try {
-    const res = await fetch(url, {
-      headers: { 'Accept': 'application/json' },
-    });
-    if (!res.ok) throw new Error(`Yahoo Finance ${res.status}`);
-    const raw = await res.json() as { quoteResponse?: { result?: YahooQuoteRaw[] } };
-    return (raw.quoteResponse?.result ?? []).map(q => {
-      const price  = q.regularMarketPrice ?? 0;
-      const spread = price * 0.001;
-      return {
-        symbol:        q.symbol,
-        name:          q.shortName ?? q.longName ?? q.symbol,
-        price,
-        bid:           q.bid ?? price - spread,
-        ask:           q.ask ?? price + spread,
-        changePercent: q.regularMarketChangePercent ?? 0,
-        volume:        q.regularMarketVolume ?? 0,
-        marketCap:     q.marketCap,
-        week52High:    q.fiftyTwoWeekHigh,
-        week52Low:     q.fiftyTwoWeekLow,
-        currency:      q.currency ?? 'USD',
-        exchange:      q.fullExchangeName ?? '',
-      };
-    });
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`quotes proxy ${res.status}`);
+    return await res.json() as QuoteResult[];
   } catch {
     return [];
   }
