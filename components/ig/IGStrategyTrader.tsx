@@ -727,6 +727,9 @@ export function IGStrategyTrader() {
   const runningRef  = useRef(false); // test-scan only
   const newsSignalsRef     = useRef<Map<string, 'BUY'|'SELL'>>(new Map());
   const recentlyClosedRef  = useRef<Map<string, { closedAt: number; wasLoss: boolean }>>(new Map());
+  // Tracks orders placed but not yet confirmed in positionsRef (race-condition guard).
+  // Prevents the same epic:direction being opened twice during the ~2s loadPositions delay.
+  const pendingOrdersRef   = useRef<Set<string>>(new Set());
 
   // ── Active demo/live mode ──────────────────────────────────────────────────
   const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
@@ -1674,14 +1677,18 @@ export function IGStrategyTrader() {
         const botMode  = strat.mode ?? 'BOTH';
         const ownedDir = botMode === 'LONG_ONLY' ? 'BUY' : botMode === 'SHORT_ONLY' ? 'SELL' : null;
 
-        // [AUTO] Close same-instrument position when signal flips direction
+        // [AUTO] Close same-instrument position when signal flips direction — PROFIT ONLY.
+        // Losing positions are held: the £5 hard limit is their only exit.
+        // Closing losers on every flip is what destroyed P&L before.
         if (strat.autoClose) {
           const toClose = envPos.filter(p =>
-            p.epic === market.epic && p.direction === opposite && (ownedDir === null || p.direction === ownedDir)
+            p.epic === market.epic && p.direction === opposite &&
+            (ownedDir === null || p.direction === ownedDir) &&
+            (p.upl ?? 0) >= 0  // never close a losing position just because signal reversed
           );
           for (const opp of toClose) {
             const exitPnl = opp.upl ?? 0;
-            slog(strat.id, 'info', `[AUTO] Closing ${market.name} — signal reversed to ${tradeDir}…`);
+            slog(strat.id, 'info', `[AUTO] Closing ${market.name} (in profit) — signal reversed to ${tradeDir}…`);
             const cr = await closePos(env, opp);
             if (cr.ok) {
               const exitPx = opp.direction === 'BUY' ? (opp.bid ?? opp.level) : (opp.offer ?? opp.level);
@@ -1697,8 +1704,15 @@ export function IGStrategyTrader() {
         if (botMode === 'LONG_ONLY' && tradeDir === 'SELL') continue;
         if (botMode === 'SHORT_ONLY' && tradeDir === 'BUY') continue;
 
-        // Don't double up in same direction on same instrument
+        // Don't double up in same direction on same instrument.
+        // Also check pendingOrdersRef — covers the ~2s window between placeOrder
+        // and loadPositions updating positionsRef (race-condition guard).
+        const orderKey = `${market.epic}:${tradeDir}:${env}`;
         if (positionsRef.current[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
+        if (pendingOrdersRef.current.has(orderKey)) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — order pending, waiting for confirmation`);
+          continue;
+        }
 
         // ── Per-type concentration cap ──────────────────────────────────────────
         // Indices (FTSE/S&P/NASDAQ/DOW/DAX) are highly correlated — capped at 2.
@@ -1837,6 +1851,7 @@ export function IGStrategyTrader() {
         slog(strat.id, effectiveDir === 'BUY' ? 'buy' : 'sell',
           `[${env.toUpperCase()}] → ${effectiveDir} ${market.name} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
 
+        pendingOrdersRef.current.add(orderKey);
         const or = await placeOrder(env, market.epic, effectiveDir, orderSize, stopDist, limitDist);
 
         if (or.ok) {
@@ -1854,6 +1869,7 @@ export function IGStrategyTrader() {
           }));
           await sleep(1500);
           await loadPositions(env);
+          pendingOrdersRef.current.delete(orderKey);
           await loadWorkingOrders(env);
         } else {
           const errStr = (or.error ?? '').toLowerCase();
@@ -1872,6 +1888,7 @@ export function IGStrategyTrader() {
             status: 'REJECTED', dealReference: '', dealId: '',
             pnl: null, closeReason: null, accountType: env,
           }));
+          pendingOrdersRef.current.delete(orderKey); // clear on failure so it can be retried next cycle
         }
       }
     }
