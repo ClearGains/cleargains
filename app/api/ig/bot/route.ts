@@ -45,6 +45,11 @@ export async function GET(req: NextRequest) {
     return proxyTo(`/accounts/${account}/status`, 'GET');
   }
 
+  // Stock bot status
+  if (action === 'stock-status' && validAccount(account)) {
+    return proxyTo(`/accounts/${account}/stock/status`, 'GET');
+  }
+
   return proxyTo('/status', 'GET');
 }
 
@@ -68,6 +73,11 @@ export async function POST(req: NextRequest) {
     if (action === 'account-stop')   return proxyTo(`/accounts/${account}/stop`,   'POST');
     if (action === 'account-pause')  return proxyTo(`/accounts/${account}/pause`,  'POST');
     if (action === 'account-resume') return proxyTo(`/accounts/${account}/resume`, 'POST');
+    // Stock bot
+    if (action === 'stock-start')  return proxyTo(`/accounts/${account}/stock/start`,  'POST', body);
+    if (action === 'stock-stop')   return proxyTo(`/accounts/${account}/stock/stop`,   'POST');
+    if (action === 'stock-pause')  return proxyTo(`/accounts/${account}/stock/pause`,  'POST');
+    if (action === 'stock-resume') return proxyTo(`/accounts/${account}/stock/resume`, 'POST');
   }
 
   return proxyTo('/start', 'POST', body);

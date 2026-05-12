@@ -3,13 +3,13 @@
 import { useState } from 'react';
 import {
   Play, Square, Pause, Settings, TrendingUp, TrendingDown,
-  Minus, Zap, AlertTriangle, ToggleLeft, ToggleRight, RefreshCw,
+  Minus, Zap, AlertTriangle, ToggleLeft, ToggleRight, RefreshCw, Server, WifiOff,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { IG_STOCK_EPICS, exchangeFlag } from '@/lib/ig-stock-epics';
 import {
   useIGStockBot, DEFAULT_SETTINGS,
-  type BotSettings, type StockSignal, type LogEntry,
+  type BotSettings, type LogEntry,
 } from '@/contexts/IGStockBotContext';
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -86,7 +86,9 @@ function SettingsPanel({ settings, onChange }: { settings: BotSettings; onChange
       {field('Min signal strength', 'minStrength',      { min: 50,  max: 95,   step: 5,   suffix: '%' })}
       {field('Scan every',          'scanIntervalMins', { min: 5,   max: 60,   step: 5,   suffix: 'min' })}
       {field('Earnings blackout',   'earningsBlackout', {})}
-      <p className="text-[10px] text-gray-600 pt-1">Earnings dates are hardcoded — update quarterly in IGStockBotContext.tsx.</p>
+      <p className="text-[10px] text-gray-600 pt-1">
+        Settings are sent to the Oracle server on Start. Stop + Start to apply changes.
+      </p>
     </div>
   );
 }
@@ -98,8 +100,8 @@ export function IGStockAutoTrader() {
   const [showSettings, setShowSettings] = useState(false);
 
   const {
-    status, env, session, positions, signals, logs, settings, enabled,
-    available, balance, connecting, connErr, startingBalance,
+    status, env, connected, serverReachable, positions, signals, logs, settings, enabled,
+    available, balance, lastScanAt, nextScanAt, connecting, connErr,
   } = bot;
 
   const allTickers     = Object.keys(IG_STOCK_EPICS);
@@ -110,8 +112,27 @@ export function IGStockAutoTrader() {
     status === 'running' ? 'text-emerald-400' :
     status === 'paused'  ? 'text-amber-400'   : 'text-gray-500';
 
+  function fmtScanTime(iso: string | null) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
   return (
     <div className="space-y-4">
+
+      {/* ── Server status banner ─────────────────────────────────────────────── */}
+      {!serverReachable && status !== 'stopped' && (
+        <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+          <WifiOff className="h-3.5 w-3.5 shrink-0" />
+          Bot server unreachable — the bot may still be running on Oracle but UI cannot poll it
+        </div>
+      )}
+      {!serverReachable && status === 'stopped' && (
+        <div className="flex items-center gap-2 text-xs text-gray-500 bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2">
+          <Server className="h-3.5 w-3.5 shrink-0" />
+          Oracle bot server not reachable — configure BOT_SERVER_URL in Vercel environment variables
+        </div>
+      )}
 
       {/* ── Header bar ─────────────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-3 justify-between">
@@ -123,7 +144,7 @@ export function IGStockAutoTrader() {
             )} />
             <span className={clsx('text-xs font-semibold capitalize', statusColor)}>{status}</span>
             {status !== 'stopped' && (
-              <span className="text-[10px] text-gray-600">· runs in background</span>
+              <span className="text-[10px] text-gray-600">· Oracle server</span>
             )}
           </div>
 
@@ -143,9 +164,11 @@ export function IGStockAutoTrader() {
             )}>{env}</span>
           )}
 
-          {session
-            ? <span className="text-xs text-emerald-400">● Connected</span>
-            : <span className="text-xs text-gray-500">○ Not connected</span>
+          {connected
+            ? <span className="text-xs text-emerald-400">● IG connected</span>
+            : status !== 'stopped'
+            ? <span className="text-xs text-amber-400">○ Connecting…</span>
+            : null
           }
           {connErr && <span className="text-xs text-red-400">{connErr}</span>}
         </div>
@@ -154,6 +177,9 @@ export function IGStockAutoTrader() {
           <button onClick={() => setShowSettings(v => !v)}
             className="p-2 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:border-gray-600 transition-all">
             <Settings className="h-4 w-4" />
+          </button>
+          <button onClick={() => void bot.refresh()} className="p-2 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:border-gray-600 transition-all">
+            <RefreshCw className="h-4 w-4" />
           </button>
 
           {status === 'stopped' && (
@@ -164,11 +190,11 @@ export function IGStockAutoTrader() {
           )}
           {status === 'running' && (
             <>
-              <button onClick={bot.pause}
+              <button onClick={() => void bot.pause()}
                 className="flex items-center gap-1.5 px-3 py-2 bg-amber-600 hover:bg-amber-500 rounded-lg text-sm font-semibold text-white transition-all">
                 <Pause className="h-3.5 w-3.5" /> Pause
               </button>
-              <button onClick={bot.stop}
+              <button onClick={() => void bot.stop()}
                 className="flex items-center gap-1.5 px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-semibold text-white transition-all">
                 <Square className="h-3.5 w-3.5" /> Stop
               </button>
@@ -180,7 +206,7 @@ export function IGStockAutoTrader() {
                 className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-semibold text-white transition-all">
                 <Play className="h-3.5 w-3.5" /> Resume
               </button>
-              <button onClick={bot.stop}
+              <button onClick={() => void bot.stop()}
                 className="flex items-center gap-1.5 px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-semibold text-white transition-all">
                 <Square className="h-3.5 w-3.5" /> Stop
               </button>
@@ -195,7 +221,7 @@ export function IGStockAutoTrader() {
       )}
 
       {/* ── Stats row ──────────────────────────────────────────────────────── */}
-      {session && (
+      {(serverReachable || status !== 'stopped') && (
         <div className="flex flex-wrap gap-4 items-center text-sm">
           {balance !== null && (
             <div><span className="text-gray-500 text-xs">Balance </span><span className="font-semibold text-white">£{balance.toFixed(2)}</span></div>
@@ -206,14 +232,6 @@ export function IGStockAutoTrader() {
               <span className={clsx('font-semibold',
                 available < 100 ? 'text-red-400' : available < 500 ? 'text-amber-400' : 'text-emerald-400'
               )}>£{available.toFixed(2)}</span>
-            </div>
-          )}
-          {startingBalance !== null && balance !== null && (
-            <div>
-              <span className="text-gray-500 text-xs">P&L </span>
-              <span className={clsx('font-semibold', balance >= startingBalance ? 'text-emerald-400' : 'text-red-400')}>
-                {balance >= startingBalance ? '+' : ''}£{(balance - startingBalance).toFixed(2)}
-              </span>
             </div>
           )}
           {stockPositions.length > 0 && (
@@ -227,21 +245,24 @@ export function IGStockAutoTrader() {
               </div>
             </>
           )}
+          {lastScanAt && (
+            <div><span className="text-gray-500 text-xs">Last scan </span><span className="text-xs text-gray-400 font-mono">{fmtScanTime(lastScanAt)}</span></div>
+          )}
+          {nextScanAt && status === 'running' && (
+            <div><span className="text-gray-500 text-xs">Next scan </span><span className="text-xs text-gray-400 font-mono">{fmtScanTime(nextScanAt)}</span></div>
+          )}
           {available !== null && available < 100 && (
             <span className="text-xs text-red-400 flex items-center gap-1">
               <AlertTriangle className="h-3.5 w-3.5" /> Funds too low — bot will not trade
             </span>
           )}
-          <button onClick={() => { void bot.fetchPositions(); void bot.fetchFunds(); }} className="text-gray-500 hover:text-white ml-auto">
-            <RefreshCw className="h-3.5 w-3.5" />
-          </button>
         </div>
       )}
 
       {/* ── Stock watchlist grid ────────────────────────────────────────────── */}
       <div>
         <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-          Watchlist — toggle to enable/disable
+          Watchlist — toggle to enable/disable (applied on next Start)
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-2">
           {allTickers.map(ticker => {
@@ -362,7 +383,7 @@ export function IGStockAutoTrader() {
       )}
 
       <p className="text-[10px] text-gray-600">
-        Stock spread bets via IG · signals from Yahoo Finance hourly candles · bot persists across page navigation · not financial advice · capital at risk
+        Stock spread bets · signals from Yahoo Finance hourly candles · runs 24/7 on Oracle Cloud · not financial advice · capital at risk
       </p>
     </div>
   );

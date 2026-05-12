@@ -3,6 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { startBot, stopBot, getBotStatus, loadSavedState, pauseBot, resumeBot } from './bot';
 import { startStrategyRunner, stopStrategyRunner, getStrategyRunnerStatus, type StrategyRunnerConfig } from './strategyRunner';
 import { demoBot, liveBot, getAccountBot, type AccountKey } from './botAccount';
+import { getStockBot, type StockBotStartParams } from './stockBot';
 import { calcRsi, calcMacdHist, calcAtr } from './scalperStrategy';
 
 const app    = express();
@@ -205,6 +206,45 @@ app.post('/pause', auth, (_req: Request, res: Response) => { pauseBot(); res.jso
 app.post('/resume', auth, (_req: Request, res: Response) => { resumeBot(); res.json({ ok: true }); });
 
 // /debug/inject removed — bot no longer executes trades
+
+// ── Stock bot routes (/accounts/:account/stock/*) ────────────────────────────
+
+app.get('/accounts/:account/stock/status', auth, (req: Request, res: Response) => {
+  const key = req.params.account as AccountKey;
+  if (key !== 'demo' && key !== 'live') { res.status(400).json({ ok: false, error: 'account must be demo or live' }); return; }
+  res.json(getStockBot(key).status());
+});
+
+app.post('/accounts/:account/stock/start', auth, (req: Request, res: Response) => {
+  const key = req.params.account as AccountKey;
+  if (key !== 'demo' && key !== 'live') { res.status(400).json({ ok: false, error: 'account must be demo or live' }); return; }
+  const params = req.body as StockBotStartParams;
+  if (!Array.isArray(params.tickers) || !params.tickers.length) {
+    res.status(400).json({ ok: false, error: 'tickers array is required' }); return;
+  }
+  void getStockBot(key).start(params).then(r => res.status(r.ok ? 200 : 500).json(r));
+});
+
+app.post('/accounts/:account/stock/stop', auth, (req: Request, res: Response) => {
+  const key = req.params.account as AccountKey;
+  if (key !== 'demo' && key !== 'live') { res.status(400).json({ ok: false, error: 'account must be demo or live' }); return; }
+  getStockBot(key).stop();
+  res.json({ ok: true });
+});
+
+app.post('/accounts/:account/stock/pause', auth, (req: Request, res: Response) => {
+  const key = req.params.account as AccountKey;
+  if (key !== 'demo' && key !== 'live') { res.status(400).json({ ok: false, error: 'account must be demo or live' }); return; }
+  getStockBot(key).pause();
+  res.json({ ok: true });
+});
+
+app.post('/accounts/:account/stock/resume', auth, (req: Request, res: Response) => {
+  const key = req.params.account as AccountKey;
+  if (key !== 'demo' && key !== 'live') { res.status(400).json({ ok: false, error: 'account must be demo or live' }); return; }
+  getStockBot(key).resume();
+  res.json({ ok: true });
+});
 
 // ── Strategy runner routes ────────────────────────────────────────────────────
 app.post('/strategy/start', auth, (req: Request, res: Response) => {

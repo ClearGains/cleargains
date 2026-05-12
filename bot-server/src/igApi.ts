@@ -258,3 +258,130 @@ export async function fetchPositions(session: IGSession): Promise<IGPosition[]> 
   }
   return [];
 }
+
+export type FullPosition = IGPosition & {
+  instrumentName: string;
+  upl:        number;
+  bid:        number;
+  offer:      number;
+  stopLevel?:  number;
+  limitLevel?: number;
+};
+
+export async function fetchFullPositions(session: IGSession): Promise<FullPosition[]> {
+  const base = BASE[session.env];
+  const r = await fetch(`${base}/positions/otc`, { headers: headers(session, '2'), signal: AbortSignal.timeout(8_000) });
+  if (!r.ok) return [];
+  const d = await r.json() as {
+    positions?: Array<{
+      position: {
+        dealId: string; size: number; direction: string; level: number;
+        upl: number; limitLevel: number | null; stopLevel: number | null;
+        currency: string;
+      };
+      market: { epic: string; instrumentName: string; bid: number; offer: number };
+    }>;
+  };
+  return (d.positions ?? []).map(p => ({
+    dealId:         p.position.dealId,
+    epic:           p.market.epic,
+    direction:      p.position.direction as 'BUY' | 'SELL',
+    size:           p.position.size,
+    level:          p.position.level,
+    instrumentName: p.market.instrumentName,
+    upl:            p.position.upl,
+    bid:            p.market.bid,
+    offer:          p.market.offer,
+    stopLevel:      p.position.stopLevel ?? undefined,
+    limitLevel:     p.position.limitLevel ?? undefined,
+  }));
+}
+
+export async function placeMarketOrder(
+  session:      IGSession,
+  epic:         string,
+  direction:    'BUY' | 'SELL',
+  size:         number,
+  stopDist?:    number,
+  profitDist?:  number,
+  currencyCode = 'GBP',
+): Promise<{ dealId: string; level: number }> {
+  const base    = BASE[session.env];
+  const payload = {
+    epic, expiry: 'DFB', direction, size,
+    orderType: 'MARKET', guaranteedStop: false, trailingStop: false,
+    forceOpen: true, currencyCode,
+  };
+
+  const r = await fetch(`${base}/positions/otc`, {
+    method: 'POST', headers: headers(session, '2'),
+    body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000),
+  });
+  const d = await r.json() as { dealReference?: string; errorCode?: string };
+  if (!r.ok) throw new Error(`placeMarketOrder ${r.status}: ${d.errorCode ?? JSON.stringify(d)}`);
+
+  const dealRef = d.dealReference ?? '';
+  let confirm: { dealId?: string; level?: number; dealStatus?: string; reason?: string } = {};
+  for (let i = 0; i < 4; i++) {
+    await new Promise(res => setTimeout(res, 1_500));
+    try {
+      const cr = await fetch(`${base}/confirms/${encodeURIComponent(dealRef)}`,
+        { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });
+      if (cr.ok) {
+        confirm = await cr.json() as typeof confirm;
+        if (confirm.dealStatus === 'ACCEPTED' || confirm.dealStatus === 'REJECTED') break;
+      }
+    } catch { /* retry */ }
+  }
+
+  if (confirm.dealStatus === 'REJECTED' || !confirm.dealId) {
+    throw new Error(`Deal REJECTED: ${confirm.reason ?? confirm.dealStatus ?? 'unknown'}`);
+  }
+
+  const dealId = confirm.dealId;
+  const level  = confirm.level ?? 0;
+
+  // Apply SL/TP via PUT after deal accepted
+  if ((stopDist || profitDist) && level) {
+    const slTp: Record<string, unknown> = { trailingStop: false };
+    if (stopDist)   slTp.stopLevel  = Math.round((direction === 'BUY' ? level - stopDist  : level + stopDist)  * 100) / 100;
+    if (profitDist) slTp.limitLevel = Math.round((direction === 'BUY' ? level + profitDist : level - profitDist) * 100) / 100;
+    try {
+      await fetch(`${base}/positions/otc/${encodeURIComponent(dealId)}`, {
+        method: 'PUT', headers: headers(session, '2'),
+        body: JSON.stringify(slTp), signal: AbortSignal.timeout(8_000),
+      });
+    } catch { /* non-critical */ }
+  }
+
+  return { dealId, level };
+}
+
+export async function updatePositionLevels(
+  session:    IGSession,
+  dealId:     string,
+  stopLevel:  number | null,
+  limitLevel: number | null,
+): Promise<void> {
+  const base = BASE[session.env];
+  const r = await fetch(`${base}/positions/otc/${encodeURIComponent(dealId)}`, {
+    method: 'PUT', headers: headers(session, '2'),
+    body: JSON.stringify({ stopLevel, limitLevel, trailingStop: false }),
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`updatePositionLevels ${r.status}: ${t.slice(0, 100)}`);
+  }
+}
+
+export async function fetchAccountFunds(session: IGSession): Promise<{ available: number; balance: number }> {
+  const base = BASE[session.env];
+  const r = await fetch(`${base}/accounts`, { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });
+  if (!r.ok) throw new Error(`fetchAccountFunds ${r.status}`);
+  const d = await r.json() as {
+    accounts?: Array<{ accountId: string; preferred: boolean; balance: { available: number; balance: number } }>;
+  };
+  const acct = d.accounts?.find(a => a.accountId === session.accountId) ?? d.accounts?.[0];
+  return { available: acct?.balance.available ?? 0, balance: acct?.balance.balance ?? 0 };
+}
