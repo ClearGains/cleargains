@@ -262,7 +262,7 @@ export function IGStockAutoTrader() {
       {/* ── Stock watchlist grid ────────────────────────────────────────────── */}
       <div>
         <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-          Watchlist — toggle to enable/disable (applied on next Start)
+          Manual additions — screener auto-selects today's movers each scan, these are always included
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-2">
           {allTickers.map(ticker => {

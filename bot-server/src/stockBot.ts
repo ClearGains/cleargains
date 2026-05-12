@@ -246,6 +246,40 @@ async function fetchHourlyCandles(ticker: string): Promise<Candle[]> {
     .filter(c => c.close > 0);
 }
 
+// ── Dynamic screener — top gainers + losers that are IG-tradeable ─────────────
+
+type ScreenerEntry = { symbol: string; changePercent: number };
+
+async function fetchScreenerCandidates(): Promise<{ gainers: string[]; losers: string[] }> {
+  const auth = await getYahooCrumb();
+  const yfHdr = {
+    'User-Agent': YF_UA, Accept: 'application/json',
+    ...(auth?.cookie ? { Cookie: auth.cookie } : {}),
+  };
+
+  async function fetchOne(scrId: string): Promise<string[]> {
+    const base = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?count=20&scrIds=${scrId}&start=0`;
+    const url  = auth?.crumb ? `${base}&crumb=${encodeURIComponent(auth.crumb)}` : base;
+    try {
+      const res = await fetch(url, { headers: yfHdr, signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) return [];
+      const raw = await res.json() as {
+        finance?: { result?: Array<{ quotes?: ScreenerEntry[] }> };
+      };
+      return (raw.finance?.result?.[0]?.quotes ?? [])
+        .filter(q => q.symbol in STOCK_EPICS)
+        .slice(0, 6)
+        .map(q => q.symbol);
+    } catch { return []; }
+  }
+
+  const [gainers, losers] = await Promise.all([
+    fetchOne('day_gainers'),
+    fetchOne('day_losers'),
+  ]);
+  return { gainers, losers };
+}
+
 // ── Signal engine ─────────────────────────────────────────────────────────────
 
 function isEarningsBlackout(ticker: string, enabled: boolean): boolean {
@@ -437,7 +471,6 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
 
   async function runScan() {
     if (!running || paused || !session || !settings) return;
-    addLog('info', `Scanning ${tickers.length} stocks…`);
     lastScanAt = new Date().toISOString();
 
     await Promise.all([refreshFunds(), refreshPositions()]);
@@ -448,10 +481,21 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
       return;
     }
 
+    // Build candidate list: today's top movers from screener + manual additions
+    let candidates: string[] = tickers;
+    try {
+      const { gainers, losers } = await fetchScreenerCandidates();
+      const screenerSet = new Set([...gainers, ...losers, ...tickers]);
+      candidates = [...screenerSet];
+      addLog('info', `Scanning ${candidates.length} candidates — screener: ${gainers.length} gainers + ${losers.length} losers, ${tickers.length} manual`);
+    } catch {
+      addLog('warn', `Screener unavailable — scanning ${tickers.length} manual tickers`);
+    }
+
     const heldEpics = new Set(positions.map(p => p.epic));
     let newTrades = 0;
 
-    for (const ticker of tickers) {
+    for (const ticker of candidates) {
       if (!running || paused) break;
 
       const sig = await computeSignal(ticker, settings.earningsBlackout);
