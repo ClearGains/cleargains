@@ -672,6 +672,15 @@ export function IGStrategyTrader() {
   const startingBalanceRef = useRef<Partial<Record<'demo'|'live', number>>>({});
 
   // ── Scan frequency settings ────────────────────────────────────────────────
+  // ── Global paper mode — blocks ALL order placement when true ──────────────
+  const [paperMode, setPaperMode] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    const stored = localStorage.getItem('ig-paper-mode');
+    return stored === null ? true : stored === 'true'; // default ON for safety
+  });
+  const paperModeRef = useRef(paperMode);
+  useEffect(() => { paperModeRef.current = paperMode; localStorage.setItem('ig-paper-mode', String(paperMode)); }, [paperMode]);
+
   const [signalScanMs, setSignalScanMs] = useState(5 * 60_000);
   const [posMonitorMs, setPosMonitorMs] = useState(60_000);
   const signalStartRef = useRef<number|null>(null);
@@ -1173,6 +1182,12 @@ export function IGStrategyTrader() {
   }
 
   async function placeOrder(env: 'demo'|'live', epic:string, direction:'BUY'|'SELL', size:number, stopDist?:number, limitDist?:number) {
+    // Global paper mode — log the order but don't send it to IG
+    if (paperModeRef.current) {
+      console.info(`[PAPER] Would place: ${env.toUpperCase()} ${direction} ${epic} £${size}/pt SL:${stopDist ?? '—'} TP:${limitDist ?? '—'}`);
+      return { ok: true as const, dealReference: 'PAPER-MODE', epic, sentPayload: null, igBody: null };
+    }
+
     // Proactive freshness check (spec: validate before every IG call)
     let sess = await freshSession(env);
     if (!sess) return { ok:false as const, error:`No ${env} session`, epic, sentPayload: null, igBody: null };
@@ -1877,7 +1892,18 @@ export function IGStrategyTrader() {
           if (liveCount > 0) slog(strat.id, 'info', `⚡ Bot server: ${liveCount} live feed(s) — RSI/MACD/ATR active`);
         }
       }
-    } catch { /* bot server offline — Yahoo fallback will be used */ }
+    } catch { /* bot server offline */ }
+
+    // Guard: require live candle data before scanning.
+    // Without the bot server (Lightstreamer stream OFF), there is no RSI, MACD, or
+    // 5-min trend — all the quality gates that prevent bad trades are blind.
+    // Trading on daily % change alone produces exactly the noise signals we're trying to avoid.
+    const liveFeedCount = Object.values(botPricesRef.current).filter(e => e.candleCount >= 10).length;
+    if (liveFeedCount === 0) {
+      slog(strat.id, 'info', `[SCAN SKIPPED] No live bot server data — start the Lightstreamer stream in the IG Server Bot panel first`);
+      scanInProgressRef.current.delete(strat.id);
+      return;
+    }
 
     // Pre-fetch IG client sentiment for all watchlist epics (contrarian gate)
     const envForSent = strat.accounts.includes('live') ? 'live' : 'demo';
@@ -2781,6 +2807,39 @@ export function IGStrategyTrader() {
           </button>
         </div>
       )}
+
+      {/* ── Paper Mode banner — full-width, impossible to miss ──────────── */}
+      <div className={clsx(
+        'flex items-center gap-3 rounded-lg px-4 py-3 border transition-all',
+        paperMode
+          ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+          : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+      )}>
+        <div className="text-xl">{paperMode ? '🔒' : '⚡'}</div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-bold">{paperMode ? 'Paper Mode — No Orders Will Be Placed' : 'Live Trading Enabled'}</p>
+          <p className="text-[11px] opacity-70 mt-0.5">
+            {paperMode
+              ? 'Bot scans and logs signals but cannot open or close any positions. Turn off Paper Mode to allow real trades.'
+              : 'Bot will place real orders. Turn Paper Mode on to scan signals without trading.'}
+          </p>
+        </div>
+        <button
+          onClick={() => {
+            if (paperMode) {
+              if (!confirm('Turn off Paper Mode? The bot will start placing real orders automatically.')) return;
+            }
+            setPaperMode(v => !v);
+          }}
+          className={clsx(
+            'shrink-0 px-4 py-2 rounded-lg text-xs font-bold border transition-all',
+            paperMode
+              ? 'bg-amber-500 hover:bg-amber-400 text-black border-amber-400'
+              : 'bg-red-600/30 hover:bg-red-600/50 text-red-300 border-red-500/40'
+          )}>
+          {paperMode ? 'Enable Live Trading' : 'Switch to Paper Mode'}
+        </button>
+      </div>
 
       {/* ── Env header badge ─────────────────────────────────────────────── */}
       {activeMode === 'demo' ? (
