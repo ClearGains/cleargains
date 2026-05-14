@@ -400,8 +400,8 @@ function evaluateSignal(
   mType:         MarketType,
 ): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
   const minMove: Record<MarketType, number> = {
-    INDEX:     0.25,  // 0.25% on FTSE/S&P is a real intraday move
-    FOREX:     0.10,  // GBP/USD 0.10% is meaningful; typical daily range is 0.3-0.8%
+    INDEX:     0.50,  // 0.25% is daily noise; 0.50% (42 FTSE pts) = real intraday trend
+    FOREX:     0.20,  // 0.10% was too small (10 pips noise); 0.20% (~26 pips) = real move
     COMMODITY: 0.40,
     CRYPTO:    0.50,
     SHARES:    0.35,
@@ -1417,9 +1417,19 @@ export function IGStrategyTrader() {
       }
     }
 
-    // ── Gate 3: 5-min trend alignment (hard block, not a penalty) ───────────
-    // If the short-term trend is actively pointing the other way, skip — don't fight it.
-    if (direction !== 'HOLD' && botCandleCount >= 10) {
+    // ── Gate 3: 5-min trend — require active confirmation, not just block conflicts ──
+    // With 20+ candles we have enough data to be selective: only trade when the
+    // recent short-term trend actively agrees with the daily signal direction.
+    // NEUTRAL means "unclear" — don't trade into ambiguity.
+    // With < 20 candles we fall back to conflict-block only (less data, less strict).
+    if (direction !== 'HOLD' && botCandleCount >= 20) {
+      const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
+      const trendConfirms = (direction === 'BUY' && trend5m === 'UP') || (direction === 'SELL' && trend5m === 'DOWN');
+      if (!trendConfirms) {
+        slog(strat.id, 'signal', `[SKIP] ${market.name} — 5-min trend ${trend5m} does not confirm ${direction} signal`);
+        direction = 'HOLD'; strength = 0;
+      }
+    } else if (direction !== 'HOLD' && botCandleCount >= 10) {
       const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
       const trendConflict = (direction === 'BUY' && trend5m === 'DOWN') || (direction === 'SELL' && trend5m === 'UP');
       if (trendConflict) { direction = 'HOLD'; strength = 0; }
@@ -1607,15 +1617,16 @@ export function IGStrategyTrader() {
           continue;
         }
 
-        // ── Portfolio cap — hard stop, no rotation ─────────────────────────────
-        const ownedPositions = positionsRef.current[env].filter(p => ownedDir === null || p.direction === ownedDir);
-        const fundsForMax    = igFundsRef.current[env]?.available ?? 0;
-        const effectiveMax   = strat.autoMaxPositions
+        // ── Portfolio cap — count unique instruments (epics), not total position copies ───
+        const ownedPositions    = positionsRef.current[env].filter(p => ownedDir === null || p.direction === ownedDir);
+        const ownedUniqueEpics  = new Set(ownedPositions.map(p => p.epic)).size;
+        const fundsForMax       = igFundsRef.current[env]?.available ?? 0;
+        const effectiveMax      = strat.autoMaxPositions
           ? calcAutoMaxPositions(fundsForMax, asGlobal)
           : strat.maxPositions;
 
-        if (effectiveMax > 0 && ownedPositions.length >= effectiveMax) {
-          slog(strat.id, 'signal', `[SKIP] ${market.name} — at portfolio cap (${ownedPositions.length}/${effectiveMax})`);
+        if (effectiveMax > 0 && ownedUniqueEpics >= effectiveMax) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — at portfolio cap (${ownedUniqueEpics} unique instruments / ${effectiveMax} max)`);
           continue;
         }
 
@@ -1980,22 +1991,23 @@ export function IGStrategyTrader() {
           if (botData && botData.candleCount >= 15) {
             const cRed   = botData.consecutiveReds   ?? 0;
             const cGreen = botData.consecutiveGreens ?? 0;
-            // Frontend-computed reversal: 2+ consecutive candles against position + RSI/MACD gate
-            const reversalToSell = cRed   >= 2 && (botData.rsi === null || botData.rsi > 30) && (botData.macd === null || botData.macd < 0.001);
-            const reversalToBuy  = cGreen >= 2 && (botData.rsi === null || botData.rsi < 70) && (botData.macd === null || botData.macd > -0.001);
+            // 3+ consecutive candles required (not 2) — 2 red candles is daily noise and
+            // leads to closing at £0.10-0.20 profit before the position has room to run.
+            const reversalToSell = cRed   >= 3 && (botData.rsi === null || botData.rsi > 30) && (botData.macd === null || botData.macd < 0.001);
+            const reversalToBuy  = cGreen >= 3 && (botData.rsi === null || botData.rsi < 70) && (botData.macd === null || botData.macd > -0.001);
             const shouldFlip = (pos.direction === 'BUY'  && reversalToSell) ||
                                (pos.direction === 'SELL' && reversalToBuy);
             if (shouldFlip) {
               const uplNow = pos.upl ?? 0;
-              // Only close on reversal when the position is in profit — take the gain.
-              // If it's still at a loss, hold it and let the £5 hard limit be the backstop.
-              // Closing losers on every small reversal is what destroyed P&L before.
-              if (uplNow < 0) {
+              // Minimum £2 profit before reversal close is allowed.
+              // This prevents exiting at pennies — a £0.14 profit is not a win,
+              // it's noise. One real loss would wipe many such exits.
+              const minReversalProfit = 2.0;
+              if (uplNow < minReversalProfit) {
                 const consTag = pos.direction === 'BUY' ? `${cRed}xred` : `${cGreen}xgreen`;
-                slog(strat.id, 'info', `[REVERSAL] Holding ${posName} despite reversal (${consTag}, P&L £${uplNow.toFixed(2)}) — waiting for recovery or £5 limit`);
-                // Don't continue — fall through to trailing stop logic
+                slog(strat.id, 'info', `[REVERSAL] Holding ${posName} (${consTag}, P&L £${uplNow.toFixed(2)}) — need ≥£${minReversalProfit} profit to exit on reversal`);
+                // fall through to trailing stop logic
               } else {
-                // In profit — take it on the reversal signal
                 const consTag = pos.direction === 'BUY' ? `${cRed}xred` : `${cGreen}xgreen`;
                 const rsiTag  = botData.rsi  !== null ? ` RSI:${botData.rsi.toFixed(0)}` : '';
                 const macdTag = botData.macd !== null ? ` MACD:${botData.macd > 0 ? '+' : ''}${botData.macd.toFixed(4)}` : '';
