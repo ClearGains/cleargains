@@ -1788,6 +1788,15 @@ export function IGStrategyTrader() {
           slog(strat.id, 'info', `[${mType}] ${market.name} — skipping Gemini, trusting indicator signal directly`);
         }
 
+        // Hard Paper Mode block at the point of trade decision — not inside placeOrder.
+        // placeOrder can be captured in stale closures; this guard runs in the current scan closure.
+        if (paperModeRef.current) {
+          slog(strat.id, 'info', `[PAPER] Would open: ${effectiveDir} ${market.name} £${orderSize}/pt — Paper Mode is ON, no order sent`);
+          pendingOrdersRef.current.delete(orderKey);
+          placedEpicsRef.current.delete(`${market.epic}:${env}`);
+          continue;
+        }
+
         const maxLoss = orderSize * stopDist;
         slog(strat.id, effectiveDir === 'BUY' ? 'buy' : 'sell',
           `[${env.toUpperCase()}] → ${effectiveDir} ${market.name} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
@@ -2810,17 +2819,17 @@ export function IGStrategyTrader() {
       )}>
         <div className="text-xl">{paperMode ? '🔒' : '⚡'}</div>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-bold">{paperMode ? 'Paper Mode — No Orders Will Be Placed' : 'Live Trading Enabled'}</p>
+          <p className="text-sm font-bold">{paperMode ? 'Paper Mode ON — Bot will not place any orders (demo or live)' : 'Paper Mode OFF — Bot is placing real orders on demo and live'}</p>
           <p className="text-[11px] opacity-70 mt-0.5">
             {paperMode
-              ? 'Bot scans and logs signals but cannot open or close any positions. Turn off Paper Mode to allow real trades.'
-              : 'Bot will place real orders. Turn Paper Mode on to scan signals without trading.'}
+              ? 'Bot scans and logs signals only. No positions will open on demo or live accounts until you turn this off.'
+              : 'Bot will open and close positions automatically on whichever accounts your strategies are set to run on.'}
           </p>
         </div>
         <button
           onClick={() => {
             if (paperMode) {
-              if (!confirm('Turn off Paper Mode? The bot will start placing real orders automatically.')) return;
+              if (!confirm('Turn off Paper Mode?\n\nThe bot will start placing real orders on your demo and/or live accounts automatically.')) return;
             }
             setPaperMode(v => !v);
           }}
@@ -2830,7 +2839,7 @@ export function IGStrategyTrader() {
               ? 'bg-amber-500 hover:bg-amber-400 text-black border-amber-400'
               : 'bg-red-600/30 hover:bg-red-600/50 text-red-300 border-red-500/40'
           )}>
-          {paperMode ? 'Enable Live Trading' : 'Switch to Paper Mode'}
+          {paperMode ? 'Turn Off Paper Mode (allow trading)' : 'Turn On Paper Mode (stop trading)'}
         </button>
       </div>
 
