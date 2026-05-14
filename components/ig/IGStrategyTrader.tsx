@@ -761,6 +761,14 @@ export function IGStrategyTrader() {
   // Tracks orders placed but not yet confirmed in positionsRef (race-condition guard).
   // Prevents the same epic:direction being opened twice during the ~2s loadPositions delay.
   const pendingOrdersRef   = useRef<Set<string>>(new Set());
+  // Prevents concurrent scan executions: if a scan is still running when the next
+  // timer fires, the new fire is silently skipped. A 20-market scan with Gemini
+  // can take 3-5 min; overlapping scans are the primary cause of duplicate positions.
+  const scanInProgressRef  = useRef<Set<string>>(new Set());
+  // Epics locked within the current scan cycle. Set as soon as we commit to an order,
+  // cleared at the start of the NEXT scan after positions are refreshed.
+  // Adds a second layer of protection on top of pendingOrdersRef for same-epic dupes.
+  const placedEpicsRef     = useRef<Set<string>>(new Set());
 
   // ── Active demo/live mode ──────────────────────────────────────────────────
   const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
@@ -1678,7 +1686,7 @@ export function IGStrategyTrader() {
       return sum + (strat.autoMaxPositions ? calcAutoMaxPositions(f, asGlobal) : strat.maxPositions);
     }, 0);
     const totalOwned = envs.reduce((sum, e) =>
-      sum + positions[e].filter(p => ownedDirGlobal === null || p.direction === ownedDirGlobal).length, 0);
+      sum + (positionsRef.current[e] ?? []).filter(p => ownedDirGlobal === null || p.direction === ownedDirGlobal).length, 0);
     const globalFillRatio = totalAllowed > 0 ? totalOwned / totalAllowed : 1;
     const dynamicMinStrength = strat.minStrength ?? 72; // high bar — only strong, confirmed signals
 
@@ -1756,8 +1764,10 @@ export function IGStrategyTrader() {
         // HARD RULE: max 1 open position per epic (regardless of type cap) to prevent
         // the same instrument being opened multiple times across strategies.
         const sameEpicCount = positionsRef.current[env].filter(p => p.epic === market.epic).length;
-        if (sameEpicCount >= 1) {
-          slog(strat.id, 'signal', `[SKIP] ${market.name} — already have position on this instrument`);
+        // Also check placedEpicsRef — catches epics ordered earlier in THIS scan cycle
+        // before loadPositions has confirmed them (covers within-scan duplicates).
+        if (sameEpicCount >= 1 || placedEpicsRef.current.has(`${market.epic}:${env}`)) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — already have a position on this instrument`);
           continue;
         }
         const typeMax: Record<MarketType, number> = {
@@ -1869,6 +1879,10 @@ export function IGStrategyTrader() {
         // Reserve slot BEFORE any async call — prevents concurrent strategy scans
         // from both passing the pending check before either has added their key.
         pendingOrdersRef.current.add(orderKey);
+        // Lock this epic for the rest of THIS scan cycle — protects against the
+        // case where placedEpicsRef.clear() hasn't run yet and a second market
+        // in the same watchlist maps to the same underlying instrument.
+        placedEpicsRef.current.add(`${market.epic}:${env}`);
 
         // Gemini second opinion
         let effectiveDir: 'BUY' | 'SELL' = tradeDir as 'BUY' | 'SELL';
@@ -1893,7 +1907,8 @@ export function IGStrategyTrader() {
             slog(strat.id, 'info', `[GEMINI] ${market.name} → ${gv.direction} ${gv.confidence}% — ${gv.reason} (${gv.engine})`);
             if (gv.direction === 'SKIP' || gv.confidence < (strat.minStrength ?? 50)) {
               slog(strat.id, 'info', `[GEMINI] Skipped ${market.name} — ${gv.direction} ${gv.confidence}%`);
-              pendingOrdersRef.current.delete(orderKey); // Release slot on skip
+              pendingOrdersRef.current.delete(orderKey);
+              placedEpicsRef.current.delete(`${market.epic}:${env}`); // release epic lock — no order placed
               continue;
             }
             if (gv.direction === 'BUY' || gv.direction === 'SELL') effectiveDir = gv.direction;
@@ -1940,7 +1955,8 @@ export function IGStrategyTrader() {
             status: 'REJECTED', dealReference: '', dealId: '',
             pnl: null, closeReason: null, accountType: env,
           }));
-          pendingOrdersRef.current.delete(orderKey); // clear on failure so it can be retried next cycle
+          pendingOrdersRef.current.delete(orderKey);
+          placedEpicsRef.current.delete(`${market.epic}:${env}`); // release epic lock — order was rejected
         }
       }
     }
@@ -1951,10 +1967,24 @@ export function IGStrategyTrader() {
   // ── Signal scan: scan markets + execute trades ────────────────────────────
   const runSignalScan = useCallback(async (strat: IGSavedStrategy) => {
     if (getStratState(strat.id) === 'STOPPED') return;
+
+    // ── Concurrent-scan guard ─────────────────────────────────────────────────
+    // A scan with Gemini over 20 markets takes 3-5 minutes. If the 5-min timer
+    // fires before the previous scan finishes, the new invocation is silently
+    // dropped. Without this guard, two overlapping scans both see 0 positions
+    // for an epic and both place an order — producing the duplicate-position bug.
+    if (scanInProgressRef.current.has(strat.id)) {
+      slog(strat.id, 'info', '[SCAN] ⏭ Previous scan still running — skipping this timer fire to prevent duplicates');
+      return;
+    }
+    scanInProgressRef.current.add(strat.id);
+
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
 
-    // Refresh positions at scan start so cap checks (INDEX max 2, etc.) always use live data.
+    // Refresh positions at scan start so cap checks always use live data.
     await loadPositions();
+    // Clear the intra-cycle epic lock now that positions are freshly confirmed.
+    placedEpicsRef.current.clear();
 
     // PERMISSION: Fetch account balances at the start of each scan cycle so
     // calcDynamicSize() has up-to-date fund data when sizing positions.
@@ -1998,26 +2028,32 @@ export function IGStrategyTrader() {
       } catch { /* sentiment fetch failed — skip contrarian gate this cycle */ }
     }
 
-    slog(strat.id, 'info', `📡 Signal scan — ${markets.length} markets… (fetching news)`);
-    await fetchNewsSignals(markets, positions);
+    try {
+      slog(strat.id, 'info', `📡 Signal scan — ${markets.length} markets… (fetching news)`);
+      await fetchNewsSignals(markets, positions);
 
-    for (let i = 0; i < markets.length; i++) {
-      if (getStratState(strat.id) === 'STOPPED') break;
-      const m = markets[i];
-      setScanProgress(`${m.name} (${i+1}/${markets.length})`);
-      await scanMarket(strat, m);
-      if (i < markets.length - 1) await sleep(300);
+      for (let i = 0; i < markets.length; i++) {
+        if (getStratState(strat.id) === 'STOPPED') break;
+        const m = markets[i];
+        setScanProgress(`${m.name} (${i+1}/${markets.length})`);
+        await scanMarket(strat, m);
+        if (i < markets.length - 1) await sleep(300);
+      }
+
+      setScanProgress('');
+      const runEnv: 'demo'|'live' = strat.accounts.includes('live') ? 'live' : 'demo';
+      const updated: IGSavedStrategy = { ...strat, env: strat.env ?? runEnv, lastRunAt: new Date().toISOString(), lastRunEnv: runEnv };
+      saveStrategy(updated);
+      setStrategies(loadStrategies(strat.env ?? activeMode));
+      const scanMs = strat.signalScanMs ?? signalScanMs;
+      lastSignalAtRef.current = Date.now();
+      setLastSignalAt(Date.now());
+      slog(strat.id, 'info', `Signal scan complete — next in ${Math.round(scanMs / 60_000)}min`);
+    } finally {
+      // Always release the scan lock — even if an error occurs mid-scan.
+      // Without this, a thrown error would permanently block all future scans.
+      scanInProgressRef.current.delete(strat.id);
     }
-
-    setScanProgress('');
-    const runEnv: 'demo'|'live' = strat.accounts.includes('live') ? 'live' : 'demo';
-    const updated: IGSavedStrategy = { ...strat, env: strat.env ?? runEnv, lastRunAt: new Date().toISOString(), lastRunEnv: runEnv };
-    saveStrategy(updated);
-    setStrategies(loadStrategies(strat.env ?? activeMode));
-    const scanMs = strat.signalScanMs ?? signalScanMs;
-    lastSignalAtRef.current = Date.now();
-    setLastSignalAt(Date.now());
-    slog(strat.id, 'info', `Signal scan complete — next in ${Math.round(scanMs / 60_000)}min`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, positions, signalScanMs, loadPositions]);
 
