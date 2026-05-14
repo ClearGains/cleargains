@@ -1688,7 +1688,7 @@ export function IGStrategyTrader() {
     const totalOwned = envs.reduce((sum, e) =>
       sum + (positionsRef.current[e] ?? []).filter(p => ownedDirGlobal === null || p.direction === ownedDirGlobal).length, 0);
     const globalFillRatio = totalAllowed > 0 ? totalOwned / totalAllowed : 1;
-    const dynamicMinStrength = strat.minStrength ?? 72; // high bar — only strong, confirmed signals
+    const dynamicMinStrength = strat.minStrength ?? 78; // high bar — only strong, confirmed signals
 
     const tradeDir: 'BUY' | 'SELL' | null =
       newsDir
@@ -1760,9 +1760,7 @@ export function IGStrategyTrader() {
         // Indices (FTSE/S&P/NASDAQ/DOW/DAX) are highly correlated — capped at 2 distinct instruments.
         // Commodities and crypto are volatile — capped at 1 each.
         // Forex pairs share USD/JPY exposure — capped at 2.
-        // Shares — capped at 2 to avoid sector concentration.
-        // HARD RULE: max 1 open position per epic (regardless of type cap) to prevent
-        // the same instrument being opened multiple times across strategies.
+        // HARD RULE: exactly 1 open position per epic at all times.
         const sameEpicCount = positionsRef.current[env].filter(p => p.epic === market.epic).length;
         // Also check placedEpicsRef — catches epics ordered earlier in THIS scan cycle
         // before loadPositions has confirmed them (covers within-scan duplicates).
@@ -1770,32 +1768,30 @@ export function IGStrategyTrader() {
           slog(strat.id, 'signal', `[SKIP] ${market.name} — already have a position on this instrument`);
           continue;
         }
+        // Per-type cap: 1 per asset class. The cap is a ceiling, not a target —
+        // the bot will only trade when genuinely signalled, never to "fill slots".
         const typeMax: Record<MarketType, number> = {
-          INDEX:     2,
-          FOREX:     2,
-          SHARES:    2,
+          INDEX:     1,
+          FOREX:     1,
+          SHARES:    1,
           COMMODITY: 1,
           CRYPTO:    1,
         };
         const typeCount = positionsRef.current[env].filter(p => getMarketType(p.epic) === mType).length;
         if (typeCount >= typeMax[mType]) {
-          slog(strat.id, 'signal', `[SKIP] ${market.name} — ${mType} cap (${typeCount}/${typeMax[mType]} positions)`);
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — ${mType} slot occupied (max 1 per asset class)`);
           continue;
         }
 
         // ── Portfolio cap — hard stop, no rotation ─────────────────────────────
-        // Rotation (closing losers to make room) was the primary source of forced
-        // losses. Skip any new signal when the book is full. Positions exit via
-        // TP, stop-loss, or the reversal close in the monitor — never to manufacture capacity.
         const ownedPositions = positionsRef.current[env].filter(p => ownedDir === null || p.direction === ownedDir);
         const fundsForMax    = igFundsRef.current[env]?.available ?? 0;
         const effectiveMax   = strat.autoMaxPositions
           ? calcAutoMaxPositions(fundsForMax, asGlobal)
           : strat.maxPositions;
-        const fillRatio = effectiveMax > 0 ? ownedPositions.length / effectiveMax : 1;
 
         if (effectiveMax > 0 && ownedPositions.length >= effectiveMax) {
-          slog(strat.id, 'signal', `[SKIP] ${market.name} — at cap (${ownedPositions.length}/${effectiveMax})`);
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — at portfolio cap (${ownedPositions.length}/${effectiveMax})`);
           continue;
         }
 
