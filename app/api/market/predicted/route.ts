@@ -59,12 +59,15 @@ function scoreQuote(q: Mover): { signal: Signal; signalReasons: string[]; score:
   if (q.goldenCross && q.aboveSma50)   { score += 2; reasons.push('Golden cross + above SMA50'); }
   if (!q.goldenCross && !q.aboveSma50) { score -= 2; reasons.push('Death cross + below SMA50'); }
 
-  // Momentum — upside: reward moderate moves, penalise stocks that have already run hard.
-  // A stock up 15%+ has likely made its move — buying at that point is chasing, not investing.
-  if (totalChange > 15)       { score -= 2; reasons.push(`Already up ${totalChange.toFixed(1)}% — chasing risk, move likely priced in`); }
-  else if (totalChange > 10)  { score -= 1; reasons.push(`Up ${totalChange.toFixed(1)}% — stretched entry, limited upside`); }
-  else if (totalChange > 5)   { score += 2; reasons.push(`Up ${totalChange.toFixed(1)}% momentum`); }
-  else if (totalChange > 3)   { score += 1; reasons.push(`Up ${totalChange.toFixed(1)}% from yesterday`); }
+  // Momentum — upside: reward EARLY moves (1-5%), heavily penalise stocks that have already run.
+  // A stock up 8%+ has made most of its move — the best trade was earlier, not now.
+  // Buying after a big move is chasing: the reward/risk has inverted.
+  if (totalChange > 15)       { score -= 5; reasons.push(`Already up ${totalChange.toFixed(1)}% — move is priced in, do NOT chase`); }
+  else if (totalChange > 10)  { score -= 4; reasons.push(`Up ${totalChange.toFixed(1)}% — extended entry, most upside already gone`); }
+  else if (totalChange > 8)   { score -= 3; reasons.push(`Up ${totalChange.toFixed(1)}% — stretched, limited remaining upside`); }
+  else if (totalChange > 5)   { score -= 1; reasons.push(`Up ${totalChange.toFixed(1)}% — moderate chase risk`); }
+  else if (totalChange > 2)   { score += 2; reasons.push(`Up ${totalChange.toFixed(1)}% — early momentum`); }
+  else if (totalChange > 0.5) { score += 1; reasons.push(`Up ${totalChange.toFixed(1)}% — early move forming`); }
 
   // Momentum — downside: oversold bounce candidates.
   // Very large drops (>15%) get less credit — could be fundamental, not just a dip.

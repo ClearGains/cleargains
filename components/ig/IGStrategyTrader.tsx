@@ -400,7 +400,9 @@ function calibrateSignal(
       strength = pct >= 1.0 ? 85 : pct >= 0.5 ? 75 : pct >= 0.3 ? 65 : Math.round((pct / 0.3) * 60);
       break;
     case 'FOREX':
-      strength = pct >= 0.3 ? 85 : pct >= 0.2 ? 75 : pct >= 0.1 ? 65 : Math.round((pct / 0.1) * 60);
+      // Forex moves 0.1-0.5% daily — old thresholds required 0.3% for 85%, making
+      // most forex pairs permanently untradeable. Halved so 0.15% → 75%, 0.2% → 85%.
+      strength = pct >= 0.2 ? 85 : pct >= 0.15 ? 78 : pct >= 0.1 ? 70 : pct >= 0.05 ? 60 : Math.round((pct / 0.05) * 50);
       break;
     case 'COMMODITY':
       strength = pct >= 2.0 ? 85 : pct >= 1.0 ? 75 : pct >= 0.5 ? 65 : Math.round((pct / 0.5) * 60);
@@ -673,6 +675,10 @@ export function IGStrategyTrader() {
   // positionsRef mirrors state but is updated synchronously — scanMarket reads
   // this so it never sees stale positions after a trade is placed mid-scan.
   const positionsRef = useRef<PositionMap>({ demo:[], live:[] });
+  // Refs to the latest callback versions — timers capture stale closures, so
+  // they must read from refs. Updated on every render (no effect needed).
+  const loadPositionsRef    = useRef<typeof loadPositions | null>(null);
+  const runSignalScanRef    = useRef<((s: IGSavedStrategy) => Promise<void>) | null>(null);
   const [loadingPos, setLoadingPos] = useState(false);
   const [closingId, setClosingId]   = useState<string|null>(null);
   const [posError, setPosError]     = useState<string|null>(null);
@@ -1098,6 +1104,7 @@ export function IGStrategyTrader() {
     }
     setLoadingPos(false);
   }, [sessions]);
+  loadPositionsRef.current = loadPositions; // always keep ref current so timers use latest sessions
 
   useEffect(() => {
     if (Object.values(sessions).some(Boolean)) {
@@ -1897,6 +1904,30 @@ export function IGStrategyTrader() {
         // in the same watchlist maps to the same underlying instrument.
         placedEpicsRef.current.add(`${market.epic}:${env}`);
 
+        // ── Final live guard — ask IG directly before committing funds ─────────
+        // positionsRef can be stale if sessions refreshed mid-scan (stale closure issue).
+        // This fresh fetch is the bulletproof gate: if the epic is already open in IG,
+        // abort regardless of what the ref says.
+        try {
+          const guardSess = await freshSession(env);
+          if (guardSess) {
+            const guardRes = await fetch('/api/ig/positions', { headers: makeHeaders(guardSess, env) });
+            if (guardRes.ok) {
+              const guardData = await guardRes.json() as { ok: boolean; positions?: IGPosition[] };
+              if (guardData.ok) {
+                const livePos = guardData.positions ?? [];
+                positionsRef.current = { ...positionsRef.current, [env]: livePos }; // sync ref
+                if (livePos.some(p => p.epic === market.epic)) {
+                  slog(strat.id, 'signal', `[GUARD] ${market.name} — live IG check: position already exists, releasing locks`);
+                  pendingOrdersRef.current.delete(orderKey);
+                  placedEpicsRef.current.delete(`${market.epic}:${env}`);
+                  continue;
+                }
+              }
+            }
+          }
+        } catch { /* network error — proceed with ref-based check */ }
+
         // Gemini second opinion — SHARES only.
         // INDEX and FOREX are driven by liquid price-action data (RSI/MACD/IG real-time).
         // Calling Gemini on them adds ~10s latency per market with no edge: Gemini has
@@ -2001,8 +2032,10 @@ export function IGStrategyTrader() {
 
     const markets = (strat.watchlist?.length ? strat.watchlist : DEFAULT_WATCHLIST).filter(m => m.enabled);
 
-    // Refresh positions at scan start so cap checks always use live data.
-    await loadPositions();
+    // Always use the ref — ensures stale closures (from setInterval) call the latest loadPositions
+    // which has the current sessions. Without this, a stale closure uses old sessions → 401 → empty positionsRef.
+    const loadPos = loadPositionsRef.current ?? loadPositions;
+    await loadPos();
 
     // PERMISSION: Fetch account balances at the start of each scan cycle so
     // calcDynamicSize() has up-to-date fund data when sizing positions.
@@ -2101,6 +2134,7 @@ export function IGStrategyTrader() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, positions, signalScanMs, loadPositions]);
+  runSignalScanRef.current = runSignalScan; // keep ref current so the setInterval always calls latest version
 
   // ── Position monitor: trailing stops + SL/TP refresh + stale recycling ────
   const runPositionMonitor = useCallback(async (strat: IGSavedStrategy) => {
@@ -2436,7 +2470,7 @@ export function IGStrategyTrader() {
     void runPositionMonitor(strat);
 
     stratTimersRef.current[strat.id] = {
-      signal: setInterval(() => { signalStartRef.current = Date.now(); void runSignalScan(strat); }, sScanMs),
+      signal: setInterval(() => { signalStartRef.current = Date.now(); void (runSignalScanRef.current ?? runSignalScan)(strat); }, sScanMs),
       pos:    setInterval(() => { posStartRef.current    = Date.now(); void runPositionMonitor(strat); }, pMonMs),
     };
 

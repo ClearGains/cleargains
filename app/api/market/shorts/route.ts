@@ -167,6 +167,17 @@ function scoreConviction(q: Mover) {
   const overnight   = q.extendedChangePercent ?? 0;
   const totalChange = q.changePercent + overnight;
 
+  // Hard gate: if the stock is rising today it has buyers in control.
+  // Shorting a stock that is actively going up is fighting the trend — wait
+  // for exhaustion and reversal confirmation before entering a conviction short.
+  if (totalChange > 1) {
+    return {
+      shortSignal: 'AVOID' as const,
+      shortReasons: [`Up ${totalChange.toFixed(1)}% today — wait for reversal confirmation before shorting`],
+      shortScore: 0,
+    };
+  }
+
   if (!q.goldenCross && !q.aboveSma50) { score += 3; reasons.push('Death cross + below SMA50 — bearish structure'); }
   else if (!q.goldenCross)             { score += 2; reasons.push('Death cross (SMA50 < SMA200)'); }
   if (!q.aboveSma200)                  { score += 2; reasons.push('Below SMA200 — long-term downtrend confirmed'); }
@@ -213,12 +224,18 @@ function scoreDayTrade(q: Mover) {
   else if (q.volumeRatio > 1.5) { score += 2; reasons.push(`Volume ${q.volumeRatio.toFixed(1)}× avg`); }
   else if (q.volumeRatio < 0.8) { score -= 3; reasons.push('Low volume — avoid day trading'); }
 
-  // Intraday momentum is the core signal
+  // Intraday momentum is the core signal — must be falling NOW to day-trade short
+  if (totalChange > 0) {
+    return {
+      shortSignal: 'AVOID' as const,
+      shortReasons: [`Up ${totalChange.toFixed(1)}% today — day-trade shorts require active downward momentum`],
+      shortScore: 0,
+    };
+  }
   if (totalChange < -8)       { score += 4; reasons.push(`Down ${Math.abs(totalChange).toFixed(1)}% intraday — strong momentum`); }
   else if (totalChange < -5)  { score += 3; reasons.push(`Down ${Math.abs(totalChange).toFixed(1)}% — bearish momentum`); }
   else if (totalChange < -3)  { score += 2; reasons.push(`Down ${Math.abs(totalChange).toFixed(1)}% today`); }
   else if (totalChange < -1)  { score += 1; reasons.push(`Down ${Math.abs(totalChange).toFixed(1)}% — early weakness`); }
-  else if (totalChange > 3)   { score -= 4; reasons.push('Rising today — not a day-trade short setup'); }
 
   // Price in day's range — near lows = momentum continuing
   const dayRange = q.dayHigh - q.dayLow;
@@ -248,6 +265,16 @@ function scoreSmallCap(q: Mover) {
   let score = 0;
   const overnight   = q.extendedChangePercent ?? 0;
   const totalChange = q.changePercent + overnight;
+
+  // Small caps can pump 20-50% on a single headline. Shorting on an up day is
+  // extremely dangerous — the squeeze risk is too high. Only short when actually falling.
+  if (totalChange > 2) {
+    return {
+      shortSignal: 'AVOID' as const,
+      shortReasons: [`Up ${totalChange.toFixed(1)}% today — small cap momentum, extreme squeeze risk if shorted`],
+      shortScore: 0,
+    };
+  }
 
   // Post-pump reversal is the best small-cap short setup
   if (q.fromHigh < -15 && !q.goldenCross && totalChange < 0) {
