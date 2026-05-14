@@ -385,193 +385,51 @@ function isLiquidTradingWindow(mType: MarketType): boolean {
  * Indices / forex move much less than individual stocks, so the
  * thresholds are scaled per asset class.
  */
-function calibrateSignal(
+// ── Signal evaluation — three hard gates, no score tables ────────────────────
+// Philosophy: fewer, clearer rules beat many fuzzy ones.
+// Gate 1 — Price move: must exceed the minimum meaningful threshold for this asset class.
+// Gate 2 — RSI: block overbought buys (>68) and oversold sells (<32). These are the two
+//          most reliable losing trades — you're always too late when RSI is at extremes.
+// Gate 3 — MACD: if momentum is pointing the other direction, skip.
+// All three must pass. If any gate fails → HOLD.
+// Strength is proportional to how far the move exceeds the threshold (not a magic table).
+function evaluateSignal(
   changePercent: number,
-  rawSignal: 'BUY' | 'SELL' | 'NEUTRAL',
-  mType: MarketType,
-): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
-  const pct = Math.abs(changePercent);
-  const dir: 'BUY' | 'SELL' | 'HOLD' =
-    rawSignal === 'BUY' ? 'BUY' : rawSignal === 'SELL' ? 'SELL' : 'HOLD';
-
-  let strength: number;
-  switch (mType) {
-    case 'INDEX':
-      strength = pct >= 1.0 ? 85 : pct >= 0.5 ? 75 : pct >= 0.3 ? 65 : Math.round((pct / 0.3) * 60);
-      break;
-    case 'FOREX':
-      // Forex moves 0.1-0.5% daily — old thresholds required 0.3% for 85%, making
-      // most forex pairs permanently untradeable. Halved so 0.15% → 75%, 0.2% → 85%.
-      strength = pct >= 0.2 ? 85 : pct >= 0.15 ? 78 : pct >= 0.1 ? 70 : pct >= 0.05 ? 60 : Math.round((pct / 0.05) * 50);
-      break;
-    case 'COMMODITY':
-      strength = pct >= 2.0 ? 85 : pct >= 1.0 ? 75 : pct >= 0.5 ? 65 : Math.round((pct / 0.5) * 60);
-      break;
-    case 'CRYPTO':
-      strength = pct >= 3.0 ? 85 : pct >= 2.0 ? 75 : pct >= 1.0 ? 65 : Math.round((pct / 1.0) * 60);
-      break;
-    case 'SHARES':
-    default:
-      strength = pct >= 2.0 ? 85 : pct >= 1.0 ? 75 : pct >= 0.5 ? 65 : Math.round((pct / 0.5) * 60);
-      break;
-  }
-  return { direction: dir, strength: Math.min(99, Math.max(0, strength)) };
-}
-
-// ── Session prime-time bonus — highest-probability trading windows by asset class ──
-// London open / NY open / overlap sessions have institutional participation,
-// tight spreads, and reliable follow-through. Off-peak hours are thin and noisy.
-function sessionPrimeScore(mType: MarketType): number {
-  const now    = new Date();
-  const utcH   = now.getUTCHours();
-  const utcM   = now.getUTCMinutes();
-  const ukMins = (utcH * 60 + utcM + 60) % (24 * 60); // approx UK local time
-
-  switch (mType) {
-    case 'INDEX':
-    case 'SHARES':
-      if (ukMins >= 480 && ukMins < 570) return 10;  // London open 08:00–09:30 UK
-      if (ukMins >= 870 && ukMins < 930) return 10;  // NY open 14:30–15:30 UK
-      if (ukMins >= 780 && ukMins < 1050) return 5;  // overlap 13:00–17:30 UK
-      return 0;
-    case 'FOREX':
-      if (ukMins >= 480 && ukMins < 540) return 10;  // London open 08:00–09:00 UK
-      if (ukMins >= 810 && ukMins < 900) return 10;  // NY open 13:30–15:00 UK
-      if (ukMins >= 780 && ukMins < 1020) return 5;  // London/NY overlap
-      return 0;
-    case 'COMMODITY':
-      if (ukMins >= 810 && ukMins < 960) return 10;  // NY session 13:30–16:00 UK
-      if (ukMins >= 480 && ukMins < 720) return 4;   // London morning
-      return 0;
-    default:
-      return 0;
-  }
-}
-
-// ── Signal calibration from bot server indicators ──────────────────────────────
-// Composite confluence scoring — each factor contributes points. Entry requires
-// multiple factors agreeing, not just one indicator crossing a threshold.
-//
-// Philosophy: The best long entry is an RSI recovering from 40 heading toward 60
-// (momentum resuming after pullback). The best short is RSI rolling over from 60.
-// MACD magnitude (not just direction) tells us the force behind the move.
-// Daily trend alignment gives the macro tailwind. Session timing tells us whether
-// institutions are active. All factors together determine trade quality.
-function calibrateFromIndicators(
   rsi:           number | null,
   macd:          number | null,
-  changePercent: number,
   mType:         MarketType,
-  consRed   = 0,
-  consGreen = 0,
 ): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
-  // No indicators at all — price action only fallback
-  if (rsi === null && macd === null && consRed === 0 && consGreen === 0) {
-    return calibrateSignal(changePercent, changePercent > 0.3 ? 'BUY' : changePercent < -0.3 ? 'SELL' : 'NEUTRAL', mType);
-  }
-
-  // ── 1. RSI Zone Scoring ───────────────────────────────────────────────────
-  // Zone scoring, not a binary gate. Enter early in the move, not after it has run.
-  // BUY: best when recovering from oversold (35–48). SELL: best when rolling from overbought (52–65).
-  let rsiLong = 0, rsiShort = 0;
-  if (rsi !== null) {
-    // Long zones
-    if      (rsi >= 36 && rsi < 46) rsiLong = 15;  // prime: recovering from dip, momentum turning
-    else if (rsi >= 46 && rsi < 54) rsiLong = 10;  // good: mid-range upward momentum
-    else if (rsi >= 54 && rsi < 61) rsiLong = 4;   // ok: trending but getting extended
-    else if (rsi >= 61 && rsi < 67) rsiLong = -2;  // caution: late entry, limited upside
-    else if (rsi >= 67)             rsiLong = -999; // BLOCK: overbought — never chase tops
-    else if (rsi < 36)              rsiLong = -6;   // still falling — wait for turn confirmation
-
-    // Short zones
-    if      (rsi > 54 && rsi <= 64) rsiShort = 15; // prime: extended, starting to roll over
-    else if (rsi > 46 && rsi <= 54) rsiShort = 10; // good: mid-range with room to fall
-    else if (rsi > 39 && rsi <= 46) rsiShort = 3;  // marginal: oversold territory approaching
-    else if (rsi > 33 && rsi <= 39) rsiShort = -6; // caution: near oversold, snap-back risk
-    else if (rsi <= 33)             rsiShort = -999; // BLOCK: oversold — never short bottoms
-    else if (rsi > 64 && rsi <= 72) rsiShort = 12; // very extended — prime distribution zone
-    else if (rsi > 72)              rsiShort = 5;   // extreme overbought — risky but valid fade
-  }
-
-  // ── 2. MACD Quality Scoring ───────────────────────────────────────────────
-  // Magnitude matters — a barely-positive MACD is noise, a strongly-positive one
-  // means real institutional buying pressure. Thresholds tuned for forex/index spread.
-  let macdLong = 0, macdShort = 0;
-  if (macd !== null) {
-    if      (macd > 0.010)  macdLong = 20;  // very strong upward thrust
-    else if (macd > 0.003)  macdLong = 14;  // strong momentum
-    else if (macd > 0.001)  macdLong = 8;   // confirmed positive
-    else if (macd > 0)      macdLong = 3;   // barely above zero — weak signal
-    else if (macd < -0.001) macdLong = -15; // counter-direction, penalise hard
-    else                    macdLong = -5;
-
-    if      (macd < -0.010) macdShort = 20;
-    else if (macd < -0.003) macdShort = 14;
-    else if (macd < -0.001) macdShort = 8;
-    else if (macd < 0)      macdShort = 3;
-    else if (macd > 0.001)  macdShort = -15;
-    else                    macdShort = -5;
-  }
-
-  // ── 3. Candle Streak Quality ──────────────────────────────────────────────
-  // Consecutive closes in one direction show accumulation/distribution in progress.
-  // 4+ candles = strong institutional footprint. 2 candles alone = insufficient.
-  let candleLong = 0, candleShort = 0;
-  if      (consGreen >= 5) candleLong = 20;
-  else if (consGreen >= 4) candleLong = 15;
-  else if (consGreen >= 3) candleLong = 10;
-  else if (consGreen >= 2) candleLong = 5;
-
-  if      (consRed >= 5)   candleShort = 20;
-  else if (consRed >= 4)   candleShort = 15;
-  else if (consRed >= 3)   candleShort = 10;
-  else if (consRed >= 2)   candleShort = 5;
-
-  // ── 4. Daily Trend Alignment ──────────────────────────────────────────────
-  // Trading with the macro trend is the single biggest structural edge.
-  // Thresholds scaled per asset class since forex moves less than equities.
-  const thr: Record<MarketType, [number, number]> = {
-    INDEX:     [0.40, 0.15],
-    FOREX:     [0.20, 0.08],
-    COMMODITY: [0.80, 0.30],
-    CRYPTO:    [2.00, 0.80],
-    SHARES:    [0.80, 0.30],
+  const minMove: Record<MarketType, number> = {
+    INDEX:     0.25,  // 0.25% on FTSE/S&P is a real intraday move
+    FOREX:     0.10,  // GBP/USD 0.10% is meaningful; typical daily range is 0.3-0.8%
+    COMMODITY: 0.40,
+    CRYPTO:    0.50,
+    SHARES:    0.35,
   };
-  const [strongThr, mildThr] = thr[mType] ?? [0.50, 0.15];
-  const dailyLong  = changePercent >  strongThr ? 10 : changePercent >  mildThr ? 5 : changePercent < -mildThr ? -8 : 0;
-  const dailyShort = changePercent < -strongThr ? 10 : changePercent < -mildThr ? 5 : changePercent >  mildThr ? -8 : 0;
 
-  // ── 5. Session Prime-Time Bonus ───────────────────────────────────────────
-  const sessionBonus = sessionPrimeScore(mType);
+  const threshold = minMove[mType];
+  const absPct = Math.abs(changePercent);
+  if (absPct < threshold) return { direction: 'HOLD', strength: 0 };
 
-  // ── Composite scores ──────────────────────────────────────────────────────
-  const rawLong  = rsiLong  + macdLong  + candleLong  + dailyLong  + sessionBonus;
-  const rawShort = rsiShort + macdShort + candleShort + dailyShort + sessionBonus;
+  const dir: 'BUY' | 'SELL' = changePercent > 0 ? 'BUY' : 'SELL';
 
-  const longBlocked  = rsiLong  <= -999;
-  const shortBlocked = rsiShort <= -999;
-
-  // Require at least 2 independent positive factors (prevents single-indicator entries)
-  const longFactors  = [rsiLong > 0, macdLong > 0, candleLong > 0, dailyLong > 0].filter(Boolean).length;
-  const shortFactors = [rsiShort > 0, macdShort > 0, candleShort > 0, dailyShort > 0].filter(Boolean).length;
-
-  // Minimum composite score: 25 (RSI sweet-spot + candles decent + mild daily = 30 → passes)
-  const MIN_RAW = 25;
-
-  let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-  let rawScore = 0;
-
-  if (!longBlocked  && rawLong  >= MIN_RAW && longFactors  >= 2 && rawLong  >= rawShort) {
-    direction = 'BUY';  rawScore = rawLong;
-  } else if (!shortBlocked && rawShort >= MIN_RAW && shortFactors >= 2 && rawShort > rawLong) {
-    direction = 'SELL'; rawScore = rawShort;
+  // Gate 2: RSI extremes
+  if (rsi !== null) {
+    if (dir === 'BUY'  && rsi > 68) return { direction: 'HOLD', strength: 0 };
+    if (dir === 'SELL' && rsi < 32) return { direction: 'HOLD', strength: 0 };
   }
 
-  if (direction === 'HOLD') return { direction: 'HOLD', strength: 0 };
+  // Gate 3: MACD direction conflict
+  if (macd !== null) {
+    if (dir === 'BUY'  && macd < 0) return { direction: 'HOLD', strength: 0 };
+    if (dir === 'SELL' && macd > 0) return { direction: 'HOLD', strength: 0 };
+  }
 
-  // Map raw score (25–80) → strength (62–99). Score of 50 = ~76%, score of 70 = ~92%.
-  const strength = Math.min(99, Math.max(62, Math.round(62 + ((rawScore - MIN_RAW) / 55) * 37)));
-  return { direction, strength };
+  // Strength: how many times larger than the threshold. 1× → 65, 2× → 78, 3× → 88, 4×+ → 95.
+  const multiple = absPct / threshold;
+  const strength = Math.min(95, Math.round(52 + multiple * 12));
+
+  return { direction: dir, strength };
 }
 
 // ── Market close guard ────────────────────────────────────────────────────────
@@ -1534,91 +1392,35 @@ export function IGStrategyTrader() {
       return null;
     }
 
-    // ── Calibrated signal scoring ─────────────────────────────────────────────
+    // ── Signal evaluation — three gates, no score tables ─────────────────────
     const stopLoss = strat.stopLoss ?? strat.stopPct ?? 5;
-
-    const pctStr         = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
-    const rsiVal         = snapshot.indicators?.rsi  ?? null;
-    const macdVal        = snapshot.indicators?.macd ?? null;
-    const atrVal         = snapshot.indicators?.atr  ?? null;
-    // Pull raw candle streak counts from bot server — frontend uses these for its own signal logic
-    const botEntry       = botPricesRef.current[market.epic];
+    const pctStr   = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
+    const rsiVal   = snapshot.indicators?.rsi  ?? null;
+    const macdVal  = snapshot.indicators?.macd ?? null;
+    const atrVal   = snapshot.indicators?.atr  ?? null;
+    const botEntry = botPricesRef.current[market.epic];
     const botCandleCount = botEntry?.candleCount ?? 0;
-    const consRed        = botEntry?.consecutiveReds   ?? 0;
-    const consGreen      = botEntry?.consecutiveGreens ?? 0;
 
-    // Bot server is primary when ≥20 candles available (enough for reliable RSI/MACD/candle streaks)
-    // or when bot is the only data source. Below 20 candles indicators are unreliable.
-    // ig+bot: IG real-time price + bot RSI/MACD — treat same as yahoo+bot (bot primary when ≥20 candles).
-    const useBotPrimary = snapshot.source === 'bot-server' ||
-                          ((snapshot.source === 'yahoo+bot' || snapshot.source === 'ig+bot') && botCandleCount >= 20);
-
-    let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-    let strength = 0;
-
-    if (useBotPrimary) {
-      // All signal logic in the frontend — bot server supplies raw indicators only
-      // (sessionPrimeScore is already baked into calibrateFromIndicators)
-      const r = calibrateFromIndicators(rsiVal, macdVal, snapshot.changePercent, mType, consRed, consGreen);
-      direction = r.direction;
-      strength  = r.strength;
-    } else {
-      const r = calibrateSignal(snapshot.changePercent, snapshot.signal, mType);
-      direction = r.direction;
-      strength  = r.strength;
-
-      if (snapshot.indicators && direction !== 'HOLD') {
-        const { rsi, macd } = snapshot.indicators;
-        if (direction === 'BUY') {
-          if (rsi  !== null && rsi  <  50)    strength = Math.min(99, strength + 10);
-          if (rsi  !== null && rsi  >  65)    strength = Math.max(0,  strength - 15);
-          if (macd !== null && macd >  0)     strength = Math.min(99, strength + 10);
-          if (macd !== null && macd < -0.001) strength = Math.max(0,  strength - 15);
-        } else {
-          if (rsi  !== null && rsi  >  50)    strength = Math.min(99, strength + 10);
-          if (rsi  !== null && rsi  <  35)    strength = Math.max(0,  strength - 15);
-          if (macd !== null && macd <  0)     strength = Math.min(99, strength + 10);
-          if (macd !== null && macd >  0.001) strength = Math.max(0,  strength - 15);
-        }
-        if (direction === 'BUY'  && rsi !== null && rsi > 62) { direction = 'HOLD'; strength = 0; }
-        if (direction === 'SELL' && rsi !== null && rsi < 40) { direction = 'HOLD'; strength = 0; }
-      }
-
-      // Apply session prime-time bonus to Yahoo-only path too — without this,
-      // markets lacking bot-server data never benefit from the session timing edge.
-      if (direction !== 'HOLD') {
-        strength = Math.min(99, strength + sessionPrimeScore(mType));
-      }
-    }
+    const { direction: sigDir, strength: sigStrength } = evaluateSignal(snapshot.changePercent, rsiVal, macdVal, mType);
+    let direction: 'BUY' | 'SELL' | 'HOLD' = sigDir;
+    let strength = sigStrength;
 
     // ── Gate 2: IG Client Sentiment (contrarian) ─────────────────────────────
-    // Retail crowds are typically wrong at extremes. When ≥75% of IG clients
-    // are on one side, trade against them. Reduce strength when ≥65%.
+    // When ≥75% of retail IG clients are on one side they are almost always wrong.
     if (direction !== 'HOLD') {
       const sent = sentimentRef.current[market.epic];
       if (sent) {
-        const crowdedLong  = sent.longPct  >= 75 && direction === 'BUY';
-        const crowdedShort = sent.shortPct >= 75 && direction === 'SELL';
-        const moderateLong  = sent.longPct  >= 65 && direction === 'BUY';
-        const moderateShort = sent.shortPct >= 65 && direction === 'SELL';
-        if (crowdedLong || crowdedShort) {
-          direction = 'HOLD'; strength = 0; // hard block at ≥75% extreme
-        } else if (moderateLong || moderateShort) {
-          strength = Math.max(0, strength - 15); // soften at ≥65%
-        }
+        const crowded = (sent.longPct >= 75 && direction === 'BUY') || (sent.shortPct >= 75 && direction === 'SELL');
+        if (crowded) { direction = 'HOLD'; strength = 0; }
       }
     }
 
-    // ── Gate 3: 5-minute trend alignment ────────────────────────────────────
-    // Only take a 1-min signal when the 5-min trend agrees (avoids counter-trend scalps).
+    // ── Gate 3: 5-min trend alignment (hard block, not a penalty) ───────────
+    // If the short-term trend is actively pointing the other way, skip — don't fight it.
     if (direction !== 'HOLD' && botCandleCount >= 10) {
       const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
-      const trendConflict = (direction === 'BUY'  && trend5m === 'DOWN') ||
-                            (direction === 'SELL' && trend5m === 'UP');
-      if (trendConflict) {
-        strength = Math.max(0, strength - 20); // heavy penalty for counter-trend entry
-        if (strength < (strat.minStrength ?? 65)) { direction = 'HOLD'; strength = 0; }
-      }
+      const trendConflict = (direction === 'BUY' && trend5m === 'DOWN') || (direction === 'SELL' && trend5m === 'UP');
+      if (trendConflict) { direction = 'HOLD'; strength = 0; }
     }
 
     // ATR-based stop/TP when real-time ATR available.
@@ -1633,12 +1435,11 @@ export function IGStrategyTrader() {
     }
 
     const hasBotData = snapshot.source === 'yahoo+bot' || snapshot.source === 'ig+bot' || snapshot.source === 'bot-server';
-    const srcLabel = snapshot.source.startsWith('ig') ? 'IG real-time' : 'Daily';
-    const reason = useBotPrimary && rsiVal !== null
-      ? `RSI ${rsiVal.toFixed(0)} (${mType}) · ${srcLabel} ${pctStr} [${botCandleCount}c]`
-      : hasBotData && rsiVal !== null
-        ? `${srcLabel} ${pctStr} (${mType}) · RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? '✓' : '⚠') : (rsiVal > 50 ? '✓' : '⚠')}`
-        : `${srcLabel} ${pctStr} (${mType})`;
+    const srcLabel   = snapshot.source.startsWith('ig') ? 'IG' : 'Daily';
+    const parts      = [`${srcLabel} ${pctStr}`];
+    if (rsiVal  !== null) parts.push(`RSI ${rsiVal.toFixed(0)}`);
+    if (macdVal !== null) parts.push(`MACD ${macdVal > 0 ? '↑' : '↓'}`);
+    const reason = parts.join(' · ');
 
     const sig: StrategySignal = {
       direction,
@@ -1702,7 +1503,7 @@ export function IGStrategyTrader() {
     const totalOwned = envs.reduce((sum, e) =>
       sum + (positionsRef.current[e] ?? []).filter(p => ownedDirGlobal === null || p.direction === ownedDirGlobal).length, 0);
     const globalFillRatio = totalAllowed > 0 ? totalOwned / totalAllowed : 1;
-    const dynamicMinStrength = strat.minStrength ?? 78; // high bar — only strong, confirmed signals
+    const dynamicMinStrength = strat.minStrength ?? 65; // evaluateSignal already gates weak signals at source
 
     const tradeDir: 'BUY' | 'SELL' | null =
       newsDir
