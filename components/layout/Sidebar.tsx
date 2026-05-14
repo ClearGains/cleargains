@@ -30,6 +30,7 @@ import {
   Star,
   Rocket,
   AlertTriangle,
+  Gem,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -41,7 +42,8 @@ const navLinks = [
   { href: '/penny-scanner',    label: 'Penny Scanner',    icon: ScanLine   },
   { href: '/graph-analysis',   label: 'Graph Analysis',   icon: LineChart  },
   { href: '/market-movers',    label: 'Market Movers',    icon: TrendingUp  },
-  { href: '/overvalued',        label: 'Overvalued Stocks', icon: AlertTriangle },
+  { href: '/overvalued',        label: 'Overvalued Stocks',  icon: AlertTriangle },
+  { href: '/undervalued',       label: 'Undervalued Stocks', icon: Gem           },
   { href: '/short-scanner',    label: 'Short Scanner',    icon: TrendingDown },
   { href: '/auto-trader',      label: 'Auto Trader',      icon: Bot         },
   { href: '/reputable-stocks', label: 'Reputable Stocks',  icon: Star        },
