@@ -1411,9 +1411,24 @@ export function IGStrategyTrader() {
     const botEntry = botPricesRef.current[market.epic];
     const botCandleCount = botEntry?.candleCount ?? 0;
 
-    const { direction: sigDir, strength: sigStrength } = evaluateSignal(snapshot.changePercent, rsiVal, macdVal, mType);
-    let direction: 'BUY' | 'SELL' | 'HOLD' = sigDir;
-    let strength = sigStrength;
+    // ── Swing mode: use daily candle signal (trend + pullback) ────────────────
+    // For weekly/longterm strategies, bypass the intraday % change signal entirely.
+    // The daily RSI and EMA trend are far more reliable for multi-day holds.
+    const swingData = swingSignals[market.epic];
+    let direction: 'BUY' | 'SELL' | 'HOLD';
+    let strength: number;
+    if (isSwingStrategy && swingData) {
+      direction = swingData.direction;
+      strength  = swingData.strength;
+      const swingLabel = swingData.direction === 'HOLD'
+        ? `[SWING] ${market.name} — ${swingData.reasons[0] ?? 'no signal'}`
+        : `[SWING] ${market.name} → ${swingData.direction} ${swingData.strength}% | Trend:${swingData.trend} RSI:${swingData.rsi?.toFixed(0) ?? '?'} Pullback:${swingData.pullbackPct?.toFixed(1) ?? '?'}%`;
+      slog(strat.id, 'signal', swingLabel);
+    } else {
+      const { direction: sigDir, strength: sigStrength } = evaluateSignal(snapshot.changePercent, rsiVal, macdVal, mType);
+      direction = sigDir;
+      strength  = sigStrength;
+    }
 
     // ── Gate 2: IG Client Sentiment (contrarian) ─────────────────────────────
     // When ≥75% of retail IG clients are on one side they are almost always wrong.
@@ -1429,15 +1444,15 @@ export function IGStrategyTrader() {
     // With 20+ candles we have enough data to be selective: only trade when the
     // recent short-term trend actively agrees with the daily signal direction.
     // NEUTRAL means "unclear" — don't trade into ambiguity.
-    // With < 20 candles we fall back to conflict-block only (less data, less strict).
-    if (direction !== 'HOLD' && botCandleCount >= 20) {
+    // Swing strategies skip this gate — a 5-min candle is noise for a multi-day hold.
+    if (!isSwingStrategy && direction !== 'HOLD' && botCandleCount >= 20) {
       const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
       const trendConfirms = (direction === 'BUY' && trend5m === 'UP') || (direction === 'SELL' && trend5m === 'DOWN');
       if (!trendConfirms) {
         slog(strat.id, 'signal', `[SKIP] ${market.name} — 5-min trend ${trend5m} does not confirm ${direction} signal`);
         direction = 'HOLD'; strength = 0;
       }
-    } else if (direction !== 'HOLD' && botCandleCount >= 10) {
+    } else if (!isSwingStrategy && direction !== 'HOLD' && botCandleCount >= 10) {
       const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
       const trendConflict = (direction === 'BUY' && trend5m === 'DOWN') || (direction === 'SELL' && trend5m === 'UP');
       if (trendConflict) { direction = 'HOLD'; strength = 0; }
@@ -1896,15 +1911,34 @@ export function IGStrategyTrader() {
       }
     } catch { /* bot server offline */ }
 
-    // Guard: require live candle data before scanning.
-    // Without the bot server (Lightstreamer stream OFF), there is no RSI, MACD, or
-    // 5-min trend — all the quality gates that prevent bad trades are blind.
-    // Trading on daily % change alone produces exactly the noise signals we're trying to avoid.
+    const isSwingStrategy = strat.timeframe === 'weekly' || strat.timeframe === 'longterm';
+
+    // Guard: require live candle data before scanning — EXCEPT for swing strategies.
+    // Swing uses Yahoo Finance daily candles (no Lightstreamer needed).
+    // Intraday strategies need bot server for RSI/MACD/trend5m quality gates.
     const liveFeedCount = Object.values(botPricesRef.current).filter(e => e.candleCount >= 10).length;
-    if (liveFeedCount === 0) {
+    if (!isSwingStrategy && liveFeedCount === 0) {
       slog(strat.id, 'info', `[SCAN SKIPPED] No live bot server data — start the Lightstreamer stream in the IG Server Bot panel first`);
       scanInProgressRef.current.delete(strat.id);
       return;
+    }
+
+    // Pre-fetch swing signals for all markets (swing strategies only)
+    type SwingResult = { direction: 'BUY'|'SELL'|'HOLD'; strength: number; reasons: string[]; rsi: number|null; trend: string; pullbackPct: number|null };
+    const swingSignals: Record<string, SwingResult> = {};
+    if (isSwingStrategy) {
+      slog(strat.id, 'info', `[SWING] Fetching daily candle signals for ${markets.length} markets…`);
+      await Promise.all(markets.map(async m => {
+        try {
+          const sr = await fetch(`/api/ig/swing?epic=${encodeURIComponent(m.epic)}`);
+          if (sr.ok) {
+            const sd = await sr.json() as { ok: boolean } & SwingResult;
+            if (sd.ok) swingSignals[m.epic] = sd;
+          }
+        } catch {}
+      }));
+      const hits = Object.keys(swingSignals).length;
+      slog(strat.id, 'info', `[SWING] Got data for ${hits}/${markets.length} markets`);
     }
 
     // Pre-fetch IG client sentiment for all watchlist epics (contrarian gate)
