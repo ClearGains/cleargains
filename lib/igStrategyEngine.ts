@@ -41,10 +41,14 @@ export type WatchlistMarket = {
 
 /** Classify an IG spread-bet epic by market type. */
 export function getMarketType(epic: string): MarketType {
-  if (epic.startsWith('IX.D.')) return 'INDEX';
+  if (epic.startsWith('IX.D.'))  return 'INDEX';
+  if (epic.startsWith('CS.D.'))  return 'FOREX';   // forex spread-bet TODAY/FORWARD instruments
+  if (epic.startsWith('CF.D.'))  return 'FOREX';   // forex CFD instruments
   if (epic.includes('BITCOIN') || epic.includes('ETHUSD') || epic.includes('CRYPTO')) return 'CRYPTO';
   if (epic.includes('GOLD') || epic.includes('SILVER') || epic.includes('CRUDE') || epic.includes('NATGAS') || epic.includes('OIL')) return 'COMMODITY';
-  return 'COMMODITY';
+  // UC.D.* = US shares, KA.D.* = UK shares, UA.D.* = US shares (alt prefix)
+  if (epic.startsWith('UC.D.') || epic.startsWith('UA.D.') || epic.startsWith('KA.D.') || epic.startsWith('UB.D.')) return 'SHARES';
+  return 'SHARES'; // safe default — avoids misclassifying shares as commodities
 }
 
 export type IGSavedStrategy = {
