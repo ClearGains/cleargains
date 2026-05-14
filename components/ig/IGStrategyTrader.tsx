@@ -1784,9 +1784,16 @@ export function IGStrategyTrader() {
           COMMODITY: 1,
           CRYPTO:    1,
         };
-        const typeCount = positionsRef.current[env].filter(p => getMarketType(p.epic) === mType).length;
+        // Count confirmed positions AND in-cycle placements of the same type.
+        // Without the in-cycle count, FTSE and Germany 40 can both open in the same
+        // scan because positionsRef isn't updated until ~1.5s after order confirmation.
+        const confirmedTypeCount = positionsRef.current[env].filter(p => getMarketType(p.epic) === mType).length;
+        const inCycleTypeCount   = [...placedEpicsRef.current]
+          .filter(k => k.endsWith(`:${env}`) && getMarketType(k.slice(0, k.lastIndexOf(':'))) === mType)
+          .length;
+        const typeCount = confirmedTypeCount + inCycleTypeCount;
         if (typeCount >= typeMax[mType]) {
-          slog(strat.id, 'signal', `[SKIP] ${market.name} — ${mType} slot occupied (max 1 per asset class)`);
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — ${mType} slot occupied (${confirmedTypeCount} confirmed + ${inCycleTypeCount} in-cycle, max ${typeMax[mType]})`);
           continue;
         }
 
@@ -1996,12 +2003,17 @@ export function IGStrategyTrader() {
 
     // Refresh positions at scan start so cap checks always use live data.
     await loadPositions();
-    // Clear the intra-cycle epic lock now that positions are freshly confirmed.
-    placedEpicsRef.current.clear();
 
     // PERMISSION: Fetch account balances at the start of each scan cycle so
     // calcDynamicSize() has up-to-date fund data when sizing positions.
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
+
+    // Clear intra-cycle epic locks ONLY for this strategy's envs.
+    // A global .clear() would wipe locks placed by another concurrently-running strategy,
+    // allowing it to open a duplicate that this strategy already locked.
+    for (const k of [...placedEpicsRef.current]) {
+      if (envs.some(e => k.endsWith(`:${e}`))) placedEpicsRef.current.delete(k);
+    }
     for (const env of envs) {
       const funds = await fetchIGFunds(env);
       if (funds) slog(strat.id, 'info', `[${env.toUpperCase()}] 💰 Available: £${funds.available.toFixed(2)} | Balance: £${funds.balance.toFixed(2)}`);
