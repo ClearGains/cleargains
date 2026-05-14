@@ -30,7 +30,7 @@ export type BotStatus = 'stopped' | 'running' | 'paused';
 
 export const DEFAULT_SETTINGS: BotSettings = {
   riskPerTrade: 50, maxPositions: 3, stopAtrMult: 2.0, targetRR: 2.5,
-  minStrength: 70, scanIntervalMins: 15, earningsBlackout: true,
+  minStrength: 65, scanIntervalMins: 10, earningsBlackout: true,
 };
 
 // High-volatility names only — blue chips move too slowly to justify minimum 1pt bet

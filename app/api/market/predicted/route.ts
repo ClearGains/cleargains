@@ -30,6 +30,7 @@ export type PredictedMover = Mover & {
   signalReasons: string[];
   score: number;
   scannedAt: string;
+  parabolicRisk?: boolean;
   // Pre-market / post-market extras
   preMarketChangePercent?: number;
   preMarketPrice?: number;
@@ -81,13 +82,20 @@ function scoreQuote(q: Mover): { signal: Signal; signalReasons: string[]; score:
   if (q.fromHigh < -40) { score -= 2; reasons.push('Far from 52-week high (>40%)'); }
   if (!q.aboveSma200)   score -= 1;
 
+  // Parabolic risk: massive one-day spike signals potential exhaustion / reversal candidate
+  const isParabolic = totalChange > 15 || (totalChange > 8 && q.fromHigh > -2);
+  if (isParabolic && !reasons.some(r => r.includes('chasing'))) {
+    reasons.push(`Parabolic move +${totalChange.toFixed(1)}% — high reversal risk, watch for SELL`);
+    score -= 1; // penalise extra for chasing
+  }
+
   const signal: Signal =
     score >= 6  ? 'STRONG_BUY'  :
     score >= 3  ? 'BUY'         :
     score <= -4 ? 'STRONG_SELL' :
     score <= -2 ? 'SELL'        : 'WATCH';
 
-  return { signal, signalReasons: reasons.slice(0, 5), score };
+  return { signal, signalReasons: reasons.slice(0, 6), score };
 }
 
 type RawQuote = {
@@ -221,10 +229,14 @@ async function fetchAndScore(universe: string[], market: string): Promise<Predic
       })(),
     };
 
+    const scored = scoreQuote(base);
+    const overnight = base.extendedChangePercent ?? 0;
+    const totalChange = effectiveChange + overnight;
     return {
       ...base,
-      ...scoreQuote(base),
+      ...scored,
       scannedAt,
+      parabolicRisk: totalChange > 15 || (totalChange > 8 && base.fromHigh > -2),
       preMarketChangePercent: q.preMarketChangePercent,
       preMarketPrice:         q.preMarketPrice,
       marketState:            q.marketState,

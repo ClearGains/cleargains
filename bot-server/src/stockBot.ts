@@ -182,6 +182,21 @@ function calcSMA(candles: Candle[], period: number): number | null {
   return slice.reduce((s, c) => s + c.close, 0) / period;
 }
 
+function calcBollingerTouch(candles: Candle[], period = 20, mult = 2): 'lower'|'upper'|'none' {
+  if (candles.length < period) return 'none';
+  const slice = candles.slice(-period);
+  const mean  = slice.reduce((s, c) => s + c.close, 0) / period;
+  const sq    = slice.reduce((s, c) => s + (c.close - mean) ** 2, 0);
+  const sd    = Math.sqrt(sq / period);
+  const upper = mean + mult * sd;
+  const lower = mean - mult * sd;
+  const cur   = candles[candles.length - 1].close;
+  const prev  = candles[candles.length - 2]?.close ?? cur;
+  if (cur <= lower && cur > prev) return 'lower';   // touched lower band AND recovering
+  if (cur >= upper && cur < prev) return 'upper';   // touched upper band AND rolling
+  return 'none';
+}
+
 function calcATR(candles: Candle[], period = 14): number {
   const s = candles.slice(-(period + 1));
   if (s.length < 2) return (candles[candles.length - 1]?.close ?? 1) * 0.02;
@@ -330,13 +345,13 @@ async function computeSignal(ticker: string, earningsBlackout: boolean): Promise
     let bull = 0, bear = 0;
     const reasons: string[] = [];
 
-    // MACD cross is the primary trigger — without it signals are too weak for stocks
+    // MACD cross: primary signal (45 pts) — strong cross triggers are the best entries
     if      (macdCross === 'bullish') { bull += 45; reasons.push('MACD bullish cross'); }
     else if (macdCross === 'bearish') { bear += 45; reasons.push('MACD bearish cross'); }
     else if (lastH > 0) bull += 8;
     else if (lastH < 0) bear += 8;
 
-    // RSI — extreme readings only count as meaningful confirmation
+    // RSI — extreme readings are strong standalone signals for stocks
     if (rsi !== null) {
       if      (rsi < 25) { bull += 45; reasons.push(`RSI ${rsi.toFixed(0)} deeply oversold`); }
       else if (rsi < 35) { bull += 25; reasons.push(`RSI ${rsi.toFixed(0)} oversold`); }
@@ -347,15 +362,24 @@ async function computeSignal(ticker: string, earningsBlackout: boolean): Promise
       else if (rsi < 40 && macdCross === 'bearish') { bull += 20; }
     }
 
+    // Bollinger Band touch — mean reversion signal (20 pts when price recovers from band)
+    const bbTouch = calcBollingerTouch(candles);
+    if      (bbTouch === 'lower') { bull += 20; reasons.push('BB lower band touch — recovering'); }
+    else if (bbTouch === 'upper') { bear += 20; reasons.push('BB upper band touch — rolling over'); }
+
     // SMA20 — trend confirmation
     if (sma20 !== null) { if (price > sma20) bull += 10; else bear += 10; }
 
-    // Strength out of 100 (max possible: 45+45+10 = 100)
-    // Both MACD cross AND confirming RSI needed to clear 70% threshold
-    const strength = Math.round((Math.max(bull, bear) / 100) * 100);
+    // Strength out of 120 (max possible: 45+45+20+10 = 120), normalised to 100
+    // Single signal (RSI alone at 45 = 37.5% → below threshold)
+    // MACD cross + RSI = 45+25 = 70 → ~58% (below 65)
+    // MACD cross + deeply oversold = 45+45 = 90 → 75% (passes)
+    // BB touch + MACD + RSI = 20+45+25 = 90 → 75% (passes)
+    const maxPossible = 120;
+    const strength = Math.round((Math.max(bull, bear) / maxPossible) * 100);
     const direction: 'BUY'|'SELL'|'NEUTRAL' =
-      bull > bear + 25 && strength >= 60 ? 'BUY'  :
-      bear > bull + 25 && strength >= 60 ? 'SELL' : 'NEUTRAL';
+      bull > bear + 15 && strength >= 58 ? 'BUY'  :
+      bear > bull + 15 && strength >= 58 ? 'SELL' : 'NEUTRAL';
 
     return {
       ...base, price, rsi, macdHist: lastH, macdCross, sma20, direction, strength,

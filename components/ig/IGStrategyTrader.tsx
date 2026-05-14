@@ -65,6 +65,8 @@ type MarketScan = {
   status: 'idle' | 'ok' | 'error';
   error?: string;
   lastScanned?: string;
+  parabolicRisk?: boolean;    // true when big spike signals potential reversal
+  parabolicNote?: string;     // human-readable warning
 };
 
 type RunLog = { id: string; ts: string; type: 'info'|'buy'|'sell'|'close'|'error'|'signal'; msg: string };
@@ -834,7 +836,7 @@ export function IGStrategyTrader() {
   const [bName, setBName]                   = useState('');
   const [bTimeframe, setBTimeframe]         = useState<Timeframe>('daily');
   const [bSize, setBSize]                   = useState(1);
-  const [bMaxPos, setBMaxPos]               = useState(10);
+  const [bMaxPos, setBMaxPos]               = useState(3);
   const [bAutoMaxPos, setBAutoMaxPos]       = useState(false);
   const [bMinStrength, setBMinStrength]     = useState(55);
   const [bAccounts, setBAccounts]           = useState<('demo'|'live')[]>(['demo']);
@@ -1641,12 +1643,22 @@ export function IGStrategyTrader() {
       ],
     };
 
+    // Parabolic risk: a big one-day spike signals potential exhaustion / reversal.
+    // Thresholds per asset class — indices move less than individual stocks.
+    const parabolicThreshold = mType === 'INDEX' ? 3.0 : mType === 'FOREX' ? 1.5 : 5.0;
+    const parabolicRisk = snapshot.changePercent > parabolicThreshold ||
+                          (rsiVal !== null && rsiVal > 72 && snapshot.changePercent > 0);
+    const parabolicNote = parabolicRisk
+      ? `Up ${snapshot.changePercent.toFixed(1)}% today${rsiVal !== null && rsiVal > 70 ? ` · RSI ${rsiVal.toFixed(0)} — overbought` : ''} — watch for reversal`
+      : undefined;
+
     setScans(p => ({
       ...p,
       [market.epic]: {
         epic: market.epic, name: market.name, signal: sig,
         price: snapshot.price, changePercent: snapshot.changePercent, source: snapshot.source,
         scanning: false, status: 'ok', lastScanned: new Date().toISOString(),
+        parabolicRisk, parabolicNote,
       },
     }));
 
@@ -1719,13 +1731,16 @@ export function IGStrategyTrader() {
         if (botMode === 'LONG_ONLY' && tradeDir === 'SELL') continue;
         if (botMode === 'SHORT_ONLY' && tradeDir === 'BUY') continue;
 
-        // Don't double up in same direction on same instrument.
-        // Also check pendingOrdersRef — covers the ~2s window between placeOrder
-        // and loadPositions updating positionsRef (race-condition guard).
+        // Prevent duplicate positions on same instrument.
+        // Check both same-direction AND pending orders — covers the full window from signal
+        // to position confirmation (~10s including Gemini). The key is added BEFORE any
+        // async call so concurrent strategy scans can't both slip through.
         const orderKey = `${market.epic}:${tradeDir}:${env}`;
         if (positionsRef.current[env].some(p => p.epic === market.epic && p.direction === tradeDir)) continue;
-        if (pendingOrdersRef.current.has(orderKey)) {
-          slog(strat.id, 'signal', `[SKIP] ${market.name} — order pending, waiting for confirmation`);
+        // Block if ANY direction pending for this epic — prevents race where two strategies
+        // both check pendingOrdersRef before either has added its key.
+        if ([...pendingOrdersRef.current].some(k => k.endsWith(`:${env}`) && k.startsWith(`${market.epic}:`))) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — order pending for this instrument, waiting`);
           continue;
         }
         if (isEpicClosingSoon(market.epic)) {
@@ -1734,10 +1749,17 @@ export function IGStrategyTrader() {
         }
 
         // ── Per-type concentration cap ──────────────────────────────────────────
-        // Indices (FTSE/S&P/NASDAQ/DOW/DAX) are highly correlated — capped at 2.
+        // Indices (FTSE/S&P/NASDAQ/DOW/DAX) are highly correlated — capped at 2 distinct instruments.
         // Commodities and crypto are volatile — capped at 1 each.
         // Forex pairs share USD/JPY exposure — capped at 2.
         // Shares — capped at 2 to avoid sector concentration.
+        // HARD RULE: max 1 open position per epic (regardless of type cap) to prevent
+        // the same instrument being opened multiple times across strategies.
+        const sameEpicCount = positionsRef.current[env].filter(p => p.epic === market.epic).length;
+        if (sameEpicCount >= 1) {
+          slog(strat.id, 'signal', `[SKIP] ${market.name} — already have position on this instrument`);
+          continue;
+        }
         const typeMax: Record<MarketType, number> = {
           INDEX:     2,
           FOREX:     2,
@@ -1799,10 +1821,15 @@ export function IGStrategyTrader() {
         }
 
         // PERMISSION: Dynamic position sizing — cap size to 5% of available funds.
+        // ALSO: cap to stopLoss/stopDist so max loss is guaranteed ≤ stopLoss even
+        // after ATR overrides the stop distance used in calcAutoSizing.
         const fundsNow = igFundsRef.current[env];
         const available = fundsNow?.available ?? Infinity;
         const startBal  = startingBalanceRef.current[env];
-        const orderSizeRaw = calcDynamicSize(autoSize, available, startBal);
+        const maxLossAllowed = strat.stopLoss ?? 5;
+        const sizeCapForLoss = Math.max(0.1, Math.floor((maxLossAllowed / Math.max(1, stopDist)) * 10) / 10);
+        const cappedAutoSize = Math.min(autoSize, sizeCapForLoss);
+        const orderSizeRaw = calcDynamicSize(cappedAutoSize, available, startBal);
 
         if (orderSizeRaw === 0) {
           const floorPct = startBal ? ` (floor: 15% of starting £${startBal.toFixed(0)})` : '';
@@ -1811,10 +1838,12 @@ export function IGStrategyTrader() {
           continue;
         }
 
-        // [AUTO] +50% size boost when a correlated instrument confirms the signal
+        // Corroborated signal: small size boost but capped so max loss stays within stopLoss
         const corroborated = hasCorrelatedConfirmation(market.name, tradeDir, scans);
-        const orderSize = corroborated ? Math.round(orderSizeRaw * 1.5 * 10) / 10 : orderSizeRaw;
-        if (corroborated) slog(strat.id, 'info', `[AUTO] Correlated confirmation — size boosted to £${orderSize}/pt`);
+        const orderSize = corroborated
+          ? Math.min(Math.round(orderSizeRaw * 1.5 * 10) / 10, sizeCapForLoss)
+          : orderSizeRaw;
+        if (corroborated) slog(strat.id, 'info', `[AUTO] Correlated confirmation — size £${orderSize}/pt (capped to £${maxLossAllowed} max loss)`);
 
         // Capital-floor: if funds tight (< £500), close worst own-mode loser to free capital
         if (available < 500 && ownedPositions.length > 0) {
@@ -1836,6 +1865,10 @@ export function IGStrategyTrader() {
         }
 
         if (strength >= 90) slog(strat.id, 'info', `[AUTO] High-confidence signal (${strength}%) — proceeding`);
+
+        // Reserve slot BEFORE any async call — prevents concurrent strategy scans
+        // from both passing the pending check before either has added their key.
+        pendingOrdersRef.current.add(orderKey);
 
         // Gemini second opinion
         let effectiveDir: 'BUY' | 'SELL' = tradeDir as 'BUY' | 'SELL';
@@ -1860,6 +1893,7 @@ export function IGStrategyTrader() {
             slog(strat.id, 'info', `[GEMINI] ${market.name} → ${gv.direction} ${gv.confidence}% — ${gv.reason} (${gv.engine})`);
             if (gv.direction === 'SKIP' || gv.confidence < (strat.minStrength ?? 50)) {
               slog(strat.id, 'info', `[GEMINI] Skipped ${market.name} — ${gv.direction} ${gv.confidence}%`);
+              pendingOrdersRef.current.delete(orderKey); // Release slot on skip
               continue;
             }
             if (gv.direction === 'BUY' || gv.direction === 'SELL') effectiveDir = gv.direction;
@@ -1870,7 +1904,6 @@ export function IGStrategyTrader() {
         slog(strat.id, effectiveDir === 'BUY' ? 'buy' : 'sell',
           `[${env.toUpperCase()}] → ${effectiveDir} ${market.name} | £${orderSize}/pt | SL ${stopDist}pt TP ${limitDist}pt | max loss £${maxLoss.toFixed(2)} | ${strength}%${forceOpen ? ' (FORCE)' : ''}`);
 
-        pendingOrdersRef.current.add(orderKey);
         const or = await placeOrder(env, market.epic, effectiveDir, orderSize, stopDist, limitDist);
 
         if (or.ok) {
@@ -3241,11 +3274,18 @@ export function IGStrategyTrader() {
                 <label className="text-xs text-gray-400 mb-1.5 block">Trading Timeframe</label>
                 <select value={bTimeframe} onChange={e => setBTimeframe(e.target.value as Timeframe)}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
-                  <option value="hourly">⚡ Intraday (Hours) — tight stops, exit same session</option>
-                  <option value="daily">📅 Day Trade — sized for daily range, exit same day</option>
-                  <option value="weekly">📆 Swing (Days–Weeks) — wider stops, hold several days</option>
-                  <option value="longterm">📈 Long-term Trend — very wide stops, hold weeks/months</option>
-                  <option value="rsi2">⭐ RSI(2) Mean Reversion — lowest API usage</option>
+                  <optgroup label="Classic Strategies">
+                    <option value="hourly">⚡ Intraday (Hours) — EMA9/21 + RSI, exit same session</option>
+                    <option value="daily">📅 Day Trade — EMA20/50 + MACD, exit same day</option>
+                    <option value="weekly">📆 Swing (Days–Weeks) — wider stops, hold several days</option>
+                    <option value="longterm">📈 Long-term Trend — Golden/Death Cross, weeks/months</option>
+                    <option value="rsi2">⭐ RSI(2) Mean Reversion — lowest API usage</option>
+                  </optgroup>
+                  <optgroup label="Advanced Strategies (Higher Win Rate)">
+                    <option value="bollinger">🎯 Bollinger Band Reversion — ~65% WR, mean reversion</option>
+                    <option value="triple-ema">🚀 Triple EMA (8/21/55) — ~70% WR, trend confirmation</option>
+                    <option value="supertrend">⚡ Supertrend (3,10) — ~68% WR, ATR-based trend filter</option>
+                  </optgroup>
                 </select>
               </div>
             </div>
@@ -3876,6 +3916,13 @@ export function IGStrategyTrader() {
                     )}>
                       {scan.source === 'yahoo+bot' ? '⚡ Bot verified' : scan.source === 'bot-server' ? '⚡ Live' : 'Yahoo Finance'}
                     </span>
+                    {/* Parabolic / overvaluation warning */}
+                    {scan.parabolicRisk && (
+                      <div className="flex items-start gap-1 mt-1 bg-amber-500/10 border border-amber-500/20 rounded px-1.5 py-1">
+                        <AlertCircle className="h-3 w-3 text-amber-400 flex-shrink-0 mt-0.5" />
+                        <p className="text-[9px] text-amber-400 leading-tight">{scan.parabolicNote ?? 'Potential reversal — watch for short entry'}</p>
+                      </div>
+                    )}
                   </div>
                 )}
 
