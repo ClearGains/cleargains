@@ -1264,7 +1264,9 @@ export function IGStrategyTrader() {
   async function fetchSnapshot(name: string, epic?: string): Promise<SnapshotResult|null> {
     // ── Step 1: Bot server (real-time RSI/MACD/ATR from Lightstreamer) ──
     const botData  = epic ? botPricesRef.current[epic] : null;
-    const hasBot   = !!(botData && botData.candleCount >= 5 && botData.mid > 0);
+    // RSI needs 14+ candles, MACD needs 26+ — below 20 the values are noise.
+    // Treating unreliable indicators as null is better than using garbage RSI to block valid signals.
+    const hasBot   = !!(botData && botData.candleCount >= 20 && botData.mid > 0);
     const botInds  = hasBot ? { rsi: botData!.rsi, macd: botData!.macd, atr: botData!.atr } : undefined;
 
     // ── Step 2: IG real-time snapshot (pre-fetched in runSignalScan) ──
