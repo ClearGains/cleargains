@@ -301,18 +301,17 @@ function calcAutoMaxPositions(available: number, avgStrength: number): number {
 }
 
 function isEpicTradeable(epic: string): boolean {
-  const now  = new Date();
-  const day  = now.getUTCDay();   // 0=Sun 6=Sat
-  const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const { mins, day } = getUKTime(); // UK local time — correct for BST and GMT
 
   if (epic.startsWith('CS.D.')) {
-    if (day === 6) return false;
-    if (day === 0 && mins < 22 * 60) return false;
-    if (day === 5 && mins >= 22 * 60) return false;
+    if (day === 6) return false;                          // Saturday — forex closed
+    if (day === 0 && mins < 22 * 60) return false;       // Sunday before 22:00 UK
+    if (day === 5 && mins >= 22 * 60) return false;      // Friday after 22:00 UK
     return true;
   }
   // Indices — closed all weekend
   if (day === 0 || day === 6) return false;
+  // Sessions in UK local time (BST in summer, GMT in winter)
   const sessions: Record<string, [number, number, number, number]> = {
     'IX.D.FTSE.DAILY.IP':   [8,  0,  16, 30],
     'IX.D.SPTRD.DAILY.IP':  [14, 30, 21, 0 ],
@@ -329,51 +328,33 @@ function isEpicTradeable(epic: string): boolean {
   return open > close ? (mins >= open || mins < close) : (mins >= open && mins < close);
 }
 
-/**
- * Liquid trading window filter — only scan during high-volume periods.
- * Thin liquidity = wider spreads, more whipsaws, less reliable signals.
- *
- * Times are UK local time (UTC+0 winter / UTC+1 summer).
- * We use UTC and add 1 hour as a simple approximation.
- */
+// Liquid trading window filter — only scan during high-volume periods.
+// All times are UK local (handles BST/GMT via getUKTime).
 function isLiquidTradingWindow(mType: MarketType): boolean {
-  const now     = new Date();
-  const utcH    = now.getUTCHours();
-  const utcM    = now.getUTCMinutes();
-  const utcDay  = now.getUTCDay(); // 0=Sun 6=Sat
-  const ukMins  = (utcH * 60 + utcM + 60) % (24 * 60); // approx UK time (UTC+1)
+  const { mins, day } = getUKTime();
 
-  // Never during weekend (forex handles its own)
-  if (mType !== 'FOREX' && (utcDay === 0 || utcDay === 6)) return false;
+  if (mType !== 'FOREX' && (day === 0 || day === 6)) return false;
 
   switch (mType) {
     case 'INDEX': {
-      // UK/EU open: 08:00–10:30 UK  (active London open)
-      // US overlap: 14:30–17:30 UK  (best liquidity of day)
-      const inUKOpen = ukMins >= 8 * 60 && ukMins < 10 * 60 + 30;
-      const inUSOver = ukMins >= 14 * 60 + 30 && ukMins < 17 * 60 + 30;
+      const inUKOpen = mins >= 8 * 60 && mins < 10 * 60 + 30;   // 08:00–10:30 UK
+      const inUSOver = mins >= 14 * 60 + 30 && mins < 17 * 60 + 30; // 14:30–17:30 UK
       return inUKOpen || inUSOver;
     }
     case 'FOREX': {
-      // Forex liquid: London session 08:00–17:00 UK, or NY overlap 13:00–17:00 UK
-      // Skip weekends (Sat all day, Sun before 22:00 UTC)
-      if (utcDay === 6) return false;
-      if (utcDay === 0 && utcH < 22) return false;
-      if (utcDay === 5 && utcH >= 22) return false;
-      return ukMins >= 8 * 60 && ukMins < 17 * 60;
+      if (day === 6) return false;
+      if (day === 0 && mins < 22 * 60) return false;
+      if (day === 5 && mins >= 22 * 60) return false;
+      return mins >= 8 * 60 && mins < 17 * 60;                  // 08:00–17:00 UK
     }
     case 'SHARES': {
-      // UK shares: 08:00–16:30 UK
-      // US shares: 14:30–21:00 UK
-      const inUK = ukMins >= 8 * 60 && ukMins < 16 * 60 + 30;
-      const inUS = ukMins >= 14 * 60 + 30 && ukMins < 21 * 60;
+      const inUK = mins >= 8 * 60 && mins < 16 * 60 + 30;
+      const inUS = mins >= 14 * 60 + 30 && mins < 21 * 60;
       return inUK || inUS;
     }
     case 'COMMODITY':
-      // Commodities most liquid during NY session
-      return ukMins >= 14 * 60 + 30 && ukMins < 21 * 60;
+      return mins >= 14 * 60 + 30 && mins < 21 * 60;
     case 'CRYPTO':
-      // Crypto is 24/7, no filter
       return true;
     default:
       return true;
@@ -432,10 +413,24 @@ function evaluateSignal(
   return { direction: dir, strength };
 }
 
+// ── UK local time helper — handles BST/GMT automatically via Intl ─────────────
+// Never use getUTCHours() + hardcoded offset — that breaks in winter when UK is GMT.
+function getUKTime(): { mins: number; day: number } {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    hour: 'numeric', minute: 'numeric', weekday: 'short', hour12: false,
+  }).formatToParts(now);
+  const h   = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10);
+  const m   = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+  const wdy = parts.find(p => p.type === 'weekday')?.value ?? 'Mon';
+  const dayMap: Record<string, number> = { Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6 };
+  return { mins: h * 60 + m, day: dayMap[wdy] ?? 1 };
+}
+
 // ── Market close guard ────────────────────────────────────────────────────────
-// Returns true if the market for this epic closes within the next 30 minutes.
-// Mirrors bot-server/src/marketHours.ts — keep in sync if sessions change.
-const INDEX_CLOSE_UTC: Record<string, { h: number; m: number }> = {
+// All times are UK local (BST in summer, GMT in winter). getUKTime() handles the offset.
+const INDEX_CLOSE_UK: Record<string, { h: number; m: number }> = {
   'IX.D.FTSE.DAILY.IP':   { h: 16, m: 30 },
   'IX.D.SPTRD.DAILY.IP':  { h: 21, m: 0  },
   'IX.D.NASDAQ.CASH.IP':  { h: 21, m: 0  },
@@ -449,14 +444,12 @@ const FOREX_EPICS_FE = new Set([
   'CS.D.EURGBP.TODAY.IP', 'CS.D.AUDUSD.TODAY.IP',
 ]);
 function isEpicClosingSoon(epic: string, bufferMins = 30): boolean {
-  const now = new Date();
-  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const day = now.getUTCDay();
-  if (FOREX_EPICS_FE.has(epic)) return day === 5 && utcMins >= (22 * 60 - bufferMins);
-  const close = INDEX_CLOSE_UTC[epic];
+  const { mins, day } = getUKTime();
+  if (FOREX_EPICS_FE.has(epic)) return day === 5 && mins >= (22 * 60 - bufferMins);
+  const close = INDEX_CLOSE_UK[epic];
   if (!close) return false;
   const closeMins = close.h * 60 + close.m;
-  return utcMins >= closeMins - bufferMins && utcMins < closeMins;
+  return mins >= closeMins - bufferMins && mins < closeMins;
 }
 
 // ── Trade history ─────────────────────────────────────────────────────────────
