@@ -769,6 +769,10 @@ export function IGStrategyTrader() {
   // cleared at the start of the NEXT scan after positions are refreshed.
   // Adds a second layer of protection on top of pendingOrdersRef for same-epic dupes.
   const placedEpicsRef     = useRef<Set<string>>(new Set());
+  // Bulk IG real-time snapshot pre-fetched at scan start — avoids Yahoo Finance (15-min delayed).
+  // keyed by epic, populated in runSignalScan, consumed in fetchSnapshot.
+  type IGSnapshotEntry = { bid: number; offer: number; mid: number; percentageChange: number; spread: number; high: number; low: number };
+  const igSnapshotRef      = useRef<Record<string, IGSnapshotEntry>>({});
 
   // ── Active demo/live mode ──────────────────────────────────────────────────
   const [activeMode, setActiveModeState] = useState<'demo'|'live'>('demo');
@@ -1387,50 +1391,31 @@ export function IGStrategyTrader() {
     indicators?: { rsi: number|null; macd: number|null; atr: number|null };
   };
 
-  // ── Fetch market snapshot — Yahoo Finance primary, bot server as validation layer ──
-  // Yahoo drives the signal (daily change % → BUY/SELL threshold).
-  // Bot server RSI/MACD is attached when available — used in scanMarket to
-  // boost or reduce strength based on whether indicators confirm the direction.
+  // ── Fetch market snapshot — IG real-time primary, Yahoo fallback, bot indicators ──
+  // Priority:
+  //   1. IG bulk snapshot (pre-fetched at scan start) — real-time bid/offer, zero data cost
+  //   2. Bot server RSI/MACD/ATR — attached as indicators when available (≥5 candles)
+  //   3. Yahoo Finance — only when IG snapshot has no entry for this epic (shares not on IG watchlist)
   async function fetchSnapshot(name: string, epic?: string): Promise<SnapshotResult|null> {
-    // ── Step 1: Yahoo Finance (browser-side — bypasses Vercel server blocking) ──
-    // Yahoo blocks server-side / datacenter requests (429/401) but allows browser
-    // CORS requests. fetchYahooQuotes calls Yahoo directly from the browser — no
-    // server proxy, no crumb authentication needed. This is the reliable path.
-    const { YAHOO_SYMBOL_MAP, fetchYahooQuotes } = await import('@/lib/yahooClient');
-    const symbol = YAHOO_SYMBOL_MAP[name];
-    let yahooResult: SnapshotResult | null = null;
-
-    if (symbol) {
-      try {
-        const quotes = await fetchYahooQuotes([symbol]);
-        if (quotes.length) {
-          const q = quotes[0];
-          const signal: 'BUY'|'SELL'|'NEUTRAL' = q.changePercent > 0.3 ? 'BUY' : q.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
-          yahooResult = { price: q.price, changePercent: q.changePercent, signal, source: 'yahoo' };
-        } else {
-          log('error', `[Yahoo] ${name} (${symbol}): empty response — market may be closed or symbol invalid`);
-        }
-      } catch (e) {
-        log('error', `[Yahoo] ${name} (${symbol}): ${e instanceof Error ? e.message : 'fetch failed'}`);
-      }
-    } else {
-      log('error', `[Scanner] No Yahoo symbol mapping for "${name}" — add it to YAHOO_SYMBOL_MAP`);
-    }
-
-    // ── Step 2: Bot server (secondary — real-time RSI/MACD/ATR from Lightstreamer) ──
+    // ── Step 1: Bot server (real-time RSI/MACD/ATR from Lightstreamer) ──
     const botData  = epic ? botPricesRef.current[epic] : null;
     const hasBot   = !!(botData && botData.candleCount >= 5 && botData.mid > 0);
     const botInds  = hasBot ? { rsi: botData!.rsi, macd: botData!.macd, atr: botData!.atr } : undefined;
 
-    // ── Return: Yahoo result with bot indicators attached, or bot-only, or error ──
-    if (yahooResult) {
-      return hasBot
-        ? { ...yahooResult, source: 'yahoo+bot', indicators: botInds }
-        : yahooResult;
+    // ── Step 2: IG real-time snapshot (pre-fetched in runSignalScan) ──
+    const igEntry = epic ? igSnapshotRef.current[epic] : undefined;
+    if (igEntry) {
+      const pct    = igEntry.percentageChange;
+      const signal: 'BUY'|'SELL'|'NEUTRAL' = pct > 0.3 ? 'BUY' : pct < -0.3 ? 'SELL' : 'NEUTRAL';
+      const igResult: SnapshotResult = {
+        price: igEntry.mid, changePercent: pct, signal,
+        source: hasBot ? 'ig+bot' : 'ig',
+        ...(hasBot ? { indicators: botInds } : {}),
+      };
+      return igResult;
     }
 
-    // No Yahoo data — fall back to bot server alone if available.
-    // Derive signal from raw indicators (bot server is data-only; frontend decides direction).
+    // ── Step 3: Bot server alone (fallback when IG snapshot missing this epic) ──
     if (hasBot) {
       const bd    = botData!;
       const cRed  = bd.consecutiveReds   ?? 0;
@@ -1446,8 +1431,28 @@ export function IGStrategyTrader() {
       };
     }
 
+    // ── Step 4: Yahoo Finance (last resort — 15-min delayed, US/UK only) ──
+    const { YAHOO_SYMBOL_MAP, fetchYahooQuotes } = await import('@/lib/yahooClient');
+    const symbol = YAHOO_SYMBOL_MAP[name];
+
+    if (symbol) {
+      try {
+        const quotes = await fetchYahooQuotes([symbol]);
+        if (quotes.length) {
+          const q = quotes[0];
+          const signal: 'BUY'|'SELL'|'NEUTRAL' = q.changePercent > 0.3 ? 'BUY' : q.changePercent < -0.3 ? 'SELL' : 'NEUTRAL';
+          return { price: q.price, changePercent: q.changePercent, signal, source: 'yahoo' };
+        }
+        log('error', `[Yahoo] ${name} (${symbol}): empty response — market may be closed or symbol invalid`);
+      } catch (e) {
+        log('error', `[Yahoo] ${name} (${symbol}): ${e instanceof Error ? e.message : 'fetch failed'}`);
+      }
+    } else {
+      log('error', `[Scanner] No IG snapshot and no Yahoo symbol mapping for "${name}" — add epic to watchlist or YAHOO_SYMBOL_MAP`);
+    }
+
     return { price: 0, changePercent: 0, signal: 'NEUTRAL', source: 'yahoo',
-             error: symbol ? 'No data returned' : `No symbol mapping for "${name}"` };
+             error: symbol ? 'No data returned' : `No symbol or IG mapping for "${name}"` };
   }
 
   // ── Fetch news signals once per scan cycle ────────────────────────────────
@@ -1537,8 +1542,9 @@ export function IGStrategyTrader() {
 
     // Bot server is primary when ≥20 candles available (enough for reliable RSI/MACD/candle streaks)
     // or when bot is the only data source. Below 20 candles indicators are unreliable.
+    // ig+bot: IG real-time price + bot RSI/MACD — treat same as yahoo+bot (bot primary when ≥20 candles).
     const useBotPrimary = snapshot.source === 'bot-server' ||
-                          (snapshot.source === 'yahoo+bot' && botCandleCount >= 20);
+                          ((snapshot.source === 'yahoo+bot' || snapshot.source === 'ig+bot') && botCandleCount >= 20);
 
     let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
     let strength = 0;
@@ -1619,12 +1625,13 @@ export function IGStrategyTrader() {
       if (atrStop > 0 && atrTP > 0) { stopDist = atrStop; limitDist = atrTP; }
     }
 
-    const hasBotData = snapshot.source === 'yahoo+bot' || snapshot.source === 'bot-server';
+    const hasBotData = snapshot.source === 'yahoo+bot' || snapshot.source === 'ig+bot' || snapshot.source === 'bot-server';
+    const srcLabel = snapshot.source.startsWith('ig') ? 'IG real-time' : 'Daily';
     const reason = useBotPrimary && rsiVal !== null
-      ? `RSI ${rsiVal.toFixed(0)} (${mType}) · Daily ${pctStr} [${botCandleCount}c]`
+      ? `RSI ${rsiVal.toFixed(0)} (${mType}) · ${srcLabel} ${pctStr} [${botCandleCount}c]`
       : hasBotData && rsiVal !== null
-        ? `Daily ${pctStr} (${mType}) · RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? '✓' : '⚠') : (rsiVal > 50 ? '✓' : '⚠')}`
-        : `Daily ${pctStr} (${mType})`;
+        ? `${srcLabel} ${pctStr} (${mType}) · RSI ${rsiVal.toFixed(0)} ${direction === 'BUY' ? (rsiVal < 50 ? '✓' : '⚠') : (rsiVal > 50 ? '✓' : '⚠')}`
+        : `${srcLabel} ${pctStr} (${mType})`;
 
     const sig: StrategySignal = {
       direction,
@@ -1634,7 +1641,7 @@ export function IGStrategyTrader() {
       targetPoints: limitDist,
       riskReward:   `1:${(limitDist / stopDist).toFixed(1)}`,
       indicators: [
-        { label: 'Daily Change', value: pctStr, status: (direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral') as 'bullish'|'bearish'|'neutral' },
+        { label: snapshot.source.startsWith('ig') ? 'IG Change' : 'Daily Change', value: pctStr, status: (direction === 'BUY' ? 'bullish' : direction === 'SELL' ? 'bearish' : 'neutral') as 'bullish'|'bearish'|'neutral' },
         hasBotData && rsiVal !== null
           ? { label: 'RSI (live)',  value: rsiVal.toFixed(0),     status: (direction === 'BUY' ? (rsiVal < 50 ? 'bullish' : 'bearish') : (rsiVal > 50 ? 'bearish' : 'bullish')) as 'bullish'|'bearish'|'neutral' }
           : { label: 'Type',        value: mType,                 status: 'neutral' as const },
@@ -1803,14 +1810,17 @@ export function IGStrategyTrader() {
         if (recentClose) {
           const cooldown = recentClose.wasLoss ? 60 * 60_000 : 30 * 60_000;
           if (Date.now() - recentClose.closedAt < cooldown) {
-            // Still within cooldown — only a very high-conviction setup overrides
-            if (strength < 87) {
+            // Still within cooldown.
+            // Loss closes: NEVER re-enter regardless of signal strength — the losing market
+            // condition has not changed in minutes; re-entering is the loss-loop bug.
+            // Profit closes: allow re-entry only on extreme conviction (95%+).
+            if (recentClose.wasLoss || strength < 95) {
               const label = recentClose.wasLoss ? 'loss' : 'profit';
               const remaining = Math.round((cooldown - (Date.now() - recentClose.closedAt)) / 60_000);
-              slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} — closed at ${label}, ${remaining}min cooldown (need 87%+ to override, have ${strength}%)`);
+              slog(strat.id, 'signal', `[SKIP] ${market.name} ${tradeDir} — closed at ${label}, ${remaining}min cooldown${recentClose.wasLoss ? ' (loss — never override)' : ` (need 95%+ to override, have ${strength}%)`}`);
               continue;
             }
-            slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} — conviction ${strength}% overrides cooldown`);
+            slog(strat.id, 'info', `[RE-ENTRY] ${market.name} ${tradeDir} — conviction ${strength}% overrides profit-close cooldown`);
           }
         }
 
@@ -1880,36 +1890,43 @@ export function IGStrategyTrader() {
         // in the same watchlist maps to the same underlying instrument.
         placedEpicsRef.current.add(`${market.epic}:${env}`);
 
-        // Gemini second opinion
+        // Gemini second opinion — SHARES only.
+        // INDEX and FOREX are driven by liquid price-action data (RSI/MACD/IG real-time).
+        // Calling Gemini on them adds ~10s latency per market with no edge: Gemini has
+        // no live price feed and its "opinions" on liquid markets are worse than indicators.
         let effectiveDir: 'BUY' | 'SELL' = tradeDir as 'BUY' | 'SELL';
-        try {
-          const gRes = await fetch('/api/gemini/verdict', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              instrumentName: market.name,
-              direction:      effectiveDir,
-              strength,
-              price:          snapshot.price,
-              changePercent:  snapshot.changePercent,
-              stopPoints:     stopDist,
-              tpPoints:       limitDist,
-              marketType:     mType,
-            }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (gRes.ok) {
-            const gv = await gRes.json() as { direction: 'BUY' | 'SELL' | 'SKIP'; confidence: number; reason: string; engine: string };
-            slog(strat.id, 'info', `[GEMINI] ${market.name} → ${gv.direction} ${gv.confidence}% — ${gv.reason} (${gv.engine})`);
-            if (gv.direction === 'SKIP' || gv.confidence < (strat.minStrength ?? 50)) {
-              slog(strat.id, 'info', `[GEMINI] Skipped ${market.name} — ${gv.direction} ${gv.confidence}%`);
-              pendingOrdersRef.current.delete(orderKey);
-              placedEpicsRef.current.delete(`${market.epic}:${env}`); // release epic lock — no order placed
-              continue;
+        if (mType !== 'INDEX' && mType !== 'FOREX') {
+          try {
+            const gRes = await fetch('/api/gemini/verdict', {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                instrumentName: market.name,
+                direction:      effectiveDir,
+                strength,
+                price:          snapshot.price,
+                changePercent:  snapshot.changePercent,
+                stopPoints:     stopDist,
+                tpPoints:       limitDist,
+                marketType:     mType,
+              }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (gRes.ok) {
+              const gv = await gRes.json() as { direction: 'BUY' | 'SELL' | 'SKIP'; confidence: number; reason: string; engine: string };
+              slog(strat.id, 'info', `[GEMINI] ${market.name} → ${gv.direction} ${gv.confidence}% — ${gv.reason} (${gv.engine})`);
+              if (gv.direction === 'SKIP' || gv.confidence < (strat.minStrength ?? 50)) {
+                slog(strat.id, 'info', `[GEMINI] Skipped ${market.name} — ${gv.direction} ${gv.confidence}%`);
+                pendingOrdersRef.current.delete(orderKey);
+                placedEpicsRef.current.delete(`${market.epic}:${env}`); // release epic lock — no order placed
+                continue;
+              }
+              if (gv.direction === 'BUY' || gv.direction === 'SELL') effectiveDir = gv.direction;
             }
-            if (gv.direction === 'BUY' || gv.direction === 'SELL') effectiveDir = gv.direction;
-          }
-        } catch { /* Gemini unavailable — proceed with original signal */ }
+          } catch { /* Gemini unavailable — proceed with original signal */ }
+        } else {
+          slog(strat.id, 'info', `[${mType}] ${market.name} — skipping Gemini, trusting indicator signal directly`);
+        }
 
         const maxLoss = orderSize * stopDist;
         slog(strat.id, effectiveDir === 'BUY' ? 'buy' : 'sell',
@@ -2022,6 +2039,26 @@ export function IGStrategyTrader() {
           }
         }
       } catch { /* sentiment fetch failed — skip contrarian gate this cycle */ }
+    }
+
+    // Pre-fetch real-time IG prices for all watchlist epics in a single bulk call.
+    // Uses IG's /v1/markets?epics=... endpoint — zero data-allowance cost, <1s, no delay.
+    // Stored in igSnapshotRef so fetchSnapshot can use it instead of Yahoo's 15-min delayed data.
+    if (sentSession) {
+      try {
+        const epicList = markets.map(m => m.epic).join(',');
+        const igSnap = await fetch(
+          `/api/ig/snapshot?epics=${encodeURIComponent(epicList)}`,
+          { headers: makeHeaders(sentSession, envForSent) },
+        );
+        if (igSnap.ok) {
+          const sd = await igSnap.json() as { ok: boolean; snapshot?: Record<string, IGSnapshotEntry> };
+          if (sd.ok && sd.snapshot) {
+            igSnapshotRef.current = sd.snapshot;
+            slog(strat.id, 'info', `📊 IG snapshot: ${Object.keys(sd.snapshot).length} real-time prices loaded (replaces Yahoo)`);
+          }
+        }
+      } catch { /* IG snapshot failed — Yahoo fallback remains active */ }
     }
 
     try {
