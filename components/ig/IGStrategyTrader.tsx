@@ -1376,7 +1376,8 @@ export function IGStrategyTrader() {
   }
 
   // ── Scan one market + execute ──────────────────────────────────────────────
-  async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
+  type SwingResult = { direction: 'BUY'|'SELL'|'HOLD'; strength: number; reasons: string[]; rsi: number|null; trend: string; pullbackPct: number|null };
+  async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket, swingSignals?: Record<string, SwingResult>): Promise<StrategySignal|null> {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
     const envs = strat.accounts.filter(e => sessions[e]);
 
@@ -1414,7 +1415,8 @@ export function IGStrategyTrader() {
     // ── Swing mode: use daily candle signal (trend + pullback) ────────────────
     // For weekly/longterm strategies, bypass the intraday % change signal entirely.
     // The daily RSI and EMA trend are far more reliable for multi-day holds.
-    const swingData = swingSignals[market.epic];
+    const isSwingStrategy = strat.timeframe === 'weekly' || strat.timeframe === 'longterm';
+    const swingData = swingSignals?.[market.epic];
     let direction: 'BUY' | 'SELL' | 'HOLD';
     let strength: number;
     if (isSwingStrategy && swingData) {
@@ -1924,7 +1926,6 @@ export function IGStrategyTrader() {
     }
 
     // Pre-fetch swing signals for all markets (swing strategies only)
-    type SwingResult = { direction: 'BUY'|'SELL'|'HOLD'; strength: number; reasons: string[]; rsi: number|null; trend: string; pullbackPct: number|null };
     const swingSignals: Record<string, SwingResult> = {};
     if (isSwingStrategy) {
       slog(strat.id, 'info', `[SWING] Fetching daily candle signals for ${markets.length} markets…`);
@@ -1990,7 +1991,7 @@ export function IGStrategyTrader() {
         if (getStratState(strat.id) === 'STOPPED') break;
         const m = markets[i];
         setScanProgress(`${m.name} (${i+1}/${markets.length})`);
-        await scanMarket(strat, m);
+        await scanMarket(strat, m, swingSignals);
         if (i < markets.length - 1) await sleep(300);
       }
 
