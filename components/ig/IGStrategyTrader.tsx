@@ -338,14 +338,14 @@ function isLiquidTradingWindow(mType: MarketType): boolean {
   switch (mType) {
     case 'INDEX': {
       const inUKOpen = mins >= 8 * 60 && mins < 10 * 60 + 30;   // 08:00–10:30 UK
-      const inUSOver = mins >= 14 * 60 + 30 && mins < 17 * 60 + 30; // 14:30–17:30 UK
-      return inUKOpen || inUSOver;
+      const inUSOpen = mins >= 14 * 60 + 30 && mins < 21 * 60;  // 14:30–21:00 UK (full US session)
+      return inUKOpen || inUSOpen;
     }
     case 'FOREX': {
       if (day === 6) return false;
       if (day === 0 && mins < 22 * 60) return false;
       if (day === 5 && mins >= 22 * 60) return false;
-      return mins >= 8 * 60 && mins < 17 * 60;                  // 08:00–17:00 UK
+      return mins >= 8 * 60 && mins < 21 * 60;                  // 08:00–21:00 UK (London + NY sessions)
     }
     case 'SHARES': {
       const inUK = mins >= 8 * 60 && mins < 16 * 60 + 30;
@@ -669,7 +669,7 @@ export function IGStrategyTrader() {
   const [paperMode, setPaperMode] = useState<boolean>(() => {
     if (typeof window === 'undefined') return true;
     const stored = localStorage.getItem('ig-paper-mode');
-    return stored === null ? true : stored === 'true'; // default ON for safety
+    return stored === null ? false : stored === 'true'; // default OFF — paper mode must be explicitly enabled
   });
   const paperModeRef = useRef(paperMode);
   useEffect(() => { paperModeRef.current = paperMode; localStorage.setItem('ig-paper-mode', String(paperMode)); }, [paperMode]);

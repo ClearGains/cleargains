@@ -1,12 +1,14 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   Search, RefreshCw, TrendingUp, TrendingDown,
   ArrowUpDown, Scale, BarChart2, AlertTriangle, ChevronUp, ChevronDown,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { DepthData, SRLevel } from '@/app/api/market/depth/route';
+
+type SearchResult = { symbol: string; name: string; exchange: string; type: string };
 
 function fmtPrice(n: number, currency = 'USD') {
   const sym = currency === 'GBP' ? '£' : currency === 'EUR' ? '€' : '$';
@@ -86,16 +88,47 @@ function LevelRow({ level, price }: { level: SRLevel; price: number }) {
 }
 
 export function MarketDepth() {
-  const [query,   setQuery]   = useState('');
-  const [symbol,  setSymbol]  = useState('');
-  const [data,    setData]    = useState<DepthData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState('');
+  const [query,       setQuery]       = useState('');
+  const [symbol,      setSymbol]      = useState('');
+  const [data,        setData]        = useState<DepthData | null>(null);
+  const [loading,     setLoading]     = useState(false);
+  const [error,       setError]       = useState('');
+  const [suggestions, setSuggestions] = useState<SearchResult[]>([]);
+  const [showDrop,    setShowDrop]    = useState(false);
+  const [searchBusy,  setSearchBusy]  = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapRef     = useRef<HTMLDivElement>(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handle(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setShowDrop(false);
+    }
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, []);
+
+  // Debounced search-as-you-type
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    const q = query.trim();
+    if (q.length < 2) { setSuggestions([]); setShowDrop(false); return; }
+    debounceRef.current = setTimeout(async () => {
+      setSearchBusy(true);
+      try {
+        const res = await fetch(`/api/chart/search?q=${encodeURIComponent(q)}`);
+        const results = await res.json() as SearchResult[];
+        setSuggestions(results);
+        setShowDrop(results.length > 0);
+      } catch { setSuggestions([]); }
+      finally { setSearchBusy(false); }
+    }, 300);
+  }, [query]);
 
   const fetchDepth = useCallback(async (sym: string, force = false) => {
     const s = sym.toUpperCase().trim();
     if (!s) return;
-    setLoading(true); setError('');
+    setLoading(true); setError(''); setShowDrop(false);
     try {
       const res = await fetch(`/api/market/depth?symbol=${encodeURIComponent(s)}${force ? '&force=1' : ''}`);
       const json = await res.json() as DepthData & { error?: string };
@@ -111,7 +144,14 @@ export function MarketDepth() {
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    void fetchDepth(query);
+    if (query.trim()) void fetchDepth(query);
+  };
+
+  const selectSuggestion = (r: SearchResult) => {
+    setQuery(r.symbol);
+    setSuggestions([]);
+    setShowDrop(false);
+    void fetchDepth(r.symbol);
   };
 
   // Derived values
@@ -141,15 +181,40 @@ export function MarketDepth() {
 
       {/* Search */}
       <form onSubmit={handleSearch} className="flex gap-2">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
+        <div className="relative flex-1" ref={wrapRef}>
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500 z-10" />
+          {searchBusy && (
+            <RefreshCw className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500 animate-spin z-10" />
+          )}
           <input
             type="text"
             value={query}
-            onChange={e => setQuery(e.target.value.toUpperCase())}
-            placeholder="Enter stock ticker (e.g. AAPL, TSLA, NVDA)"
+            onChange={e => { setQuery(e.target.value); setShowDrop(true); }}
+            onFocus={() => suggestions.length > 0 && setShowDrop(true)}
+            placeholder="Ticker or name — e.g. AAPL, Apple, FTSE, GBP/USD"
             className="w-full pl-9 pr-4 py-2.5 bg-gray-900 border border-gray-700 rounded-xl text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition"
           />
+          {showDrop && suggestions.length > 0 && (
+            <div className="absolute top-full left-0 right-0 mt-1 bg-gray-900 border border-gray-700 rounded-xl shadow-xl z-50 overflow-hidden max-h-60 overflow-y-auto">
+              {suggestions.map(r => (
+                <button
+                  key={r.symbol}
+                  type="button"
+                  onClick={() => selectSuggestion(r)}
+                  className="w-full flex items-center justify-between px-3 py-2 text-left text-sm hover:bg-gray-800 transition"
+                >
+                  <div>
+                    <span className="font-semibold text-white">{r.symbol}</span>
+                    <span className="text-gray-400 ml-2 text-xs">{r.name}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                    <span className="text-[10px] text-gray-500">{r.exchange}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">{r.type}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <button
           type="submit"
@@ -161,7 +226,7 @@ export function MarketDepth() {
         {data && (
           <button
             type="button"
-            onClick={() => fetchDepth(symbol, true)}
+            onClick={() => void fetchDepth(symbol, true)}
             disabled={loading}
             className="px-3 py-2.5 rounded-xl bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700 transition disabled:opacity-50"
             title="Refresh"
@@ -183,8 +248,8 @@ export function MarketDepth() {
       {!data && !loading && !error && (
         <div className="text-center py-20 text-gray-600">
           <Scale className="h-12 w-12 mx-auto mb-4 opacity-20" />
-          <p className="font-medium text-gray-500">Search for a stock to see its order book</p>
-          <p className="text-sm mt-1">Enter a US ticker symbol above (UK stocks won't have options data)</p>
+          <p className="font-medium text-gray-500">Search by name or ticker</p>
+          <p className="text-sm mt-1">Type a company name, index, or ticker — e.g. "Apple", "AAPL", "FTSE", "GBP/USD"</p>
         </div>
       )}
 

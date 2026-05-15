@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
     const raw = await res.json() as { quotes?: Quote[] };
 
     const results = (raw.quotes ?? [])
-      .filter(q => q.symbol && q.quoteType !== 'MUTUALFUND' && q.quoteType !== 'CURRENCY' && q.quoteType !== 'INDEX')
+      .filter(q => q.symbol && q.quoteType !== 'MUTUALFUND' && q.quoteType !== 'CURRENCY')
       .slice(0, 10)
       .map(q => ({
         symbol:   q.symbol ?? '',
