@@ -686,6 +686,7 @@ export function IGStrategyTrader() {
   const [scanProgress, setScanProgress] = useState<string>('');
   // Bot server real-time prices + indicators — refreshed once per scan cycle
   const botPricesRef = useRef<Record<string, BotPriceEntry>>({});
+  const [botServerActive, setBotServerActive] = useState(false);
   // IG client sentiment — refreshed once per scan cycle (contrarian gate)
   const sentimentRef = useRef<Record<string, { longPct: number; shortPct: number }>>({});
 
@@ -1909,20 +1910,25 @@ export function IGStrategyTrader() {
           botPricesRef.current = pd.prices;
           const liveCount = Object.keys(pd.prices).length;
           if (liveCount > 0) slog(strat.id, 'info', `⚡ Bot server: ${liveCount} live feed(s) — RSI/MACD/ATR active`);
-        }
-      }
-    } catch { /* bot server offline */ }
+          setBotServerActive(liveCount > 0);
+        } else { setBotServerActive(false); }
+      } else { setBotServerActive(false); }
+    } catch { setBotServerActive(false); /* bot server offline */ }
 
     const isSwingStrategy = strat.timeframe === 'weekly' || strat.timeframe === 'longterm';
 
-    // Guard: require live candle data before scanning — EXCEPT for swing strategies.
-    // Swing uses Yahoo Finance daily candles (no Lightstreamer needed).
-    // Intraday strategies need bot server for RSI/MACD/trend5m quality gates.
+    // Check whether the bot server has live candle data.
+    // Swing strategies never need it — they use Yahoo Finance daily candles.
+    // For intraday strategies (hourly/daily/rsi2 etc.) the bot server is optional:
+    //   • With bot data  → RSI, MACD, and trend5m gates all active (higher quality)
+    //   • Without it     → those gates self-disable (botCandleCount < 10 guards them)
+    //                      and the scan runs on IG snapshot price + % change alone.
+    // We no longer hard-block intraday scans when the bot server is offline — a weaker
+    // signal is better than no signal at all, and the user can start the bot server
+    // later to re-enable the full gate suite.
     const liveFeedCount = Object.values(botPricesRef.current).filter(e => e.candleCount >= 10).length;
     if (!isSwingStrategy && liveFeedCount === 0) {
-      slog(strat.id, 'info', `[SCAN SKIPPED] No live bot server data — start the Lightstreamer stream in the IG Server Bot panel first`);
-      scanInProgressRef.current.delete(strat.id);
-      return;
+      slog(strat.id, 'info', `⚠️ No live bot server data — RSI/MACD/trend5m gates inactive. Scanning on price % change only. Start the IG Server Bot panel for full signal quality.`);
     }
 
     // Pre-fetch swing signals for all markets (swing strategies only)
@@ -2023,9 +2029,12 @@ export function IGStrategyTrader() {
       const pr = await fetch('/api/ig/bot?action=prices');
       if (pr.ok) {
         const pd = await pr.json() as { ok: boolean; prices: Record<string, BotPriceEntry> };
-        if (pd.ok && pd.prices) botPricesRef.current = pd.prices;
+        if (pd.ok && pd.prices) {
+          botPricesRef.current = pd.prices;
+          setBotServerActive(Object.keys(pd.prices).length > 0);
+        }
       }
-    } catch { /* bot server offline — skip flip logic */ }
+    } catch { setBotServerActive(false); /* bot server offline — skip flip logic */ }
 
     const envs = strat.accounts.filter(e => sessions[e]) as ('demo'|'live')[];
     const botMode = strat.mode ?? 'BOTH';
@@ -3768,6 +3777,17 @@ export function IGStrategyTrader() {
                       {signalCountdown && <span>Next scan: <span className="text-emerald-400 font-mono">{signalCountdown}</span></span>}
                       {posCountdown && <span>Pos check: <span className="text-blue-400 font-mono">{posCountdown}</span></span>}
                     </div>
+                    {/* Bot server offline warning — only for intraday strategies */}
+                    {!botServerActive && strat.timeframe !== 'weekly' && strat.timeframe !== 'longterm' && (
+                      <div className="rounded-md px-3 py-2 bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-3">
+                        <p className="text-[11px] text-amber-300">
+                          <span className="font-semibold">Bot Server offline</span> — RSI/MACD/trend5m gates inactive. Signals use price % change only.
+                        </p>
+                        <span className="text-[11px] text-amber-400 font-semibold flex-shrink-0 whitespace-nowrap">
+                          Open &quot;IG Server Bot&quot; tab to enable full signals
+                        </span>
+                      </div>
+                    )}
                     {/* Mini activity log — last 5 entries for this strategy */}
                     {(stratLogs[strat.id] ?? []).slice(0, 5).length > 0 && (
                       <div className="pt-1.5 border-t border-emerald-500/10 space-y-0.5">
