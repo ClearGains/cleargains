@@ -31,6 +31,7 @@ import {
   Rocket,
   AlertTriangle,
   Gem,
+  Scale,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -42,6 +43,7 @@ const navLinks = [
   { href: '/penny-scanner',    label: 'Penny Scanner',    icon: ScanLine   },
   { href: '/graph-analysis',   label: 'Graph Analysis',   icon: LineChart  },
   { href: '/market-movers',    label: 'Market Movers',    icon: TrendingUp  },
+  { href: '/market-depth',     label: 'Market Depth',     icon: Scale       },
   { href: '/overvalued',        label: 'Overvalued Stocks',  icon: AlertTriangle },
   { href: '/undervalued',       label: 'Undervalued Stocks', icon: Gem           },
   { href: '/short-scanner',    label: 'Short Scanner',    icon: TrendingDown },
