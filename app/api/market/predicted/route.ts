@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getYahooCrumb, yfHeaders } from '@/lib/yahooServer';
-import { fetchFinnhubBatch } from '@/lib/finnhub';
+import { fetchFinnhubBatch, fetchFinnhubNewsBatch, type NewsResult } from '@/lib/finnhub';
 import type { Mover } from '../movers/route';
 
 export const revalidate = 0;
@@ -37,7 +37,7 @@ export type PredictedMover = Mover & {
   marketState?: string; // 'PRE' | 'REGULAR' | 'POST' | 'CLOSED'
 };
 
-function scoreQuote(q: Mover): { signal: Signal; signalReasons: string[]; score: number } {
+function scoreQuote(q: Mover, news?: NewsResult): { signal: Signal; signalReasons: string[]; score: number } {
   const reasons: string[] = [];
   let score = 0;
 
@@ -141,6 +141,35 @@ function scoreQuote(q: Mover): { signal: Signal; signalReasons: string[]; score:
   else if (overnight > 4)  { score -= 1; reasons.push(`+${overnight.toFixed(1)}% overnight — check entry price vs close`); }
   else if (overnight < -8) { score -= 1; reasons.push(`Down ${Math.abs(overnight).toFixed(1)}% overnight — gap-down risk`); }
 
+  // ── 6. News catalyst context ──────────────────────────────────────────────
+  // A big move with news = real catalyst behind it (more confident in the direction).
+  // A big move with NO news = unknown cause — could be a rumour, thin-market pump,
+  // or short squeeze. Without knowing WHY, the signal is much less reliable.
+  // A down move caused by news (bad earnings, lawsuit, FDA rejection) is NOT a dip —
+  // the price is falling for a real reason, not because of temporary panic.
+  if (news !== undefined) {
+    const absPct = Math.abs(totalChange);
+    const hl     = news.topHeadline
+      ? ` "${news.topHeadline.length > 80 ? news.topHeadline.slice(0, 80) + '…' : news.topHeadline}"`
+      : '';
+    if (absPct > 3) {
+      if (news.count > 0) {
+        if (isUp) {
+          score += 1;
+          reasons.push(`${news.count} news item${news.count > 1 ? 's' : ''} today — catalyst identified:${hl}`);
+        } else {
+          score -= 1;
+          reasons.push(`News-driven drop (${news.count} article${news.count > 1 ? 's' : ''}) — not a simple dip, verify before buying:${hl}`);
+        }
+      } else {
+        // Big move with zero news is a yellow flag — don't know why
+        reasons.push(`No news found — ${absPct.toFixed(1)}% move without visible catalyst (check social media / options flow)`);
+      }
+    } else if (news.count > 0) {
+      reasons.push(`${news.count} news item${news.count > 1 ? 's' : ''} today — read before trading:${hl}`);
+    }
+  }
+
   const signal: Signal =
     score >= 6  ? 'STRONG_BUY'  :
     score >= 3  ? 'BUY'         :
@@ -212,7 +241,7 @@ async function fetchAndScore(universe: string[], market: string): Promise<Predic
   const baseUrl = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(allSymbols.join(','))}`;
   const url = auth?.crumb ? `${baseUrl}&crumb=${encodeURIComponent(auth.crumb)}` : baseUrl;
 
-  // Fetch Yahoo quotes + Finnhub real-time prices in parallel (US only; UK free tier is limited)
+  // Phase 1: Yahoo quotes + Finnhub real-time prices in parallel
   const [res, fhMap] = await Promise.all([
     fetch(url, { headers: yfHeaders(auth?.cookie) }),
     market === 'US' ? fetchFinnhubBatch(allSymbols, 50) : Promise.resolve(new Map<string, { c: number; pc: number; dp: number }>()),
@@ -222,6 +251,23 @@ async function fetchAndScore(universe: string[], market: string): Promise<Predic
   const raw = await res.json() as { quoteResponse?: { result?: RawQuote[] } };
   const quotes = raw.quoteResponse?.result ?? [];
   const scannedAt = new Date().toISOString();
+
+  // Phase 2: Fetch news for US stocks that had a notable move or spike in volume.
+  // Only fetch news for these movers — Finnhub free tier is 60 req/min and
+  // Phase 1 already used ~50 calls. Cap at 15 news fetches; 30-min cache handles repeats.
+  const newsMap = new Map<string, NewsResult>();
+  if (market === 'US') {
+    const avgVol = (q: RawQuote) => Math.max(q.averageDailyVolume3Month ?? 1, 1);
+    const moverSymbols = quotes
+      .filter(q =>
+        Math.abs(q.regularMarketChangePercent ?? 0) > 3 ||
+        (q.regularMarketVolume ?? 0) / avgVol(q) > 2,
+      )
+      .map(q => q.symbol)
+      .slice(0, 15);
+    const fetched = await fetchFinnhubNewsBatch(moverSymbols, 15);
+    fetched.forEach((v, k) => newsMap.set(k, v));
+  }
 
   const predicted: PredictedMover[] = quotes.map(q => {
     const closePrice = q.regularMarketPrice ?? 0;
@@ -282,7 +328,7 @@ async function fetchAndScore(universe: string[], market: string): Promise<Predic
       })(),
     };
 
-    const scored = scoreQuote(base);
+    const scored = scoreQuote(base, newsMap.get(q.symbol));
     const overnight = base.extendedChangePercent ?? 0;
     const totalChange = effectiveChange + overnight;
     return {
