@@ -41,56 +41,105 @@ function scoreQuote(q: Mover): { signal: Signal; signalReasons: string[]; score:
   const reasons: string[] = [];
   let score = 0;
 
-  // Total effective move from yesterday's close, including overnight/extended hours.
-  // This is the actual price change an investor faces when entering a position.
-  const overnight = q.extendedChangePercent ?? 0;
+  const overnight   = q.extendedChangePercent ?? 0;
   const totalChange = q.changePercent + overnight;
+  const isUp        = totalChange > 0.5;
+  const isDown      = totalChange < -0.5;
 
-  if (q.volumeRatio > 3)        { score += 3; reasons.push(`Volume ${q.volumeRatio.toFixed(1)}× average`); }
-  else if (q.volumeRatio > 2)   { score += 2; reasons.push(`Volume ${q.volumeRatio.toFixed(1)}× average`); }
-  else if (q.volumeRatio > 1.5) { score += 1; reasons.push(`Volume elevated ${q.volumeRatio.toFixed(1)}×`); }
-
-  if (q.fromLow < 5)             { score += 3; reasons.push('Near 52-week low — bounce zone'); }
-  else if (q.fromLow < 10)       { score += 1; reasons.push('Within 10% of 52-week low'); }
-
-  if (q.fromHigh > -3)           { score += 2; reasons.push('At/near 52-week high — momentum'); }
-  else if (q.fromHigh > -8)      { score += 1; reasons.push('Near 52-week high'); }
-
-  if (q.goldenCross && q.aboveSma50)   { score += 2; reasons.push('Golden cross + above SMA50'); }
-  if (!q.goldenCross && !q.aboveSma50) { score -= 2; reasons.push('Death cross + below SMA50'); }
-
-  // Momentum — upside: reward EARLY moves (1-5%), heavily penalise stocks that have already run.
-  // A stock up 8%+ has made most of its move — the best trade was earlier, not now.
-  // Buying after a big move is chasing: the reward/risk has inverted.
-  if (totalChange > 15)       { score -= 5; reasons.push(`Already up ${totalChange.toFixed(1)}% — move is priced in, do NOT chase`); }
-  else if (totalChange > 10)  { score -= 4; reasons.push(`Up ${totalChange.toFixed(1)}% — extended entry, most upside already gone`); }
-  else if (totalChange > 8)   { score -= 3; reasons.push(`Up ${totalChange.toFixed(1)}% — stretched, limited remaining upside`); }
-  else if (totalChange > 5)   { score -= 1; reasons.push(`Up ${totalChange.toFixed(1)}% — moderate chase risk`); }
-  else if (totalChange > 2)   { score += 2; reasons.push(`Up ${totalChange.toFixed(1)}% — early momentum`); }
-  else if (totalChange > 0.5) { score += 1; reasons.push(`Up ${totalChange.toFixed(1)}% — early move forming`); }
-
-  // Momentum — downside: oversold bounce candidates.
-  // Very large drops (>15%) get less credit — could be fundamental, not just a dip.
-  if (totalChange < -15)      { score += 1; reasons.push(`Sharp drop ${Math.abs(totalChange).toFixed(1)}% — oversold, bounce possible`); }
-  else if (totalChange < -5)  { score += 2; reasons.push(`Down ${Math.abs(totalChange).toFixed(1)}% — oversold bounce candidate`); }
-  else if (totalChange < -3)  { score += 1; reasons.push(`Down ${Math.abs(totalChange).toFixed(1)}% from yesterday`); }
-
-  // Overnight risk: penalise stocks that have already moved significantly in
-  // extended hours — entering at open would be at a much higher price than close
-  if (overnight > 15)         { score -= 4; reasons.push(`Already +${overnight.toFixed(1)}% overnight — entry price far above close`); }
-  else if (overnight > 8)     { score -= 3; reasons.push(`Already +${overnight.toFixed(1)}% overnight — elevated entry risk`); }
-  else if (overnight > 4)     { score -= 1; reasons.push(`Up ${overnight.toFixed(1)}% overnight — check entry price`); }
-  else if (overnight < -8)    { score -= 1; reasons.push(`Down ${Math.abs(overnight).toFixed(1)}% overnight — gap down risk`); }
-
-  if (q.fromHigh < -40) { score -= 2; reasons.push('Far from 52-week high (>40%)'); }
-  if (!q.aboveSma200)   score -= 1;
-
-  // Parabolic risk: massive one-day spike signals potential exhaustion / reversal candidate
-  const isParabolic = totalChange > 15 || (totalChange > 8 && q.fromHigh > -2);
-  if (isParabolic && !reasons.some(r => r.includes('chasing'))) {
-    reasons.push(`Parabolic move +${totalChange.toFixed(1)}% — high reversal risk, watch for SELL`);
-    score -= 1; // penalise extra for chasing
+  // ── 1. Volume × Direction — the primary signal ───────────────────────────
+  // Volume is the "amount of bets placed". High volume confirms a move is
+  // backed by real conviction. High volume on a DOWN day is bearish
+  // (distribution / institutional selling) — NOT a buy signal.
+  if (q.volumeRatio > 3) {
+    if (isUp) {
+      score += 4;
+      reasons.push(`Strong buying volume: ${q.volumeRatio.toFixed(1)}× average on up move — real demand`);
+    } else if (isDown) {
+      score -= 4;
+      reasons.push(`Heavy selling volume: ${q.volumeRatio.toFixed(1)}× average on down move — distribution`);
+    } else {
+      score += 1;
+      reasons.push(`Volume spike ${q.volumeRatio.toFixed(1)}× — no clear direction yet`);
+    }
+  } else if (q.volumeRatio > 2) {
+    if (isUp)   { score += 2; reasons.push(`Volume ${q.volumeRatio.toFixed(1)}× on up move — buying pressure confirmed`); }
+    else if (isDown) { score -= 2; reasons.push(`Volume ${q.volumeRatio.toFixed(1)}× on down move — selling pressure`); }
+  } else if (q.volumeRatio > 1.5) {
+    if (isUp) { score += 1; reasons.push(`Volume elevated ${q.volumeRatio.toFixed(1)}× on up move`); }
   }
+
+  // Thin-volume moves are suspect — no real conviction behind them
+  if (q.volumeRatio < 0.5 && Math.abs(totalChange) > 3) {
+    score -= 1;
+    reasons.push(`${Math.abs(totalChange).toFixed(1)}% move on below-average volume — weak conviction`);
+  }
+
+  // ── 2. 52-week position — structural context ─────────────────────────────
+  // Near a 52-week low is NOT automatically bullish. It could be a falling
+  // knife (bad earnings, sector collapse, fraud). It's only a positive signal
+  // if the stock is holding that level and starting to reverse on volume.
+  if (q.fromLow < 5) {
+    if (isUp && q.volumeRatio >= 1.5) {
+      score += 3;
+      reasons.push('Bouncing off 52-week low on volume — key support holding');
+    } else if (isDown) {
+      score -= 2;
+      reasons.push('Breaking 52-week low support — falling knife, no floor visible');
+    } else {
+      score += 1;
+      reasons.push('At 52-week low — watch for volume-backed bounce before entering');
+    }
+  } else if (q.fromLow < 10 && isUp) {
+    score += 1;
+    reasons.push(`${q.fromLow.toFixed(1)}% above 52-week low and rising`);
+  }
+
+  // Near 52-week high = momentum only if accompanied by volume; otherwise resistance
+  if (q.fromHigh > -3) {
+    if (isUp && q.volumeRatio > 1.5) {
+      score += 3;
+      reasons.push('Breaking to 52-week high on volume — confirmed breakout');
+    } else if (isUp) {
+      score += 1;
+      reasons.push('Near 52-week high — momentum, but watch for resistance without volume');
+    }
+    // Sitting at highs but flat or falling = potential distribution (neutral/negative)
+  } else if (q.fromHigh > -8 && isUp && q.volumeRatio > 1.5) {
+    score += 1;
+    reasons.push('Approaching 52-week high on volume');
+  }
+
+  // ── 3. Technical structure (SMA) ─────────────────────────────────────────
+  if (q.goldenCross && q.aboveSma50)   { score += 2; reasons.push('Golden cross + above SMA50 — structural uptrend'); }
+  if (!q.goldenCross && !q.aboveSma50) { score -= 2; reasons.push('Death cross + below SMA50 — structural downtrend'); }
+  if (!q.aboveSma200) score -= 1;
+  if (q.fromHigh < -40 && !q.goldenCross) {
+    score -= 2;
+    reasons.push('Far from 52-week high (>40%) with no uptrend structure — avoid');
+  }
+
+  // ── 4. Parabolic / chase risk ─────────────────────────────────────────────
+  // After a big single-day move, entry risk has inverted. The opportunity
+  // was earlier — buying now means buying near the top of the day's range.
+  if (totalChange > 15) {
+    score -= 5;
+    reasons.push(`Up ${totalChange.toFixed(1)}% — move already happened, do not chase`);
+  } else if (totalChange > 10) {
+    score -= 4;
+    reasons.push(`Up ${totalChange.toFixed(1)}% — extended, most upside already taken`);
+  } else if (totalChange > 8) {
+    score -= 3;
+    reasons.push(`Up ${totalChange.toFixed(1)}% — stretched entry, reward/risk inverted`);
+  } else if (totalChange > 5) {
+    score -= 1;
+    reasons.push(`Up ${totalChange.toFixed(1)}% — moderate chase risk, wait for pullback`);
+  }
+
+  // ── 5. Overnight gap risk ─────────────────────────────────────────────────
+  if (overnight > 15)      { score -= 4; reasons.push(`+${overnight.toFixed(1)}% overnight — entry price far above close`); }
+  else if (overnight > 8)  { score -= 2; reasons.push(`+${overnight.toFixed(1)}% overnight — elevated entry risk`); }
+  else if (overnight > 4)  { score -= 1; reasons.push(`+${overnight.toFixed(1)}% overnight — check entry price vs close`); }
+  else if (overnight < -8) { score -= 1; reasons.push(`Down ${Math.abs(overnight).toFixed(1)}% overnight — gap-down risk`); }
 
   const signal: Signal =
     score >= 6  ? 'STRONG_BUY'  :
@@ -100,6 +149,7 @@ function scoreQuote(q: Mover): { signal: Signal; signalReasons: string[]; score:
 
   return { signal, signalReasons: reasons.slice(0, 6), score };
 }
+
 
 type RawQuote = {
   symbol: string;
