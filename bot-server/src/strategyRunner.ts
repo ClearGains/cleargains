@@ -2,6 +2,8 @@
 // openPosition / closePosition removed. This file generates signals only;
 // all trade execution is handled by the frontend IG Spread Bet tab.
 
+import { isWeekend, msUntilMondayOpen } from './marketHours';
+
 export type StrategyMarket = {
   epic:        string;
   name:        string;
@@ -83,6 +85,18 @@ async function fetchPrice(market: StrategyMarket): Promise<{ price: number; chan
 
 async function runScan() {
   if (!config || !running) return;
+  if (isWeekend()) {
+    const sleepMs = msUntilMondayOpen();
+    addLog('info', `Weekend — markets closed. Next scan Monday (~${Math.round(sleepMs / 3_600_000)}h)`);
+    if (scanTimer) clearInterval(scanTimer);
+    scanTimer = null;
+    setTimeout(() => {
+      if (!running || !config) return;
+      void runScan();
+      scanTimer = setInterval(() => { void runScan(); }, config.scanIntervalMs);
+    }, sleepMs);
+    return;
+  }
   addLog('info', `Scanning ${config.markets.length} market(s) — signal only, no orders`);
 
   for (const market of config.markets) {

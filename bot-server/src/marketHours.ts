@@ -60,6 +60,23 @@ export function isClosingSoon(epic: string, bufferMins = 30): boolean {
   return mins >= closeMins - bufferMins && mins < closeMins;
 }
 
+export function isWeekend(): boolean {
+  const day = new Date().getUTCDay();
+  return day === 0 || day === 6;
+}
+
+// Returns ms until Monday 13:00 UTC (30 min before NYSE open / after most EU opens)
+export function msUntilMondayOpen(): number {
+  const now  = new Date();
+  const day  = now.getUTCDay();
+  const daysUntilMonday = day === 1 ? 7 : (8 - day) % 7;
+  const monday = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilMonday,
+    13, 0, 0, 0,
+  ));
+  return Math.max(monday.getTime() - now.getTime(), 60_000);
+}
+
 export function isMarketOpen(epic: string): { open: boolean; reason: string } {
   const day  = dayOfWeekUTC();
   const mins = minutesSinceMidnightUTC();

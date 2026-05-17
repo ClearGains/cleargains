@@ -15,7 +15,7 @@ import {
   DEFAULT_CONFIG,
   type CandleTick, type ScalperEpicState, type ScalperConfig,
 } from './scalperStrategy';
-import { isMarketOpen, isClosingSoon } from './marketHours';
+import { isMarketOpen, isClosingSoon, isWeekend } from './marketHours';
 import { askGemini, type EntrySignal } from './gemini';
 import { feedCandle, runSignalCheck } from './signalMonitor';
 
@@ -111,9 +111,9 @@ function startSignalMonitor() {
   if (signalMonitorTimer) clearInterval(signalMonitorTimer);
   // Run every 5 minutes — checks ALL open positions, not just scalper ones
   signalMonitorTimer = setInterval(() => {
+    if (isWeekend()) return; // markets closed — skip until Monday
     void runSignalCheck(currentEpics, addLog).then(newEpics => {
       if (newEpics.length > 0) {
-        // Add newly discovered position epics to the Lightstreamer subscription
         const session = getSession();
         if (session) {
           const merged = [...new Set([...currentEpics, ...newEpics])];

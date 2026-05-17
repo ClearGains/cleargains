@@ -3,7 +3,7 @@ import {
   placeMarketOrder, updatePositionLevels, fetchAccountFunds, fetchFullPositions,
   type IGSession,
 } from './igApi';
-import { isMarketOpen } from './marketHours';
+import { isMarketOpen, isWeekend, msUntilMondayOpen } from './marketHours';
 
 // ── Stock epics ───────────────────────────────────────────────────────────────
 
@@ -595,7 +595,10 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
   function scheduleNext() {
     if (!running || !settings) return;
     if (scanTimer) clearTimeout(scanTimer);
-    const ms = settings.scanIntervalMins * 60_000;
+    const ms = isWeekend()
+      ? msUntilMondayOpen()
+      : settings.scanIntervalMins * 60_000;
+    if (isWeekend()) addLog('info', `Weekend — markets closed. Next scan Monday (~${Math.round(ms / 3_600_000)}h)`);
     nextScanAt = new Date(Date.now() + ms).toISOString();
     scanTimer  = setTimeout(() => void runScan(), ms);
   }
