@@ -350,10 +350,17 @@ app.listen(PORT, '0.0.0.0', () => {
   // Auto-resume legacy single-account bot if it was running before restart
   const saved = loadSavedState();
   if (saved) {
-    console.log(`[bot-server] Auto-resuming legacy bot with ${saved.epics.length} epic(s)...`);
-    void startBot(saved).then(r => {
-      if (r.ok) console.log('[bot-server] Auto-resume successful');
-      else console.error(`[bot-server] Auto-resume failed: ${r.error}`);
-    });
+    const igKey  = process.env.IG_API_KEY  ?? '';
+    const igUser = process.env.IG_USERNAME ?? '';
+    const igPass = process.env.IG_PASSWORD ?? '';
+    if (!igKey || !igUser || !igPass) {
+      console.warn('[bot-server] Skipping auto-resume — IG_API_KEY / IG_USERNAME / IG_PASSWORD not set');
+    } else {
+      console.log(`[bot-server] Auto-resuming legacy bot with ${saved.epics.length} epic(s)...`);
+      void startBot(saved).then(r => {
+        if (r.ok) console.log('[bot-server] Auto-resume successful');
+        else console.error(`[bot-server] Auto-resume failed: ${r.error}`);
+      });
+    }
   }
 });

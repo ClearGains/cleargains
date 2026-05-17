@@ -60,7 +60,8 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
   const log: LogEntry[] = [];
   const monitorCandles = new Map<string, CandleTick[]>();
 
-  let sessionRefreshTimer: ReturnType<typeof setTimeout>  | null = null;
+  let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let authFailCount = 0;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -98,12 +99,20 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
     try {
       addLog('info', '—', 'Refreshing IG session...');
       session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, accountKey);
+      authFailCount = 0;
       addLog('info', '—', `Session refreshed — expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
       if (running) stream.connect(session, currentEpics, handleTick, '5MINUTE');
       scheduleRefresh(session);
     } catch (e) {
+      authFailCount++;
       addLog('error', '—', `Session refresh failed: ${e instanceof Error ? e.message : String(e)}`);
-      sessionRefreshTimer = setTimeout(() => { void doRefresh(); }, 5 * 60_000);
+      if (authFailCount >= 3) {
+        addLog('error', '—', `Auth failed ${authFailCount} times in a row — stopping retries to prevent account lockout. Fix credentials and restart the bot.`);
+        return;
+      }
+      const backoffMs = 5 * 60_000 * Math.pow(2, authFailCount - 1); // 5m, 10m, 20m
+      addLog('info', '—', `Retrying session refresh in ${Math.round(backoffMs / 60_000)} min (attempt ${authFailCount}/3)`);
+      sessionRefreshTimer = setTimeout(() => { void doRefresh(); }, backoffMs);
     }
   }
 

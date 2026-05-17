@@ -80,6 +80,7 @@ let currentEpics:  string[] = [];
 let currentConfig: ScalperConfig = { ...DEFAULT_CONFIG };
 let recentLosses   = 0;   // tracks consecutive losing trades to auto-scale cooldown
 let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let authFailCount = 0;
 let signalMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
 const log: LogEntry[] = [];
@@ -151,17 +152,23 @@ async function refreshSession() {
   try {
     addLog('info', '—', 'Refreshing IG session...');
     const session = await authenticate(apiKey, username, password, env);
+    authFailCount = 0;
     addLog('info', '—', `Session refreshed — expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
 
     if (running) {
-      // Reconnect Lightstreamer with new credentials
       connect(session, currentEpics, handleTick, '5MINUTE');
     }
     scheduleSessionRefresh(session);
   } catch (e) {
+    authFailCount++;
     addLog('error', '—', `Session refresh failed: ${e instanceof Error ? e.message : String(e)}`);
-    // Retry in 5 minutes
-    sessionRefreshTimer = setTimeout(() => { void refreshSession(); }, 5 * 60_000);
+    if (authFailCount >= 3) {
+      addLog('error', '—', `Auth failed ${authFailCount} times in a row — stopping retries to prevent account lockout. Fix credentials and restart the bot.`);
+      return;
+    }
+    const backoffMs = 5 * 60_000 * Math.pow(2, authFailCount - 1); // 5m, 10m, 20m
+    addLog('info', '—', `Retrying session refresh in ${Math.round(backoffMs / 60_000)} min (attempt ${authFailCount}/3)`);
+    sessionRefreshTimer = setTimeout(() => { void refreshSession(); }, backoffMs);
   }
 }
 
@@ -357,6 +364,7 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
   }
 
   try {
+    authFailCount = 0;
     addLog('info', '—', `Starting bot — epics: ${params.epics.join(', ')} | fully automated sizing`);
     const session = await authenticate(apiKey, username, password, env);
 
