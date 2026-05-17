@@ -63,6 +63,7 @@ type StrategyRecommendation = {
   allowShorts:      boolean;
   keyHeadlines:     KeyHeadline[];
   generatedAt:      string;
+  engine?:          'gemini' | 'rules';
 };
 
 // ── Strategy definitions ──────────────────────────────────────────────────────
@@ -308,9 +309,14 @@ function RecommendationPanel({
           <Sparkles className="w-4 h-4 text-indigo-400" />
           <span className="text-sm font-semibold text-slate-200">AI Strategy Recommendation</span>
           {rec && (
-            <span className="text-xs text-slate-500">
-              · {new Date(rec.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
+            <>
+              <span className="text-xs text-slate-500">
+                · {new Date(rec.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${rec.engine === 'gemini' ? 'bg-indigo-500/20 text-indigo-300' : 'bg-slate-700 text-slate-400'}`}>
+                {rec.engine === 'gemini' ? 'Gemini' : 'Rules'}
+              </span>
+            </>
           )}
         </div>
         <div className="flex items-center gap-2">
