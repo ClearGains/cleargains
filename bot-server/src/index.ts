@@ -5,6 +5,11 @@ import { startStrategyRunner, stopStrategyRunner, getStrategyRunnerStatus, type 
 import { demoBot, liveBot, getAccountBot, type AccountKey } from './botAccount';
 import { getStockBot, type StockBotStartParams } from './stockBot';
 import { calcRsi, calcMacdHist, calcAtr } from './scalperStrategy';
+import {
+  startAlpacaBot, stopAlpacaBot, pauseAlpacaBot, resumeAlpacaBot,
+  getAlpacaBotStatus, emergencyStop,
+  type AlpacaBotConfig,
+} from './alpacaBot';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -261,6 +266,77 @@ app.post('/strategy/start', auth, (req: Request, res: Response) => {
 
 app.post('/strategy/stop', auth, (_req: Request, res: Response) => { stopStrategyRunner(); res.json({ ok: true }); });
 app.get('/strategy/status', auth, (_req: Request, res: Response) => { res.json(getStrategyRunnerStatus()); });
+
+// ── Alpaca bot routes (/alpaca/*) ─────────────────────────────────────────────
+
+function resolveAlpacaMode(req: Request, res: Response): 'paper' | 'live' | null {
+  const mode = (req.params.mode ?? req.query.mode) as string;
+  if (mode !== 'paper' && mode !== 'live') {
+    res.status(400).json({ ok: false, error: 'mode must be "paper" or "live"' });
+    return null;
+  }
+  return mode;
+}
+
+// GET /alpaca/:mode/status
+app.get('/alpaca/:mode/status', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  void getAlpacaBotStatus(mode).then(status => res.json(status));
+});
+
+// POST /alpaca/:mode/start
+app.post('/alpaca/:mode/start', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+
+  const body = req.body as Partial<AlpacaBotConfig>;
+  if (!Array.isArray(body.symbols) || !body.symbols.length) {
+    res.status(400).json({ ok: false, error: 'symbols array is required' });
+    return;
+  }
+
+  const cfg: AlpacaBotConfig = {
+    mode,
+    strategy:        body.strategy        ?? 'rsi_mean_reversion',
+    symbols:         body.symbols,
+    positionSizeUsd: body.positionSizeUsd ?? 500,
+    maxPositions:    body.maxPositions    ?? 3,
+    allowShorts:     body.allowShorts     ?? false,
+  };
+
+  res.json({ ok: true, message: 'Bot starting…' });
+  void startAlpacaBot(cfg).then(result => {
+    if (!result.ok) console.error(`[alpaca] Start failed: ${result.error}`);
+  });
+});
+
+// POST /alpaca/:mode/stop
+app.post('/alpaca/:mode/stop', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  stopAlpacaBot();
+  res.json({ ok: true });
+});
+
+// POST /alpaca/:mode/pause
+app.post('/alpaca/:mode/pause', auth, (_req: Request, res: Response) => {
+  pauseAlpacaBot();
+  res.json({ ok: true });
+});
+
+// POST /alpaca/:mode/resume
+app.post('/alpaca/:mode/resume', auth, (_req: Request, res: Response) => {
+  resumeAlpacaBot();
+  res.json({ ok: true });
+});
+
+// POST /alpaca/:mode/emergency-stop — cancel all open orders without closing positions
+app.post('/alpaca/:mode/emergency-stop', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  void emergencyStop(mode).then(result => res.status(result.ok ? 200 : 500).json(result));
+});
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
