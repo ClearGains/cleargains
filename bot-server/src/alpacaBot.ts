@@ -17,7 +17,7 @@ export type AlpacaBotConfig = {
   mode:             AccountMode;
   strategy:         StrategyName;
   symbols:          string[];
-  positionSizeUsd:  number;    // notional $ per position (supports fractional shares)
+  positionSizeUsd:  number;
   maxPositions:     number;
   allowShorts:      boolean;
 };
@@ -47,61 +47,82 @@ export type AlpacaBotStatus = {
 
 type OrbState = { high: number; low: number; established: boolean };
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// ── Per-mode state ────────────────────────────────────────────────────────────
 
-let running        = false;
-let paused         = false;
-let config: AlpacaBotConfig | null = null;
+type ModeState = {
+  running:    boolean;
+  paused:     boolean;
+  config:     AlpacaBotConfig | null;
+  log:        AlpacaLogEntry[];
+  pollTimer:  ReturnType<typeof setTimeout> | null;
+  nextRunMs:  number | null;
+  lastPollTs: string | null;
+  orbState:   Record<string, OrbState>;
+};
 
-const log: AlpacaLogEntry[] = [];
-let pollTimer: ReturnType<typeof setTimeout> | null = null;
-let nextRunMs: number | null = null;
-let lastPollTs: string | null = null;
+function makeModeState(): ModeState {
+  return {
+    running: false, paused: false, config: null,
+    log: [], pollTimer: null, nextRunMs: null, lastPollTs: null,
+    orbState: {},
+  };
+}
 
-const orbState: Record<string, OrbState> = {};
+const modeStates = new Map<AccountMode, ModeState>([
+  ['paper', makeModeState()],
+  ['live',  makeModeState()],
+]);
+
+function s(mode: AccountMode): ModeState {
+  return modeStates.get(mode)!;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function uid()  { return Math.random().toString(36).slice(2, 8); }
-function now()  { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+function uid() { return Math.random().toString(36).slice(2, 8); }
+function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
 
-function addLog(type: AlpacaLogEntry['type'], symbol: string, msg: string) {
+function addLog(mode: AccountMode, type: AlpacaLogEntry['type'], symbol: string, msg: string) {
+  const st    = s(mode);
   const entry: AlpacaLogEntry = { id: uid(), ts: now(), type, symbol, msg };
-  log.unshift(entry);
-  if (log.length > 400) log.splice(400);
+  st.log.unshift(entry);
+  if (st.log.length > 400) st.log.splice(400);
   const level = type === 'error' ? 'error' : 'log';
-  console[level](`[alpaca] [${entry.ts}] [${type.toUpperCase()}] [${symbol}] ${msg}`);
+  console[level](`[alpaca:${mode}] [${entry.ts}] [${type.toUpperCase()}] [${symbol}] ${msg}`);
 }
 
 // ── ORB range builder ─────────────────────────────────────────────────────────
 
-function resetOrbState(symbols: string[]) {
+function resetOrbState(mode: AccountMode, symbols: string[]) {
+  const st = s(mode);
   for (const sym of symbols) {
-    orbState[sym] = { high: 0, low: 0, established: false };
+    st.orbState[sym] = { high: 0, low: 0, established: false };
   }
 }
 
-async function buildOrbRange(symbols: string[], mode: AccountMode) {
-  addLog('info', '—', 'Building Opening Range (first 30 min)…');
+async function buildOrbRange(mode: AccountMode, symbols: string[]) {
+  addLog(mode, 'info', '—', 'Building Opening Range (first 30 min)…');
   try {
     const barsMap = await getBars(symbols, '1Min', 60, mode);
+    const st      = s(mode);
     for (const sym of symbols) {
-      const bars = barsMap[sym] ?? [];
+      const bars    = barsMap[sym] ?? [];
       if (!bars.length) continue;
-      const orbBars = bars.slice(-30);   // last 30 1-min bars = 30 minutes
-      const high = Math.max(...orbBars.map(b => b.h));
-      const low  = Math.min(...orbBars.map(b => b.l));
-      orbState[sym] = { high, low, established: true };
-      addLog('info', sym, `ORB established: ${low.toFixed(2)}–${high.toFixed(2)}`);
+      const orbBars = bars.slice(-30);
+      const high    = Math.max(...orbBars.map(b => b.h));
+      const low     = Math.min(...orbBars.map(b => b.l));
+      st.orbState[sym] = { high, low, established: true };
+      addLog(mode, 'info', sym, `ORB established: ${low.toFixed(2)}–${high.toFixed(2)}`);
     }
   } catch (e) {
-    addLog('error', '—', `ORB build failed: ${e instanceof Error ? e.message : String(e)}`);
+    addLog(mode, 'error', '—', `ORB build failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 // ── Signal dispatch ───────────────────────────────────────────────────────────
 
 async function evaluateSymbol(
+  mode:      AccountMode,
   sym:       string,
   positions: AlpacaPosition[],
   cfg:       AlpacaBotConfig,
@@ -113,19 +134,20 @@ async function evaluateSymbol(
 
   let bars;
   try {
-    const barsMap = await getBars([sym], meta.barPeriod, meta.barsNeeded, cfg.mode);
+    const barsMap = await getBars([sym], meta.barPeriod, meta.barsNeeded, mode);
     bars = barsMap[sym] ?? [];
   } catch (e) {
-    addLog('error', sym, `Failed to fetch bars: ${e instanceof Error ? e.message : String(e)}`);
+    addLog(mode, 'error', sym, `Failed to fetch bars: ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
 
   if (!bars.length) {
-    addLog('wait', sym, 'No bar data returned');
+    addLog(mode, 'wait', sym, 'No bar data returned');
     return;
   }
 
   let signal: StrategySignal;
+  const st = s(mode);
 
   switch (cfg.strategy) {
     case 'rsi_mean_reversion':
@@ -137,19 +159,19 @@ async function evaluateSymbol(
       break;
 
     case 'orb': {
-      const orb = orbState[sym] ?? { high: 0, low: 0, established: false };
+      const orb = st.orbState[sym] ?? { high: 0, low: 0, established: false };
       if (!orb.established) {
-        addLog('wait', sym, 'ORB not established yet');
+        addLog(mode, 'wait', sym, 'ORB not established yet');
         return;
       }
-      const latestBars = await getLatestBars([sym], cfg.mode).catch(() => ({} as Record<string, typeof bars[0]>));
+      const latestBars = await getLatestBars([sym], mode).catch(() => ({} as Record<string, typeof bars[0]>));
       const price      = latestBars[sym]?.c ?? bars[bars.length - 1].c;
       signal = orbSignal(orb.high, orb.low, price, inPosition, side);
       break;
     }
 
     case 'vwap': {
-      const latestBars = await getLatestBars([sym], cfg.mode).catch(() => ({} as Record<string, typeof bars[0]>));
+      const latestBars = await getLatestBars([sym], mode).catch(() => ({} as Record<string, typeof bars[0]>));
       const price      = latestBars[sym]?.c ?? bars[bars.length - 1].c;
       signal = vwapSignal(bars, price, inPosition, side);
       break;
@@ -158,7 +180,7 @@ async function evaluateSymbol(
     case 'weekly_momentum': {
       let dailyBars: import('./alpacaApi').AlpacaBar[] = [];
       try {
-        const daily = await getBars([sym], '1Day', 30, cfg.mode);
+        const daily = await getBars([sym], '1Day', 30, mode);
         dailyBars = daily[sym] ?? [];
       } catch {
         dailyBars = [];
@@ -171,229 +193,228 @@ async function evaluateSymbol(
       return;
   }
 
-  await executeSignal(sym, signal, openPos ?? null, cfg);
+  await executeSignal(mode, sym, signal, openPos ?? null, cfg);
 }
 
 // ── Order execution ───────────────────────────────────────────────────────────
 
 async function executeSignal(
+  mode:    AccountMode,
   sym:     string,
   signal:  StrategySignal,
   openPos: AlpacaPosition | null,
   cfg:     AlpacaBotConfig,
 ): Promise<void> {
   const { action, reason, stopPrice, takeProfitPrice, trailPercent, orderType } = signal;
+  const st = s(mode);
 
   if (action === 'HOLD') {
-    addLog('wait', sym, reason);
+    addLog(mode, 'wait', sym, reason);
     return;
   }
 
   if (action === 'CLOSE_LONG' || action === 'CLOSE_SHORT') {
     if (!openPos) return;
-    addLog('exit', sym, `Closing position — ${reason}`);
+    addLog(mode, 'exit', sym, `Closing position — ${reason}`);
     try {
-      await closePosition(cfg.mode, sym);
-      addLog('exit', sym, `Position closed`);
+      await closePosition(mode, sym);
+      addLog(mode, 'exit', sym, 'Position closed');
     } catch (e) {
-      addLog('error', sym, `Close failed: ${e instanceof Error ? e.message : String(e)}`);
+      addLog(mode, 'error', sym, `Close failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     return;
   }
 
-  // BUY or SELL — check guards before opening
-  if (paused) {
-    addLog('wait', sym, `⏸ Paused — skipping ${action} signal`);
+  if (st.paused) {
+    addLog(mode, 'wait', sym, `⏸ Paused — skipping ${action} signal`);
     return;
   }
 
   if (action === 'SELL' && !cfg.allowShorts) {
-    addLog('wait', sym, 'Short selling disabled — skipping SELL signal');
+    addLog(mode, 'wait', sym, 'Short selling disabled — skipping SELL signal');
     return;
   }
 
   if (openPos) {
-    addLog('wait', sym, `Already in position (${openPos.side}) — skipping ${action}`);
+    addLog(mode, 'wait', sym, `Already in position (${openPos.side}) — skipping ${action}`);
     return;
   }
 
   if (isNearClose()) {
-    addLog('wait', sym, '⏸ Market closing in <15 min — no new entries');
+    addLog(mode, 'wait', sym, '⏸ Market closing in <15 min — no new entries');
     return;
   }
 
   const orderSide = action === 'BUY' ? 'buy' : 'sell';
 
-  addLog('enter', sym, `${action} signal — ${reason}`);
-  if (stopPrice)       addLog('info', sym, `Stop: ${stopPrice.toFixed(4)}`);
-  if (takeProfitPrice) addLog('info', sym, `TP:   ${takeProfitPrice.toFixed(4)}`);
+  addLog(mode, 'enter', sym, `${action} signal — ${reason}`);
+  if (stopPrice)       addLog(mode, 'info', sym, `Stop: ${stopPrice.toFixed(4)}`);
+  if (takeProfitPrice) addLog(mode, 'info', sym, `TP:   ${takeProfitPrice.toFixed(4)}`);
 
   try {
-    const order = await placeOrder(cfg.mode, {
-      symbol:       sym,
-      notional:     cfg.positionSizeUsd,
-      side:         orderSide,
-      type:         orderType === 'trailing_stop' ? 'trailing_stop' : 'market',
+    const order = await placeOrder(mode, {
+      symbol:        sym,
+      notional:      cfg.positionSizeUsd,
+      side:          orderSide,
+      type:          orderType === 'trailing_stop' ? 'trailing_stop' : 'market',
       time_in_force: 'day',
       ...(trailPercent ? { trail_percent: trailPercent } : {}),
     });
 
-    addLog('enter', sym, `Order placed — id ${order.id} status ${order.status}`);
+    addLog(mode, 'enter', sym, `Order placed — id ${order.id} status ${order.status}`);
 
-    // Place stop-loss bracket order if we have a stop price (separate order)
     if (stopPrice && orderType !== 'trailing_stop') {
       try {
-        await placeOrder(cfg.mode, {
-          symbol:       sym,
-          qty:          parseFloat(order.filled_qty || '0') || undefined,
-          notional:     !parseFloat(order.filled_qty || '0') ? cfg.positionSizeUsd : undefined,
-          side:         orderSide === 'buy' ? 'sell' : 'buy',
-          type:         'stop',
+        await placeOrder(mode, {
+          symbol:        sym,
+          qty:           parseFloat(order.filled_qty || '0') || undefined,
+          notional:      !parseFloat(order.filled_qty || '0') ? cfg.positionSizeUsd : undefined,
+          side:          orderSide === 'buy' ? 'sell' : 'buy',
+          type:          'stop',
           time_in_force: 'gtc',
-          stop_price:   stopPrice,
+          stop_price:    stopPrice,
         });
-        addLog('info', sym, `Stop order placed at ${stopPrice.toFixed(4)}`);
+        addLog(mode, 'info', sym, `Stop order placed at ${stopPrice.toFixed(4)}`);
       } catch {
-        addLog('info', sym, 'Stop order skipped (will manage manually)');
+        addLog(mode, 'info', sym, 'Stop order skipped (will manage manually)');
       }
     }
   } catch (e) {
-    addLog('error', sym, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
+    addLog(mode, 'error', sym, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 
-async function poll() {
-  if (!running || !config) return;
+async function poll(mode: AccountMode) {
+  const st = s(mode);
+  if (!st.running || !st.config) return;
 
-  const cfg  = config;
+  const cfg  = st.config;
   const meta = STRATEGY_META[cfg.strategy];
-  lastPollTs = new Date().toISOString();
+  st.lastPollTs = new Date().toISOString();
 
-  // Intraday strategies: skip when market is closed
   if (meta.timeframe === 'intraday' && !isNYSEOpen()) {
-    addLog('wait', '—', 'Market closed — skipping poll');
-    schedule(cfg);
+    addLog(mode, 'wait', '—', 'Market closed — skipping poll');
+    schedule(mode, cfg);
     return;
   }
 
-  // Daily strategy: only run once at close time
   if (meta.timeframe === 'daily' && !isDailyCheckTime()) {
-    schedule(cfg);
+    schedule(mode, cfg);
     return;
   }
 
-  // Weekly strategy: only run once on Monday
   if (meta.timeframe === 'weekly' && !isWeeklyCheckTime()) {
-    schedule(cfg);
+    schedule(mode, cfg);
     return;
   }
 
-  // ORB: build range during opening window, then trade
   if (cfg.strategy === 'orb') {
     if (isInOpeningRange()) {
-      await buildOrbRange(cfg.symbols, cfg.mode);
-      schedule(cfg);
+      await buildOrbRange(mode, cfg.symbols);
+      schedule(mode, cfg);
       return;
     }
   }
 
-  // Fetch account + positions
   let positions: AlpacaPosition[] = [];
   try {
-    const account = await getAccount(cfg.mode);
-    positions     = await getPositions(cfg.mode);
-    // Quietly update equity in log periodically
+    const account = await getAccount(mode);
+    positions     = await getPositions(mode);
     if (Math.random() < 0.1) {
-      addLog('info', '—', `Equity: $${parseFloat(account.equity).toFixed(2)} | Cash: $${parseFloat(account.cash).toFixed(2)} | Positions: ${positions.length}`);
+      addLog(mode, 'info', '—', `Equity: $${parseFloat(account.equity).toFixed(2)} | Cash: $${parseFloat(account.cash).toFixed(2)} | Positions: ${positions.length}`);
     }
   } catch (e) {
-    addLog('error', '—', `Account fetch failed: ${e instanceof Error ? e.message : String(e)}`);
-    schedule(cfg);
+    addLog(mode, 'error', '—', `Account fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    schedule(mode, cfg);
     return;
   }
 
-  // Enforce max positions guard
   const openCount = positions.length;
 
-  // Evaluate each symbol
   for (const sym of cfg.symbols) {
-    if (!running) break;
+    if (!st.running) break;
     const inPos = positions.find(p => p.symbol === sym);
     if (!inPos && openCount >= cfg.maxPositions) {
-      addLog('wait', sym, `Max positions (${cfg.maxPositions}) reached — skipping`);
+      addLog(mode, 'wait', sym, `Max positions (${cfg.maxPositions}) reached — skipping`);
       continue;
     }
-    await evaluateSymbol(sym, positions, cfg);
+    await evaluateSymbol(mode, sym, positions, cfg);
   }
 
-  schedule(cfg);
+  schedule(mode, cfg);
 }
 
-function schedule(cfg: AlpacaBotConfig) {
-  if (!running) return;
-  const delay = STRATEGY_META[cfg.strategy].pollMs;
-  nextRunMs   = Date.now() + delay;
-  pollTimer   = setTimeout(() => { void poll(); }, delay);
+function schedule(mode: AccountMode, cfg: AlpacaBotConfig) {
+  const st = s(mode);
+  if (!st.running) return;
+  const delay   = STRATEGY_META[cfg.strategy].pollMs;
+  st.nextRunMs  = Date.now() + delay;
+  st.pollTimer  = setTimeout(() => { void poll(mode); }, delay);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function startAlpacaBot(cfg: AlpacaBotConfig): Promise<{ ok: boolean; error?: string }> {
-  if (running) stopAlpacaBot();
+  const mode = cfg.mode;
+  stopAlpacaBot(mode);  // stop this mode only, leave the other intact
 
   try {
-    // Validate credentials by fetching account
-    const account = await getAccount(cfg.mode);
+    const account = await getAccount(mode);
     if (account.trading_blocked) {
       return { ok: false, error: 'Account trading is blocked' };
     }
-    addLog('info', '—', `Alpaca ${cfg.mode} account connected — equity $${parseFloat(account.equity).toFixed(2)}`);
+    addLog(mode, 'info', '—', `Alpaca ${mode} account connected — equity $${parseFloat(account.equity).toFixed(2)}`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, error: `Alpaca auth failed: ${msg}` };
   }
 
-  config  = cfg;
-  running = true;
-  paused  = false;
+  const st    = s(mode);
+  st.config   = cfg;
+  st.running  = true;
+  st.paused   = false;
 
-  if (cfg.strategy === 'orb') resetOrbState(cfg.symbols);
+  if (cfg.strategy === 'orb') resetOrbState(mode, cfg.symbols);
 
-  addLog('info', '—', `Bot started — strategy: ${STRATEGY_META[cfg.strategy].label} | mode: ${cfg.mode} | symbols: ${cfg.symbols.join(', ')}`);
-  addLog('info', '—', `Position size: $${cfg.positionSizeUsd} | max positions: ${cfg.maxPositions} | shorts: ${cfg.allowShorts ? 'allowed' : 'disabled'}`);
+  addLog(mode, 'info', '—', `Bot started — strategy: ${STRATEGY_META[cfg.strategy].label} | mode: ${mode} | symbols: ${cfg.symbols.join(', ')}`);
+  addLog(mode, 'info', '—', `Position size: $${cfg.positionSizeUsd} | max positions: ${cfg.maxPositions} | shorts: ${cfg.allowShorts ? 'allowed' : 'disabled'}`);
 
-  void poll();
+  void poll(mode);
   return { ok: true };
 }
 
-export function stopAlpacaBot(): void {
-  running = false;
-  paused  = false;
-  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-  nextRunMs  = null;
-  lastPollTs = null;
-  addLog('info', '—', 'Alpaca bot stopped');
+export function stopAlpacaBot(mode: AccountMode): void {
+  const st    = s(mode);
+  st.running  = false;
+  st.paused   = false;
+  if (st.pollTimer) { clearTimeout(st.pollTimer); st.pollTimer = null; }
+  st.nextRunMs  = null;
+  st.lastPollTs = null;
+  addLog(mode, 'info', '—', `Alpaca ${mode} bot stopped`);
 }
 
-export function pauseAlpacaBot(): void {
-  if (!running) return;
-  paused = true;
-  addLog('info', '—', '⏸ Alpaca bot paused — monitoring positions, no new entries');
+export function pauseAlpacaBot(mode: AccountMode): void {
+  const st = s(mode);
+  if (!st.running) return;
+  st.paused = true;
+  addLog(mode, 'info', '—', '⏸ Alpaca bot paused — monitoring positions, no new entries');
 }
 
-export function resumeAlpacaBot(): void {
-  if (!running) return;
-  paused = false;
-  addLog('info', '—', '▶ Alpaca bot resumed');
+export function resumeAlpacaBot(mode: AccountMode): void {
+  const st = s(mode);
+  if (!st.running) return;
+  st.paused = false;
+  addLog(mode, 'info', '—', '▶ Alpaca bot resumed');
 }
 
 export async function getAlpacaBotStatus(mode: AccountMode): Promise<AlpacaBotStatus> {
+  const st = s(mode);
   let positions: AlpacaPosition[] = [];
   let equity = '0', cash = '0';
 
-  if (running && config) {
+  if (st.running && st.config) {
     try {
       const [acct, pos] = await Promise.all([getAccount(mode), getPositions(mode)]);
       positions = pos;
@@ -403,30 +424,30 @@ export async function getAlpacaBotStatus(mode: AccountMode): Promise<AlpacaBotSt
   }
 
   return {
-    running,
-    paused,
-    mode:       config?.mode      ?? mode,
-    strategy:   config?.strategy  ?? 'rsi_mean_reversion',
-    symbols:    config?.symbols   ?? [],
+    running:   st.running,
+    paused:    st.paused,
+    mode:      st.config?.mode     ?? mode,
+    strategy:  st.config?.strategy ?? 'rsi_mean_reversion',
+    symbols:   st.config?.symbols  ?? [],
     equity,
     cash,
     positions,
-    log:        log.slice(0, 100),
-    nextRunMs,
-    orbState:   { ...orbState },
-    lastPollTs,
+    log:       st.log.slice(0, 100),
+    nextRunMs: st.nextRunMs,
+    orbState:  { ...st.orbState },
+    lastPollTs: st.lastPollTs,
   };
 }
 
 export async function emergencyStop(mode: AccountMode): Promise<{ ok: boolean; error?: string }> {
-  stopAlpacaBot();
+  stopAlpacaBot(mode);
   try {
     await cancelAllOrders(mode);
-    addLog('info', '—', 'Emergency stop: all orders cancelled');
+    addLog(mode, 'info', '—', 'Emergency stop: all orders cancelled');
     return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    addLog('error', '—', `Emergency stop error: ${msg}`);
+    addLog(mode, 'error', '—', `Emergency stop error: ${msg}`);
     return { ok: false, error: msg };
   }
 }

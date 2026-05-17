@@ -315,19 +315,23 @@ app.post('/alpaca/:mode/start', auth, (req: Request, res: Response) => {
 app.post('/alpaca/:mode/stop', auth, (req: Request, res: Response) => {
   const mode = resolveAlpacaMode(req, res);
   if (!mode) return;
-  stopAlpacaBot();
+  stopAlpacaBot(mode);
   res.json({ ok: true });
 });
 
 // POST /alpaca/:mode/pause
-app.post('/alpaca/:mode/pause', auth, (_req: Request, res: Response) => {
-  pauseAlpacaBot();
+app.post('/alpaca/:mode/pause', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  pauseAlpacaBot(mode);
   res.json({ ok: true });
 });
 
 // POST /alpaca/:mode/resume
-app.post('/alpaca/:mode/resume', auth, (_req: Request, res: Response) => {
-  resumeAlpacaBot();
+app.post('/alpaca/:mode/resume', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  resumeAlpacaBot(mode);
   res.json({ ok: true });
 });
 
