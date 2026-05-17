@@ -258,3 +258,20 @@ export function isWeeklyCheckTime(): boolean {
   const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
   return utcMins >= 14 * 60 && utcMins < 14 * 60 + 5;
 }
+
+export function isWeekend(): boolean {
+  const day = new Date().getUTCDay();
+  return day === 0 || day === 6;
+}
+
+// Returns ms until Monday 13:00 UTC (30 min before NYSE open)
+export function msUntilMondayOpen(): number {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun, 1=Mon … 6=Sat
+  const daysUntilMonday = day === 1 ? 7 : (8 - day) % 7; // always next Monday
+  const monday = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilMonday,
+    13, 0, 0, 0,
+  ));
+  return Math.max(monday.getTime() - now.getTime(), 60_000);
+}

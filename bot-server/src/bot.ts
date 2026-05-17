@@ -134,7 +134,22 @@ function stopSignalMonitor() {
 
 function scheduleSessionRefresh(session: IGSession) {
   if (sessionRefreshTimer) clearTimeout(sessionRefreshTimer);
-  const msUntilRefresh = session.expiresAt - Date.now() - 5 * 60_000;  // 5 min before expiry
+
+  // On weekends markets are closed — defer the next refresh until Sunday 22:00 UTC
+  // so we don't hammer IG auth with unnecessary calls
+  const now = new Date();
+  const day = now.getUTCDay();
+  if (day === 0 || day === 6) {
+    const sunday22 = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    sunday22.setUTCDate(sunday22.getUTCDate() + ((7 - day) % 7)); // next Sunday
+    sunday22.setUTCHours(22, 0, 0, 0);
+    const sleepMs = Math.max(sunday22.getTime() - now.getTime(), 60_000);
+    console.log(`[bot] Weekend — deferring session refresh until Sunday 22:00 UTC (~${Math.round(sleepMs / 3_600_000)}h)`);
+    sessionRefreshTimer = setTimeout(() => { void refreshSession(); }, sleepMs);
+    return;
+  }
+
+  const msUntilRefresh = session.expiresAt - Date.now() - 5 * 60_000;
   if (msUntilRefresh <= 0) {
     void refreshSession();
     return;

@@ -1,7 +1,7 @@
 import {
   getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition,
   cancelAllOrders, isNYSEOpen, isInOpeningRange, isNearClose,
-  isDailyCheckTime, isWeeklyCheckTime,
+  isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
   type AccountMode, type AlpacaPosition,
 } from './alpacaApi';
 import {
@@ -293,6 +293,15 @@ async function poll(mode: AccountMode) {
   const cfg  = st.config;
   const meta = STRATEGY_META[cfg.strategy];
   st.lastPollTs = new Date().toISOString();
+
+  // Weekend — markets closed globally, sleep until Monday 13:00 UTC
+  if (isWeekend()) {
+    const sleepMs = msUntilMondayOpen();
+    addLog(mode, 'wait', '—', `Weekend — markets closed. Sleeping until Monday open (~${Math.round(sleepMs / 3_600_000)}h)`);
+    st.nextRunMs = Date.now() + sleepMs;
+    st.pollTimer = setTimeout(() => { void poll(mode); }, sleepMs);
+    return;
+  }
 
   if (meta.timeframe === 'intraday' && !isNYSEOpen()) {
     addLog(mode, 'wait', '—', 'Market closed — skipping poll');
