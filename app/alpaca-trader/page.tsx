@@ -453,6 +453,7 @@ export default function AlpacaTraderPage() {
   const [sizeUsd, setSizeUsd]     = useState('500');
   const [maxPos, setMaxPos]       = useState('3');
   const [allowShorts, setAllowShorts] = useState(false);
+  const [autoSelect, setAutoSelect]   = useState(false);
 
   const [status, setStatus]       = useState<BotStatus | null>(null);
   const [loading, setLoading]     = useState(false);
@@ -535,6 +536,7 @@ export default function AlpacaTraderPage() {
       positionSizeUsd: parseFloat(sizeUsd) || 500,
       maxPositions:    parseInt(maxPos, 10) || 3,
       allowShorts,
+      autoSelect,
     });
   };
 
@@ -711,6 +713,27 @@ export default function AlpacaTraderPage() {
                   )} />
                 </div>
                 <span className="text-xs text-slate-400">Allow short selling</span>
+              </label>
+
+              {/* Auto-select toggle */}
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <div
+                  onClick={() => { if (!isRunning) setAutoSelect(v => !v); }}
+                  className={clsx(
+                    'w-9 h-5 rounded-full relative transition-colors',
+                    autoSelect ? 'bg-emerald-500' : 'bg-slate-700',
+                    isRunning && 'opacity-50 cursor-not-allowed',
+                  )}
+                >
+                  <div className={clsx(
+                    'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
+                    autoSelect ? 'left-4' : 'left-0.5',
+                  )} />
+                </div>
+                <span className="text-xs text-slate-400">
+                  Auto-select symbols
+                  <span className="ml-1 text-slate-600">(scans best picks at start + on close)</span>
+                </span>
               </label>
 
               {/* Controls */}

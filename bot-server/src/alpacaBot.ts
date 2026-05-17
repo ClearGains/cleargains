@@ -4,6 +4,7 @@ import {
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
   type AccountMode, type AlpacaPosition,
 } from './alpacaApi';
+import { scanForBestSymbols } from './alpacaScanner';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal,
@@ -20,6 +21,7 @@ export type AlpacaBotConfig = {
   positionSizeUsd:  number;
   maxPositions:     number;
   allowShorts:      boolean;
+  autoSelect:       boolean;   // scan universe for best symbols at start + on position close
 };
 
 export type AlpacaLogEntry = {
@@ -219,6 +221,29 @@ async function executeSignal(
     try {
       await closePosition(mode, sym);
       addLog(mode, 'exit', sym, 'Position closed');
+
+      // Auto-select: find a replacement symbol for the freed slot
+      if (cfg.autoSelect) {
+        void (async () => {
+          try {
+            const current = st.config?.symbols ?? [];
+            const held    = (await getPositions(mode)).map(p => p.symbol);
+            const exclude = [...new Set([...current, ...held])].filter(s => s !== sym);
+            const picks   = await scanForBestSymbols(
+              cfg.strategy, mode, exclude, 1,
+              msg => addLog(mode, 'info', '—', msg),
+            );
+            if (picks[0] && st.config) {
+              const idx = st.config.symbols.indexOf(sym);
+              if (idx !== -1) st.config.symbols[idx] = picks[0];
+              else st.config.symbols.push(picks[0]);
+              addLog(mode, 'info', '—', `Slot replacement: ${sym} → ${picks[0]}`);
+            }
+          } catch (e) {
+            addLog(mode, 'info', '—', `Replacement scan failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        })();
+      }
     } catch (e) {
       addLog(mode, 'error', sym, `Close failed: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -384,6 +409,21 @@ export async function startAlpacaBot(cfg: AlpacaBotConfig): Promise<{ ok: boolea
   st.config   = cfg;
   st.running  = true;
   st.paused   = false;
+
+  // Auto-select: scan universe for best symbols before first poll
+  if (cfg.autoSelect) {
+    addLog(mode, 'info', '—', 'Auto-select enabled — scanning for best symbols…');
+    try {
+      const best = await scanForBestSymbols(
+        cfg.strategy, mode, [], cfg.maxPositions + 2,
+        msg => addLog(mode, 'info', '—', msg),
+      );
+      cfg.symbols = best;
+      addLog(mode, 'info', '—', `Auto-selected: ${best.join(', ')}`);
+    } catch (e) {
+      addLog(mode, 'info', '—', `Auto-select scan failed — using provided symbols: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   if (cfg.strategy === 'orb') resetOrbState(mode, cfg.symbols);
 
