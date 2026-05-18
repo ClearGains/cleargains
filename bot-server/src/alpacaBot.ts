@@ -2,12 +2,13 @@ import {
   getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition,
   cancelAllOrders, isNYSEOpen, isInOpeningRange, isNearClose,
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
+  selectOptionsContract,
   type AccountMode, type AlpacaPosition,
 } from './alpacaApi';
 import { scanForBestSymbols } from './alpacaScanner';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
-  vwapSignal, weeklyMomentumSignal,
+  vwapSignal, weeklyMomentumSignal, optionsDirectionalSignal,
   STRATEGY_META,
   type StrategyName, type StrategySignal,
 } from './alpacaStrategies';
@@ -190,6 +191,47 @@ async function evaluateSymbol(
       break;
     }
 
+    case 'options_directional': {
+      // Check for an existing options position on this underlying (OCC symbols start with underlying ticker)
+      const occRegex = new RegExp(`^${sym}\\d{6}[CP]`);
+      const optPos   = positions.find(p => occRegex.test(p.symbol));
+
+      if (optPos) {
+        // We hold an options contract — evaluate exit conditions
+        const plPct  = parseFloat(optPos.unrealized_plpc) * 100;
+        const yymmdd = optPos.symbol.slice(sym.length, sym.length + 6);
+        const expiry = new Date(`20${yymmdd.slice(0, 2)}-${yymmdd.slice(2, 4)}-${yymmdd.slice(4, 6)}`);
+        const dte    = Math.ceil((expiry.getTime() - Date.now()) / 86_400_000);
+        const exitSig = optionsDirectionalSignal(bars, true, plPct, dte);
+        if (exitSig.action !== 'HOLD') {
+          await executeSignal(mode, optPos.symbol, exitSig, optPos, cfg);
+        } else {
+          addLog(mode, 'wait', sym, exitSig.reason);
+        }
+        return;
+      }
+
+      // No position — check entry
+      const entrySig = optionsDirectionalSignal(bars, false);
+      if (entrySig.action === 'BUY') {
+        const currentPrice = bars[bars.length - 1].c;
+        const optType      = entrySig.optionType ?? 'call';
+        const contract     = await selectOptionsContract(sym, optType, currentPrice, mode);
+        if (!contract) {
+          addLog(mode, 'wait', sym, `No tradable ATM ${optType} contract found`);
+          return;
+        }
+        const contractPrice = parseFloat(contract.close_price ?? '2');
+        const qty = Math.max(1, Math.floor(cfg.positionSizeUsd / (contractPrice * 100)));
+        entrySig.optionContract = contract.symbol;
+        entrySig.optionQty      = qty;
+        await executeSignal(mode, sym, entrySig, null, cfg);
+      } else {
+        addLog(mode, 'wait', sym, entrySig.reason);
+      }
+      return;
+    }
+
     default:
       return;
   }
@@ -268,6 +310,27 @@ async function executeSignal(
   }
 
   const orderSide = action === 'BUY' ? 'buy' : 'sell';
+
+  // ── Options entry — contract symbol with qty, no notional ────────────────
+  if (signal.optionContract) {
+    const qty         = signal.optionQty ?? 1;
+    const optionType  = signal.optionType ?? 'call';
+    addLog(mode, 'enter', sym, `${reason}`);
+    addLog(mode, 'info',  sym, `Ordering ${qty}x ${signal.optionContract} (${optionType}) — $${cfg.positionSizeUsd} budget`);
+    try {
+      const order = await placeOrder(mode, {
+        symbol:        signal.optionContract,
+        qty,
+        side:          'buy',
+        type:          'market',
+        time_in_force: 'day',
+      });
+      addLog(mode, 'enter', sym, `Options order placed — ${signal.optionContract} id ${order.id}`);
+    } catch (e) {
+      addLog(mode, 'error', sym, `Options order failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return;
+  }
 
   addLog(mode, 'enter', sym, `${action} signal — ${reason}`);
   if (stopPrice)       addLog(mode, 'info', sym, `Stop: ${stopPrice.toFixed(4)}`);

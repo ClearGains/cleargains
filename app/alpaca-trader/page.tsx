@@ -12,7 +12,7 @@ import { clsx } from 'clsx';
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type AccountMode = 'paper' | 'live';
-type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum';
+type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional';
 
 type AlpacaPosition = {
   symbol:           string;
@@ -99,14 +99,21 @@ const STRATEGIES: { value: StrategyName; label: string; timeframe: string; descr
     timeframe:   'Position (Weekly)',
     description: 'Buy when above 12-week SMA + 4-week momentum > 1% + RSI 50–70. Trail 5% stop.',
   },
+  {
+    value:       'options_directional',
+    label:       'Options Directional',
+    timeframe:   'Intraday (5-min)',
+    description: 'Buy calls when RSI < 30, buy puts when RSI > 70. Exit at +75% profit, −50% loss, or ≤2 DTE.',
+  },
 ];
 
 const DEFAULT_SYMBOLS: Record<StrategyName, string> = {
-  rsi_mean_reversion: 'SPY,QQQ,AAPL,MSFT,NVDA',
-  ema_crossover:      'SPY,QQQ,AAPL,MSFT,NVDA,AMZN',
-  orb:                'SPY,QQQ,AAPL,TSLA,NVDA',
-  vwap:               'SPY,QQQ,AAPL,MSFT',
-  weekly_momentum:    'XLK,XLF,XLE,XLV,XLY,SPY',
+  rsi_mean_reversion:  'SPY,QQQ,AAPL,MSFT,NVDA',
+  ema_crossover:       'SPY,QQQ,AAPL,MSFT,NVDA,AMZN',
+  orb:                 'SPY,QQQ,AAPL,TSLA,NVDA',
+  vwap:                'SPY,QQQ,AAPL,MSFT',
+  weekly_momentum:     'XLK,XLF,XLE,XLV,XLY,SPY',
+  options_directional: 'SPY,QQQ,AAPL,MSFT,NVDA',
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -145,11 +152,12 @@ function sentimentBadge(s: KeyHeadline['sentiment']) {
 }
 
 const STRATEGY_LABEL: Record<StrategyName, string> = {
-  rsi_mean_reversion: 'RSI Mean Reversion',
-  ema_crossover:      'EMA Crossover',
-  orb:                'Opening Range Breakout',
-  vwap:               'VWAP Reversion',
-  weekly_momentum:    'Weekly Momentum',
+  rsi_mean_reversion:  'RSI Mean Reversion',
+  ema_crossover:       'EMA Crossover',
+  orb:                 'Opening Range Breakout',
+  vwap:                'VWAP Reversion',
+  weekly_momentum:     'Weekly Momentum',
+  options_directional: 'Options Directional',
 };
 
 // ── Server health hook ────────────────────────────────────────────────────────

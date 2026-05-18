@@ -160,14 +160,31 @@ function scoreWeeklyMomentum(barsMap: Record<string, AlpacaBar[]>): Scored[] {
   });
 }
 
+function scoreOptionsDirectional(barsMap: Record<string, AlpacaBar[]>): Scored[] {
+  return Object.entries(barsMap).map(([symbol, bars]) => {
+    if (bars.length < 20) return { symbol, score: -1 };
+    const rsi = calcRsi(bars);
+    if (rsi === null) return { symbol, score: -1 };
+    // Score by how extreme RSI is — further from 50 = more likely to get an options signal
+    const extremeness = Math.abs(rsi - 50);
+    if (extremeness < 20) return { symbol, score: 0 }; // RSI 30–70: not extreme enough
+    const atr    = calcAtr(bars);
+    const price  = bars[bars.length - 1].c;
+    const atrPct = atr && price > 0 ? (atr / price) * 100 : 0;
+    // Prefer liquid, volatile stocks where options have tighter spreads
+    return { symbol, score: extremeness * 2 + atrPct * 5 };
+  });
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit: number }> = {
-  rsi_mean_reversion: { tf: '5Min',  limit: 50 },
-  ema_crossover:      { tf: '1Day',  limit: 30 },
-  orb:                { tf: '5Min',  limit: 60 },
-  vwap:               { tf: '1Min',  limit: 60 },
-  weekly_momentum:    { tf: '1Week', limit: 16 },
+  rsi_mean_reversion:  { tf: '5Min',  limit: 50 },
+  ema_crossover:       { tf: '1Day',  limit: 30 },
+  orb:                 { tf: '5Min',  limit: 60 },
+  vwap:                { tf: '1Min',  limit: 60 },
+  weekly_momentum:     { tf: '1Week', limit: 16 },
+  options_directional: { tf: '5Min',  limit: 60 },
 };
 
 /**
@@ -193,11 +210,12 @@ export async function scanForBestSymbols(
 
   let scored: Scored[];
   switch (strategy) {
-    case 'rsi_mean_reversion': scored = scoreRsiMeanReversion(barsMap); break;
-    case 'ema_crossover':      scored = scoreEmaCrossover(barsMap);     break;
-    case 'orb':                scored = scoreOrb(barsMap);              break;
-    case 'vwap':               scored = scoreVwap(barsMap);             break;
-    case 'weekly_momentum':    scored = scoreWeeklyMomentum(barsMap);   break;
+    case 'rsi_mean_reversion':  scored = scoreRsiMeanReversion(barsMap);  break;
+    case 'ema_crossover':       scored = scoreEmaCrossover(barsMap);      break;
+    case 'orb':                 scored = scoreOrb(barsMap);               break;
+    case 'vwap':                scored = scoreVwap(barsMap);              break;
+    case 'weekly_momentum':     scored = scoreWeeklyMomentum(barsMap);    break;
+    case 'options_directional': scored = scoreOptionsDirectional(barsMap); break;
     default: return liquid.slice(0, count);
   }
 

@@ -72,6 +72,9 @@ export type StrategySignal = {
   takeProfitPrice?: number;
   trailPercent?:    number;
   orderType?:       'market' | 'trailing_stop';
+  optionType?:      'call' | 'put';   // options_directional: direction of the options trade
+  optionContract?:  string;           // OCC symbol to order (filled in by evaluateSymbol)
+  optionQty?:       number;           // contracts to buy (filled in by evaluateSymbol)
 };
 
 export type PositionSide = 'long' | 'short';
@@ -327,9 +330,59 @@ export function weeklyMomentumSignal(
   return { action: 'HOLD', reason: `Weekly: mom=${momentum4w.toFixed(2)}% sma=${sma12w?.toFixed(2) ?? 'N/A'} rsi=${rsi?.toFixed(1) ?? 'N/A'}` };
 }
 
+// ── 6. Options Directional (5-min intraday) ────────────────────────────────────
+// Entry: RSI extreme → buy call (oversold) or put (overbought)
+// Exit:  +75% profit, −50% loss, or ≤2 DTE
+export function optionsDirectionalSignal(
+  bars:         AlpacaBar[],
+  inPosition:   boolean,
+  currentPlPct?: number,   // unrealized P/L % on the options position (0–100 scale)
+  dte?:          number,    // days to expiry
+): StrategySignal {
+  if (bars.length < 20) return { action: 'HOLD', reason: 'insufficient bars' };
+
+  const rsi  = calcRsi(bars);
+  const macd = calcMacdHist(bars);
+
+  if (rsi === null) return { action: 'HOLD', reason: 'RSI not ready' };
+
+  if (inPosition) {
+    if (dte !== undefined && dte <= 2) {
+      return { action: 'CLOSE_LONG', reason: `≤2 DTE (${dte}) — closing to avoid expiry risk` };
+    }
+    if (currentPlPct !== undefined && currentPlPct >= 75) {
+      return { action: 'CLOSE_LONG', reason: `Profit target hit: +${currentPlPct.toFixed(1)}%` };
+    }
+    if (currentPlPct !== undefined && currentPlPct <= -50) {
+      return { action: 'CLOSE_LONG', reason: `Stop loss hit: ${currentPlPct.toFixed(1)}%` };
+    }
+    return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} | P/L ${currentPlPct?.toFixed(1) ?? '?'}% | ${dte ?? '?'}d to expiry` };
+  }
+
+  // Buy calls when oversold — expecting mean reversion upward
+  if (rsi < 30 && (macd === null || macd <= 0)) {
+    return {
+      action:     'BUY',
+      reason:     `RSI oversold ${rsi.toFixed(1)} — buying call (mean reversion up)`,
+      optionType: 'call',
+    };
+  }
+
+  // Buy puts when overbought — expecting mean reversion downward
+  if (rsi > 70 && (macd === null || macd >= 0)) {
+    return {
+      action:     'BUY',
+      reason:     `RSI overbought ${rsi.toFixed(1)} — buying put (mean reversion down)`,
+      optionType: 'put',
+    };
+  }
+
+  return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} — not extreme enough for options entry` };
+}
+
 // ── Strategy metadata ─────────────────────────────────────────────────────────
 
-export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum';
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional';
 
 export const STRATEGY_META: Record<StrategyName, {
   label:     string;
@@ -338,9 +391,10 @@ export const STRATEGY_META: Record<StrategyName, {
   barPeriod: '5Min' | '1Min' | '1Day' | '1Week';
   barsNeeded: number;
 }> = {
-  rsi_mean_reversion: { label: 'RSI Mean Reversion', timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5Min', barsNeeded: 60  },
-  ema_crossover:      { label: 'EMA Crossover',       timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day', barsNeeded: 60  },
-  orb:                { label: 'Opening Range Breakout', timeframe: 'intraday', pollMs: 60_000,    barPeriod: '1Min', barsNeeded: 60  },
-  vwap:               { label: 'VWAP Reversion',      timeframe: 'intraday', pollMs: 60_000,      barPeriod: '1Min', barsNeeded: 60  },
-  weekly_momentum:    { label: 'Weekly Momentum',      timeframe: 'weekly',   pollMs: 60 * 60_000, barPeriod: '1Week', barsNeeded: 20 },
+  rsi_mean_reversion:  { label: 'RSI Mean Reversion',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5Min',  barsNeeded: 60  },
+  ema_crossover:       { label: 'EMA Crossover',          timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
+  orb:                 { label: 'Opening Range Breakout', timeframe: 'intraday', pollMs: 60_000,      barPeriod: '1Min',  barsNeeded: 60  },
+  vwap:                { label: 'VWAP Reversion',         timeframe: 'intraday', pollMs: 60_000,      barPeriod: '1Min',  barsNeeded: 60  },
+  weekly_momentum:     { label: 'Weekly Momentum',        timeframe: 'weekly',   pollMs: 60 * 60_000, barPeriod: '1Week', barsNeeded: 20  },
+  options_directional: { label: 'Options Directional',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5Min',  barsNeeded: 60  },
 };
