@@ -449,11 +449,9 @@ function RecommendationPanel({
 export default function AlpacaTraderPage() {
   const [mode, setMode]           = useState<AccountMode>('paper');
   const [strategy, setStrategy]   = useState<StrategyName>('rsi_mean_reversion');
-  const [symbols, setSymbols]     = useState(DEFAULT_SYMBOLS.rsi_mean_reversion);
   const [sizeUsd, setSizeUsd]     = useState('500');
   const [maxPos, setMaxPos]       = useState('3');
   const [allowShorts, setAllowShorts] = useState(false);
-  const [autoSelect, setAutoSelect]   = useState(false);
 
   const [status, setStatus]       = useState<BotStatus | null>(null);
   const [loading, setLoading]     = useState(false);
@@ -463,15 +461,10 @@ export default function AlpacaTraderPage() {
   const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const serverHealth = useServerHealth();
 
-  const handleStrategyChange = (s: StrategyName) => {
-    setStrategy(s);
-    setSymbols(DEFAULT_SYMBOLS[s]);
-  };
+  const handleStrategyChange = (s: StrategyName) => setStrategy(s);
 
-  // Apply a recommendation from the AI panel
   const applyRecommendation = (rec: StrategyRecommendation) => {
     handleStrategyChange(rec.strategy);
-    if (rec.suggestedSymbols.length) setSymbols(rec.suggestedSymbols.join(','));
     setAllowShorts(rec.allowShorts);
   };
 
@@ -528,15 +521,11 @@ export default function AlpacaTraderPage() {
   };
 
   const handleStart = () => {
-    const syms = symbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
-    if (!syms.length) { setError('Enter at least one symbol'); return; }
     void post('start', {
       strategy,
-      symbols:         syms,
       positionSizeUsd: parseFloat(sizeUsd) || 500,
       maxPositions:    parseInt(maxPos, 10) || 3,
       allowShorts,
-      autoSelect,
     });
   };
 
@@ -657,18 +646,6 @@ export default function AlpacaTraderPage() {
                 )}
               </div>
 
-              {/* Symbols */}
-              <div>
-                <label className="block text-xs text-slate-400 mb-1.5">Symbols (comma-separated)</label>
-                <input
-                  value={symbols}
-                  onChange={e => setSymbols(e.target.value.toUpperCase())}
-                  disabled={isRunning}
-                  placeholder="SPY,QQQ,AAPL"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
-                />
-              </div>
-
               {/* Position size & max positions */}
               <div className="grid grid-cols-2 gap-2">
                 <div>
@@ -713,27 +690,6 @@ export default function AlpacaTraderPage() {
                   )} />
                 </div>
                 <span className="text-xs text-slate-400">Allow short selling</span>
-              </label>
-
-              {/* Auto-select toggle */}
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <div
-                  onClick={() => { if (!isRunning) setAutoSelect(v => !v); }}
-                  className={clsx(
-                    'w-9 h-5 rounded-full relative transition-colors',
-                    autoSelect ? 'bg-emerald-500' : 'bg-slate-700',
-                    isRunning && 'opacity-50 cursor-not-allowed',
-                  )}
-                >
-                  <div className={clsx(
-                    'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
-                    autoSelect ? 'left-4' : 'left-0.5',
-                  )} />
-                </div>
-                <span className="text-xs text-slate-400">
-                  Auto-select symbols
-                  <span className="ml-1 text-slate-600">(scans best picks at start + on close)</span>
-                </span>
               </label>
 
               {/* Controls */}

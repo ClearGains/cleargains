@@ -291,19 +291,14 @@ app.post('/alpaca/:mode/start', auth, (req: Request, res: Response) => {
   if (!mode) return;
 
   const body = req.body as Partial<AlpacaBotConfig>;
-  if (!Array.isArray(body.symbols) || !body.symbols.length) {
-    res.status(400).json({ ok: false, error: 'symbols array is required' });
-    return;
-  }
 
   const cfg: AlpacaBotConfig = {
     mode,
     strategy:        body.strategy        ?? 'rsi_mean_reversion',
-    symbols:         body.symbols,
+    symbols:         [],   // always filled by scanner at start
     positionSizeUsd: body.positionSizeUsd ?? 500,
     maxPositions:    body.maxPositions    ?? 3,
     allowShorts:     body.allowShorts     ?? false,
-    autoSelect:      body.autoSelect      ?? false,
   };
 
   res.json({ ok: true, message: 'Bot starting…' });

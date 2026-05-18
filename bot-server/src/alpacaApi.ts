@@ -210,6 +210,38 @@ export async function getLatestBars(
   return data.bars ?? {};
 }
 
+export type AlpacaSnapshot = {
+  latestTrade?: { p: number };
+  dailyBar?:    { v: number; vw: number; o: number; c: number };
+};
+
+export async function getSnapshots(
+  symbols: string[],
+  mode:    AccountMode,
+): Promise<Record<string, AlpacaSnapshot>> {
+  const { key, secret } = getKeys(mode);
+  if (!key || !secret) throw new Error('Alpaca credentials not configured');
+
+  const result: Record<string, AlpacaSnapshot> = {};
+  const BATCH = 100;
+  for (let i = 0; i < symbols.length; i += BATCH) {
+    const batch  = symbols.slice(i, i + BATCH);
+    const params = new URLSearchParams({ symbols: batch.join(','), feed: 'iex' });
+    const url    = `https://data.alpaca.markets/v2/stocks/snapshots?${params.toString()}`;
+    try {
+      const res = await fetch(url, {
+        headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret },
+        signal:  AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) continue;
+      const data = await res.json() as Record<string, AlpacaSnapshot>;
+      Object.assign(result, data);
+    } catch {}
+    if (i + BATCH < symbols.length) await new Promise(r => setTimeout(r, 200));
+  }
+  return result;
+}
+
 // ── Market hours ──────────────────────────────────────────────────────────────
 
 export function isNYSEOpen(): boolean {
