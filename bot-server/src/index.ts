@@ -10,6 +10,11 @@ import {
   getAlpacaBotStatus, emergencyStop,
   type AlpacaBotConfig,
 } from './alpacaBot';
+import {
+  startIgStrategyBot, stopIgStrategyBot, pauseIgStrategyBot, resumeIgStrategyBot,
+  getIgStrategyBotStatus,
+  type IgMode, type IgStrategyConfig,
+} from './igStrategyBot';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -336,6 +341,64 @@ app.post('/alpaca/:mode/emergency-stop', auth, (req: Request, res: Response) => 
   const mode = resolveAlpacaMode(req, res);
   if (!mode) return;
   void emergencyStop(mode).then(result => res.status(result.ok ? 200 : 500).json(result));
+});
+
+// ── IG Strategy bot routes (/ig-strategy/:mode/*) ────────────────────────────
+
+function resolveIgMode(req: Request, res: Response): IgMode | null {
+  const mode = req.params.mode as string;
+  if (mode !== 'demo' && mode !== 'live') {
+    res.status(400).json({ ok: false, error: 'mode must be "demo" or "live"' });
+    return null;
+  }
+  return mode;
+}
+
+app.get('/ig-strategy/:mode/status', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  void getIgStrategyBotStatus(mode).then(status => res.json(status));
+});
+
+app.post('/ig-strategy/:mode/start', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+
+  const body = req.body as Partial<IgStrategyConfig>;
+  const cfg: IgStrategyConfig = {
+    mode,
+    strategy:     body.strategy     ?? 'rsi_mean_reversion',
+    epics:        [],                // filled by scanner
+    notionalGbp:  body.notionalGbp  ?? 200,
+    maxPositions: body.maxPositions ?? 3,
+    allowShorts:  body.allowShorts  ?? false,
+  };
+
+  res.json({ ok: true, message: 'IG bot starting…' });
+  void startIgStrategyBot(cfg).then(r => {
+    if (!r.ok) console.error(`[ig-strategy] Start failed: ${r.error}`);
+  });
+});
+
+app.post('/ig-strategy/:mode/stop', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  stopIgStrategyBot(mode);
+  res.json({ ok: true });
+});
+
+app.post('/ig-strategy/:mode/pause', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  pauseIgStrategyBot(mode);
+  res.json({ ok: true });
+});
+
+app.post('/ig-strategy/:mode/resume', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  resumeIgStrategyBot(mode);
+  res.json({ ok: true });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────

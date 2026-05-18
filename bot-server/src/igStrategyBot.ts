@@ -1,0 +1,542 @@
+import {
+  authenticate, getSession, fetchCandleHistory, fetchFullPositions,
+  fetchAccountFunds, placeMarketOrder, closePosition as igClosePos,
+  type IGSession, type CandleBar, type FullPosition,
+} from './igApi';
+import {
+  rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
+  vwapSignal, weeklyMomentumSignal, STRATEGY_META,
+  type StrategySignal,
+} from './alpacaStrategies';
+import { scanIgEpics, epicName } from './igStrategyScanner';
+import type { AlpacaBar } from './alpacaApi';
+import {
+  isNYSEOpen, isInOpeningRange, isNearClose,
+  isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
+} from './alpacaApi';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum';
+export type IgMode         = 'demo' | 'live';
+
+export type IgStrategyConfig = {
+  mode:         IgMode;
+  strategy:     IgStrategyName;
+  epics:        string[];   // populated by scanner at start
+  notionalGbp:  number;    // target exposure per position in £
+  maxPositions: number;
+  allowShorts:  boolean;
+};
+
+export type IgLogEntry = {
+  id:   string;
+  ts:   string;
+  type: 'info' | 'enter' | 'exit' | 'wait' | 'error';
+  epic: string;
+  msg:  string;
+};
+
+export type IgOpenPosition = {
+  dealId:    string;
+  epic:      string;
+  name:      string;
+  direction: 'BUY' | 'SELL';
+  size:      number;    // stake £/pt
+  level:     number;    // entry price
+  upl:       number;    // unrealised P/L in £
+  bid:       number;
+  offer:     number;
+};
+
+export type IgStrategyBotStatus = {
+  running:    boolean;
+  paused:     boolean;
+  mode:       IgMode;
+  strategy:   IgStrategyName;
+  epics:      string[];
+  balance:    number;
+  available:  number;
+  positions:  IgOpenPosition[];
+  log:        IgLogEntry[];
+  nextRunMs:  number | null;
+  lastPollTs: string | null;
+  orbState:   Record<string, OrbState>;
+  sessionOk:  boolean;
+};
+
+type OrbState  = { high: number; low: number; established: boolean };
+
+// ── Per-mode state ────────────────────────────────────────────────────────────
+
+type ModeState = {
+  running:              boolean;
+  paused:               boolean;
+  config:               IgStrategyConfig | null;
+  session:              IGSession | null;
+  log:                  IgLogEntry[];
+  pollTimer:            ReturnType<typeof setTimeout> | null;
+  nextRunMs:            number | null;
+  lastPollTs:           string | null;
+  orbState:             Record<string, OrbState>;
+  authFailCount:        number;
+  sessionRefreshTimer:  ReturnType<typeof setTimeout> | null;
+};
+
+function makeModeState(): ModeState {
+  return {
+    running: false, paused: false, config: null, session: null,
+    log: [], pollTimer: null, nextRunMs: null, lastPollTs: null,
+    orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
+  };
+}
+
+const modeStates = new Map<IgMode, ModeState>([
+  ['demo', makeModeState()],
+  ['live', makeModeState()],
+]);
+
+function ms(mode: IgMode): ModeState { return modeStates.get(mode)!; }
+
+// ── IG resolution map ─────────────────────────────────────────────────────────
+
+const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
+  rsi_mean_reversion: { resolution: 'MINUTE_5', count: 60 },
+  ema_crossover:      { resolution: 'DAY',       count: 30 },
+  orb:                { resolution: 'MINUTE',    count: 60 },
+  vwap:               { resolution: 'MINUTE',    count: 60 },
+  weekly_momentum:    { resolution: 'WEEK',       count: 20 },
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function uid() { return Math.random().toString(36).slice(2, 8); }
+function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+
+function addLog(mode: IgMode, type: IgLogEntry['type'], epic: string, msg: string) {
+  const st    = ms(mode);
+  const entry: IgLogEntry = { id: uid(), ts: now(), type, epic, msg };
+  st.log.unshift(entry);
+  if (st.log.length > 400) st.log.splice(400);
+  console[type === 'error' ? 'error' : 'log'](`[ig-bot:${mode}] [${type.toUpperCase()}] [${epic}] ${msg}`);
+}
+
+function igBarToAlpacaBar(b: CandleBar): AlpacaBar {
+  return {
+    t: b.snapshotTime,
+    o: b.openPrice.mid  ?? b.openPrice.bid,
+    h: b.highPrice.mid  ?? b.highPrice.bid,
+    l: b.lowPrice.mid   ?? b.lowPrice.bid,
+    c: b.closePrice.mid ?? b.closePrice.bid,
+    v: 0,
+  };
+}
+
+// Stake (£/point) from a target GBP notional and current mid price
+function calcStake(notionalGbp: number, midPrice: number): number {
+  if (midPrice <= 0) return 0.5;
+  const raw = notionalGbp / midPrice;
+  return Math.max(0.1, Math.round(raw * 10) / 10);
+}
+
+function resolveCredentials(mode: IgMode) {
+  if (mode === 'live') {
+    return {
+      apiKey:   process.env.IG_LIVE_API_KEY   ?? '',
+      username: process.env.IG_LIVE_USERNAME  ?? '',
+      password: process.env.IG_LIVE_PASSWORD  ?? '',
+      env:      'live' as const,
+    };
+  }
+  return {
+    apiKey:   process.env.IG_DEMO_API_KEY  ?? process.env.IG_API_KEY   ?? '',
+    username: process.env.IG_DEMO_USERNAME ?? process.env.IG_USERNAME  ?? '',
+    password: process.env.IG_DEMO_PASSWORD ?? process.env.IG_PASSWORD  ?? '',
+    env:      'demo' as const,
+  };
+}
+
+// ── Session management ────────────────────────────────────────────────────────
+
+function scheduleSessionRefresh(mode: IgMode, session: IGSession) {
+  const st = ms(mode);
+  if (st.sessionRefreshTimer) clearTimeout(st.sessionRefreshTimer);
+
+  const d = new Date().getUTCDay();
+  if (d === 0 || d === 6) {
+    const sun = new Date();
+    sun.setUTCDate(sun.getUTCDate() + ((7 - d) % 7));
+    sun.setUTCHours(22, 0, 0, 0);
+    const sleepMs = Math.max(sun.getTime() - Date.now(), 60_000);
+    addLog(mode, 'wait', '—', `Weekend — deferring session refresh (~${Math.round(sleepMs / 3_600_000)}h)`);
+    st.sessionRefreshTimer = setTimeout(() => { void doSessionRefresh(mode); }, sleepMs);
+    return;
+  }
+
+  const delay = session.expiresAt - Date.now() - 5 * 60_000;
+  if (delay <= 0) { void doSessionRefresh(mode); return; }
+  st.sessionRefreshTimer = setTimeout(() => { void doSessionRefresh(mode); }, delay);
+}
+
+async function doSessionRefresh(mode: IgMode) {
+  const st    = ms(mode);
+  const creds = resolveCredentials(mode);
+  if (!creds.apiKey) return;
+  try {
+    addLog(mode, 'info', '—', 'Refreshing IG session…');
+    st.session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, `igstrat:${mode}`);
+    st.authFailCount = 0;
+    addLog(mode, 'info', '—', `Session refreshed — expires ${new Date(st.session.expiresAt).toLocaleTimeString()}`);
+    scheduleSessionRefresh(mode, st.session);
+  } catch (e) {
+    st.authFailCount++;
+    addLog(mode, 'error', '—', `Session refresh failed: ${e instanceof Error ? e.message : String(e)}`);
+    if (st.authFailCount >= 3) {
+      addLog(mode, 'error', '—', 'Auth failed 3× — stopping retries to prevent account lockout');
+      return;
+    }
+    const backoffMs = 5 * 60_000 * Math.pow(2, st.authFailCount - 1);
+    addLog(mode, 'info', '—', `Retrying in ${Math.round(backoffMs / 60_000)} min (${st.authFailCount}/3)`);
+    st.sessionRefreshTimer = setTimeout(() => { void doSessionRefresh(mode); }, backoffMs);
+  }
+}
+
+// ── ORB ───────────────────────────────────────────────────────────────────────
+
+function resetOrbState(mode: IgMode, epics: string[]) {
+  const st = ms(mode);
+  for (const epic of epics) st.orbState[epic] = { high: 0, low: 0, established: false };
+}
+
+async function buildOrbRange(mode: IgMode, session: IGSession, epics: string[]) {
+  addLog(mode, 'info', '—', 'Building Opening Range (first 30 min)…');
+  const st = ms(mode);
+  for (const epic of epics) {
+    try {
+      const raw  = await fetchCandleHistory(session, epic, 'MINUTE', 60);
+      const last30 = raw.slice(-30);
+      if (!last30.length) continue;
+      const high = Math.max(...last30.map(b => b.highPrice.mid ?? b.highPrice.bid));
+      const low  = Math.min(...last30.map(b => b.lowPrice.mid  ?? b.lowPrice.bid));
+      st.orbState[epic] = { high, low, established: true };
+      addLog(mode, 'info', epicName(epic), `ORB: ${low.toFixed(2)}–${high.toFixed(2)}`);
+    } catch {}
+  }
+}
+
+// ── Signal evaluation ─────────────────────────────────────────────────────────
+
+async function evaluateEpic(
+  mode:      IgMode,
+  epic:      string,
+  positions: FullPosition[],
+  cfg:       IgStrategyConfig,
+  session:   IGSession,
+): Promise<void> {
+  const openPos    = positions.find(p => p.epic === epic);
+  const inPosition = !!openPos;
+  const side       = openPos ? (openPos.direction === 'BUY' ? 'long' : 'short') as 'long' | 'short' : undefined;
+
+  const { resolution, count } = IG_RES[cfg.strategy];
+  let bars: AlpacaBar[];
+  try {
+    bars = (await fetchCandleHistory(session, epic, resolution, count)).map(igBarToAlpacaBar);
+  } catch (e) {
+    addLog(mode, 'error', epicName(epic), `Bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  if (!bars.length) { addLog(mode, 'wait', epicName(epic), 'No bar data'); return; }
+
+  const st = ms(mode);
+  let signal: StrategySignal;
+
+  switch (cfg.strategy) {
+    case 'rsi_mean_reversion':
+      signal = rsiMeanReversionSignal(bars, inPosition, side);
+      break;
+
+    case 'ema_crossover':
+      signal = emaCrossoverSignal(bars, inPosition, side);
+      break;
+
+    case 'orb': {
+      const orb = st.orbState[epic] ?? { high: 0, low: 0, established: false };
+      if (!orb.established) { addLog(mode, 'wait', epicName(epic), 'ORB not established'); return; }
+      signal = orbSignal(orb.high, orb.low, bars[bars.length - 1].c, inPosition, side);
+      break;
+    }
+
+    case 'vwap':
+      signal = vwapSignal(bars, bars[bars.length - 1].c, inPosition, side);
+      break;
+
+    case 'weekly_momentum': {
+      let dailyBars: AlpacaBar[] = [];
+      try { dailyBars = (await fetchCandleHistory(session, epic, 'DAY', 30)).map(igBarToAlpacaBar); } catch {}
+      signal = weeklyMomentumSignal(bars, dailyBars, inPosition, side);
+      break;
+    }
+
+    default: return;
+  }
+
+  await executeIgSignal(mode, epic, signal, openPos ?? null, cfg, session, bars[bars.length - 1].c);
+}
+
+// ── Order execution ───────────────────────────────────────────────────────────
+
+async function executeIgSignal(
+  mode:         IgMode,
+  epic:         string,
+  signal:       StrategySignal,
+  openPos:      FullPosition | null,
+  cfg:          IgStrategyConfig,
+  session:      IGSession,
+  currentPrice: number,
+): Promise<void> {
+  const { action, reason, stopPrice, takeProfitPrice, trailPercent } = signal;
+  const st   = ms(mode);
+  const name = epicName(epic);
+
+  if (action === 'HOLD') { addLog(mode, 'wait', name, reason); return; }
+
+  if (action === 'CLOSE_LONG' || action === 'CLOSE_SHORT') {
+    if (!openPos) return;
+    addLog(mode, 'exit', name, `Closing — ${reason}`);
+    try {
+      await igClosePos(session, openPos.dealId, openPos.direction, openPos.size);
+      addLog(mode, 'exit', name, `Closed deal ${openPos.dealId}`);
+
+      // Find replacement epic
+      void (async () => {
+        try {
+          const current = st.config?.epics ?? [];
+          const held    = (await fetchFullPositions(session)).map(p => p.epic);
+          const exclude = [...new Set([...current, ...held])].filter(e => e !== epic);
+          const picks   = await scanIgEpics(cfg.strategy, session, exclude, 1, msg => addLog(mode, 'info', '—', msg));
+          if (picks[0] && st.config) {
+            const idx = st.config.epics.indexOf(epic);
+            if (idx !== -1) st.config.epics[idx] = picks[0];
+            else st.config.epics.push(picks[0]);
+            addLog(mode, 'info', '—', `Slot replacement: ${name} → ${epicName(picks[0])}`);
+          }
+        } catch {}
+      })();
+    } catch (e) {
+      addLog(mode, 'error', name, `Close failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return;
+  }
+
+  if (st.paused)                       { addLog(mode, 'wait', name, `⏸ Paused — skipping ${action}`); return; }
+  if (action === 'SELL' && !cfg.allowShorts) { addLog(mode, 'wait', name, 'Shorts disabled'); return; }
+  if (openPos)                          { addLog(mode, 'wait', name, `Already in position — skipping ${action}`); return; }
+  if (isNearClose())                    { addLog(mode, 'wait', name, '⏸ Market closing <15 min — no new entries'); return; }
+
+  const direction  = action === 'BUY' ? 'BUY' : 'SELL';
+  const stake      = calcStake(cfg.notionalGbp, currentPrice);
+  const stopDist   = stopPrice        ? Math.abs(currentPrice - stopPrice)        : undefined;
+  const profitDist = takeProfitPrice  ? Math.abs(currentPrice - takeProfitPrice)  : undefined;
+
+  // Trailing stop: use trail_percent converted to points
+  const effectiveStopDist = trailPercent ? currentPrice * (trailPercent / 100) : stopDist;
+
+  addLog(mode, 'enter', name, `${action} — ${reason}`);
+  addLog(mode, 'info',  name, `Stake: £${stake}/pt | Price: ~${currentPrice.toFixed(2)} | ~£${(stake * currentPrice).toFixed(0)} exposure`);
+  if (effectiveStopDist) addLog(mode, 'info', name, `Stop: ${effectiveStopDist.toFixed(2)} pts`);
+  if (profitDist)        addLog(mode, 'info', name, `TP:   ${profitDist.toFixed(2)} pts`);
+
+  try {
+    const { dealId, level } = await placeMarketOrder(session, epic, direction, stake, effectiveStopDist, profitDist);
+    addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
+  } catch (e) {
+    addLog(mode, 'error', name, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+// ── Poll loop ─────────────────────────────────────────────────────────────────
+
+async function poll(mode: IgMode) {
+  const st = ms(mode);
+  if (!st.running || !st.config || !st.session) return;
+
+  const cfg = st.config;
+  st.lastPollTs = new Date().toISOString();
+
+  if (isWeekend()) {
+    const sleepMs = msUntilMondayOpen();
+    addLog(mode, 'wait', '—', `Weekend — sleeping until Monday (~${Math.round(sleepMs / 3_600_000)}h)`);
+    st.nextRunMs = Date.now() + sleepMs;
+    st.pollTimer = setTimeout(() => { void poll(mode); }, sleepMs);
+    return;
+  }
+
+  const meta = STRATEGY_META[cfg.strategy];
+
+  if (meta.timeframe === 'intraday' && !isNYSEOpen()) { schedule(mode, cfg); return; }
+  if (meta.timeframe === 'daily'    && !isDailyCheckTime())  { schedule(mode, cfg); return; }
+  if (meta.timeframe === 'weekly'   && !isWeeklyCheckTime()) { schedule(mode, cfg); return; }
+
+  if (cfg.strategy === 'orb' && isInOpeningRange()) {
+    await buildOrbRange(mode, st.session, cfg.epics);
+    schedule(mode, cfg);
+    return;
+  }
+
+  let positions: FullPosition[] = [];
+  let balance = 0, available = 0;
+  try {
+    [positions, { balance, available }] = await Promise.all([
+      fetchFullPositions(st.session),
+      fetchAccountFunds(st.session),
+    ]);
+    if (Math.random() < 0.1) {
+      addLog(mode, 'info', '—', `Balance: £${balance.toFixed(2)} | Available: £${available.toFixed(2)} | Positions: ${positions.length}`);
+    }
+  } catch (e) {
+    addLog(mode, 'error', '—', `Account fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    schedule(mode, cfg);
+    return;
+  }
+
+  const openCount = positions.length;
+
+  for (const epic of cfg.epics) {
+    if (!st.running) break;
+    const inPos = positions.find(p => p.epic === epic);
+    if (!inPos && openCount >= cfg.maxPositions) {
+      addLog(mode, 'wait', epicName(epic), `Max positions (${cfg.maxPositions}) reached`);
+      continue;
+    }
+    await evaluateEpic(mode, epic, positions, cfg, st.session);
+  }
+
+  schedule(mode, cfg);
+}
+
+function schedule(mode: IgMode, cfg: IgStrategyConfig) {
+  const st = ms(mode);
+  if (!st.running) return;
+  const delay  = STRATEGY_META[cfg.strategy].pollMs;
+  st.nextRunMs = Date.now() + delay;
+  st.pollTimer = setTimeout(() => { void poll(mode); }, delay);
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: boolean; error?: string }> {
+  const mode = cfg.mode;
+  stopIgStrategyBot(mode);
+
+  const creds = resolveCredentials(mode);
+  if (!creds.apiKey || !creds.username || !creds.password) {
+    return { ok: false, error: `IG ${mode} credentials not configured — set IG_${mode.toUpperCase()}_API_KEY / USERNAME / PASSWORD` };
+  }
+
+  const st = ms(mode);
+  try {
+    const sessionKey = `igstrat:${mode}`;
+    const existing   = getSession(sessionKey);
+    if (existing && Date.now() < existing.expiresAt - 2 * 60_000) {
+      st.session = existing;
+      addLog(mode, 'info', '—', `Reusing existing session — expires ${new Date(st.session.expiresAt).toLocaleTimeString()}`);
+    } else {
+      addLog(mode, 'info', '—', 'Authenticating with IG…');
+      st.session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, sessionKey);
+    }
+  } catch (e) {
+    return { ok: false, error: `IG auth failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  const { balance } = await fetchAccountFunds(st.session).catch(() => ({ balance: 0, available: 0 }));
+  addLog(mode, 'info', '—', `Connected — account ${st.session.accountId} | balance £${balance.toFixed(2)}`);
+
+  st.config        = cfg;
+  st.running       = true;
+  st.paused        = false;
+  st.authFailCount = 0;
+
+  addLog(mode, 'info', '—', 'Scanning for best instruments…');
+  try {
+    const best = await scanIgEpics(cfg.strategy, st.session, [], cfg.maxPositions + 2, msg => addLog(mode, 'info', '—', msg));
+    cfg.epics = best;
+  } catch (e) {
+    addLog(mode, 'info', '—', `Scan failed — using default indices: ${e instanceof Error ? e.message : String(e)}`);
+    cfg.epics = ['IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.DAILY.IP', 'IX.D.FTSE.DAILY.IP'];
+  }
+
+  if (cfg.strategy === 'orb') resetOrbState(mode, cfg.epics);
+  scheduleSessionRefresh(mode, st.session);
+
+  addLog(mode, 'info', '—', `Bot started — ${STRATEGY_META[cfg.strategy].label} | ${mode} | ${cfg.epics.map(epicName).join(', ')}`);
+  addLog(mode, 'info', '—', `Notional: £${cfg.notionalGbp} | Max positions: ${cfg.maxPositions} | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
+
+  void poll(mode);
+  return { ok: true };
+}
+
+export function stopIgStrategyBot(mode: IgMode): void {
+  const st = ms(mode);
+  st.running = false;
+  st.paused  = false;
+  if (st.pollTimer)           { clearTimeout(st.pollTimer);           st.pollTimer           = null; }
+  if (st.sessionRefreshTimer) { clearTimeout(st.sessionRefreshTimer); st.sessionRefreshTimer = null; }
+  st.nextRunMs  = null;
+  st.lastPollTs = null;
+  addLog(mode, 'info', '—', `IG strategy bot ${mode} stopped`);
+}
+
+export function pauseIgStrategyBot(mode: IgMode): void {
+  const st = ms(mode);
+  if (!st.running) return;
+  st.paused = true;
+  addLog(mode, 'info', '—', '⏸ Paused — monitoring positions, no new entries');
+}
+
+export function resumeIgStrategyBot(mode: IgMode): void {
+  const st = ms(mode);
+  if (!st.running) return;
+  st.paused = false;
+  addLog(mode, 'info', '—', '▶ Resumed');
+}
+
+export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBotStatus> {
+  const st = ms(mode);
+  let positions: IgOpenPosition[] = [];
+  let balance = 0, available = 0;
+
+  if (st.running && st.session) {
+    try {
+      const [full, funds] = await Promise.all([fetchFullPositions(st.session), fetchAccountFunds(st.session)]);
+      balance   = funds.balance;
+      available = funds.available;
+      positions = full.map(p => ({
+        dealId:    p.dealId,
+        epic:      p.epic,
+        name:      p.instrumentName,
+        direction: p.direction,
+        size:      p.size,
+        level:     p.level,
+        upl:       p.upl,
+        bid:       p.bid,
+        offer:     p.offer,
+      }));
+    } catch {}
+  }
+
+  return {
+    running:    st.running,
+    paused:     st.paused,
+    mode,
+    strategy:   st.config?.strategy  ?? 'rsi_mean_reversion',
+    epics:      st.config?.epics     ?? [],
+    balance,
+    available,
+    positions,
+    log:        st.log.slice(0, 100),
+    nextRunMs:  st.nextRunMs,
+    lastPollTs: st.lastPollTs,
+    orbState:   { ...st.orbState },
+    sessionOk:  !!st.session && Date.now() < st.session.expiresAt,
+  };
+}
