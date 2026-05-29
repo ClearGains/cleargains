@@ -304,6 +304,7 @@ app.post('/alpaca/:mode/start', auth, (req: Request, res: Response) => {
     positionSizeUsd: body.positionSizeUsd ?? 500,
     maxPositions:    body.maxPositions    ?? 3,
     allowShorts:     body.allowShorts     ?? false,
+    allow24h:        body.allow24h        ?? false,
   };
 
   res.json({ ok: true, message: 'Bot starting…' });

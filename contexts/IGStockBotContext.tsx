@@ -21,7 +21,7 @@ export type StockPosition = {
 export type BotSettings = {
   riskPerTrade: number; maxPositions: number; stopAtrMult: number;
   targetRR: number; minStrength: number; scanIntervalMins: number;
-  earningsBlackout: boolean;
+  earningsBlackout: boolean; hedgingEnabled: boolean;
 };
 
 export type LogEntry = { id: string; ts: string; type: 'info'|'buy'|'sell'|'close'|'error'|'warn'; msg: string };
@@ -30,7 +30,7 @@ export type BotStatus = 'stopped' | 'running' | 'paused';
 
 export const DEFAULT_SETTINGS: BotSettings = {
   riskPerTrade: 50, maxPositions: 3, stopAtrMult: 2.0, targetRR: 2.5,
-  minStrength: 65, scanIntervalMins: 10, earningsBlackout: true,
+  minStrength: 65, scanIntervalMins: 10, earningsBlackout: true, hedgingEnabled: false,
 };
 
 // High-volatility names only — blue chips move too slowly to justify minimum 1pt bet

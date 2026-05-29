@@ -855,6 +855,7 @@ export default function AlpacaTraderPage() {
   const [sizeUsd, setSizeUsd]     = useState('500');
   const [maxPos, setMaxPos]       = useState('3');
   const [allowShorts, setAllowShorts] = useState(false);
+  const [allow24h, setAllow24h]       = useState(false);
 
   const [status, setStatus]       = useState<BotStatus | null>(null);
   const [loading, setLoading]     = useState(false);
@@ -929,6 +930,7 @@ export default function AlpacaTraderPage() {
       positionSizeUsd: parseFloat(sizeUsd) || 500,
       maxPositions:    parseInt(maxPos, 10) || 3,
       allowShorts,
+      allow24h,
     });
   };
 
@@ -1121,6 +1123,24 @@ export default function AlpacaTraderPage() {
                   )} />
                 </div>
                 <span className="text-xs text-slate-400">Allow short selling</span>
+              </label>
+
+              {/* 24/5 trading toggle */}
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <div
+                  onClick={() => { if (!isRunning) setAllow24h(v => !v); }}
+                  className={clsx(
+                    'w-9 h-5 rounded-full relative transition-colors',
+                    allow24h ? 'bg-amber-500' : 'bg-slate-700',
+                    isRunning && 'opacity-50 cursor-not-allowed',
+                  )}
+                >
+                  <div className={clsx(
+                    'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
+                    allow24h ? 'left-4' : 'left-0.5',
+                  )} />
+                </div>
+                <span className="text-xs text-slate-400">24/5 trading (trade outside NYSE hours)</span>
               </label>
 
               {/* Controls */}

@@ -375,6 +375,57 @@ export async function updatePositionLevels(
   }
 }
 
+export type MarketDetail = {
+  epic:         string;
+  minDealSize:  number;   // minimum £/point bet size
+  minStopDist:  number;   // minimum stop distance in points
+};
+
+export async function fetchMarketDetails(
+  session: IGSession,
+  epics:   string[],
+): Promise<Map<string, MarketDetail>> {
+  const result = new Map<string, MarketDetail>();
+  if (!epics.length) return result;
+
+  const base   = BASE[session.env];
+  const BATCH  = 50;  // IG cap per request
+
+  for (let i = 0; i < epics.length; i += BATCH) {
+    const batch = epics.slice(i, i + BATCH);
+    try {
+      const url = `${base}/markets?epics=${batch.map(encodeURIComponent).join(',')}`;
+      const r   = await fetch(url, { headers: headers(session, '2'), signal: AbortSignal.timeout(10_000) });
+      if (!r.ok) {
+        console.warn(`[igApi] fetchMarketDetails ${r.status} for batch ${i}`);
+        continue;
+      }
+      const d = await r.json() as {
+        marketDetails?: Array<{
+          instrument?: { epic?: string };
+          dealingRules?: {
+            minDealSize?: { value?: number };
+            minControlledRiskStopDistance?: { value?: number };
+            minNormalStopOrLimitDistance?:  { value?: number };
+          };
+        }>;
+      };
+      for (const m of d.marketDetails ?? []) {
+        const epic       = m.instrument?.epic;
+        if (!epic) continue;
+        const minDeal    = m.dealingRules?.minDealSize?.value ?? 1;
+        const minStop    = m.dealingRules?.minNormalStopOrLimitDistance?.value
+                        ?? m.dealingRules?.minControlledRiskStopDistance?.value
+                        ?? 1;
+        result.set(epic, { epic, minDealSize: minDeal, minStopDist: minStop });
+      }
+    } catch (e) {
+      console.warn(`[igApi] fetchMarketDetails batch failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return result;
+}
+
 export async function fetchAccountFunds(session: IGSession): Promise<{ available: number; balance: number }> {
   const base = BASE[session.env];
   const r = await fetch(`${base}/accounts`, { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });

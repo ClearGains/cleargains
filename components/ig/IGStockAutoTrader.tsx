@@ -86,6 +86,7 @@ function SettingsPanel({ settings, onChange }: { settings: BotSettings; onChange
       {field('Min signal strength', 'minStrength',      { min: 50,  max: 95,   step: 5,   suffix: '%' })}
       {field('Scan every',          'scanIntervalMins', { min: 5,   max: 60,   step: 5,   suffix: 'min' })}
       {field('Earnings blackout',   'earningsBlackout', {})}
+      {field('Hedge negative longs', 'hedgingEnabled',  {})}
       <p className="text-[10px] text-gray-600 pt-1">
         Settings are sent to the Oracle server on Start. Stop + Start to apply changes.
       </p>

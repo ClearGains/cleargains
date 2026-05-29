@@ -1,7 +1,8 @@
 import {
   authenticate, getSession,
-  placeMarketOrder, updatePositionLevels, fetchAccountFunds, fetchFullPositions,
-  type IGSession,
+  placeMarketOrder, closePosition, updatePositionLevels, fetchAccountFunds, fetchFullPositions,
+  fetchMarketDetails,
+  type IGSession, type MarketDetail,
 } from './igApi';
 import { isMarketOpen, isWeekend, msUntilMondayOpen } from './marketHours';
 
@@ -70,6 +71,7 @@ export type StockBotSettings = {
   minStrength:      number;
   scanIntervalMins: number;
   earningsBlackout: boolean;
+  hedgingEnabled:   boolean;  // open SELL hedge when BUY goes negative; cut losing shorts
 };
 
 export type StockSignal = {
@@ -433,6 +435,7 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
   let nextScanAt: string | null = null;
   let scanTimer:  ReturnType<typeof setTimeout> | null = null;
   let peakProfit: Map<string, number> = new Map();
+  let minSizes:   Map<string, MarketDetail> = new Map();
 
   const logs: StockLogEntry[] = [];
 
@@ -474,6 +477,17 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
     } catch { /* non-critical */ }
   }
 
+  async function fetchMinSizes() {
+    if (!session) return;
+    const epics = Object.values(STOCK_EPICS).map(v => v.epic);
+    try {
+      minSizes = await fetchMarketDetails(session, epics);
+      addLog('info', `Fetched min sizes for ${minSizes.size} instruments from IG`);
+    } catch (e) {
+      addLog('warn', `Could not fetch min sizes: ${e instanceof Error ? e.message : String(e)} — using defaults`);
+    }
+  }
+
   async function manageTrailingStops() {
     if (!session) return;
     for (const pos of positions) {
@@ -507,6 +521,61 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
         } catch { /* retry next cycle */ }
         await new Promise(r => setTimeout(r, 200));
       }
+    }
+  }
+
+  async function manageHedges() {
+    if (!session || !settings?.hedgingEnabled) return;
+
+    await refreshPositions();
+
+    const buyPositions  = positions.filter(p => p.direction === 'BUY');
+    const sellPositions = positions.filter(p => p.direction === 'SELL');
+
+    // 1. Cut SELL (short) positions that are losing — never hold a negative short
+    for (const pos of sellPositions) {
+      if (pos.upl >= 0) continue;
+      try {
+        await closePosition(session, pos.dealId, 'SELL', pos.size);
+        addLog('close', `Cut hedge SELL ${pos.ticker} (−£${Math.abs(pos.upl).toFixed(2)}) — not holding losing shorts`);
+      } catch (e) {
+        addLog('error', `Failed to close SELL hedge ${pos.ticker}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    // Refresh after any closes
+    await refreshPositions();
+    const hedgedTickers = new Set(positions.filter(p => p.direction === 'SELL').map(p => p.ticker));
+
+    // 2. Open a SELL hedge for each BUY that is currently negative (no hedge yet)
+    for (const pos of buyPositions) {
+      if (pos.upl >= 0) continue;              // BUY is positive — no hedge needed
+      if (hedgedTickers.has(pos.ticker)) continue;  // already hedged
+
+      const info = STOCK_EPICS[pos.ticker];
+      if (!info) continue;
+
+      // Mirror the BUY's stop/limit distances for the hedge
+      const stopDist  = pos.stopLevel
+        ? Math.max(1, Math.round(Math.abs(pos.level - pos.stopLevel)  * 10) / 10)
+        : Math.max(1, Math.round(pos.size * 2 * 10) / 10);
+      const limitDist = pos.limitLevel
+        ? Math.max(1, Math.round(Math.abs(pos.level - pos.limitLevel) * 10) / 10)
+        : Math.max(1, Math.round(stopDist * (settings?.targetRR ?? 2.5) * 10) / 10);
+
+      try {
+        const { dealId: _hid, level } = await placeMarketOrder(
+          session, info.epic, 'SELL', pos.size,
+          stopDist, limitDist, 'GBP',
+        );
+        addLog('sell', `Hedge SELL ${info.name} £${pos.size}/pt @ ${level.toFixed(2)} — BUY is −£${Math.abs(pos.upl).toFixed(2)}`);
+        hedgedTickers.add(pos.ticker);
+      } catch (e) {
+        addLog('error', `Hedge open failed ${pos.ticker}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      await new Promise(r => setTimeout(r, 500));
     }
   }
 
@@ -556,14 +625,25 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
       // Fund check
       if (available !== null && available < 100) { addLog('warn', 'Funds too low to trade'); break; }
 
-      const atr       = sig.price * 0.02;
-      const stopDist  = Math.max(1, Math.round(atr * settings.stopAtrMult * 10) / 10);
-      const limitDist = Math.max(1, Math.round(stopDist * settings.targetRR * 10) / 10);
-      const rawSize   = Math.max(info.minSize, Math.round((settings.riskPerTrade / stopDist) * 10) / 10);
+      const igDetail  = minSizes.get(info.epic);
+      const minDeal   = igDetail?.minDealSize ?? info.minSize;
+      const minStop   = igDetail?.minStopDist ?? 1;
+
+      const atr           = sig.price * 0.02;
+      const rawStopDist   = Math.round(atr * settings.stopAtrMult * 10) / 10;
+      const stopDist      = Math.max(minStop, rawStopDist);
+      const limitDist     = Math.max(minStop, Math.round(stopDist * settings.targetRR * 10) / 10);
+      const rawSize       = Math.round((settings.riskPerTrade / stopDist) * 10) / 10;
       // Cap so notional (size × price) ≤ 5% of available funds
-      const maxNotional = available !== null ? available * 0.05 : settings.riskPerTrade * 20;
-      const pctCap    = Math.max(info.minSize, Math.floor((maxNotional / Math.max(sig.price, 1)) * 10) / 10);
-      const size      = Math.max(info.minSize, Math.min(rawSize, pctCap));
+      const maxNotional   = available !== null ? available * 0.05 : settings.riskPerTrade * 20;
+      const pctCap        = Math.floor((maxNotional / Math.max(sig.price, 1)) * 10) / 10;
+      const sizeCapped    = Math.min(rawSize, pctCap);
+      const size          = Math.max(minDeal, sizeCapped);
+      const expectedTP    = (size * limitDist).toFixed(2);
+      const expectedSL    = (size * stopDist).toFixed(2);
+      if (sizeCapped < minDeal) {
+        addLog('warn', `${ticker}: risk-based size £${sizeCapped}/pt below IG minimum £${minDeal}/pt — using minimum (TP ~£${expectedTP}, SL ~£${expectedSL})`);
+      }
 
       try {
         const direction = sig.direction as 'BUY' | 'SELL';
@@ -574,7 +654,7 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
         const stopLevel  = direction === 'BUY' ? level - stopDist  : level + stopDist;
         const limitLevel = direction === 'BUY' ? level + limitDist : level - limitDist;
         addLog(direction === 'BUY' ? 'buy' : 'sell',
-          `${direction} ${info.name} £${size}/pt @ ${level.toFixed(2)} · stop ${stopLevel.toFixed(2)} · target ${limitLevel.toFixed(2)} (deal: ${dealId})`
+          `${direction} ${info.name} £${size}/pt @ ${level.toFixed(2)} · stop ${stopLevel.toFixed(2)} · target ${limitLevel.toFixed(2)} · TP ~£${expectedTP} / SL ~£${expectedSL} (deal: ${dealId})`
         );
         newTrades++;
         heldEpics.add(info.epic);
@@ -589,6 +669,7 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
 
     addLog('info', `Scan complete — ${newTrades} new trade(s)`);
     await manageTrailingStops();
+    await manageHedges();
     scheduleNext();
   }
 
@@ -622,11 +703,13 @@ export function createStockBot(accountKey: 'demo' | 'live'): StockBotHandle {
       tickers     = params.tickers.filter(t => STOCK_EPICS[t]);
       signals     = {};
       peakProfit  = new Map();
+      minSizes    = new Map();
       running     = true;
       paused      = false;
 
       addLog('info', `Stock bot started on ${accountKey.toUpperCase()} · risk £${settings.riskPerTrade}/trade · ${tickers.length} tickers`);
       await refreshFunds();
+      await fetchMinSizes();
       // First scan after 2s
       scanTimer = setTimeout(() => void runScan(), 2_000);
       nextScanAt = new Date(Date.now() + 2_000).toISOString();

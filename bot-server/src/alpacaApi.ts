@@ -210,6 +210,57 @@ export async function getLatestBars(
   return data.bars ?? {};
 }
 
+// ── Options ───────────────────────────────────────────────────────────────────
+
+export type AlpacaOptionsContract = {
+  id:                string;
+  symbol:            string;   // OCC symbol e.g. AAPL250117C00180000
+  underlying_symbol: string;
+  type:              'call' | 'put';
+  strike_price:      string;
+  expiration_date:   string;   // YYYY-MM-DD
+  status:            string;
+  tradable:          boolean;
+  close_price?:      string;   // last close price of the contract
+};
+
+export async function getOptionsContracts(
+  underlying: string,
+  type:       'call' | 'put',
+  mode:       AccountMode,
+): Promise<AlpacaOptionsContract[]> {
+  const today  = new Date();
+  const minExp = new Date(today.getTime() +  7 * 86_400_000).toISOString().split('T')[0];
+  const maxExp = new Date(today.getTime() + 21 * 86_400_000).toISOString().split('T')[0];
+
+  return alpacaFetch<{ option_contracts: AlpacaOptionsContract[] }>(mode,
+    `/options/contracts?underlying_symbols=${underlying}&type=${type}` +
+    `&expiration_date_gte=${minExp}&expiration_date_lte=${maxExp}&status=active&limit=30`,
+  ).then(d => d.option_contracts ?? []).catch(() => []);
+}
+
+// Find the ATM contract (strike closest to current price) with best liquidity
+export async function selectOptionsContract(
+  underlying:    string,
+  type:          'call' | 'put',
+  currentPrice:  number,
+  mode:          AccountMode,
+): Promise<AlpacaOptionsContract | null> {
+  const contracts = await getOptionsContracts(underlying, type, mode);
+  if (!contracts.length) return null;
+
+  const tradable = contracts.filter(c => c.tradable && c.status === 'active');
+  if (!tradable.length) return null;
+
+  // Sort by strike closest to current price (ATM)
+  tradable.sort((a, b) =>
+    Math.abs(parseFloat(a.strike_price) - currentPrice) -
+    Math.abs(parseFloat(b.strike_price) - currentPrice),
+  );
+
+  return tradable[0] ?? null;
+}
+
 export type AlpacaSnapshot = {
   latestTrade?: { p: number };
   dailyBar?:    { v: number; vw: number; o: number; c: number };

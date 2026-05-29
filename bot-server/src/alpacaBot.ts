@@ -22,6 +22,7 @@ export type AlpacaBotConfig = {
   positionSizeUsd:  number;
   maxPositions:     number;
   allowShorts:      boolean;
+  allow24h:         boolean;    // skip NYSE hours gate — trade Mon-Fri around the clock
 };
 
 export type AlpacaLogEntry = {
@@ -236,17 +237,18 @@ async function evaluateSymbol(
       return;
   }
 
-  await executeSignal(mode, sym, signal, openPos ?? null, cfg);
+  await executeSignal(mode, sym, signal, openPos ?? null, cfg, bars[bars.length - 1].c);
 }
 
 // ── Order execution ───────────────────────────────────────────────────────────
 
 async function executeSignal(
-  mode:    AccountMode,
-  sym:     string,
-  signal:  StrategySignal,
-  openPos: AlpacaPosition | null,
-  cfg:     AlpacaBotConfig,
+  mode:         AccountMode,
+  sym:          string,
+  signal:       StrategySignal,
+  openPos:      AlpacaPosition | null,
+  cfg:          AlpacaBotConfig,
+  currentPrice?: number,
 ): Promise<void> {
   const { action, reason, stopPrice, takeProfitPrice, trailPercent, orderType } = signal;
   const st = s(mode);
@@ -310,6 +312,10 @@ async function executeSignal(
   }
 
   const orderSide = action === 'BUY' ? 'buy' : 'sell';
+  // Alpaca rejects fractional short orders — use integer qty for sells
+  const shortQty = orderSide === 'sell' && currentPrice && currentPrice > 0
+    ? Math.max(1, Math.floor(cfg.positionSizeUsd / currentPrice))
+    : undefined;
 
   // ── Options entry — contract symbol with qty, no notional ────────────────
   if (signal.optionContract) {
@@ -339,7 +345,7 @@ async function executeSignal(
   try {
     const order = await placeOrder(mode, {
       symbol:        sym,
-      notional:      cfg.positionSizeUsd,
+      ...(shortQty ? { qty: shortQty } : { notional: cfg.positionSizeUsd }),
       side:          orderSide,
       type:          orderType === 'trailing_stop' ? 'trailing_stop' : 'market',
       time_in_force: 'day',
@@ -388,7 +394,7 @@ async function poll(mode: AccountMode) {
     return;
   }
 
-  if (meta.timeframe === 'intraday' && !isNYSEOpen()) {
+  if (meta.timeframe === 'intraday' && !isNYSEOpen() && !cfg.allow24h) {
     addLog(mode, 'wait', '—', 'Market closed — skipping poll');
     schedule(mode, cfg);
     return;
@@ -486,7 +492,7 @@ export async function startAlpacaBot(cfg: AlpacaBotConfig): Promise<{ ok: boolea
   if (cfg.strategy === 'orb') resetOrbState(mode, cfg.symbols);
 
   addLog(mode, 'info', '—', `Bot started — strategy: ${STRATEGY_META[cfg.strategy].label} | mode: ${mode} | symbols: ${cfg.symbols.join(', ')}`);
-  addLog(mode, 'info', '—', `Position size: $${cfg.positionSizeUsd} | max positions: ${cfg.maxPositions} | shorts: ${cfg.allowShorts ? 'allowed' : 'disabled'}`);
+  addLog(mode, 'info', '—', `Position size: $${cfg.positionSizeUsd} | max positions: ${cfg.maxPositions} | shorts: ${cfg.allowShorts ? 'allowed' : 'disabled'} | 24/5: ${cfg.allow24h ? 'on' : 'off'}`);
 
   void poll(mode);
   return { ok: true };
