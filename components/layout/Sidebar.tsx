@@ -86,6 +86,7 @@ const navLinks = [
   { href: '/short-scanner',    label: 'Short Scanner',    icon: TrendingDown },
   { href: '/auto-trader',      label: 'Auto Trader',      icon: Bot         },
   { href: '/alpaca-trader',    label: 'Alpaca Bot',        icon: Bot         },
+  { href: '/backtest',         label: 'Backtest Lab',      icon: FlaskConical },
   { href: '/reputable-stocks', label: 'Reputable Stocks',  icon: Star        },
   { href: '/future-leaders',   label: 'Future Leaders',    icon: Rocket      },
   { href: '/trade-log',        label: 'Trade Log',        icon: FileText    },

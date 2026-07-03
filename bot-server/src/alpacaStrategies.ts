@@ -53,14 +53,25 @@ export function calcVwap(bars: AlpacaBar[]): number | null {
   return cumVol > 0 ? cumTPV / cumVol : null;
 }
 
-export function calcMacdHist(bars: AlpacaBar[]): number | null {
-  if (bars.length < 26) return null;
+// True MACD histogram: (EMA12 − EMA26) − EMA9 of that difference.
+// Returns the last two values so callers can detect the histogram turning.
+export function calcMacdHist(bars: AlpacaBar[]): { hist: number; prevHist: number } | null {
+  if (bars.length < 35) return null;
   const closes = bars.map(b => b.c);
   const ema12 = calcEma(closes, 12);
   const ema26 = calcEma(closes, 26);
   if (!ema12.length || !ema26.length) return null;
-  const macdLine = ema12[ema12.length - 1] - ema26[ema26.length - 1];
-  return macdLine;
+  // Align tails: both series end at the last close
+  const n = Math.min(ema12.length, ema26.length);
+  const macdLine: number[] = [];
+  for (let i = 0; i < n; i++) {
+    macdLine.push(ema12[ema12.length - n + i] - ema26[ema26.length - n + i]);
+  }
+  const signal = calcEma(macdLine.map((v, i) => v), 9);
+  if (signal.length < 2) return null;
+  const hist     = macdLine[macdLine.length - 1] - signal[signal.length - 1];
+  const prevHist = macdLine[macdLine.length - 2] - signal[signal.length - 2];
+  return { hist, prevHist };
 }
 
 // ── Signal type ───────────────────────────────────────────────────────────────
@@ -98,32 +109,36 @@ export function rsiMeanReversionSignal(
   if (rsi === null || atr === null) return { action: 'HOLD', reason: 'indicators not ready' };
 
   if (inPosition) {
-    if (side === 'long') {
-      if (rsi > 65) return { action: 'CLOSE_LONG', reason: `RSI recovered to ${rsi.toFixed(1)}` };
-      if (last < bars[bars.length - 1].l - atr * 1.5) return { action: 'CLOSE_LONG', reason: 'ATR stop hit' };
-    }
-    if (side === 'short') {
-      if (rsi < 35) return { action: 'CLOSE_SHORT', reason: `RSI recovered to ${rsi.toFixed(1)}` };
-    }
+    // Hard stop / take-profit live server-side as bracket legs; here we only
+    // exit on the mean-reversion thesis completing.
+    if (side === 'long'  && rsi > 60) return { action: 'CLOSE_LONG',  reason: `RSI recovered to ${rsi.toFixed(1)}` };
+    if (side === 'short' && rsi < 40) return { action: 'CLOSE_SHORT', reason: `RSI recovered to ${rsi.toFixed(1)}` };
     return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} — in position` };
   }
 
-  if (rsi < 30 && (macd === null || macd < 0.01)) {
+  // Momentum filter: only take oversold longs when downside momentum is easing
+  // (histogram rising) or already recovered (histogram positive) — avoids
+  // catching a falling knife. Mirrored for shorts. Epsilon absorbs float noise.
+  const eps = last * 1e-9;
+  const histTurningUp   = macd === null || macd.hist >= macd.prevHist - eps || macd.hist > 0;
+  const histTurningDown = macd === null || macd.hist <= macd.prevHist + eps || macd.hist < 0;
+
+  if (rsi < 30 && histTurningUp) {
     return {
       action:           'BUY',
-      reason:           `RSI oversold ${rsi.toFixed(1)} — mean reversion long`,
-      stopPrice:        +(last - atr * 1.5).toFixed(4),
-      takeProfitPrice:  +(last + atr * 3).toFixed(4),
+      reason:           `RSI oversold ${rsi.toFixed(1)} + MACD hist turning up — mean reversion long`,
+      stopPrice:        +(last - atr * 1.5).toFixed(2),
+      takeProfitPrice:  +(last + atr * 3).toFixed(2),
       orderType:        'market',
     };
   }
 
-  if (rsi > 70 && (macd === null || macd > -0.01)) {
+  if (rsi > 70 && histTurningDown) {
     return {
       action:           'SELL',
-      reason:           `RSI overbought ${rsi.toFixed(1)} — mean reversion short`,
-      stopPrice:        +(last + atr * 1.5).toFixed(4),
-      takeProfitPrice:  +(last - atr * 3).toFixed(4),
+      reason:           `RSI overbought ${rsi.toFixed(1)} + MACD hist turning down — mean reversion short`,
+      stopPrice:        +(last + atr * 1.5).toFixed(2),
+      takeProfitPrice:  +(last - atr * 3).toFixed(2),
       orderType:        'market',
     };
   }
@@ -168,8 +183,8 @@ export function emaCrossoverSignal(
     return {
       action:           'BUY',
       reason:           `EMA9 crossed above EMA21 (${e9curr.toFixed(2)} > ${e21curr.toFixed(2)})`,
-      stopPrice:        +(last - atr * 2).toFixed(4),
-      takeProfitPrice:  +(last + atr * 5).toFixed(4),
+      stopPrice:        +(last - atr * 2).toFixed(2),
+      takeProfitPrice:  +(last + atr * 5).toFixed(2),
       orderType:        'market',
     };
   }
@@ -178,8 +193,8 @@ export function emaCrossoverSignal(
     return {
       action:           'SELL',
       reason:           `EMA9 crossed below EMA21 (${e9curr.toFixed(2)} < ${e21curr.toFixed(2)})`,
-      stopPrice:        +(last + atr * 2).toFixed(4),
-      takeProfitPrice:  +(last - atr * 5).toFixed(4),
+      stopPrice:        +(last + atr * 2).toFixed(2),
+      takeProfitPrice:  +(last - atr * 5).toFixed(2),
       orderType:        'market',
     };
   }
@@ -214,8 +229,8 @@ export function orbSignal(
     return {
       action:           'BUY',
       reason:           `Breakout above ORB high ${orbHigh.toFixed(2)} (+0.2%)`,
-      stopPrice:        +(midpoint).toFixed(4),
-      takeProfitPrice:  +(orbHigh + range * 2).toFixed(4),
+      stopPrice:        +(midpoint).toFixed(2),
+      takeProfitPrice:  +(orbHigh + range * 2).toFixed(2),
       orderType:        'market',
     };
   }
@@ -224,8 +239,8 @@ export function orbSignal(
     return {
       action:           'SELL',
       reason:           `Breakdown below ORB low ${orbLow.toFixed(2)} (-0.2%)`,
-      stopPrice:        +(midpoint).toFixed(4),
-      takeProfitPrice:  +(orbLow - range * 2).toFixed(4),
+      stopPrice:        +(midpoint).toFixed(2),
+      takeProfitPrice:  +(orbLow - range * 2).toFixed(2),
       orderType:        'market',
     };
   }
@@ -253,13 +268,16 @@ export function vwapSignal(
   const pctFromVwap = (currentPrice - vwap) / vwap * 100;
 
   if (inPosition) {
+    // Target: price reverts to VWAP. Stop: stretch extends to 1% beyond VWAP
+    // (entries happen at ~0.5% away, so this is ~0.5% adverse from entry —
+    // the server-side bracket stop is the primary protection).
     if (side === 'long') {
-      if (currentPrice >= vwap * 1.005) return { action: 'CLOSE_LONG',  reason: `Price hit VWAP +0.5% target` };
-      if (currentPrice < vwap * 0.995)  return { action: 'CLOSE_LONG',  reason: `Stop: 0.5% below VWAP` };
+      if (currentPrice >= vwap)         return { action: 'CLOSE_LONG',  reason: `Price reverted to VWAP ${vwap.toFixed(2)} — target hit` };
+      if (currentPrice < vwap * 0.99)   return { action: 'CLOSE_LONG',  reason: `Stop: stretched >1% below VWAP` };
     }
     if (side === 'short') {
-      if (currentPrice <= vwap * 0.995) return { action: 'CLOSE_SHORT', reason: `Price hit VWAP -0.5% target` };
-      if (currentPrice > vwap * 1.005)  return { action: 'CLOSE_SHORT', reason: `Stop: 0.5% above VWAP` };
+      if (currentPrice <= vwap)         return { action: 'CLOSE_SHORT', reason: `Price reverted to VWAP ${vwap.toFixed(2)} — target hit` };
+      if (currentPrice > vwap * 1.01)   return { action: 'CLOSE_SHORT', reason: `Stop: stretched >1% above VWAP` };
     }
     return { action: 'HOLD', reason: `VWAP=${vwap.toFixed(2)} price ${pctFromVwap > 0 ? '+' : ''}${pctFromVwap.toFixed(2)}%` };
   }
@@ -268,8 +286,8 @@ export function vwapSignal(
     return {
       action:           'BUY',
       reason:           `Price ${Math.abs(pctFromVwap).toFixed(2)}% below VWAP (${vwap.toFixed(2)}) RSI=${rsi?.toFixed(1) ?? 'N/A'}`,
-      stopPrice:        +(vwap * 0.995).toFixed(4),
-      takeProfitPrice:  +(vwap * 1.005).toFixed(4),
+      stopPrice:        +Math.min(currentPrice - atr * 1.2, vwap * 0.99).toFixed(2),
+      takeProfitPrice:  +vwap.toFixed(2),
       orderType:        'market',
     };
   }
@@ -278,8 +296,8 @@ export function vwapSignal(
     return {
       action:           'SELL',
       reason:           `Price ${pctFromVwap.toFixed(2)}% above VWAP (${vwap.toFixed(2)}) RSI=${rsi?.toFixed(1) ?? 'N/A'}`,
-      stopPrice:        +(vwap * 1.005).toFixed(4),
-      takeProfitPrice:  +(vwap * 0.995).toFixed(4),
+      stopPrice:        +Math.max(currentPrice + atr * 1.2, vwap * 1.01).toFixed(2),
+      takeProfitPrice:  +vwap.toFixed(2),
       orderType:        'market',
     };
   }
@@ -317,12 +335,13 @@ export function weeklyMomentumSignal(
   const goodRsi   = rsi !== null && rsi >= 50 && rsi <= 70;
 
   if (aboveSma && bullMom && goodRsi) {
+    // Enter at market; the bot attaches a 5% trailing stop as the exit order.
     return {
       action:           'BUY',
       reason:           `Weekly mom ${momentum4w.toFixed(2)}% | above 12w SMA | RSI ${rsi?.toFixed(1)}`,
-      stopPrice:        +(lastClose - dailyAtr * 4).toFixed(4),
-      takeProfitPrice:  +(lastClose + dailyAtr * 10).toFixed(4),
-      orderType:        'trailing_stop',
+      stopPrice:        +(lastClose - dailyAtr * 4).toFixed(2),
+      takeProfitPrice:  +(lastClose + dailyAtr * 10).toFixed(2),
+      orderType:        'market',
       trailPercent:     5,
     };
   }
@@ -359,20 +378,26 @@ export function optionsDirectionalSignal(
     return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} | P/L ${currentPlPct?.toFixed(1) ?? '?'}% | ${dte ?? '?'}d to expiry` };
   }
 
-  // Buy calls when oversold — expecting mean reversion upward
-  if (rsi < 30 && (macd === null || macd <= 0)) {
+  // Buy calls when oversold and downside momentum is easing (hist turning up
+  // or already positive); mirrored for puts
+  const lastClose = bars[bars.length - 1].c;
+  const eps = lastClose * 1e-9;
+  const histTurningUp   = macd === null || macd.hist >= macd.prevHist - eps || macd.hist > 0;
+  const histTurningDown = macd === null || macd.hist <= macd.prevHist + eps || macd.hist < 0;
+
+  if (rsi < 30 && histTurningUp) {
     return {
       action:     'BUY',
-      reason:     `RSI oversold ${rsi.toFixed(1)} — buying call (mean reversion up)`,
+      reason:     `RSI oversold ${rsi.toFixed(1)} + MACD hist turning up — buying call (mean reversion up)`,
       optionType: 'call',
     };
   }
 
-  // Buy puts when overbought — expecting mean reversion downward
-  if (rsi > 70 && (macd === null || macd >= 0)) {
+  // Buy puts when overbought and upside momentum is fading (hist turning down)
+  if (rsi > 70 && histTurningDown) {
     return {
       action:     'BUY',
-      reason:     `RSI overbought ${rsi.toFixed(1)} — buying put (mean reversion down)`,
+      reason:     `RSI overbought ${rsi.toFixed(1)} + MACD hist turning down — buying put (mean reversion down)`,
       optionType: 'put',
     };
   }

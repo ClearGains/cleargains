@@ -63,6 +63,11 @@ export type OrderParams = {
   stop_price?:      number;
   trail_percent?:   number;
   extended_hours?:  boolean;
+  // Bracket orders: entry + server-side take-profit and stop-loss legs.
+  // Requires whole-share qty (no notional/fractional support).
+  order_class?:     'simple' | 'bracket' | 'oco' | 'oto';
+  take_profit?:     { limit_price: number };
+  stop_loss?:       { stop_price: number; limit_price?: number };
 };
 
 // ── Credentials ───────────────────────────────────────────────────────────────
@@ -141,6 +146,18 @@ export async function cancelOrder(mode: AccountMode, orderId: string): Promise<v
 
 export async function cancelAllOrders(mode: AccountMode): Promise<void> {
   await alpacaFetch<unknown>(mode, '/orders', { method: 'DELETE' });
+}
+
+// Cancel every open order on a symbol — required before closing a position,
+// otherwise Alpaca rejects the close ("insufficient qty: held for orders")
+// or a surviving GTC stop leg later opens an unwanted reverse position.
+export async function cancelOrdersForSymbol(mode: AccountMode, symbol: string): Promise<number> {
+  const open = await getOrders(mode, 'open');
+  const mine = open.filter(o => o.symbol === symbol);
+  for (const o of mine) {
+    try { await cancelOrder(mode, o.id); } catch {}
+  }
+  return mine.length;
 }
 
 export function closePosition(mode: AccountMode, symbol: string): Promise<AlpacaOrder> {
@@ -302,6 +319,14 @@ export function isNYSEOpen(): boolean {
   // Use 13:30–21:00 to cover both seasons conservatively.
   const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
   return utcMins >= 13 * 60 + 30 && utcMins < 21 * 60;
+}
+
+// Start of today's NYSE session in UTC ms. Uses 13:30 UTC (EDT); during
+// winter (EST) the true open is 14:30 UTC, so this may include up to 1h of
+// pre-market — callers treat it as a lower bound.
+export function sessionStartUtcMs(): number {
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 13, 30, 0, 0);
 }
 
 export function isInOpeningRange(): boolean {

@@ -226,5 +226,8 @@ export async function scanForBestSymbols(
     .map(s => s.symbol);
 
   log(`[scanner] Best picks: ${top.join(', ') || 'none — falling back to liquid top'}`);
-  return top.length >= count ? top : [...top, ...liquid.slice(0, count - top.length)];
+  if (top.length >= count) return top;
+  // Backfill with the most liquid names not already picked
+  const backfill = liquid.filter(s => !top.includes(s)).slice(0, count - top.length);
+  return [...top, ...backfill];
 }

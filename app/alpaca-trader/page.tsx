@@ -45,6 +45,7 @@ type BotStatus = {
   log:         LogEntry[];
   nextRunMs:   number | null;
   lastPollTs:  string | null;
+  lossLock?:   boolean;   // daily-loss circuit breaker engaged (no new entries today)
 };
 
 type ServerHealth = 'checking' | 'online' | 'offline' | 'misconfigured';
@@ -982,6 +983,15 @@ export default function AlpacaTraderPage() {
             )}>
               {isRunning && !isPaused ? '● Running' : isPaused ? '⏸ Paused' : '○ Stopped'}
             </span>
+
+            {status?.lossLock && (
+              <span
+                className="text-xs px-2 py-1 rounded-full font-medium bg-rose-500/20 text-rose-400"
+                title="Daily loss limit reached — no new entries until the next trading day; exits are still managed"
+              >
+                🛑 Loss limit
+              </span>
+            )}
 
             <button
               onClick={() => { void fetchStatus(); }}

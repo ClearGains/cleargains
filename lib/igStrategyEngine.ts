@@ -217,13 +217,13 @@ export function hourlySignal(candles: Candle[]): StrategySignal {
     strength = Math.min(90, 60 + (50 - Math.abs(curRsi - 50)));
     reason = `EMA9 crossed below EMA21 — bearish momentum. RSI ${curRsi.toFixed(0)} confirms entry room.`;
   } else if (aboveNow && curRsi < 65) {
-    direction = 'BUY';
+    // Trend continuation is NOT a fresh entry — direction HOLD so auto-traders
+    // don't open on every scan; the trend still shows in the indicators below.
     strength = 45;
-    reason = `EMA9 above EMA21 — uptrend intact. Waiting for fresh cross.`;
+    reason = `EMA9 above EMA21 — uptrend intact. Waiting for fresh cross to enter.`;
   } else if (!aboveNow && curRsi > 35) {
-    direction = 'SELL';
     strength = 45;
-    reason = `EMA9 below EMA21 — downtrend intact. Waiting for fresh cross.`;
+    reason = `EMA9 below EMA21 — downtrend intact. Waiting for fresh cross to enter.`;
   } else {
     reason = 'No clear signal — market neutral or RSI extreme.';
   }
@@ -234,7 +234,7 @@ export function hourlySignal(candles: Candle[]): StrategySignal {
     reason,
     indicators: [
       { label: 'EMA9', value: curE9.toFixed(2), status: aboveNow ? 'bullish' : 'bearish' },
-      { label: 'EMA21', value: curE21.toFixed(2), status: aboveNow ? 'bearish' : 'bullish' },
+      { label: 'EMA21', value: curE21.toFixed(2), status: aboveNow ? 'bullish' : 'bearish' },
       { label: 'RSI(14)', value: curRsi.toFixed(1), status: curRsi > 60 ? 'bearish' : curRsi < 40 ? 'bullish' : 'neutral' },
       { label: 'Cross', value: crossedAbove ? '▲ Bull Cross' : crossedBelow ? '▼ Bear Cross' : aboveNow ? 'Above' : 'Below', status: crossedAbove ? 'bullish' : crossedBelow ? 'bearish' : 'neutral' },
     ],
@@ -283,11 +283,10 @@ export function dailySignal(candles: Candle[]): StrategySignal {
     strength = 85;
     reason = `Strong SELL: EMA20 below EMA50 (downtrend) + MACD crossed below signal line. High-probability swing setup.`;
   } else if (trendUp && curMacd > curSig) {
-    direction = 'BUY';
+    // Waiting state — not a fresh entry, so no tradeable direction
     strength = 55;
     reason = `Uptrend confirmed (EMA20 > EMA50). MACD positive. Waiting for fresh cross to enter.`;
   } else if (!trendUp && curMacd < curSig) {
-    direction = 'SELL';
     strength = 55;
     reason = `Downtrend confirmed (EMA20 < EMA50). MACD negative. Waiting for fresh cross to enter.`;
   } else {
@@ -300,7 +299,7 @@ export function dailySignal(candles: Candle[]): StrategySignal {
     reason,
     indicators: [
       { label: 'EMA20', value: curE20.toFixed(2), status: trendUp ? 'bullish' : 'bearish' },
-      { label: 'EMA50', value: curE50.toFixed(2), status: trendUp ? 'bearish' : 'bullish' },
+      { label: 'EMA50', value: curE50.toFixed(2), status: trendUp ? 'bullish' : 'bearish' },
       { label: 'MACD', value: curMacd.toFixed(3), status: curMacd > curSig ? 'bullish' : 'bearish' },
       { label: 'Histogram', value: curHist.toFixed(3), status: curHist > 0 ? 'bullish' : 'bearish' },
       { label: 'Trend', value: trendUp ? 'Uptrend' : 'Downtrend', status: trendUp ? 'bullish' : 'bearish' },
@@ -450,11 +449,10 @@ export function rsi2Signal(candles: Candle[]): StrategySignal {
     strength  = Math.round(85 + (curRsi2 - 90));
     reason    = `Mean reversion SELL — price ${Math.abs(gap).toFixed(1)}% below EMA200 (downtrend) with RSI(2) at ${curRsi2.toFixed(1)} (extreme overbought). Classic RSI(2) bounce entry.`;
   } else if (uptrend && curRsi2 < 30) {
-    direction = 'BUY';
+    // Not yet at the RSI(2) extreme — waiting state, no tradeable direction
     strength  = 55;
     reason    = `Uptrend intact (${gap.toFixed(1)}% above EMA200). RSI(2) ${curRsi2.toFixed(1)} — pullback but not yet at extreme. Waiting for RSI(2) < 10.`;
   } else if (!uptrend && curRsi2 > 70) {
-    direction = 'SELL';
     strength  = 55;
     reason    = `Downtrend intact (${Math.abs(gap).toFixed(1)}% below EMA200). RSI(2) ${curRsi2.toFixed(1)} — bouncing but not yet extreme. Waiting for RSI(2) > 90.`;
   } else {
@@ -636,11 +634,10 @@ export function tripleEmaSignal(candles: Candle[]): StrategySignal {
     strength  = bearCross ? 90 : accelerating ? 82 : 72;
     reason    = `Triple EMA bearish — EMA8 < EMA21 < EMA55 with price below all MAs${bearCross ? ' (fresh cross — prime entry)' : accelerating ? ' (momentum accelerating)' : ''}.`;
   } else if (bullAlign) {
-    direction = 'BUY';
+    // Price hasn't confirmed — waiting state, no tradeable direction
     strength  = 55;
     reason    = `Triple EMA up but price below EMA8 (${curClose.toFixed(2)} < ${e8.toFixed(2)}) — waiting for price to reclaim fast MA.`;
   } else if (bearAlign) {
-    direction = 'SELL';
     strength  = 55;
     reason    = `Triple EMA down but price above EMA8 — waiting for price to re-break below fast MA.`;
   } else {
@@ -756,18 +753,20 @@ export function supertrendSignal(candles: Candle[]): StrategySignal {
   let strength = 0;
   let reason = '';
 
+  // Only a fresh band flip is a tradeable entry — a continuing trend is
+  // informational (HOLD), otherwise the auto-trader would enter on every scan.
   if (curDir === 1) {
-    direction = 'BUY';
-    strength  = isFreshSignal ? 92 : 75;
+    direction = isFreshSignal ? 'BUY' : 'HOLD';
+    strength  = isFreshSignal ? 92 : 50;
     reason    = isFreshSignal
       ? `Supertrend flipped BULLISH — price broke above the stop band at ${curST.toFixed(2)}. High-probability trend change entry.`
-      : `Supertrend bullish — price ${curClose.toFixed(2)} above support line ${curST.toFixed(2)}. Trend intact.`;
+      : `Supertrend bullish — price ${curClose.toFixed(2)} above support line ${curST.toFixed(2)}. Trend intact; waiting for a fresh flip.`;
   } else {
-    direction = 'SELL';
-    strength  = isFreshSignal ? 92 : 75;
+    direction = isFreshSignal ? 'SELL' : 'HOLD';
+    strength  = isFreshSignal ? 92 : 50;
     reason    = isFreshSignal
       ? `Supertrend flipped BEARISH — price broke below the resistance band at ${curST.toFixed(2)}. High-probability trend change entry.`
-      : `Supertrend bearish — price ${curClose.toFixed(2)} below resistance ${curST.toFixed(2)}. Downtrend intact.`;
+      : `Supertrend bearish — price ${curClose.toFixed(2)} below resistance ${curST.toFixed(2)}. Downtrend intact; waiting for a fresh flip.`;
   }
 
   if (curDir === 1 && curRsi > 68) { strength -= 15; reason += ` (RSI ${curRsi.toFixed(0)} caution — extended).`; }

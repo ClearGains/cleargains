@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useEffect, useState } from 'react';
 import {
   ShieldCheck,
   ShieldAlert,
@@ -11,7 +11,7 @@ import {
   Info,
 } from 'lucide-react';
 import { useClearGainsStore } from '@/lib/store';
-import { computePortfolioRisk } from '@/lib/risk';
+import { computePortfolioRisk, computeHistoricalVaR, type HistoricalVaR } from '@/lib/risk';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { clsx } from 'clsx';
@@ -56,6 +56,26 @@ export default function RiskPage() {
     [t212Positions, section104Pools]
   );
 
+  // Historical VaR from real price history — falls back to the flat estimate
+  const [histVaR, setHistVaR] = useState<HistoricalVaR | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (t212Positions.length === 0) { setHistVaR(null); return; }
+    computeHistoricalVaR(t212Positions)
+      .then((v) => { if (!cancelled) setHistVaR(v); })
+      .catch(() => { if (!cancelled) setHistVaR(null); });
+    return () => { cancelled = true; };
+  }, [t212Positions]);
+
+  const usingHistVaR = histVaR !== null && histVaR.coveragePct > 0;
+  const volByTicker = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of histVaR?.perPosition ?? []) {
+      if (p.volPct !== null) m.set(p.ticker, p.volPct);
+    }
+    return m;
+  }, [histVaR]);
+
   const sortedPositions = [...t212Positions].sort(
     (a, b) => b.currentPrice * b.quantity - a.currentPrice * a.quantity
   );
@@ -80,7 +100,10 @@ export default function RiskPage() {
         <AlertTriangle className="h-4 w-4 text-yellow-500 flex-shrink-0 mt-0.5" />
         <p className="text-xs text-yellow-400">
           <span className="font-semibold">Educational tool only.</span> Risk metrics are simplified
-          estimates. VaR assumes 2% average daily volatility — actual volatility will differ.
+          estimates.{' '}
+          {usingHistVaR
+            ? `VaR is computed from ~90 days of your holdings' actual price history (${histVaR!.coveragePct.toFixed(0)}% of portfolio value covered).`
+            : 'VaR assumes 2% average daily volatility — actual volatility will differ.'}{' '}
           This is not regulated financial advice.
         </p>
       </div>
@@ -109,7 +132,13 @@ export default function RiskPage() {
             {[
               { label: 'Total Value', value: formatGBP(totalValue) },
               { label: 'Positions', value: report.positionCount.toString() },
-              { label: '1-Day VaR (95%)', value: formatGBP(report.estimatedVaR95), sub: 'at 2% daily vol' },
+              {
+                label: '1-Day VaR (95%)',
+                value: formatGBP(usingHistVaR ? histVaR!.var95 : report.estimatedVaR95),
+                sub: usingHistVaR
+                  ? `at ${histVaR!.portfolioVolPct.toFixed(2)}% portfolio vol (${histVaR!.observations}d history)`
+                  : 'at 2% daily vol (fallback)',
+              },
               { label: 'Non-ISA Value', value: formatGBP(report.nonIsaValue) },
               { label: 'ISA Value', value: formatGBP(report.isaValue) },
               {
@@ -190,8 +219,11 @@ export default function RiskPage() {
 
               return (
                 <div key={pos.ticker} className="flex items-center gap-3">
-                  <div className="w-16 font-mono font-semibold text-white text-sm flex-shrink-0">
-                    {pos.ticker}
+                  <div className="w-16 flex-shrink-0">
+                    <div className="font-mono font-semibold text-white text-sm">{pos.ticker}</div>
+                    {volByTicker.has(pos.ticker) && (
+                      <div className="text-[10px] text-gray-600">σ {volByTicker.get(pos.ticker)!.toFixed(1)}%/d</div>
+                    )}
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center justify-between mb-0.5">

@@ -1,5 +1,6 @@
 // Risk engine — server-side safe, no direct DOM usage
 import { T212Position, Section104Pool } from './types';
+import { fetchYahooHistory } from './yahooClient';
 
 export interface RiskCheck {
   id: string;
@@ -183,6 +184,106 @@ export function computePortfolioRisk(
     isaValue,
     estimatedVaR95,
     maxSingleExposure,
+  };
+}
+
+// ── Historical VaR ────────────────────────────────────────────────────────────
+// Computes 1-day 95% VaR from each holding's actual daily returns (~90 days),
+// capturing real volatilities AND cross-correlations via the portfolio return
+// series. Positions without price history fall back to a flat 2% daily vol,
+// added with correlation 1 (conservative).
+
+export type HistoricalVaR = {
+  var95: number;             // 1-day 95% VaR in portfolio currency
+  portfolioVolPct: number;   // 1-day portfolio volatility, %
+  coveragePct: number;       // % of portfolio value backed by real price history
+  observations: number;      // trading days used
+  perPosition: { ticker: string; volPct: number | null; weightPct: number }[];
+};
+
+/** Best-effort T212 → Yahoo symbol conversion ("AAPL_US_EQ" → "AAPL", "VODl_EQ" → "VOD.L"). */
+export function t212TickerToYahoo(ticker: string): string {
+  const base = ticker.split('_')[0];
+  if (ticker.includes('_US_')) return base;
+  // LSE instruments use a lowercase trailing "l" on the base symbol
+  if (/[a-z]$/.test(base)) return `${base.slice(0, -1)}.L`;
+  return base;
+}
+
+function stddev(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+export async function computeHistoricalVaR(
+  positions: T212Position[]
+): Promise<HistoricalVaR | null> {
+  const totalValue = positions.reduce((s, p) => s + p.currentPrice * p.quantity, 0);
+  if (totalValue <= 0 || positions.length === 0) return null;
+
+  // Fetch daily history per ticker (in parallel, failures tolerated)
+  const histories = await Promise.all(
+    positions.map(async (p) => {
+      try {
+        const candles = await fetchYahooHistory(t212TickerToYahoo(p.ticker));
+        return { ticker: p.ticker, candles };
+      } catch {
+        return { ticker: p.ticker, candles: [] as { time: string; close: number }[] };
+      }
+    })
+  );
+
+  // Per-ticker date→return maps
+  const returnsByTicker = new Map<string, Map<string, number>>();
+  for (const { ticker, candles } of histories) {
+    if (candles.length < 20) continue; // too little data to trust
+    const m = new Map<string, number>();
+    for (let i = 1; i < candles.length; i++) {
+      const prev = candles[i - 1].close;
+      if (prev > 0) m.set(candles[i].time, candles[i].close / prev - 1);
+    }
+    returnsByTicker.set(ticker, m);
+  }
+
+  const weights = new Map(positions.map((p) => [p.ticker, (p.currentPrice * p.quantity) / totalValue]));
+  const covered = positions.filter((p) => returnsByTicker.has(p.ticker));
+  const coveredWeight = covered.reduce((s, p) => s + (weights.get(p.ticker) ?? 0), 0);
+  const uncoveredWeight = 1 - coveredWeight;
+
+  // Portfolio return series across the union of dates; a missing date for one
+  // ticker (exchange holiday) contributes 0 for that ticker that day.
+  const allDates = new Set<string>();
+  for (const m of returnsByTicker.values()) for (const d of m.keys()) allDates.add(d);
+  const dates = [...allDates].sort();
+
+  let portfolioVol: number;
+  let observations = 0;
+  if (covered.length > 0 && dates.length >= 20) {
+    const series = dates.map((d) =>
+      covered.reduce((s, p) => s + (weights.get(p.ticker) ?? 0) * (returnsByTicker.get(p.ticker)!.get(d) ?? 0), 0)
+    );
+    observations = series.length;
+    // Uncovered slice: flat 2% vol, correlation 1 with the rest (conservative)
+    portfolioVol = stddev(series) + uncoveredWeight * 0.02;
+  } else {
+    portfolioVol = 0.02; // full fallback — matches the flat estimate
+  }
+
+  return {
+    var95: totalValue * portfolioVol * 1.645,
+    portfolioVolPct: portfolioVol * 100,
+    coveragePct: coveredWeight * 100,
+    observations,
+    perPosition: positions.map((p) => {
+      const m = returnsByTicker.get(p.ticker);
+      return {
+        ticker: p.ticker,
+        volPct: m ? stddev([...m.values()]) * 100 : null,
+        weightPct: (weights.get(p.ticker) ?? 0) * 100,
+      };
+    }),
   };
 }
 

@@ -143,6 +143,24 @@ export async function fetchYahooHistory(symbol: string): Promise<YahooCandle[]> 
   }
 }
 
+// Generic OHLCV fetch with custom interval/range (used by the Backtest Lab).
+// Yahoo caps intraday history: 5m bars are available for ~60 days.
+export async function fetchYahooBars(
+  symbol:   string,
+  interval: '1m' | '5m' | '15m' | '1h' | '1d',
+  range:    string,   // e.g. '60d', '2y', '5y'
+): Promise<YahooCandle[]> {
+  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
+    `?interval=${interval}&range=${range}&includePrePost=false`;
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return [];
+    return parseYahooChart(await res.json() as YahooChartRaw, interval !== '1d');
+  } catch {
+    return [];
+  }
+}
+
 // Ticker search (browser-side)
 export type TickerSearchResult = {
   symbol: string;

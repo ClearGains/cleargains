@@ -19,142 +19,104 @@ export function calculateSection104(trades: Trade[]): CGTCalculation[] {
       (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
     );
 
-    // Section 104 pool
-    let poolShares = 0;
-    let poolCost = 0;
-
-    // Track remaining unmatched sells
-    const unmatchedSells: Array<Trade & { remainingQty: number }> = [];
-
-    for (const trade of sorted) {
-      if (trade.type === 'BUY') {
-        poolShares += trade.quantity;
-        poolCost += trade.gbpValue + trade.fees;
-      } else {
-        unmatchedSells.push({ ...trade, remainingQty: trade.quantity });
-      }
+    // Per-trade remaining quantities so partial matches are handled correctly:
+    // a buy can satisfy several sells (or part of one), and whatever is left
+    // of it enters the Section 104 pool.
+    const buyRemaining = new Map<string, number>();
+    for (const t of sorted) {
+      if (t.type === 'BUY') buyRemaining.set(t.id, t.quantity);
+    }
+    const sellRemaining = new Map<string, number>();
+    for (const t of sorted) {
+      if (t.type === 'SELL') sellRemaining.set(t.id, t.quantity);
     }
 
-    // Reset pool and process all trades with matching rules
-    poolShares = 0;
-    poolCost = 0;
+    const sells = sorted.filter((t) => t.type === 'SELL');
 
-    const processedSells = new Set<string>();
-
-    for (const sell of [...sorted].filter((t) => t.type === 'SELL')) {
-      if (processedSells.has(sell.id)) continue;
-
-      const sellDate = new Date(sell.date);
-      let remainingQty = sell.quantity;
-      const proceeds = sell.gbpValue - sell.fees;
-
-      // 1. Same-day rule: match against buys on the same day
-      const sameDayBuys = sorted.filter(
-        (t) =>
-          t.type === 'BUY' &&
-          t.date.slice(0, 10) === sell.date.slice(0, 10) &&
-          !processedSells.has(t.id)
-      );
-
-      for (const buy of sameDayBuys) {
-        if (remainingQty <= 0) break;
-        const matchedQty = Math.min(remainingQty, buy.quantity);
-        const costPerShare = (buy.gbpValue + buy.fees) / buy.quantity;
-        const matchedCost = matchedQty * costPerShare;
-        const matchedProceeds = (proceeds / sell.quantity) * matchedQty;
-        const gain = matchedProceeds - matchedCost;
-
-        calculations.push({
-          ticker,
-          date: sell.date,
-          disposal: matchedProceeds,
-          allowableCost: matchedCost,
-          gain: gain > 0 ? gain : 0,
-          loss: gain < 0 ? Math.abs(gain) : 0,
-          rule: 'same-day',
-          quantity: matchedQty,
-        });
-
-        remainingQty -= matchedQty;
-        processedSells.add(buy.id);
-      }
-
-      if (remainingQty <= 0) {
-        processedSells.add(sell.id);
-        continue;
-      }
-
-      // 2. Bed & Breakfast rule: match against buys in next 30 days
-      const bbBuys = sorted.filter((t) => {
-        if (t.type !== 'BUY') return false;
-        const buyDate = new Date(t.date);
-        const diffDays =
-          (buyDate.getTime() - sellDate.getTime()) / (1000 * 60 * 60 * 24);
-        return diffDays > 0 && diffDays <= 30 && !processedSells.has(t.id);
+    const record = (
+      sell: Trade,
+      buyCostPerShare: number,
+      matchedQty: number,
+      rule: CGTCalculation['rule']
+    ) => {
+      const proceedsPerShare = (sell.gbpValue - sell.fees) / sell.quantity;
+      const matchedProceeds = proceedsPerShare * matchedQty;
+      const matchedCost = buyCostPerShare * matchedQty;
+      const gain = matchedProceeds - matchedCost;
+      calculations.push({
+        ticker,
+        date: sell.date,
+        disposal: matchedProceeds,
+        allowableCost: matchedCost,
+        gain: gain > 0 ? gain : 0,
+        loss: gain < 0 ? Math.abs(gain) : 0,
+        rule,
+        quantity: matchedQty,
       });
+    };
 
-      for (const buy of bbBuys) {
-        if (remainingQty <= 0) break;
-        const matchedQty = Math.min(remainingQty, buy.quantity);
-        const costPerShare = (buy.gbpValue + buy.fees) / buy.quantity;
-        const matchedCost = matchedQty * costPerShare;
-        const matchedProceeds = (proceeds / sell.quantity) * matchedQty;
-        const gain = matchedProceeds - matchedCost;
-
-        calculations.push({
-          ticker,
-          date: sell.date,
-          disposal: matchedProceeds,
-          allowableCost: matchedCost,
-          gain: gain > 0 ? gain : 0,
-          loss: gain < 0 ? Math.abs(gain) : 0,
-          rule: 'bed-and-breakfast',
-          quantity: matchedQty,
-        });
-
-        remainingQty -= matchedQty;
-        processedSells.add(buy.id);
+    // 1. Same-day rule (TCGA92 s105): match each sell against buys on the same day
+    for (const sell of sells) {
+      let remaining = sellRemaining.get(sell.id)!;
+      if (remaining <= 0) continue;
+      for (const buy of sorted) {
+        if (remaining <= 0) break;
+        if (buy.type !== 'BUY') continue;
+        if (buy.date.slice(0, 10) !== sell.date.slice(0, 10)) continue;
+        const avail = buyRemaining.get(buy.id)!;
+        if (avail <= 0) continue;
+        const matchedQty = Math.min(remaining, avail);
+        record(sell, (buy.gbpValue + buy.fees) / buy.quantity, matchedQty, 'same-day');
+        remaining -= matchedQty;
+        buyRemaining.set(buy.id, avail - matchedQty);
       }
+      sellRemaining.set(sell.id, remaining);
+    }
 
-      if (remainingQty <= 0) {
-        processedSells.add(sell.id);
-        continue;
+    // 2. Bed & Breakfast rule (TCGA92 s106A): buys within 30 days AFTER the
+    //    sell, matched earliest-acquisition first
+    for (const sell of sells) {
+      let remaining = sellRemaining.get(sell.id)!;
+      if (remaining <= 0) continue;
+      const sellTime = new Date(sell.date).getTime();
+      for (const buy of sorted) {
+        if (remaining <= 0) break;
+        if (buy.type !== 'BUY') continue;
+        const diffDays = (new Date(buy.date).getTime() - sellTime) / 86_400_000;
+        if (diffDays <= 0 || diffDays > 30) continue;
+        const avail = buyRemaining.get(buy.id)!;
+        if (avail <= 0) continue;
+        const matchedQty = Math.min(remaining, avail);
+        record(sell, (buy.gbpValue + buy.fees) / buy.quantity, matchedQty, 'bed-and-breakfast');
+        remaining -= matchedQty;
+        buyRemaining.set(buy.id, avail - matchedQty);
       }
+      sellRemaining.set(sell.id, remaining);
+    }
 
-      // 3. Section 104 pool: match remaining quantity
-      // Rebuild pool up to (but not including) this sell date
-      let s104Shares = 0;
-      let s104Cost = 0;
-      for (const t of sorted) {
-        if (new Date(t.date) >= new Date(sell.date)) break;
-        if (t.type === 'BUY' && !processedSells.has(t.id)) {
-          s104Shares += t.quantity;
-          s104Cost += t.gbpValue + t.fees;
+    // 3. Section 104 pool: chronological replay. Unmatched buy remainders
+    //    enter the pool as their date passes; each remaining sell quantity
+    //    consumes pool shares at average cost AND DEPLETES THE POOL, so later
+    //    disposals use the correct reduced pool.
+    let poolShares = 0;
+    let poolCost = 0;
+    for (const t of sorted) {
+      if (t.type === 'BUY') {
+        const qtyIntoPool = buyRemaining.get(t.id)!;
+        if (qtyIntoPool > 0) {
+          poolShares += qtyIntoPool;
+          poolCost += ((t.gbpValue + t.fees) / t.quantity) * qtyIntoPool;
         }
+      } else {
+        const remaining = sellRemaining.get(t.id)!;
+        if (remaining <= 0 || poolShares <= 0) continue;
+        const matchedQty = Math.min(remaining, poolShares);
+        const avgCost = poolCost / poolShares;
+        record(t, avgCost, matchedQty, 'section104');
+        poolShares -= matchedQty;
+        poolCost -= avgCost * matchedQty;
+        sellRemaining.set(t.id, remaining - matchedQty);
       }
-
-      if (s104Shares > 0 && remainingQty > 0) {
-        const matchedQty = Math.min(remainingQty, s104Shares);
-        const avgCost = s104Cost / s104Shares;
-        const matchedCost = matchedQty * avgCost;
-        const matchedProceeds = (proceeds / sell.quantity) * matchedQty;
-        const gain = matchedProceeds - matchedCost;
-
-        calculations.push({
-          ticker,
-          date: sell.date,
-          disposal: matchedProceeds,
-          allowableCost: matchedCost,
-          gain: gain > 0 ? gain : 0,
-          loss: gain < 0 ? Math.abs(gain) : 0,
-          rule: 'section104',
-          quantity: matchedQty,
-        });
-
-        remainingQty -= matchedQty;
-      }
-
-      processedSells.add(sell.id);
     }
   }
 
