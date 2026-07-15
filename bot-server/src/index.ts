@@ -15,6 +15,7 @@ import {
   getIgStrategyBotStatus,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
+import { getJournal } from './tradeJournal';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -342,6 +343,14 @@ app.post('/alpaca/:mode/emergency-stop', auth, (req: Request, res: Response) => 
   const mode = resolveAlpacaMode(req, res);
   if (!mode) return;
   void emergencyStop(mode).then(result => res.status(result.ok ? 200 : 500).json(result));
+});
+
+// GET /alpaca/:mode/journal — persisted trade history + per-strategy aggregates
+app.get('/alpaca/:mode/journal', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  const limit = Math.min(parseInt(String(req.query.limit ?? '500'), 10) || 500, 2000);
+  res.json(getJournal(mode, limit));
 });
 
 // ── IG Strategy bot routes (/ig-strategy/:mode/*) ────────────────────────────

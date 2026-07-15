@@ -34,6 +34,8 @@ import {
   Gem,
   Scale,
   Pause,
+  NotebookPen,
+  Scissors,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -87,6 +89,7 @@ const navLinks = [
   { href: '/auto-trader',      label: 'Auto Trader',      icon: Bot         },
   { href: '/alpaca-trader',    label: 'Alpaca Bot',        icon: Bot         },
   { href: '/backtest',         label: 'Backtest Lab',      icon: FlaskConical },
+  { href: '/bot-journal',      label: 'Bot Journal',       icon: NotebookPen },
   { href: '/reputable-stocks', label: 'Reputable Stocks',  icon: Star        },
   { href: '/future-leaders',   label: 'Future Leaders',    icon: Rocket      },
   { href: '/trade-log',        label: 'Trade Log',        icon: FileText    },
@@ -97,6 +100,7 @@ const navLinks = [
   { href: '/demo-trader', label: 'Demo Trader', icon: FlaskConical },
   { href: '/ledger', label: 'Trade Ledger', icon: BookOpen },
   { href: '/tax-monitor', label: 'Tax Monitor', icon: ShieldCheck },
+  { href: '/harvest', label: 'Tax Harvesting', icon: Scissors },
   { href: '/calculator',     label: 'Calculator',       icon: Hash       },
   { href: '/cgt', label: 'CGT Calculator', icon: Calculator },
   { href: '/tax-calculator', label: 'Tax Calculator', icon: Receipt },

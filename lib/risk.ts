@@ -199,6 +199,8 @@ export type HistoricalVaR = {
   coveragePct: number;       // % of portfolio value backed by real price history
   observations: number;      // trading days used
   perPosition: { ticker: string; volPct: number | null; weightPct: number }[];
+  // Pairwise Pearson correlations of daily returns (covered tickers only)
+  correlations: { tickers: string[]; matrix: number[][] } | null;
 };
 
 /** Best-effort T212 → Yahoo symbol conversion ("AAPL_US_EQ" → "AAPL", "VODl_EQ" → "VOD.L"). */
@@ -260,6 +262,7 @@ export async function computeHistoricalVaR(
 
   let portfolioVol: number;
   let observations = 0;
+  let correlations: HistoricalVaR['correlations'] = null;
   if (covered.length > 0 && dates.length >= 20) {
     const series = dates.map((d) =>
       covered.reduce((s, p) => s + (weights.get(p.ticker) ?? 0) * (returnsByTicker.get(p.ticker)!.get(d) ?? 0), 0)
@@ -267,6 +270,27 @@ export async function computeHistoricalVaR(
     observations = series.length;
     // Uncovered slice: flat 2% vol, correlation 1 with the rest (conservative)
     portfolioVol = stddev(series) + uncoveredWeight * 0.02;
+
+    // Pairwise correlations over the same aligned dates (missing day → 0 return)
+    if (covered.length >= 2) {
+      const tickers = covered.map((p) => p.ticker);
+      const vectors = tickers.map((t) => dates.map((d) => returnsByTicker.get(t)!.get(d) ?? 0));
+      const means = vectors.map((v) => v.reduce((a, b) => a + b, 0) / v.length);
+      const matrix = tickers.map((_, a) =>
+        tickers.map((__, b) => {
+          if (a === b) return 1;
+          let cov = 0, va = 0, vb = 0;
+          for (let k = 0; k < dates.length; k++) {
+            const da = vectors[a][k] - means[a];
+            const db = vectors[b][k] - means[b];
+            cov += da * db; va += da * da; vb += db * db;
+          }
+          const denom = Math.sqrt(va * vb);
+          return denom > 0 ? cov / denom : 0;
+        })
+      );
+      correlations = { tickers, matrix };
+    }
   } else {
     portfolioVol = 0.02; // full fallback — matches the flat estimate
   }
@@ -276,6 +300,7 @@ export async function computeHistoricalVaR(
     portfolioVolPct: portfolioVol * 100,
     coveragePct: coveredWeight * 100,
     observations,
+    correlations,
     perPosition: positions.map((p) => {
       const m = returnsByTicker.get(p.ticker);
       return {

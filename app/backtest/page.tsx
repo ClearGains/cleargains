@@ -6,9 +6,9 @@ import { clsx } from 'clsx';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { fetchYahooBars } from '@/lib/yahooClient';
 import {
-  runBacktest,
+  runBacktest, walkForward,
   BT_DEFAULT_PARAMS, BT_STRATEGY_LABELS, BT_DATA_NEEDS,
-  type BTStrategy, type BTParams, type BTResult, type BTBar,
+  type BTStrategy, type BTParams, type BTResult, type BTBar, type WalkForwardResult,
 } from '@/lib/backtest';
 
 const STRATEGIES = Object.keys(BT_STRATEGY_LABELS) as BTStrategy[];
@@ -154,24 +154,31 @@ export default function BacktestPage() {
   const [params, setParams] = useState<BTParams>({ ...BT_DEFAULT_PARAMS });
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<BTResult[]>([]);
+  const [wfResults, setWfResults] = useState<WalkForwardResult[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
 
   const setParam = (key: keyof BTParams, value: number | boolean) =>
     setParams(p => ({ ...p, [key]: value }));
 
+  const fetchBarsFor = async (sym: string): Promise<BTBar[]> => {
+    const { interval, range } = BT_DATA_NEEDS[strategy];
+    const candles = await fetchYahooBars(sym, interval, range);
+    return candles.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume }));
+  };
+
+  const parseSymbols = () =>
+    symbolsInput.split(',').map(s => s.trim().toUpperCase()).filter(Boolean).slice(0, 10);
+
   const run = async () => {
-    const symbols = symbolsInput.split(',').map(s => s.trim().toUpperCase()).filter(Boolean).slice(0, 10);
+    const symbols = parseSymbols();
     if (!symbols.length) return;
     setRunning(true);
-    setResults([]);
-    setErrors([]);
-    const { interval, range } = BT_DATA_NEEDS[strategy];
+    setResults([]); setWfResults([]); setErrors([]);
     const out: BTResult[] = [];
     const errs: string[] = [];
     for (const sym of symbols) {
       try {
-        const candles = await fetchYahooBars(sym, interval, range);
-        const bars: BTBar[] = candles.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume }));
+        const bars = await fetchBarsFor(sym);
         const r = runBacktest(sym, strategy, bars, params);
         if (r) out.push(r);
         else errs.push(`${sym}: not enough data (${bars.length} bars)`);
@@ -180,6 +187,30 @@ export default function BacktestPage() {
       }
     }
     setResults(out);
+    setErrors(errs);
+    setRunning(false);
+  };
+
+  const runWalkForward = async () => {
+    const symbols = parseSymbols();
+    if (!symbols.length) return;
+    setRunning(true);
+    setResults([]); setWfResults([]); setErrors([]);
+    const out: WalkForwardResult[] = [];
+    const errs: string[] = [];
+    for (const sym of symbols) {
+      try {
+        const bars = await fetchBarsFor(sym);
+        const r = walkForward(sym, strategy, bars, params);
+        if (r) out.push(r);
+        else errs.push(`${sym}: not enough data for a 70/30 split`);
+      } catch {
+        errs.push(`${sym}: data fetch failed`);
+      }
+      // Yield to the UI between symbols — grid search is CPU-heavy
+      await new Promise(res => setTimeout(res, 0));
+    }
+    setWfResults(out);
     setErrors(errs);
     setRunning(false);
   };
@@ -278,18 +309,91 @@ export default function BacktestPage() {
           </div>
         </div>
 
-        <button
-          onClick={() => { void run(); }}
-          disabled={running}
-          className={clsx(
-            'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
-            running ? 'bg-gray-700 text-gray-400 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500 text-white',
-          )}
-        >
-          {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-          {running ? 'Running…' : 'Run Backtest'}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => { void run(); }}
+            disabled={running}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+              running ? 'bg-gray-700 text-gray-400 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500 text-white',
+            )}
+          >
+            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            {running ? 'Running…' : 'Run Backtest'}
+          </button>
+          <button
+            onClick={() => { void runWalkForward(); }}
+            disabled={running}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors border',
+              running
+                ? 'border-gray-700 text-gray-500 cursor-wait'
+                : 'border-indigo-500/50 text-indigo-300 hover:bg-indigo-500/10',
+            )}
+            title="Tune parameters on the first 70% of history, validate on the last 30% — exposes over-fitting"
+          >
+            <FlaskConical className="h-4 w-4" />
+            Walk-Forward Test
+          </button>
+        </div>
       </Card>
+
+      {/* Walk-forward results */}
+      {wfResults.map(wf => {
+        const overfit = wf.train.totalReturnPct > 0 && wf.test.totalReturnPct < wf.train.totalReturnPct * 0.25;
+        return (
+          <Card key={wf.symbol} className="mb-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <span className="font-mono font-bold text-white">{wf.symbol}</span>
+                <span className="text-[11px] text-gray-600">
+                  {wf.combosTried} parameter combos · split at {wf.splitAt.slice(0, 10)}
+                </span>
+              </div>
+              <span className={clsx(
+                'text-[11px] px-2 py-0.5 rounded-full font-medium',
+                wf.test.totalReturnPct > 0
+                  ? 'bg-emerald-500/15 text-emerald-400'
+                  : 'bg-rose-500/15 text-rose-400',
+              )}>
+                {wf.test.totalReturnPct > 0 ? 'holds up out-of-sample' : 'fails out-of-sample'}
+              </span>
+            </div>
+
+            <div className="text-xs text-gray-500 mb-3">
+              Best on train:{' '}
+              <span className="text-gray-300 font-mono">
+                {Object.entries(wf.bestParams).map(([k, v]) => `${k}=${v}`).join(' · ')}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              {([['Train (tuned on this)', wf.train], ['Test (never seen)', wf.test]] as const).map(([label, s]) => (
+                <div key={label} className="bg-gray-900/50 rounded-lg p-3">
+                  <div className="text-[11px] text-gray-500 mb-2">{label}</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <StatCell label="Return" value={`${s.totalReturnPct >= 0 ? '+' : ''}${s.totalReturnPct.toFixed(2)}%`}
+                      tone={s.totalReturnPct > 0 ? 'good' : 'bad'} />
+                    <StatCell label="Trades" value={String(s.trades)} />
+                    <StatCell label="Win rate" value={`${s.winRate.toFixed(0)}%`} />
+                    <StatCell label="Max DD" value={`−${s.maxDrawdownPct.toFixed(1)}%`} />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {overfit && (
+              <p className="text-xs text-yellow-400 mt-3 flex items-start gap-2">
+                <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                Out-of-sample return is far below the tuned result — these parameters are likely
+                curve-fit to history. Don&apos;t trade them.
+              </p>
+            )}
+            <EquityCurve curve={wf.testResult.equityCurve} />
+            <div className="text-[10px] text-gray-600 text-center">out-of-sample equity curve</div>
+          </Card>
+        );
+      })}
 
       {/* Errors */}
       {errors.length > 0 && (

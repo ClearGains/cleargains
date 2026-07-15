@@ -7,6 +7,8 @@ import {
   type AccountMode, type AlpacaPosition,
 } from './alpacaApi';
 import { scanForBestSymbols } from './alpacaScanner';
+import { recordJournalEvent } from './tradeJournal';
+import { hasImminentEarnings } from './earningsGuard';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal, optionsDirectionalSignal,
@@ -298,6 +300,16 @@ async function executeSignal(
       await closePosition(mode, sym);
       addLog(mode, 'exit', sym, 'Position closed');
 
+      recordJournalEvent({
+        mode, event: 'exit', symbol: sym, strategy: cfg.strategy,
+        side:  openPos.side,
+        qty:   Math.abs(parseFloat(openPos.qty) || 0),
+        price: parseFloat(openPos.current_price) || 0,
+        reason,
+        plUsd: parseFloat(openPos.unrealized_pl) || 0,
+        plPct: (parseFloat(openPos.unrealized_plpc) || 0) * 100,
+      });
+
       // Find replacement symbol for the freed slot
       void (async () => {
         try {
@@ -349,6 +361,12 @@ async function executeSignal(
     return false;
   }
 
+  // Skip entries within 2 days of an earnings report (no-op without FINNHUB_API_KEY)
+  if (await hasImminentEarnings(sym)) {
+    addLog(mode, 'wait', sym, '📊 Earnings within 2 days — skipping entry');
+    return false;
+  }
+
   const orderSide = action === 'BUY' ? 'buy' : 'sell';
 
   // ── Options entry — contract symbol with qty, no notional ────────────────
@@ -366,6 +384,10 @@ async function executeSignal(
         time_in_force: 'day',
       });
       addLog(mode, 'enter', sym, `Options order placed — ${signal.optionContract} id ${order.id}`);
+      recordJournalEvent({
+        mode, event: 'entry', symbol: signal.optionContract, strategy: cfg.strategy,
+        side: 'long', qty, price: currentPrice ?? 0, reason,
+      });
       return true;
     } catch (e) {
       addLog(mode, 'error', sym, `Options order failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -408,6 +430,12 @@ async function executeSignal(
     });
 
     addLog(mode, 'enter', sym, `Order placed — ${qty} shares, id ${order.id} status ${order.status}${useBracket ? ' (bracket TP+SL attached)' : ''}`);
+
+    recordJournalEvent({
+      mode, event: 'entry', symbol: sym, strategy: cfg.strategy,
+      side: orderSide === 'buy' ? 'long' : 'short',
+      qty, price, reason,
+    });
 
     // Trailing-stop exit (weekly momentum): attach after the market entry
     if (trailPercent && orderType !== 'trailing_stop') {

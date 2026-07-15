@@ -42,7 +42,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: 'mode must be paper or live' }, { status: 400 });
   }
 
-  if (action === 'status') return proxyTo(`/alpaca/${mode}/status`, 'GET');
+  if (action === 'status')  return proxyTo(`/alpaca/${mode}/status`, 'GET');
+  if (action === 'journal') return proxyTo(`/alpaca/${mode}/journal`, 'GET');
 
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
 }

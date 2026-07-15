@@ -472,6 +472,85 @@ export const BT_DATA_NEEDS: Record<BTStrategy, { interval: '5m' | '1d'; range: s
   weekly_momentum:    { interval: '1d', range: '5y' },
 };
 
+// ── Walk-forward validation ───────────────────────────────────────────────────
+// Tune parameters on the first `trainFrac` of the data, then evaluate the
+// winning combination on the untouched remainder. If a parameter set only
+// works on the data it was tuned on, it's curve-fit — the test split exposes
+// that before real money does.
+
+const WF_GRIDS: Record<BTStrategy, Partial<BTParams>[]> = (() => {
+  const grids: Record<BTStrategy, Partial<BTParams>[]> = {
+    rsi_mean_reversion: [],
+    ema_crossover: [],
+    vwap: [],
+    orb: [],
+    weekly_momentum: [],
+  };
+  for (const rsiBuy of [20, 25, 30])
+    for (const rsiExitLong of [55, 60, 65])
+      for (const atrStopMult of [1, 1.5, 2])
+        grids.rsi_mean_reversion.push({ rsiBuy, rsiSell: 100 - rsiBuy, rsiExitLong, rsiExitShort: 100 - rsiExitLong, atrStopMult });
+  for (const emaFast of [5, 9, 12])
+    for (const emaSlow of [21, 30, 50])
+      if (emaFast < emaSlow) grids.ema_crossover.push({ emaFast, emaSlow });
+  for (const vwapEntryPct of [0.3, 0.5, 0.8]) grids.vwap.push({ vwapEntryPct });
+  for (const orbBreakoutPct of [0.1, 0.2, 0.3]) grids.orb.push({ orbBreakoutPct });
+  for (const trailPct of [4, 5, 7, 10]) grids.weekly_momentum.push({ trailPct });
+  return grids;
+})();
+
+export type WalkForwardResult = {
+  symbol:      string;
+  strategy:    BTStrategy;
+  splitAt:     string;         // timestamp where train ends / test begins
+  combosTried: number;
+  bestParams:  Partial<BTParams>;
+  train:       BTStats;
+  test:        BTStats;
+  testResult:  BTResult;       // full result on the out-of-sample split
+};
+
+export function walkForward(
+  symbol:     string,
+  strategy:   BTStrategy,
+  bars:       BTBar[],
+  baseParams: BTParams = BT_DEFAULT_PARAMS,
+  trainFrac   = 0.7,
+): WalkForwardResult | null {
+  if (bars.length < 120) return null;
+  const splitIdx = Math.floor(bars.length * trainFrac);
+  const trainBars = bars.slice(0, splitIdx);
+  const testBars  = bars.slice(splitIdx);
+
+  const grid = WF_GRIDS[strategy];
+  let best: { params: Partial<BTParams>; result: BTResult } | null = null;
+
+  for (const combo of grid) {
+    const r = runBacktest(symbol, strategy, trainBars, { ...baseParams, ...combo });
+    if (!r) continue;
+    // Require a minimum sample before trusting a combo
+    const score = r.stats.trades >= 5 ? r.stats.totalReturnPct : -1e9 + r.stats.totalReturnPct;
+    const bestScore = best
+      ? (best.result.stats.trades >= 5 ? best.result.stats.totalReturnPct : -1e9 + best.result.stats.totalReturnPct)
+      : -Infinity;
+    if (score > bestScore) best = { params: combo, result: r };
+  }
+  if (!best) return null;
+
+  const testResult = runBacktest(symbol, strategy, testBars, { ...baseParams, ...best.params });
+  if (!testResult) return null;
+
+  return {
+    symbol, strategy,
+    splitAt: testBars[0].t,
+    combosTried: grid.length,
+    bestParams: best.params,
+    train: best.result.stats,
+    test: testResult.stats,
+    testResult,
+  };
+}
+
 export function runBacktest(
   symbol:   string,
   strategy: BTStrategy,

@@ -293,6 +293,55 @@ export default function RiskPage() {
         </Card>
       )}
 
+      {/* Correlation heat-map */}
+      {histVaR?.correlations && histVaR.correlations.tickers.length >= 2 && (
+        <Card className="mb-6">
+          <CardHeader
+            title="Correlation Heat-map"
+            subtitle="Daily-return correlation between holdings — deep red pairs move together (concentrated risk)"
+            icon={<Info className="h-4 w-4" />}
+          />
+          <div className="overflow-x-auto">
+            <table className="text-[11px] font-mono">
+              <thead>
+                <tr>
+                  <th></th>
+                  {histVaR.correlations.tickers.map((t) => (
+                    <th key={t} className="px-1 pb-1 text-gray-500 font-normal max-w-[3.5rem] truncate">{t.split('_')[0]}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {histVaR.correlations.tickers.map((rowT, i) => (
+                  <tr key={rowT}>
+                    <td className="pr-2 py-0.5 text-gray-500 max-w-[4rem] truncate">{rowT.split('_')[0]}</td>
+                    {histVaR.correlations!.matrix[i].map((c, j) => {
+                      // −1 → blue, 0 → dark, +1 → red
+                      const bg = c >= 0
+                        ? `rgba(244, 63, 94, ${(0.12 + c * 0.55).toFixed(2)})`
+                        : `rgba(59, 130, 246, ${(0.12 - c * 0.55).toFixed(2)})`;
+                      return (
+                        <td
+                          key={j}
+                          className="text-center w-11 h-7 rounded-sm text-gray-200"
+                          style={{ backgroundColor: i === j ? 'rgba(107,114,128,0.25)' : bg }}
+                          title={`${rowT.split('_')[0]} × ${histVaR.correlations!.tickers[j].split('_')[0]}: ${c.toFixed(2)}`}
+                        >
+                          {i === j ? '—' : c.toFixed(2)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-gray-600 mt-3">
+            Pairs above 0.8 behave like one position — diversification between them is mostly an illusion.
+          </p>
+        </Card>
+      )}
+
       {/* Risk tips */}
       <Card>
         <CardHeader
