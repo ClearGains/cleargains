@@ -7,12 +7,12 @@ import { getStockBot, type StockBotStartParams } from './stockBot';
 import { calcRsi, calcMacdHist, calcAtr } from './scalperStrategy';
 import {
   startAlpacaBot, stopAlpacaBot, pauseAlpacaBot, resumeAlpacaBot,
-  getAlpacaBotStatus, emergencyStop,
+  getAlpacaBotStatus, emergencyStop, loadSavedAlpacaState,
   type AlpacaBotConfig,
 } from './alpacaBot';
 import {
   startIgStrategyBot, stopIgStrategyBot, pauseIgStrategyBot, resumeIgStrategyBot,
-  getIgStrategyBotStatus,
+  getIgStrategyBotStatus, loadSavedIgStrategyState,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
@@ -431,5 +431,44 @@ app.listen(PORT, '0.0.0.0', () => {
         else console.error(`[bot-server] Auto-resume failed: ${r.error}`);
       });
     }
+  }
+
+  // Auto-resume Alpaca strategy bots (paper/live) if either was running before restart.
+  // Without this, a PM2 restart while a bot held open positions leaves them
+  // un-monitored — no exits, no daily-loss circuit breaker — until a human
+  // notices and restarts it manually via the UI.
+  for (const mode of ['paper', 'live'] as const) {
+    const savedAlpaca = loadSavedAlpacaState(mode);
+    if (!savedAlpaca) continue;
+    const hasKeys = mode === 'live'
+      ? !!(process.env.ALPACA_LIVE_KEY  ?? process.env.ALPACA_API_KEY)
+      : !!(process.env.ALPACA_PAPER_KEY ?? process.env.ALPACA_API_KEY);
+    if (!hasKeys) {
+      console.warn(`[bot-server] Skipping Alpaca ${mode} auto-resume — credentials not set`);
+      continue;
+    }
+    console.log(`[bot-server] Auto-resuming Alpaca ${mode} bot (${savedAlpaca.strategy})...`);
+    void startAlpacaBot(savedAlpaca).then(r => {
+      if (r.ok) console.log(`[bot-server] Alpaca ${mode} auto-resume successful`);
+      else console.error(`[bot-server] Alpaca ${mode} auto-resume failed: ${r.error}`);
+    });
+  }
+
+  // Auto-resume IG strategy bots (demo/live) if either was running before restart.
+  for (const mode of ['demo', 'live'] as const) {
+    const savedIg = loadSavedIgStrategyState(mode);
+    if (!savedIg) continue;
+    const hasCreds = mode === 'live'
+      ? !!(process.env.IG_LIVE_API_KEY)
+      : !!(process.env.IG_DEMO_API_KEY ?? process.env.IG_API_KEY);
+    if (!hasCreds) {
+      console.warn(`[bot-server] Skipping IG strategy ${mode} auto-resume — credentials not set`);
+      continue;
+    }
+    console.log(`[bot-server] Auto-resuming IG strategy ${mode} bot (${savedIg.strategy})...`);
+    void startIgStrategyBot(savedIg).then(r => {
+      if (r.ok) console.log(`[bot-server] IG strategy ${mode} auto-resume successful`);
+      else console.error(`[bot-server] IG strategy ${mode} auto-resume failed: ${r.error}`);
+    });
   }
 });

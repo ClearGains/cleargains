@@ -68,6 +68,9 @@ export type OrderParams = {
   order_class?:     'simple' | 'bracket' | 'oco' | 'oto';
   take_profit?:     { limit_price: number };
   stop_loss?:       { stop_price: number; limit_price?: number };
+  // Deterministic per-decision ID — a retried POST with the same value is
+  // rejected by Alpaca as a duplicate instead of opening a second position.
+  client_order_id?: string;
 };
 
 // ── Credentials ───────────────────────────────────────────────────────────────
@@ -93,6 +96,13 @@ function tradeBase(mode: AccountMode): string {
 
 // ── Core fetch ────────────────────────────────────────────────────────────────
 
+// Retries only on transient failures (rate limit / server error / timeout) —
+// never on 4xx business errors (bad request, insufficient funds, etc), which
+// would just fail identically on retry. client_order_id (set by callers that
+// place orders) makes a retried POST safe: Alpaca rejects the duplicate ID
+// instead of opening a second position.
+const RETRYABLE_ATTEMPTS = 2;
+
 async function alpacaFetch<T>(
   mode: AccountMode,
   path: string,
@@ -102,21 +112,41 @@ async function alpacaFetch<T>(
   if (!key || !secret) throw new Error(`Alpaca ${mode} credentials not configured`);
 
   const url = path.startsWith('https://') ? path : `${tradeBase(mode)}${path}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type':        'application/json',
-      'APCA-API-KEY-ID':     key,
-      'APCA-API-SECRET-KEY': secret,
-      ...((options.headers ?? {}) as Record<string, string>),
-    },
-  });
 
-  if (res.status === 204) return {} as T;
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type':        'application/json',
+          'APCA-API-KEY-ID':     key,
+          'APCA-API-SECRET-KEY': secret,
+          ...((options.headers ?? {}) as Record<string, string>),
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (e) {
+      // Network error / timeout — retryable, same as a 5xx
+      if (attempt < RETRYABLE_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, 500 * Math.pow(3, attempt)));
+        continue;
+      }
+      throw e;
+    }
 
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Alpaca ${res.status}: ${text.slice(0, 200)}`);
-  return JSON.parse(text) as T;
+    if (res.status === 204) return {} as T;
+
+    const text = await res.text();
+    if (res.ok) return JSON.parse(text) as T;
+
+    const retryable = res.status === 429 || res.status >= 500;
+    if (retryable && attempt < RETRYABLE_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, 500 * Math.pow(3, attempt)));
+      continue;
+    }
+    throw new Error(`Alpaca ${res.status}: ${text.slice(0, 200)}`);
+  }
 }
 
 // ── Account / positions / orders ──────────────────────────────────────────────

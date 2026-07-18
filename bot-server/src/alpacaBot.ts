@@ -1,10 +1,12 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition,
   cancelAllOrders, cancelOrdersForSymbol, isNYSEOpen, isInOpeningRange, isNearClose,
   sessionStartUtcMs,
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
   selectOptionsContract,
-  type AccountMode, type AlpacaPosition,
+  type AccountMode, type AlpacaPosition, type AlpacaBar,
 } from './alpacaApi';
 import { scanForBestSymbols } from './alpacaScanner';
 import { recordJournalEvent } from './tradeJournal';
@@ -12,9 +14,27 @@ import { hasImminentEarnings } from './earningsGuard';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal, optionsDirectionalSignal,
-  STRATEGY_META,
+  calcAtr, STRATEGY_META,
   type StrategyName, type StrategySignal,
 } from './alpacaStrategies';
+
+// ── State persistence ─────────────────────────────────────────────────────────
+// Survives a PM2 restart / crash: without this, a bot running when the process
+// dies leaves open positions un-monitored until a human notices and restarts
+// it by hand via the UI.
+
+function stateFile(mode: AccountMode): string {
+  return path.join(__dirname, '..', `alpaca-bot-state-${mode}.json`);
+}
+function saveAlpacaState(mode: AccountMode, cfg: AlpacaBotConfig): void {
+  try { fs.writeFileSync(stateFile(mode), JSON.stringify(cfg), 'utf8'); } catch {}
+}
+function clearAlpacaState(mode: AccountMode): void {
+  try { fs.unlinkSync(stateFile(mode)); } catch {}
+}
+export function loadSavedAlpacaState(mode: AccountMode): AlpacaBotConfig | null {
+  try { return JSON.parse(fs.readFileSync(stateFile(mode), 'utf8')) as AlpacaBotConfig; } catch { return null; }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -96,6 +116,29 @@ function s(mode: AccountMode): ModeState {
 
 function uid() { return Math.random().toString(36).slice(2, 8); }
 function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+function round2(v: number) { return Math.round(v * 100) / 100; }
+
+// Deterministic per-decision order ID. Stable across a retry of the *same*
+// poll's decision (so a resend dedupes at Alpaca instead of double-filling),
+// but changes every poll cycle (so a genuine new signal later isn't blocked).
+function makeClientOrderId(mode: AccountMode, sym: string, action: string, pollTs: string | null): string {
+  const bucket = (pollTs ?? new Date().toISOString()).replace(/[^0-9]/g, '');
+  return `bot-${mode}-${sym}-${action}-${bucket}`.slice(0, 128);
+}
+
+// Flat dollar sizing ignores volatility — a $500 clip in a calm ETF and a
+// $500 clip in a high-ATR momentum name carry very different real risk. Scale
+// against a 2% ATR baseline (matches lib/risk.ts's flat-vol fallback) and
+// clamp so a single low/high-vol symbol can't swing size more than 1.5x/0.5x.
+const BASELINE_ATR_PCT = 2;
+function sizeMultiplierFromAtr(bars: AlpacaBar[]): number {
+  const atr   = calcAtr(bars);
+  const price = bars[bars.length - 1]?.c;
+  if (!atr || !price || price <= 0) return 1;
+  const atrPct = (atr / price) * 100;
+  if (atrPct <= 0) return 1;
+  return Math.min(1.5, Math.max(0.5, BASELINE_ATR_PCT / atrPct));
+}
 
 function addLog(mode: AccountMode, type: AlpacaLogEntry['type'], symbol: string, msg: string) {
   const st    = s(mode);
@@ -171,6 +214,10 @@ async function evaluateSymbol(
 
   let signal: StrategySignal;
   const st = s(mode);
+  // Approximate — computed on whatever bar resolution this strategy already
+  // fetches for its own signal, so magnitude varies by strategy. Only used as
+  // a soft ±50% adjustment around the configured position size, not a hard risk cap.
+  const sizeMult = sizeMultiplierFromAtr(bars);
 
   switch (cfg.strategy) {
     case 'rsi_mean_reversion':
@@ -193,7 +240,7 @@ async function evaluateSymbol(
       // One breakout trade per direction per day
       if (signal.action === 'BUY'  && orb.tradedLong)  { addLog(mode, 'wait', sym, 'ORB long already traded today'); return false; }
       if (signal.action === 'SELL' && orb.tradedShort) { addLog(mode, 'wait', sym, 'ORB short already traded today'); return false; }
-      const opened = await executeSignal(mode, sym, signal, openPos ?? null, cfg, price);
+      const opened = await executeSignal(mode, sym, signal, openPos ?? null, cfg, price, sizeMult);
       if (opened && signal.action === 'BUY')  orb.tradedLong  = true;
       if (opened && signal.action === 'SELL') orb.tradedShort = true;
       return opened;
@@ -253,10 +300,10 @@ async function evaluateSymbol(
           return false;
         }
         const contractPrice = parseFloat(contract.close_price ?? '2');
-        const qty = Math.max(1, Math.floor(cfg.positionSizeUsd / (contractPrice * 100)));
+        const qty = Math.max(1, Math.floor((cfg.positionSizeUsd * sizeMult) / (contractPrice * 100)));
         entrySig.optionContract = contract.symbol;
         entrySig.optionQty      = qty;
-        return executeSignal(mode, sym, entrySig, null, cfg);
+        return executeSignal(mode, sym, entrySig, null, cfg, contractPrice);
       }
       addLog(mode, 'wait', sym, entrySig.reason);
       return false;
@@ -266,7 +313,7 @@ async function evaluateSymbol(
       return false;
   }
 
-  return executeSignal(mode, sym, signal, openPos ?? null, cfg, bars[bars.length - 1].c);
+  return executeSignal(mode, sym, signal, openPos ?? null, cfg, bars[bars.length - 1].c, sizeMult);
 }
 
 // ── Order execution ───────────────────────────────────────────────────────────
@@ -279,6 +326,7 @@ async function executeSignal(
   openPos:      AlpacaPosition | null,
   cfg:          AlpacaBotConfig,
   currentPrice?: number,
+  sizeMult:     number = 1,
 ): Promise<boolean> {
   const { action, reason, stopPrice, takeProfitPrice, trailPercent, orderType } = signal;
   const st = s(mode);
@@ -377,17 +425,40 @@ async function executeSignal(
     addLog(mode, 'info',  sym, `Ordering ${qty}x ${signal.optionContract} (${optionType}) — $${cfg.positionSizeUsd} budget`);
     try {
       const order = await placeOrder(mode, {
-        symbol:        signal.optionContract,
+        symbol:           signal.optionContract,
         qty,
-        side:          'buy',
-        type:          'market',
-        time_in_force: 'day',
+        side:             'buy',
+        type:             'market',
+        time_in_force:    'day',
+        client_order_id:  makeClientOrderId(mode, sym, 'opt_buy', st.lastPollTs),
       });
       addLog(mode, 'enter', sym, `Options order placed — ${signal.optionContract} id ${order.id}`);
       recordJournalEvent({
         mode, event: 'entry', symbol: signal.optionContract, strategy: cfg.strategy,
         side: 'long', qty, price: currentPrice ?? 0, reason,
       });
+
+      // Options carry no default broker-side protection like the bracket stock
+      // orders below — without this, an exit depends entirely on the next poll
+      // noticing the loss, on the highest-gamma instrument in the system.
+      const entryPx = parseFloat(order.filled_avg_price ?? '') || currentPrice || 0;
+      if (entryPx > 0) {
+        const stopPx = round2(entryPx * 0.5); // matches optionsDirectionalSignal's -50% exit rule
+        try {
+          await placeOrder(mode, {
+            symbol:        signal.optionContract,
+            qty,
+            side:          'sell',
+            type:          'stop',
+            time_in_force: 'gtc',
+            stop_price:    stopPx,
+          });
+          addLog(mode, 'info', sym, `Protective stop attached — sell at ${stopPx} (-50%)`);
+        } catch (e) {
+          addLog(mode, 'error', sym,
+            `🚨 UNPROTECTED — stop order failed for ${signal.optionContract}: ${e instanceof Error ? e.message : String(e)}. Exit relies on the next poll only.`);
+        }
+      }
       return true;
     } catch (e) {
       addLog(mode, 'error', sym, `Options order failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -396,14 +467,17 @@ async function executeSignal(
   }
 
   // ── Stock entry — whole-share qty so bracket TP/SL legs are accepted ─────
-  const price = currentPrice ?? 0;
-  const qty   = price > 0 ? Math.floor(cfg.positionSizeUsd / price) : 0;
+  const price          = currentPrice ?? 0;
+  const effectiveSizeUsd = cfg.positionSizeUsd * sizeMult;
+  const qty   = price > 0 ? Math.floor(effectiveSizeUsd / price) : 0;
   if (qty < 1) {
-    addLog(mode, 'wait', sym, `Position size $${cfg.positionSizeUsd} < 1 share at $${price.toFixed(2)} — skipping`);
+    addLog(mode, 'wait', sym, `Position size $${effectiveSizeUsd.toFixed(0)} < 1 share at $${price.toFixed(2)} — skipping`);
     return false;
   }
+  if (Math.abs(sizeMult - 1) > 0.05) {
+    addLog(mode, 'info', sym, `Volatility-adjusted size: $${effectiveSizeUsd.toFixed(0)} (${sizeMult.toFixed(2)}x base)`);
+  }
 
-  const round2 = (v: number) => Math.round(v * 100) / 100;
   // Sanity: bracket legs must be on the correct side of the market or Alpaca rejects them
   const validStop = stopPrice !== undefined &&
     (orderSide === 'buy' ? stopPrice < price : stopPrice > price);
@@ -412,16 +486,22 @@ async function executeSignal(
   const useBracket = validStop && validTp && !trailPercent;
 
   addLog(mode, 'enter', sym, `${action} signal — ${reason}`);
-  if (stopPrice)       addLog(mode, 'info', sym, `Stop: ${round2(stopPrice).toFixed(2)}`);
-  if (takeProfitPrice) addLog(mode, 'info', sym, `TP:   ${round2(takeProfitPrice).toFixed(2)}`);
+  // Only log Stop/TP when a bracket leg is actually attached — otherwise (e.g.
+  // weekly_momentum, which always sets trailPercent) this claimed protection
+  // that wasn't there, with no way to tell a protected position from a naked one.
+  if (useBracket) {
+    addLog(mode, 'info', sym, `Stop: ${round2(stopPrice!).toFixed(2)}`);
+    addLog(mode, 'info', sym, `TP:   ${round2(takeProfitPrice!).toFixed(2)}`);
+  }
 
   try {
     const order = await placeOrder(mode, {
-      symbol:        sym,
+      symbol:           sym,
       qty,
-      side:          orderSide,
-      type:          'market',
-      time_in_force: useBracket ? 'gtc' : 'day',
+      side:             orderSide,
+      type:             'market',
+      time_in_force:    useBracket ? 'gtc' : 'day',
+      client_order_id:  makeClientOrderId(mode, sym, action, st.lastPollTs),
       ...(useBracket ? {
         order_class: 'bracket' as const,
         take_profit: { limit_price: round2(takeProfitPrice!) },
@@ -437,26 +517,71 @@ async function executeSignal(
       qty, price, reason,
     });
 
-    // Trailing-stop exit (weekly momentum): attach after the market entry
+    // Trailing-stop exit (weekly momentum): attach after the market entry.
+    // One retry before giving up — this is the position's only broker-side
+    // protection when useBracket is false, so a silent failure here leaves
+    // it naked until the strategy's own discretionary exit next fires.
     if (trailPercent && orderType !== 'trailing_stop') {
+      const attachTrailingStop = () => placeOrder(mode, {
+        symbol:        sym,
+        qty,
+        side:          orderSide === 'buy' ? 'sell' : 'buy',
+        type:          'trailing_stop',
+        time_in_force: 'gtc',
+        trail_percent: trailPercent,
+      });
       try {
-        await placeOrder(mode, {
-          symbol:        sym,
-          qty,
-          side:          orderSide === 'buy' ? 'sell' : 'buy',
-          type:          'trailing_stop',
-          time_in_force: 'gtc',
-          trail_percent: trailPercent,
-        });
+        await attachTrailingStop();
         addLog(mode, 'info', sym, `Trailing stop attached — ${trailPercent}%`);
-      } catch (e) {
-        addLog(mode, 'error', sym, `Trailing stop failed: ${e instanceof Error ? e.message : String(e)}`);
+      } catch (e1) {
+        addLog(mode, 'error', sym, `Trailing stop failed (retrying): ${e1 instanceof Error ? e1.message : String(e1)}`);
+        await new Promise(r => setTimeout(r, 2_000));
+        try {
+          await attachTrailingStop();
+          addLog(mode, 'info', sym, `Trailing stop attached on retry — ${trailPercent}%`);
+        } catch (e2) {
+          addLog(mode, 'error', sym,
+            `🚨 UNPROTECTED — trailing stop failed twice for ${sym}: ${e2 instanceof Error ? e2.message : String(e2)}. Position has no server-side stop; monitor manually.`);
+        }
       }
     }
     return true;
   } catch (e) {
     addLog(mode, 'error', sym, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
     return false;
+  }
+}
+
+// weekly_momentum only evaluates entries/exits in a 5-min window once a week
+// (isWeeklyCheckTime). If its trailing stop failed to attach, that SMA-based
+// discretionary exit is the only other protection — and without this, a
+// missed window (VM reboot, slow poll) leaves it unchecked for up to 7 days.
+// Runs once a day so it doesn't add meaningful API load.
+async function checkWeeklyMomentumExits(mode: AccountMode, cfg: AlpacaBotConfig): Promise<void> {
+  let positions: AlpacaPosition[];
+  try {
+    positions = await getPositions(mode);
+  } catch (e) {
+    addLog(mode, 'error', '—', `Weekly exit check: position fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  const held = cfg.symbols.filter(sym => positions.some(p => p.symbol === sym));
+  for (const sym of held) {
+    const openPos = positions.find(p => p.symbol === sym)!;
+    try {
+      const [weeklyMap, dailyMap] = await Promise.all([
+        getBars([sym], '1Week', 20, mode),
+        getBars([sym], '1Day', 30, mode),
+      ]);
+      const weeklyBars = weeklyMap[sym] ?? [];
+      if (!weeklyBars.length) continue;
+      const signal = weeklyMomentumSignal(weeklyBars, dailyMap[sym] ?? [], true, openPos.side);
+      if (signal.action === 'CLOSE_LONG' || signal.action === 'CLOSE_SHORT') {
+        await executeSignal(mode, sym, signal, openPos, cfg);
+      }
+    } catch (e) {
+      addLog(mode, 'error', sym, `Weekly exit check failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 }
 
@@ -491,6 +616,9 @@ async function poll(mode: AccountMode) {
   }
 
   if (meta.timeframe === 'weekly' && !isWeeklyCheckTime()) {
+    if (cfg.strategy === 'weekly_momentum' && isDailyCheckTime()) {
+      await checkWeeklyMomentumExits(mode, cfg);
+    }
     schedule(mode, cfg);
     return;
   }
@@ -581,6 +709,9 @@ export async function startAlpacaBot(cfg: AlpacaBotConfig): Promise<{ ok: boolea
   st.running  = true;
   st.paused   = false;
 
+  // Persist immediately — a crash mid-scan should still resume the bot
+  saveAlpacaState(mode, cfg);
+
   // Always scan for best symbols before first poll
   addLog(mode, 'info', '—', 'Scanning market for best symbols…');
   try {
@@ -610,6 +741,7 @@ export function stopAlpacaBot(mode: AccountMode): void {
   if (st.pollTimer) { clearTimeout(st.pollTimer); st.pollTimer = null; }
   st.nextRunMs  = null;
   st.lastPollTs = null;
+  clearAlpacaState(mode);
   addLog(mode, 'info', '—', `Alpaca ${mode} bot stopped`);
 }
 

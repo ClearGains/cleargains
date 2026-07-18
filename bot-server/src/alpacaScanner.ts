@@ -176,6 +176,59 @@ function scoreOptionsDirectional(barsMap: Record<string, AlpacaBar[]>): Scored[]
   });
 }
 
+// ── Diversification filter ────────────────────────────────────────────────────
+// Scoring alone ranks by signal strength only — nothing stops the bot ending
+// up simultaneously long 3 correlated momentum names. Greedily skip a
+// candidate whose return series correlates too strongly with an already-picked
+// symbol, using the same bars already fetched for scoring (no extra API calls).
+
+const CORRELATION_LIMIT = 0.75;
+const MIN_OVERLAP        = 5; // too few shared bars to trust a correlation — don't block on it
+
+function periodReturns(bars: AlpacaBar[]): number[] {
+  const rets: number[] = [];
+  for (let i = 1; i < bars.length; i++) {
+    const prev = bars[i - 1].c;
+    if (prev > 0) rets.push((bars[i].c - prev) / prev);
+  }
+  return rets;
+}
+
+function correlation(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length);
+  if (n < MIN_OVERLAP) return 0;
+  const av = a.slice(-n), bv = b.slice(-n);
+  const meanA = av.reduce((s, v) => s + v, 0) / n;
+  const meanB = bv.reduce((s, v) => s + v, 0) / n;
+  let cov = 0, va = 0, vb = 0;
+  for (let i = 0; i < n; i++) {
+    const da = av[i] - meanA, db = bv[i] - meanB;
+    cov += da * db; va += da * da; vb += db * db;
+  }
+  const denom = Math.sqrt(va * vb);
+  return denom > 0 ? cov / denom : 0;
+}
+
+function selectDiversified(
+  ranked:  Scored[],
+  barsMap: Record<string, AlpacaBar[]>,
+  count:   number,
+): { picks: string[]; skipped: number } {
+  const returns = new Map<string, number[]>();
+  for (const r of ranked) returns.set(r.symbol, periodReturns(barsMap[r.symbol] ?? []));
+
+  const picks: string[] = [];
+  let skipped = 0;
+  for (const cand of ranked) {
+    if (picks.length >= count) break;
+    const candRet = returns.get(cand.symbol) ?? [];
+    const tooCorrelated = picks.some(p => Math.abs(correlation(candRet, returns.get(p) ?? [])) > CORRELATION_LIMIT);
+    if (tooCorrelated) { skipped++; continue; }
+    picks.push(cand.symbol);
+  }
+  return { picks, skipped };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit: number }> = {
@@ -219,11 +272,9 @@ export async function scanForBestSymbols(
     default: return liquid.slice(0, count);
   }
 
-  const top = scored
-    .filter(s => s.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, count)
-    .map(s => s.symbol);
+  const ranked = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score);
+  const { picks: top, skipped } = selectDiversified(ranked, barsMap, count);
+  if (skipped) log(`[scanner] Diversification: skipped ${skipped} candidate(s) correlated >${CORRELATION_LIMIT} with an already-picked symbol`);
 
   log(`[scanner] Best picks: ${top.join(', ') || 'none — falling back to liquid top'}`);
   if (top.length >= count) return top;

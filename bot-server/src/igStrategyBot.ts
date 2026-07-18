@@ -1,7 +1,10 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   authenticate, getSession, fetchCandleHistory, fetchFullPositions,
   fetchAccountFunds, placeMarketOrder, closePosition as igClosePos,
-  type IGSession, type CandleBar, type FullPosition,
+  fetchMarketDetails,
+  type IGSession, type CandleBar, type FullPosition, type MarketDetail,
 } from './igApi';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
@@ -14,6 +17,23 @@ import {
   isNYSEOpen, isInOpeningRange, isNearClose,
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
 } from './alpacaApi';
+
+// ── State persistence ─────────────────────────────────────────────────────────
+// Mirrors alpacaBot.ts — without this, a PM2 restart while the bot is running
+// leaves open IG positions un-monitored until a human notices.
+
+function stateFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-strategy-bot-state-${mode}.json`);
+}
+function saveIgState(mode: IgMode, cfg: IgStrategyConfig): void {
+  try { fs.writeFileSync(stateFile(mode), JSON.stringify(cfg), 'utf8'); } catch {}
+}
+function clearIgState(mode: IgMode): void {
+  try { fs.unlinkSync(stateFile(mode)); } catch {}
+}
+export function loadSavedIgStrategyState(mode: IgMode): IgStrategyConfig | null {
+  try { return JSON.parse(fs.readFileSync(stateFile(mode), 'utf8')) as IgStrategyConfig; } catch { return null; }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -81,6 +101,7 @@ type ModeState = {
   orbState:             Record<string, OrbState>;
   authFailCount:        number;
   sessionRefreshTimer:  ReturnType<typeof setTimeout> | null;
+  marketDetails:        Map<string, MarketDetail>;
 };
 
 function makeModeState(): ModeState {
@@ -88,6 +109,7 @@ function makeModeState(): ModeState {
     running: false, paused: false, config: null, session: null,
     log: [], pollTimer: null, nextRunMs: null, lastPollTs: null,
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
+    marketDetails: new Map(),
   };
 }
 
@@ -334,12 +356,28 @@ async function executeIgSignal(
   if (isNearClose())                    { addLog(mode, 'wait', name, '⏸ Market closing <15 min — no new entries'); return; }
 
   const direction  = action === 'BUY' ? 'BUY' : 'SELL';
-  const stake      = calcStake(cfg.notionalGbp, currentPrice);
+
+  // IG rejects (or silently adjusts) stakes/stops below the instrument's own
+  // minimums — without clamping to these, entries can fail outright or leave
+  // a smaller-than-intended stop. Falls back to conservative defaults when
+  // fetchMarketDetails couldn't reach IG for this epic.
+  const detail  = st.marketDetails.get(epic);
+  const minDeal = detail?.minDealSize ?? 0.5;
+  const minStop = detail?.minStopDist ?? 1;
+
+  const rawStake   = calcStake(cfg.notionalGbp, currentPrice);
+  const stake      = Math.max(minDeal, rawStake);
   const stopDist   = stopPrice        ? Math.abs(currentPrice - stopPrice)        : undefined;
-  const profitDist = takeProfitPrice  ? Math.abs(currentPrice - takeProfitPrice)  : undefined;
+  const profitDistRaw = takeProfitPrice ? Math.abs(currentPrice - takeProfitPrice) : undefined;
 
   // Trailing stop: use trail_percent converted to points
-  const effectiveStopDist = trailPercent ? currentPrice * (trailPercent / 100) : stopDist;
+  const effectiveStopDistRaw = trailPercent ? currentPrice * (trailPercent / 100) : stopDist;
+  const effectiveStopDist = effectiveStopDistRaw !== undefined ? Math.max(minStop, effectiveStopDistRaw) : undefined;
+  const profitDist        = profitDistRaw !== undefined ? Math.max(minStop, profitDistRaw) : undefined;
+
+  if (rawStake < minDeal) {
+    addLog(mode, 'info', name, `Stake £${rawStake}/pt below IG minimum £${minDeal}/pt for this instrument — using minimum`);
+  }
 
   addLog(mode, 'enter', name, `${action} — ${reason}`);
   addLog(mode, 'info',  name, `Stake: £${stake}/pt | Price: ~${currentPrice.toFixed(2)} | ~£${(stake * currentPrice).toFixed(0)} exposure`);
@@ -382,6 +420,10 @@ async function poll(mode: IgMode) {
     schedule(mode, cfg);
     return;
   }
+
+  // Cheap — one batched request for cfg.epics (≤ ~10). Refreshed every poll so
+  // slot replacements (new epic swapped in) always get correct min size/stop.
+  st.marketDetails = await fetchMarketDetails(st.session, cfg.epics).catch(() => st.marketDetails);
 
   let positions: FullPosition[] = [];
   let balance = 0, available = 0;
@@ -456,6 +498,9 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
   st.paused        = false;
   st.authFailCount = 0;
 
+  // Persist immediately — a crash mid-scan should still resume the bot
+  saveIgState(mode, cfg);
+
   addLog(mode, 'info', '—', 'Scanning for best instruments…');
   try {
     const best = await scanIgEpics(cfg.strategy, st.session, [], cfg.maxPositions + 2, msg => addLog(mode, 'info', '—', msg));
@@ -483,6 +528,7 @@ export function stopIgStrategyBot(mode: IgMode): void {
   if (st.sessionRefreshTimer) { clearTimeout(st.sessionRefreshTimer); st.sessionRefreshTimer = null; }
   st.nextRunMs  = null;
   st.lastPollTs = null;
+  clearIgState(mode);
   addLog(mode, 'info', '—', `IG strategy bot ${mode} stopped`);
 }
 
