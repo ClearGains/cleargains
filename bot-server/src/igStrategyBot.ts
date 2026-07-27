@@ -108,6 +108,8 @@ type ModeState = {
   dayKey:               string;   // UTC date the balance baseline belongs to
   dayStartBalance:      number;
   lossLock:             boolean;  // true = no new entries until the next trading day
+  // Weekend risk-window guard
+  weekendGuardDate:     string;   // UTC date the guard last fired — one-shot per Friday
 };
 
 function makeModeState(): ModeState {
@@ -117,6 +119,7 @@ function makeModeState(): ModeState {
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
     marketDetails: new Map(),
     dayKey: '', dayStartBalance: 0, lossLock: false,
+    weekendGuardDate: '',
   };
 }
 
@@ -141,6 +144,16 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
 
 function uid() { return Math.random().toString(36).slice(2, 8); }
 function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+
+// FX/spread-bet markets close Friday 22:00 UTC and gap over the weekend —
+// true whenever we're within `leadMinutes` of that close, still on Friday.
+function isNearWeekendClose(leadMinutes = 120): boolean {
+  const nowDate = new Date();
+  if (nowDate.getUTCDay() !== 5) return false;
+  const utcMins = nowDate.getUTCHours() * 60 + nowDate.getUTCMinutes();
+  const closeMins = 22 * 60;
+  return utcMins >= closeMins - leadMinutes && utcMins < closeMins;
+}
 
 function addLog(mode: IgMode, type: IgLogEntry['type'], epic: string, msg: string) {
   const st    = ms(mode);
@@ -419,7 +432,9 @@ async function poll(mode: IgMode) {
   const st = ms(mode);
   if (!st.running || !st.config || !st.session) return;
 
-  const cfg = st.config;
+  const cfg   = st.config;
+  const meta  = STRATEGY_META[cfg.strategy];
+  const today = new Date().toISOString().slice(0, 10);
   st.lastPollTs = new Date().toISOString();
 
   if (isWeekend()) {
@@ -430,7 +445,44 @@ async function poll(mode: IgMode) {
     return;
   }
 
-  const meta = STRATEGY_META[cfg.strategy];
+  // ── Weekend risk-window guard ─────────────────────────────────────────────
+  // Runs before the per-strategy timeframe gate below — weekly_momentum and
+  // ema_crossover only pass that gate a few minutes a day/week, so placed
+  // after it this would almost never fire for exactly the strategies most
+  // exposed to a weekend gap (the ones designed to hold positions through
+  // it). Intraday strategies were never meant to hold through the gap at
+  // all, so those get flattened; swing/weekly strategies get their stop
+  // pulled in to cap the worst case instead of losing the whole position.
+  if (isNearWeekendClose(120) && st.weekendGuardDate !== today) {
+    st.weekendGuardDate = today;
+    try {
+      const positions = await fetchFullPositions(st.session);
+      for (const p of positions) {
+        const name = epicName(p.epic);
+        if (meta.timeframe === 'intraday') {
+          addLog(mode, 'exit', name, `Weekend risk guard — closing before the gap (${cfg.strategy} isn't meant to hold through it)`);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); }
+          catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
+        } else if (p.stopLevel !== undefined) {
+          const currentDist   = Math.abs(p.level - p.stopLevel);
+          const tightenedDist = currentDist * 0.5;
+          const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
+          const wouldTighten  = p.direction === 'BUY' ? newStop > p.stopLevel : newStop < p.stopLevel;
+          if (wouldTighten) {
+            try {
+              await updatePositionLevels(st.session, p.dealId, newStop, p.limitLevel ?? null);
+              addLog(mode, 'info', name, `Weekend risk guard — tightened stop ${currentDist.toFixed(2)}→${tightenedDist.toFixed(2)} pts ahead of the gap`);
+            } catch (e) {
+              addLog(mode, 'error', name, `Weekend stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
+      }
+      if (positions.length) addLog(mode, 'info', '—', `Weekend risk guard checked ${positions.length} position(s)`);
+    } catch (e) {
+      addLog(mode, 'error', '—', `Weekend risk guard failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   if (meta.timeframe === 'intraday' && !isNYSEOpen()) { schedule(mode, cfg); return; }
   if (meta.timeframe === 'daily'    && !isDailyCheckTime())  { schedule(mode, cfg); return; }
@@ -466,7 +518,6 @@ async function poll(mode: IgMode) {
   // Mirrors alpacaBot.ts — without this, correlated positions moving against
   // each other at once (or a fast/gapping move slipping past a non-guaranteed
   // stop) can keep bleeding the account with nothing to stop new entries.
-  const today = new Date().toISOString().slice(0, 10);
   if (st.dayKey !== today) {
     st.dayKey = today;
     st.dayStartBalance = balance;
