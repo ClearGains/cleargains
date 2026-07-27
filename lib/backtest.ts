@@ -18,7 +18,8 @@ export type BTStrategy =
   | 'ema_crossover'
   | 'vwap'
   | 'orb'
-  | 'weekly_momentum';
+  | 'weekly_momentum'
+  | 'ratchet_streak';
 
 export const BT_STRATEGY_LABELS: Record<BTStrategy, string> = {
   rsi_mean_reversion: 'RSI Mean Reversion (5-min)',
@@ -26,6 +27,7 @@ export const BT_STRATEGY_LABELS: Record<BTStrategy, string> = {
   vwap:               'VWAP Reversion (5-min)',
   orb:                'Opening Range Breakout (5-min)',
   weekly_momentum:    'Weekly Momentum (daily→weekly)',
+  ratchet_streak:     'Ratchet Streak (5-min)',
 };
 
 export type BTParams = {
@@ -49,6 +51,11 @@ export type BTParams = {
   orbBreakoutPct: number; // % beyond range to confirm breakout
   // weekly_momentum
   trailPct:      number;  // trailing stop %
+  // ratchet_streak
+  ratchetTpAtrMult:      number;  // take-profit distance per leg, in ATR
+  ratchetStopAtrMult:    number;  // stop distance on the first leg of a streak, in ATR
+  ratchetTightenAtrMult: number;  // stop tightens by this many ATR per additional winning leg
+  ratchetMinStopAtrMult: number;  // floor so the tightened stop never vanishes
 };
 
 export const BT_DEFAULT_PARAMS: BTParams = {
@@ -59,6 +66,8 @@ export const BT_DEFAULT_PARAMS: BTParams = {
   vwapEntryPct: 0.5,
   orbBreakoutPct: 0.2,
   trailPct: 5,
+  ratchetTpAtrMult: 0.5, ratchetStopAtrMult: 0.5,
+  ratchetTightenAtrMult: 0.15, ratchetMinStopAtrMult: 0.15,
 };
 
 export type BTTrade = {
@@ -163,10 +172,16 @@ type StepSignal =
   | { action: 'exit'; reason: string }
   | { action: 'none' };
 
+// What the last closed trade was and why it closed — lets a strategy tell a
+// take-profit exit (continue the streak) apart from a stop-loss exit (cool
+// down), which it can't infer from `pos` alone since that's only ever null
+// or the CURRENT open position.
+type LastExit = { side: 'long' | 'short'; reason: string } | null;
+
 function runSim(
   bars: BTBar[],
   params: BTParams,
-  signalAt: (i: number, pos: OpenPos | null) => StepSignal,
+  signalAt: (i: number, pos: OpenPos | null, lastExit: LastExit) => StepSignal,
   opts: { forceEodExit?: boolean; trailPct?: number } = {},
 ): { trades: BTTrade[]; equityCurve: { t: string; equity: number }[]; holds: number[] } {
   const slip = params.slippageBps / 10_000;
@@ -177,6 +192,7 @@ function runSim(
   let pos: OpenPos | null = null;
   let pendingEntry: { side: 'long' | 'short'; stop: number | null; tp: number | null } | null = null;
   let pendingExit: string | null = null;
+  let lastExit: LastExit = null;
 
   const closeAt = (i: number, price: number, reason: string) => {
     if (!pos) return;
@@ -189,6 +205,7 @@ function runSim(
       entryPrice: entryPx, exitPrice: exitPx, retPct: ret * 100, exitReason: reason,
     });
     holds.push(i - pos.entryIdx);
+    lastExit = { side: pos.side, reason };
     pos = null;
   };
 
@@ -223,7 +240,8 @@ function runSim(
     }
 
     // 3. Strategy signal on this bar's close → fills next bar
-    const sig = signalAt(i, pos);
+    const sig = signalAt(i, pos, lastExit);
+    lastExit = null;  // consumed — only offered for the one bar right after a close
     if (sig.action === 'exit' && pos) pendingExit = sig.reason;
     if (sig.action === 'enter' && !pos && (sig.side === 'long' || params.allowShorts)) {
       pendingEntry = { side: sig.side, stop: sig.stop, tp: sig.tp };
@@ -376,6 +394,61 @@ function makeOrb(bars: BTBar[], p: BTParams) {
   };
 }
 
+// ── Ratchet Streak ──────────────────────────────────────────────────────────
+// Seed a direction off an EMA9/21 cross. On a take-profit exit, immediately
+// re-enter the same direction (chase the continuation) with a tighter stop
+// each leg, so a reversal only gives back the most recent leg's gain rather
+// than the whole streak. On a stop-loss exit, stop opening that direction
+// until the seed signal flips to the opposite side.
+function makeRatchetStreak(bars: BTBar[], p: BTParams) {
+  const closes = bars.map(b => b.c);
+  const fast = emaSeries(closes, 9);
+  const slow = emaSeries(closes, 21);
+
+  let cooldownSide: 'long' | 'short' | null = null;  // blocked direction, cleared on a flip
+  let legCount = 0;                                    // consecutive wins in the current streak
+
+  return (i: number, pos: OpenPos | null, lastExit: LastExit): StepSignal => {
+    const atr = calcAtrAt(bars, i);
+    if (atr === null) return { action: 'none' };
+    const c = closes[i];
+
+    if (pos) return { action: 'none' };  // exits are purely stop/tp driven, checked by the simulator
+
+    // Just closed — decide whether to continue the streak or cool down
+    if (lastExit) {
+      if (lastExit.reason === 'take-profit') {
+        legCount++;
+        const stopMult = Math.max(p.ratchetMinStopAtrMult, p.ratchetStopAtrMult - legCount * p.ratchetTightenAtrMult);
+        return lastExit.side === 'long'
+          ? { action: 'enter', side: 'long',  stop: c - atr * stopMult, tp: c + atr * p.ratchetTpAtrMult }
+          : { action: 'enter', side: 'short', stop: c + atr * stopMult, tp: c - atr * p.ratchetTpAtrMult };
+      }
+      if (lastExit.reason === 'stop') {
+        cooldownSide = lastExit.side;
+        legCount = 0;
+      }
+    }
+
+    // Seed / re-seed direction off an EMA cross — blocked while it agrees
+    // with the side that just stopped out, until it flips the other way
+    const f = fast[i], fp = fast[i - 1], s = slow[i], sp = slow[i - 1];
+    if (f === null || fp === null || s === null || sp === null) return { action: 'none' };
+    const up   = fp <= sp && f > s;
+    const down = fp >= sp && f < s;
+
+    if (up && cooldownSide !== 'long') {
+      cooldownSide = null;
+      return { action: 'enter', side: 'long', stop: c - atr * p.ratchetStopAtrMult, tp: c + atr * p.ratchetTpAtrMult };
+    }
+    if (down && cooldownSide !== 'short') {
+      cooldownSide = null;
+      return { action: 'enter', side: 'short', stop: c + atr * p.ratchetStopAtrMult, tp: c - atr * p.ratchetTpAtrMult };
+    }
+    return { action: 'none' };
+  };
+}
+
 /** Resample daily bars into ISO-week bars (Mon-anchored). */
 export function resampleWeekly(daily: BTBar[]): BTBar[] {
   const weeks: BTBar[] = [];
@@ -470,6 +543,7 @@ export const BT_DATA_NEEDS: Record<BTStrategy, { interval: '5m' | '1d'; range: s
   orb:                { interval: '5m', range: '60d' },
   ema_crossover:      { interval: '1d', range: '2y' },
   weekly_momentum:    { interval: '1d', range: '5y' },
+  ratchet_streak:     { interval: '5m', range: '60d' },
 };
 
 // ── Walk-forward validation ───────────────────────────────────────────────────
@@ -485,6 +559,7 @@ const WF_GRIDS: Record<BTStrategy, Partial<BTParams>[]> = (() => {
     vwap: [],
     orb: [],
     weekly_momentum: [],
+    ratchet_streak: [],
   };
   for (const rsiBuy of [20, 25, 30])
     for (const rsiExitLong of [55, 60, 65])
@@ -496,6 +571,10 @@ const WF_GRIDS: Record<BTStrategy, Partial<BTParams>[]> = (() => {
   for (const vwapEntryPct of [0.3, 0.5, 0.8]) grids.vwap.push({ vwapEntryPct });
   for (const orbBreakoutPct of [0.1, 0.2, 0.3]) grids.orb.push({ orbBreakoutPct });
   for (const trailPct of [4, 5, 7, 10]) grids.weekly_momentum.push({ trailPct });
+  for (const ratchetTpAtrMult of [0.3, 0.5, 0.8])
+    for (const ratchetStopAtrMult of [0.3, 0.5, 0.8])
+      for (const ratchetTightenAtrMult of [0.1, 0.15, 0.2])
+        grids.ratchet_streak.push({ ratchetTpAtrMult, ratchetStopAtrMult, ratchetTightenAtrMult });
   return grids;
 })();
 
@@ -575,6 +654,11 @@ export function runBacktest(
       break;
     case 'weekly_momentum':
       out = runSim(bars, params, makeWeeklyMomentum(bars, params), { trailPct: params.trailPct });
+      break;
+    case 'ratchet_streak':
+      // No forced EOD exit — FX trades continuously, so a streak should only
+      // end on its own stop, not an artificial day boundary.
+      out = runSim(bars, params, makeRatchetStreak(bars, params));
       break;
   }
 

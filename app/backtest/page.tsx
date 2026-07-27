@@ -36,6 +36,12 @@ const PARAM_FIELDS: Record<BTStrategy, { key: keyof BTParams; label: string; ste
   weekly_momentum: [
     { key: 'trailPct', label: 'Trailing stop (%)', step: 0.5 },
   ],
+  ratchet_streak: [
+    { key: 'ratchetTpAtrMult',      label: 'Take-profit (× ATR)', step: 0.05 },
+    { key: 'ratchetStopAtrMult',    label: 'Initial stop (× ATR)', step: 0.05 },
+    { key: 'ratchetTightenAtrMult', label: 'Stop tighten / leg (× ATR)', step: 0.05 },
+    { key: 'ratchetMinStopAtrMult', label: 'Min stop floor (× ATR)', step: 0.05 },
+  ],
 };
 
 function EquityCurve({ curve }: { curve: { t: string; equity: number }[] }) {
