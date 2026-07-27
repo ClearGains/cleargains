@@ -433,7 +433,9 @@ export default function BacktestPage() {
           <span className="font-semibold">Past performance does not predict future results.</span>{' '}
           Simulations use Yahoo Finance data, fill signals at the next bar&apos;s open, charge slippage both
           ways, and assume the stop fills first when a bar touches both stop and target (pessimistic).
-          Intraday data is limited to ~60 days.
+          Overnight financing (spread bets are leveraged — every calendar day held costs benchmark rate +
+          broker markup on the full exposure, not just the stake) is charged daily at an estimated annual
+          rate, both directions. Intraday data is limited to ~60 days.
         </p>
       </div>
 
@@ -484,6 +486,16 @@ export default function BacktestPage() {
               step={1}
               value={params.slippageBps}
               onChange={e => setParam('slippageBps', parseFloat(e.target.value) || 0)}
+              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Financing (annual %)</label>
+            <input
+              type="number"
+              step={0.5}
+              value={params.financingAnnualPct}
+              onChange={e => setParam('financingAnnualPct', parseFloat(e.target.value) || 0)}
               className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono"
             />
           </div>

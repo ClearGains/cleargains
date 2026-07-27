@@ -123,6 +123,13 @@ export type BTParams = {
   // shared
   slippageBps:   number;  // per side, e.g. 2 = 0.02%
   allowShorts:   boolean;
+  // Overnight financing — spread bets are leveraged, so every calendar day a
+  // position stays open costs (benchmark rate + broker markup) on the full
+  // notional, not just the stake at risk. Estimated annualized rate; not
+  // pulled from IG's live financing schedule. This is what separates spread
+  // betting from a generic backtest — a multi-day-hold strategy that looks
+  // profitable on price action alone can be eaten alive by this cost.
+  financingAnnualPct: number;
   // rsi_mean_reversion
   rsiPeriod:     number;
   rsiBuy:        number;  // enter long below
@@ -154,7 +161,7 @@ export type BTParams = {
 };
 
 export const BT_DEFAULT_PARAMS: BTParams = {
-  slippageBps: 2, allowShorts: false,
+  slippageBps: 2, allowShorts: false, financingAnnualPct: 7.5,
   rsiPeriod: 14, rsiBuy: 30, rsiSell: 70, rsiExitLong: 60, rsiExitShort: 40,
   atrStopMult: 1.5, atrTpMult: 3,
   emaFast: 9, emaSlow: 21,
@@ -262,6 +269,7 @@ type OpenPos = {
   stop:      number | null;
   tp:        number | null;
   peak:      number;          // for trailing stops
+  financingDays: number;      // calendar days held overnight — see closeAt
 };
 
 type StepSignal =
@@ -295,7 +303,11 @@ function runSim(
     if (!pos) return;
     const exitPx = pos.side === 'long' ? price * (1 - slip) : price * (1 + slip);
     const entryPx = pos.entryPrice;
-    const ret = pos.side === 'long' ? exitPx / entryPx - 1 : entryPx / exitPx - 1;
+    const rawRet = pos.side === 'long' ? exitPx / entryPx - 1 : entryPx / exitPx - 1;
+    // Overnight financing — charged regardless of direction (broker markup
+    // applies both ways), on every calendar day the position stayed open.
+    const financingCost = (params.financingAnnualPct / 100 / 365) * pos.financingDays;
+    const ret = rawRet - financingCost;
     equity *= 1 + ret;
     trades.push({
       side: pos.side, entryTime: bars[pos.entryIdx].t, exitTime: bars[i].t,
@@ -309,11 +321,18 @@ function runSim(
   for (let i = 1; i < bars.length; i++) {
     const b = bars[i];
 
+    // Day boundary while holding — one overnight financing charge, whether
+    // the bars are 5-min (only counts once per calendar day, not per bar)
+    // or daily (one charge per bar, i.e. every night held).
+    if (pos && bars[i].t.slice(0, 10) !== bars[i - 1].t.slice(0, 10)) {
+      pos.financingDays++;
+    }
+
     // 1. Fill pending orders at this bar's open (signals from previous close)
     if (pendingExit && pos) { closeAt(i, b.o, pendingExit); pendingExit = null; }
     if (pendingEntry && !pos) {
       const px = pendingEntry.side === 'long' ? b.o * (1 + slip) : b.o * (1 - slip);
-      pos = { side: pendingEntry.side, entryIdx: i, entryPrice: px, stop: pendingEntry.stop, tp: pendingEntry.tp, peak: b.o };
+      pos = { side: pendingEntry.side, entryIdx: i, entryPrice: px, stop: pendingEntry.stop, tp: pendingEntry.tp, peak: b.o, financingDays: 0 };
       pendingEntry = null;
     }
 
@@ -353,11 +372,14 @@ function runSim(
       pendingExit  = null;
     }
 
-    // Mark-to-market equity
+    // Mark-to-market equity — includes financing accrued so far, not just
+    // price movement, so a position still open at the end of the data (or
+    // mid-simulation drawdown) doesn't understate the real holding cost.
     const mtm = pos !== null
       ? equity * (1 + ((pos as OpenPos).side === 'long'
           ? b.c / (pos as OpenPos).entryPrice - 1
-          : (pos as OpenPos).entryPrice / b.c - 1))
+          : (pos as OpenPos).entryPrice / b.c - 1)
+          - (params.financingAnnualPct / 100 / 365) * (pos as OpenPos).financingDays)
       : equity;
     equityCurve.push({ t: b.t, equity: mtm });
   }
