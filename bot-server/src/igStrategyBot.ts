@@ -41,12 +41,13 @@ export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'v
 export type IgMode         = 'demo' | 'live';
 
 export type IgStrategyConfig = {
-  mode:         IgMode;
-  strategy:     IgStrategyName;
-  epics:        string[];   // populated by scanner at start
-  notionalGbp:  number;    // target exposure per position in £
-  maxPositions: number;
-  allowShorts:  boolean;
+  mode:             IgMode;
+  strategy:         IgStrategyName;
+  epics:            string[];   // populated by scanner at start
+  notionalGbp:      number;    // target exposure per position in £
+  maxPositions:     number;
+  allowShorts:      boolean;
+  maxDailyLossPct?: number;    // circuit breaker: no new entries after balance drops this % from day start (default 3)
 };
 
 export type IgLogEntry = {
@@ -83,6 +84,7 @@ export type IgStrategyBotStatus = {
   lastPollTs: string | null;
   orbState:   Record<string, OrbState>;
   sessionOk:  boolean;
+  lossLock:   boolean;   // daily-loss circuit breaker engaged
 };
 
 type OrbState  = { high: number; low: number; established: boolean };
@@ -102,6 +104,10 @@ type ModeState = {
   authFailCount:        number;
   sessionRefreshTimer:  ReturnType<typeof setTimeout> | null;
   marketDetails:        Map<string, MarketDetail>;
+  // Daily-loss circuit breaker
+  dayKey:               string;   // UTC date the balance baseline belongs to
+  dayStartBalance:      number;
+  lossLock:             boolean;  // true = no new entries until the next trading day
 };
 
 function makeModeState(): ModeState {
@@ -110,6 +116,7 @@ function makeModeState(): ModeState {
     log: [], pollTimer: null, nextRunMs: null, lastPollTs: null,
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
     marketDetails: new Map(),
+    dayKey: '', dayStartBalance: 0, lossLock: false,
   };
 }
 
@@ -351,6 +358,7 @@ async function executeIgSignal(
   }
 
   if (st.paused)                       { addLog(mode, 'wait', name, `⏸ Paused — skipping ${action}`); return; }
+  if (st.lossLock)                     { addLog(mode, 'wait', name, `🛑 Daily-loss limit hit — skipping ${action} (entries resume next day)`); return; }
   if (action === 'SELL' && !cfg.allowShorts) { addLog(mode, 'wait', name, 'Shorts disabled'); return; }
   if (openPos)                          { addLog(mode, 'wait', name, `Already in position — skipping ${action}`); return; }
   if (isNearClose())                    { addLog(mode, 'wait', name, '⏸ Market closing <15 min — no new entries'); return; }
@@ -452,6 +460,27 @@ async function poll(mode: IgMode) {
     addLog(mode, 'error', '—', `Account fetch failed: ${e instanceof Error ? e.message : String(e)}`);
     schedule(mode, cfg);
     return;
+  }
+
+  // ── Daily-loss circuit breaker ────────────────────────────────────────────
+  // Mirrors alpacaBot.ts — without this, correlated positions moving against
+  // each other at once (or a fast/gapping move slipping past a non-guaranteed
+  // stop) can keep bleeding the account with nothing to stop new entries.
+  const today = new Date().toISOString().slice(0, 10);
+  if (st.dayKey !== today) {
+    st.dayKey = today;
+    st.dayStartBalance = balance;
+    if (st.lossLock) addLog(mode, 'info', '—', 'New trading day — daily-loss lock reset');
+    st.lossLock = false;
+  }
+  const maxLossPct = cfg.maxDailyLossPct ?? 3;
+  if (!st.lossLock && st.dayStartBalance > 0 && balance > 0) {
+    const ddPct = (st.dayStartBalance - balance) / st.dayStartBalance * 100;
+    if (ddPct >= maxLossPct) {
+      st.lossLock = true;
+      addLog(mode, 'error', '—',
+        `🛑 Daily loss ${ddPct.toFixed(2)}% ≥ ${maxLossPct}% limit — no new entries today (exits/self-heal still managed)`);
+    }
   }
 
   // Self-heal naked positions — a failed SL/TP attach (at entry, or on a prior
@@ -623,5 +652,6 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     lastPollTs: st.lastPollTs,
     orbState:   { ...st.orbState },
     sessionOk:  !!st.session && Date.now() < st.session.expiresAt,
+    lossLock:   st.lossLock,
   };
 }
