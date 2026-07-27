@@ -104,7 +104,9 @@ export type BTStrategy =
   | 'vwap'
   | 'orb'
   | 'weekly_momentum'
-  | 'ratchet_streak';
+  | 'ratchet_streak'
+  | 'donchian_breakout'
+  | 'macd_crossover';
 
 export const BT_STRATEGY_LABELS: Record<BTStrategy, string> = {
   rsi_mean_reversion: 'RSI Mean Reversion (5-min)',
@@ -113,6 +115,8 @@ export const BT_STRATEGY_LABELS: Record<BTStrategy, string> = {
   orb:                'Opening Range Breakout (5-min)',
   weekly_momentum:    'Weekly Momentum (daily→weekly)',
   ratchet_streak:     'Ratchet Streak (5-min)',
+  donchian_breakout:  'Donchian Breakout (daily)',
+  macd_crossover:     'MACD Crossover (daily)',
 };
 
 export type BTParams = {
@@ -141,6 +145,12 @@ export type BTParams = {
   ratchetStopAtrMult:    number;  // stop distance on the first leg of a streak, in ATR
   ratchetTightenAtrMult: number;  // stop tightens by this many ATR per additional winning leg
   ratchetMinStopAtrMult: number;  // floor so the tightened stop never vanishes
+  // donchian_breakout
+  donchianEntryPeriod:  number;  // N-day high/low breakout to enter
+  donchianExitPeriod:   number;  // N-day opposite breakout to exit (Turtle-style)
+  // macd_crossover
+  macdAtrStopMult:      number;  // stop distance, in ATR
+  macdAtrTpMult:         number;  // take-profit distance, in ATR
 };
 
 export const BT_DEFAULT_PARAMS: BTParams = {
@@ -153,6 +163,8 @@ export const BT_DEFAULT_PARAMS: BTParams = {
   trailPct: 5,
   ratchetTpAtrMult: 0.5, ratchetStopAtrMult: 0.5,
   ratchetTightenAtrMult: 0.15, ratchetMinStopAtrMult: 0.15,
+  donchianEntryPeriod: 20, donchianExitPeriod: 10,
+  macdAtrStopMult: 2, macdAtrTpMult: 5,
 };
 
 export type BTTrade = {
@@ -534,6 +546,86 @@ function makeRatchetStreak(bars: BTBar[], p: BTParams) {
   };
 }
 
+// ── Donchian / Turtle-style Breakout (daily) ─────────────────────────────────
+// Entry: close breaks above the highest high (long) or below the lowest low
+// (short) of the prior `donchianEntryPeriod` days. Exit: opposite breakout of
+// the shorter `donchianExitPeriod` — the actual Turtle System 1 exit rule,
+// letting winners run further than the entry channel would allow.
+function makeDonchianBreakout(bars: BTBar[], p: BTParams) {
+  return (i: number, pos: OpenPos | null): StepSignal => {
+    const entryLook = bars.slice(Math.max(0, i - p.donchianEntryPeriod), i);
+    const exitLook  = bars.slice(Math.max(0, i - p.donchianExitPeriod), i);
+    if (entryLook.length < p.donchianEntryPeriod) return { action: 'none' };
+
+    const c = bars[i].c;
+    const entryHigh = Math.max(...entryLook.map(b => b.h));
+    const entryLow  = Math.min(...entryLook.map(b => b.l));
+    const exitHigh  = Math.max(...exitLook.map(b => b.h));
+    const exitLow   = Math.min(...exitLook.map(b => b.l));
+    const atr = calcAtrAt(bars, i) ?? c * 0.015;
+
+    if (pos) {
+      if (pos.side === 'long'  && c < exitLow)  return { action: 'exit', reason: `Broke below ${p.donchianExitPeriod}-day low` };
+      if (pos.side === 'short' && c > exitHigh) return { action: 'exit', reason: `Broke above ${p.donchianExitPeriod}-day high` };
+      return { action: 'none' };
+    }
+
+    if (c > entryHigh) {
+      return { action: 'enter', side: 'long', stop: c - atr * 2, tp: null };
+    }
+    if (c < entryLow) {
+      return { action: 'enter', side: 'short', stop: c + atr * 2, tp: null };
+    }
+    return { action: 'none' };
+  };
+}
+
+// ── MACD Signal-Line Crossover (daily) ───────────────────────────────────────
+// Entry: MACD line crosses its own signal line (different lag profile than an
+// EMA9/21 price cross — reacts to momentum turning, not price alone).
+// Exit: opposite crossover.
+function makeMacdCrossover(bars: BTBar[], p: BTParams) {
+  const closes = bars.map(b => b.c);
+  const ema12 = emaSeries(closes, 12);
+  const ema26 = emaSeries(closes, 26);
+  const macdLine: (number | null)[] = closes.map((_, idx) =>
+    ema12[idx] !== null && ema26[idx] !== null ? ema12[idx]! - ema26[idx]! : null
+  );
+  const firstIdx = macdLine.findIndex(v => v !== null);
+  const validMacd = firstIdx === -1 ? [] : (macdLine.slice(firstIdx) as number[]);
+  const signalSeries = emaSeries(validMacd, 9);
+
+  const macdAt = (idx: number): number | null => idx < firstIdx ? null : macdLine[idx];
+  const signalAt = (idx: number): number | null => {
+    if (firstIdx === -1) return null;
+    const j = idx - firstIdx;
+    return j < 0 || j >= signalSeries.length ? null : signalSeries[j];
+  };
+
+  return (i: number, pos: OpenPos | null): StepSignal => {
+    const m = macdAt(i), mp = macdAt(i - 1), s = signalAt(i), sp = signalAt(i - 1);
+    if (m === null || mp === null || s === null || sp === null) return { action: 'none' };
+    const crossedAbove = mp <= sp && m > s;
+    const crossedBelow = mp >= sp && m < s;
+    const atr = calcAtrAt(bars, i) ?? closes[i] * 0.015;
+    const c = closes[i];
+
+    if (pos) {
+      if (pos.side === 'long'  && crossedBelow) return { action: 'exit', reason: 'MACD crossed below signal' };
+      if (pos.side === 'short' && crossedAbove) return { action: 'exit', reason: 'MACD crossed above signal' };
+      return { action: 'none' };
+    }
+
+    if (crossedAbove) {
+      return { action: 'enter', side: 'long', stop: c - atr * p.macdAtrStopMult, tp: c + atr * p.macdAtrTpMult };
+    }
+    if (crossedBelow) {
+      return { action: 'enter', side: 'short', stop: c + atr * p.macdAtrStopMult, tp: c - atr * p.macdAtrTpMult };
+    }
+    return { action: 'none' };
+  };
+}
+
 /** Resample daily bars into ISO-week bars (Mon-anchored). */
 export function resampleWeekly(daily: BTBar[]): BTBar[] {
   const weeks: BTBar[] = [];
@@ -629,6 +721,8 @@ export const BT_DATA_NEEDS: Record<BTStrategy, { interval: '5m' | '1d'; range: s
   ema_crossover:      { interval: '1d', range: '2y' },
   weekly_momentum:    { interval: '1d', range: '5y' },
   ratchet_streak:     { interval: '5m', range: '60d' },
+  donchian_breakout:  { interval: '1d', range: '2y' },
+  macd_crossover:     { interval: '1d', range: '2y' },
 };
 
 // ── Walk-forward validation ───────────────────────────────────────────────────
@@ -645,6 +739,8 @@ const WF_GRIDS: Record<BTStrategy, Partial<BTParams>[]> = (() => {
     orb: [],
     weekly_momentum: [],
     ratchet_streak: [],
+    donchian_breakout: [],
+    macd_crossover: [],
   };
   for (const rsiBuy of [20, 25, 30])
     for (const rsiExitLong of [55, 60, 65])
@@ -660,6 +756,12 @@ const WF_GRIDS: Record<BTStrategy, Partial<BTParams>[]> = (() => {
     for (const ratchetStopAtrMult of [0.3, 0.5, 0.8])
       for (const ratchetTightenAtrMult of [0.1, 0.15, 0.2])
         grids.ratchet_streak.push({ ratchetTpAtrMult, ratchetStopAtrMult, ratchetTightenAtrMult });
+  for (const donchianEntryPeriod of [10, 20, 40, 55])
+    for (const donchianExitPeriod of [5, 10, 20])
+      if (donchianExitPeriod < donchianEntryPeriod) grids.donchian_breakout.push({ donchianEntryPeriod, donchianExitPeriod });
+  for (const macdAtrStopMult of [1.5, 2, 3])
+    for (const macdAtrTpMult of [3, 5, 7])
+      grids.macd_crossover.push({ macdAtrStopMult, macdAtrTpMult });
   return grids;
 })();
 
@@ -744,6 +846,12 @@ export function runBacktest(
       // No forced EOD exit — FX trades continuously, so a streak should only
       // end on its own stop, not an artificial day boundary.
       out = runSim(bars, params, makeRatchetStreak(bars, params));
+      break;
+    case 'donchian_breakout':
+      out = runSim(bars, params, makeDonchianBreakout(bars, params));
+      break;
+    case 'macd_crossover':
+      out = runSim(bars, params, makeMacdCrossover(bars, params));
       break;
   }
 

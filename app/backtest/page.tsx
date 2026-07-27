@@ -43,6 +43,14 @@ const PARAM_FIELDS: Record<BTStrategy, { key: keyof BTParams; label: string; ste
     { key: 'ratchetTightenAtrMult', label: 'Stop tighten / leg (× ATR)', step: 0.05 },
     { key: 'ratchetMinStopAtrMult', label: 'Min stop floor (× ATR)', step: 0.05 },
   ],
+  donchian_breakout: [
+    { key: 'donchianEntryPeriod', label: 'Entry breakout period (days)' },
+    { key: 'donchianExitPeriod',  label: 'Exit breakout period (days)' },
+  ],
+  macd_crossover: [
+    { key: 'macdAtrStopMult', label: 'Stop (× ATR)', step: 0.1 },
+    { key: 'macdAtrTpMult',   label: 'Target (× ATR)', step: 0.1 },
+  ],
 };
 
 function EquityCurve({ curve }: { curve: { t: string; equity: number }[] }) {
