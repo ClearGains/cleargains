@@ -361,58 +361,6 @@ function isLiquidTradingWindow(mType: MarketType): boolean {
   }
 }
 
-/**
- * Calibrated signal scoring for spread-bet markets.
- * Indices / forex move much less than individual stocks, so the
- * thresholds are scaled per asset class.
- */
-// ── Signal evaluation — three hard gates, no score tables ────────────────────
-// Philosophy: fewer, clearer rules beat many fuzzy ones.
-// Gate 1 — Price move: must exceed the minimum meaningful threshold for this asset class.
-// Gate 2 — RSI: block overbought buys (>68) and oversold sells (<32). These are the two
-//          most reliable losing trades — you're always too late when RSI is at extremes.
-// Gate 3 — MACD: if momentum is pointing the other direction, skip.
-// All three must pass. If any gate fails → HOLD.
-// Strength is proportional to how far the move exceeds the threshold (not a magic table).
-function evaluateSignal(
-  changePercent: number,
-  rsi:           number | null,
-  macd:          number | null,
-  mType:         MarketType,
-): { direction: 'BUY' | 'SELL' | 'HOLD'; strength: number } {
-  const minMove: Record<MarketType, number> = {
-    INDEX:     0.50,  // 0.25% is daily noise; 0.50% (42 FTSE pts) = real intraday trend
-    FOREX:     0.20,  // 0.10% was too small (10 pips noise); 0.20% (~26 pips) = real move
-    COMMODITY: 0.40,
-    CRYPTO:    0.50,
-    SHARES:    0.35,
-  };
-
-  const threshold = minMove[mType];
-  const absPct = Math.abs(changePercent);
-  if (absPct < threshold) return { direction: 'HOLD', strength: 0 };
-
-  const dir: 'BUY' | 'SELL' = changePercent > 0 ? 'BUY' : 'SELL';
-
-  // Gate 2: RSI extremes
-  if (rsi !== null) {
-    if (dir === 'BUY'  && rsi > 68) return { direction: 'HOLD', strength: 0 };
-    if (dir === 'SELL' && rsi < 32) return { direction: 'HOLD', strength: 0 };
-  }
-
-  // Gate 3: MACD direction conflict
-  if (macd !== null) {
-    if (dir === 'BUY'  && macd < 0) return { direction: 'HOLD', strength: 0 };
-    if (dir === 'SELL' && macd > 0) return { direction: 'HOLD', strength: 0 };
-  }
-
-  // Strength: how many times larger than the threshold. 1× → 65, 2× → 78, 3× → 88, 4×+ → 95.
-  const multiple = absPct / threshold;
-  const strength = Math.min(95, Math.round(52 + multiple * 12));
-
-  return { direction: dir, strength };
-}
-
 // ── UK local time helper — handles BST/GMT automatically via Intl ─────────────
 // Never use getUTCHours() + hardcoded offset — that breaks in winter when UK is GMT.
 function getUKTime(): { mins: number; day: number } {
@@ -1377,8 +1325,7 @@ export function IGStrategyTrader() {
   }
 
   // ── Scan one market + execute ──────────────────────────────────────────────
-  type SwingResult = { direction: 'BUY'|'SELL'|'HOLD'; strength: number; reasons: string[]; rsi: number|null; trend: string; pullbackPct: number|null };
-  async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket, swingSignals?: Record<string, SwingResult>): Promise<StrategySignal|null> {
+  async function scanMarket(strat: IGSavedStrategy, market: WatchlistMarket): Promise<StrategySignal|null> {
     setScans(p => ({ ...p, [market.epic]: { epic:market.epic, name:market.name, signal:null, scanning:true, status:'idle' } }));
     const envs = strat.accounts.filter(e => sessions[e]);
 
@@ -1404,33 +1351,35 @@ export function IGStrategyTrader() {
       return null;
     }
 
-    // ── Signal evaluation — three gates, no score tables ─────────────────────
+    // ── Signal: run the ACTUAL named strategy for this timeframe ─────────────
+    // Each timeframe maps to a real algorithm in lib/igStrategyEngine.ts (Triple
+    // EMA 8/21/55, Bollinger mean reversion, Supertrend, RSI(2)+EMA200, EMA9/21,
+    // EMA20/50+MACD, Golden/Death Cross) — not a generic price-change heuristic.
+    // Fetched server-side from Yahoo at the resolution that strategy needs, so
+    // picking a different strategy in the UI actually changes what runs.
     const stopLoss = strat.stopLoss ?? strat.stopPct ?? 5;
     const pctStr   = `${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent.toFixed(2)}%`;
     const rsiVal   = snapshot.indicators?.rsi  ?? null;
     const macdVal  = snapshot.indicators?.macd ?? null;
     const atrVal   = snapshot.indicators?.atr  ?? null;
-    const botEntry = botPricesRef.current[market.epic];
-    const botCandleCount = botEntry?.candleCount ?? 0;
 
-    // ── Swing mode: use daily candle signal (trend + pullback) ────────────────
-    // For weekly/longterm strategies, bypass the intraday % change signal entirely.
-    // The daily RSI and EMA trend are far more reliable for multi-day holds.
-    const isSwingStrategy = strat.timeframe === 'weekly' || strat.timeframe === 'longterm';
-    const swingData = swingSignals?.[market.epic];
-    let direction: 'BUY' | 'SELL' | 'HOLD';
-    let strength: number;
-    if (isSwingStrategy && swingData) {
-      direction = swingData.direction;
-      strength  = swingData.strength;
-      const swingLabel = swingData.direction === 'HOLD'
-        ? `[SWING] ${market.name} — ${swingData.reasons[0] ?? 'no signal'}`
-        : `[SWING] ${market.name} → ${swingData.direction} ${swingData.strength}% | Trend:${swingData.trend} RSI:${swingData.rsi?.toFixed(0) ?? '?'} Pullback:${swingData.pullbackPct?.toFixed(1) ?? '?'}%`;
-      slog(strat.id, 'signal', swingLabel);
-    } else {
-      const { direction: sigDir, strength: sigStrength } = evaluateSignal(snapshot.changePercent, rsiVal, macdVal, mType);
-      direction = sigDir;
-      strength  = sigStrength;
+    let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
+    let strength = 0;
+    let strategyReason = '';
+    const tfLabel = TIMEFRAME_CONFIG[strat.timeframe].label;
+    try {
+      const sr = await fetch(`/api/ig/signal?name=${encodeURIComponent(market.name)}&timeframe=${strat.timeframe}`);
+      const sd = await sr.json() as { ok: boolean; direction?: 'BUY'|'SELL'|'HOLD'; strength?: number; reason?: string; error?: string };
+      if (sd.ok && sd.direction) {
+        direction = sd.direction;
+        strength  = sd.strength ?? 0;
+        strategyReason = sd.reason ?? '';
+        if (direction !== 'HOLD') slog(strat.id, 'signal', `[${tfLabel}] ${market.name} → ${direction} ${strength}% — ${strategyReason}`);
+      } else {
+        slog(strat.id, 'info', `[${tfLabel}] ${market.name} — ${sd.error ?? 'no signal data'}`);
+      }
+    } catch (e) {
+      slog(strat.id, 'error', `[${tfLabel}] ${market.name} — signal fetch failed: ${e instanceof Error ? e.message : String(e)}`);
     }
 
     // ── Gate 2: IG Client Sentiment (contrarian) ─────────────────────────────
@@ -1441,24 +1390,6 @@ export function IGStrategyTrader() {
         const crowded = (sent.longPct >= 75 && direction === 'BUY') || (sent.shortPct >= 75 && direction === 'SELL');
         if (crowded) { direction = 'HOLD'; strength = 0; }
       }
-    }
-
-    // ── Gate 3: 5-min trend — require active confirmation, not just block conflicts ──
-    // With 20+ candles we have enough data to be selective: only trade when the
-    // recent short-term trend actively agrees with the daily signal direction.
-    // NEUTRAL means "unclear" — don't trade into ambiguity.
-    // Swing strategies skip this gate — a 5-min candle is noise for a multi-day hold.
-    if (!isSwingStrategy && direction !== 'HOLD' && botCandleCount >= 20) {
-      const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
-      const trendConfirms = (direction === 'BUY' && trend5m === 'UP') || (direction === 'SELL' && trend5m === 'DOWN');
-      if (!trendConfirms) {
-        slog(strat.id, 'signal', `[SKIP] ${market.name} — 5-min trend ${trend5m} does not confirm ${direction} signal`);
-        direction = 'HOLD'; strength = 0;
-      }
-    } else if (!isSwingStrategy && direction !== 'HOLD' && botCandleCount >= 10) {
-      const trend5m = botEntry?.trend5m ?? 'NEUTRAL';
-      const trendConflict = (direction === 'BUY' && trend5m === 'DOWN') || (direction === 'SELL' && trend5m === 'UP');
-      if (trendConflict) { direction = 'HOLD'; strength = 0; }
     }
 
     // ATR-based stop/TP when real-time ATR available.
@@ -1473,11 +1404,9 @@ export function IGStrategyTrader() {
     }
 
     const hasBotData = snapshot.source === 'yahoo+bot' || snapshot.source === 'ig+bot' || snapshot.source === 'bot-server';
-    const srcLabel   = snapshot.source.startsWith('ig') ? 'IG' : 'Daily';
-    const parts      = [`${srcLabel} ${pctStr}`];
-    if (rsiVal  !== null) parts.push(`RSI ${rsiVal.toFixed(0)}`);
-    if (macdVal !== null) parts.push(`MACD ${macdVal > 0 ? '↑' : '↓'}`);
-    const reason = parts.join(' · ');
+    // Prefer the real strategy's own reasoning (e.g. "Triple EMA bullish — EMA8 >
+    // EMA21 > EMA55...") over the generic price-change summary.
+    const reason = strategyReason || `${snapshot.source.startsWith('ig') ? 'IG' : 'Daily'} ${pctStr}`;
 
     const sig: StrategySignal = {
       direction,
@@ -1541,7 +1470,7 @@ export function IGStrategyTrader() {
     const totalOwned = envs.reduce((sum, e) =>
       sum + (positionsRef.current[e] ?? []).filter(p => ownedDirGlobal === null || p.direction === ownedDirGlobal).length, 0);
     const globalFillRatio = totalAllowed > 0 ? totalOwned / totalAllowed : 1;
-    const dynamicMinStrength = strat.minStrength ?? 65; // evaluateSignal already gates weak signals at source
+    const dynamicMinStrength = strat.minStrength ?? 75; // each strategy already gates weak signals at source; 75 filters marginal ones too
 
     const tradeDir: 'BUY' | 'SELL' | null =
       newsDir
@@ -1934,39 +1863,6 @@ export function IGStrategyTrader() {
       } else { setBotServerActive(false); }
     } catch { setBotServerActive(false); /* bot server offline */ }
 
-    const isSwingStrategy = strat.timeframe === 'weekly' || strat.timeframe === 'longterm';
-
-    // Check whether the bot server has live candle data.
-    // Swing strategies never need it — they use Yahoo Finance daily candles.
-    // For intraday strategies (hourly/daily/rsi2 etc.) the bot server is optional:
-    //   • With bot data  → RSI, MACD, and trend5m gates all active (higher quality)
-    //   • Without it     → those gates self-disable (botCandleCount < 10 guards them)
-    //                      and the scan runs on IG snapshot price + % change alone.
-    // We no longer hard-block intraday scans when the bot server is offline — a weaker
-    // signal is better than no signal at all, and the user can start the bot server
-    // later to re-enable the full gate suite.
-    const liveFeedCount = Object.values(botPricesRef.current).filter(e => e.candleCount >= 10).length;
-    if (!isSwingStrategy && liveFeedCount === 0) {
-      slog(strat.id, 'info', `⚠️ No live bot server data — RSI/MACD/trend5m gates inactive. Scanning on price % change only. Start the IG Server Bot panel for full signal quality.`);
-    }
-
-    // Pre-fetch swing signals for all markets (swing strategies only)
-    const swingSignals: Record<string, SwingResult> = {};
-    if (isSwingStrategy) {
-      slog(strat.id, 'info', `[SWING] Fetching daily candle signals for ${markets.length} markets…`);
-      await Promise.all(markets.map(async m => {
-        try {
-          const sr = await fetch(`/api/ig/swing?epic=${encodeURIComponent(m.epic)}`);
-          if (sr.ok) {
-            const sd = await sr.json() as { ok: boolean } & SwingResult;
-            if (sd.ok) swingSignals[m.epic] = sd;
-          }
-        } catch {}
-      }));
-      const hits = Object.keys(swingSignals).length;
-      slog(strat.id, 'info', `[SWING] Got data for ${hits}/${markets.length} markets`);
-    }
-
     // Pre-fetch IG client sentiment for all watchlist epics (contrarian gate)
     const envForSent = strat.accounts.includes('live') ? 'live' : 'demo';
     const sentSession = sessions[envForSent];
@@ -2016,7 +1912,7 @@ export function IGStrategyTrader() {
         if (getStratState(strat.id) === 'STOPPED') break;
         const m = markets[i];
         setScanProgress(`${m.name} (${i+1}/${markets.length})`);
-        await scanMarket(strat, m, swingSignals);
+        await scanMarket(strat, m);
         if (i < markets.length - 1) await sleep(300);
       }
 
