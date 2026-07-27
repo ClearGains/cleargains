@@ -257,6 +257,9 @@ function calcAutoSizing(
     weekly:   { mult: 2.5,  rr: 3.5 },  // multi-day trends — 3.5:1 lets winners run
     longterm: { mult: 5.0,  rr: 4.0 },  // trend following — 4:1 for big macro moves
     rsi2:     { mult: 1.2,  rr: 2.5 },  // mean reversion — 2.5:1 with tight stop
+    'ema-crossover': { mult: 2.0, rr: 2.5 },  // daily trend following, held days to weeks
+    donchian:        { mult: 2.0, rr: 3.0 },  // daily breakout, exit is the opposite channel not a fixed target
+    'macd-crossover': { mult: 2.0, rr: 2.5 }, // daily momentum crossover
   };
   const { mult, rr } = TF_PROFILE[timeframe] ?? TF_PROFILE.daily;
 
@@ -1366,14 +1369,21 @@ export function IGStrategyTrader() {
     let direction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
     let strength = 0;
     let strategyReason = '';
+    let sigStopPoints: number | null = null;
+    let sigTargetPoints: number | null = null;
     const tfLabel = TIMEFRAME_CONFIG[strat.timeframe].label;
     try {
       const sr = await fetch(`/api/ig/signal?name=${encodeURIComponent(market.name)}&timeframe=${strat.timeframe}`);
-      const sd = await sr.json() as { ok: boolean; direction?: 'BUY'|'SELL'|'HOLD'; strength?: number; reason?: string; error?: string };
+      const sd = await sr.json() as { ok: boolean; direction?: 'BUY'|'SELL'|'HOLD'; strength?: number; reason?: string; stopPoints?: number; targetPoints?: number; error?: string };
       if (sd.ok && sd.direction) {
         direction = sd.direction;
         strength  = sd.strength ?? 0;
         strategyReason = sd.reason ?? '';
+        // The strategy already computes its own stop/target off the timeframe
+        // it actually trades (e.g. daily ATR for Donchian) — using those
+        // instead of a generic client-side heuristic keyed off snapshot data
+        // that may be a completely different resolution (5-min bot-server ATR).
+        if (sd.stopPoints && sd.targetPoints) { sigStopPoints = sd.stopPoints; sigTargetPoints = sd.targetPoints; }
         if (direction !== 'HOLD') slog(strat.id, 'signal', `[${tfLabel}] ${market.name} → ${direction} ${strength}% — ${strategyReason}`);
       } else {
         slog(strat.id, 'info', `[${tfLabel}] ${market.name} — ${sd.error ?? 'no signal data'}`);
@@ -1392,12 +1402,16 @@ export function IGStrategyTrader() {
       }
     }
 
-    // ATR-based stop/TP when real-time ATR available.
-    // Stop at 2.5×ATR (just outside typical candle noise) → TP at 7.5×ATR → 3:1 R:R.
-    // 3:1 means we only need to be right 25% of the time to break even; at 40% win rate
-    // the strategy is robustly profitable even through drawdown periods.
     let { stopDist, limitDist, size: autoSize } = calcAutoSizing(snapshot.price, mType, stopLoss, strat.timeframe);
-    if (atrVal !== null && atrVal > 0) {
+    if (sigStopPoints !== null && sigTargetPoints !== null) {
+      // Trust the strategy's own ATR-based sizing over the generic heuristic.
+      stopDist  = sigStopPoints;
+      limitDist = sigTargetPoints;
+      autoSize  = Math.max(0.1, Math.round((stopLoss / stopDist) * 10) / 10);
+    } else if (atrVal !== null && atrVal > 0) {
+      // Fallback: real-time 5-min ATR, only meaningful when the strategy
+      // itself didn't return sizing (shouldn't normally happen).
+      // Stop at 2.5×ATR (just outside typical candle noise) → TP at 7.5×ATR → 3:1 R:R.
       const atrStop = Math.round(atrVal * 2.5);
       const atrTP   = Math.round(atrVal * 7.5);
       if (atrStop > 0 && atrTP > 0) { stopDist = atrStop; limitDist = atrTP; }
@@ -3224,6 +3238,11 @@ export function IGStrategyTrader() {
                 <label className="text-xs text-gray-400 mb-1.5 block">Trading Timeframe</label>
                 <select value={bTimeframe} onChange={e => setBTimeframe(e.target.value as Timeframe)}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                  <optgroup label="Backtested (Backtest Lab, 52-instrument universe)">
+                    <option value="donchian">🏆 Donchian Breakout (20/10) — BEST: +13.1% avg return, 37/52 profitable</option>
+                    <option value="ema-crossover">✅ EMA Crossover (9/21) — +10.8% avg return, 34/52 profitable</option>
+                    <option value="macd-crossover">✅ MACD Crossover — +10.4% avg return, 30/52 profitable</option>
+                  </optgroup>
                   <optgroup label="Classic Strategies">
                     <option value="hourly">⚡ Intraday (Hours) — EMA9/21 + RSI, exit same session</option>
                     <option value="daily">📅 Day Trade — EMA20/50 + MACD, exit same day</option>

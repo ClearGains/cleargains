@@ -27,7 +27,7 @@ export type StrategySignal = {
   riskReward: string;
 };
 
-export type Timeframe = 'hourly' | 'daily' | 'weekly' | 'longterm' | 'rsi2' | 'bollinger' | 'triple-ema' | 'supertrend';
+export type Timeframe = 'hourly' | 'daily' | 'weekly' | 'longterm' | 'rsi2' | 'bollinger' | 'triple-ema' | 'supertrend' | 'ema-crossover' | 'donchian' | 'macd-crossover';
 
 export type MarketType = 'INDEX' | 'FOREX' | 'COMMODITY' | 'CRYPTO' | 'SHARES';
 
@@ -792,14 +792,215 @@ export function supertrendSignal(candles: Candle[]): StrategySignal {
   };
 }
 
+/**
+ * EMA Crossover (9/21) — daily candles
+ *
+ * Backtested winner: +10.8% avg return/symbol, profit factor 1.38, 34/52
+ * symbols profitable (Backtest Lab leaderboard, 52-instrument IG universe).
+ * Entry: EMA9 crosses EMA21. Exit: opposite crossover.
+ */
+export function emaCrossoverSignal(candles: Candle[]): StrategySignal {
+  if (candles.length < 25) {
+    return { direction: 'HOLD', strength: 0, reason: 'Need at least 25 daily candles for EMA9/21', indicators: [], stopPoints: 20, targetPoints: 50, riskReward: '2.5:1' };
+  }
+  const closes = candles.map(c => c.close);
+  const ema9  = ema(closes, 9);
+  const ema21 = ema(closes, 21);
+  if (ema9.length < 2 || ema21.length < 2) {
+    return { direction: 'HOLD', strength: 0, reason: 'EMA not ready', indicators: [], stopPoints: 20, targetPoints: 50, riskReward: '2.5:1' };
+  }
+
+  const e9  = ema9[ema9.length - 1];
+  const pe9 = ema9[ema9.length - 2];
+  const e21  = ema21[ema21.length - 1];
+  const pe21 = ema21[ema21.length - 2];
+  const curClose = closes[closes.length - 1];
+
+  const crossedAbove = pe9 <= pe21 && e9 > e21;
+  const crossedBelow = pe9 >= pe21 && e9 < e21;
+  const aboveNow = e9 > e21;
+
+  let direction: SignalDirection = 'HOLD';
+  let strength = 0;
+  let reason = '';
+
+  if (crossedAbove) {
+    direction = 'BUY';
+    strength = 80;
+    reason = `EMA9 crossed above EMA21 (${e9.toFixed(2)} > ${e21.toFixed(2)}) — fresh bullish entry.`;
+  } else if (crossedBelow) {
+    direction = 'SELL';
+    strength = 80;
+    reason = `EMA9 crossed below EMA21 (${e9.toFixed(2)} < ${e21.toFixed(2)}) — fresh bearish entry.`;
+  } else if (aboveNow) {
+    strength = 50;
+    reason = `EMA9 above EMA21 — uptrend intact. Waiting for a fresh cross to enter.`;
+  } else {
+    strength = 50;
+    reason = `EMA9 below EMA21 — downtrend intact. Waiting for a fresh cross to enter.`;
+  }
+
+  const curAtr   = atr(candles, 14);
+  const stopPts  = Math.max(10, Math.round(curAtr * 2));
+  const limitPts = Math.max(25, Math.round(curAtr * 5));
+
+  return {
+    direction,
+    strength,
+    reason,
+    indicators: [
+      { label: 'EMA9',  value: e9.toFixed(2),  status: aboveNow ? 'bullish' : 'bearish' },
+      { label: 'EMA21', value: e21.toFixed(2), status: aboveNow ? 'bullish' : 'bearish' },
+      { label: 'Price',  value: curClose.toFixed(2), status: aboveNow ? 'bullish' : 'bearish' },
+      { label: 'Cross',  value: crossedAbove ? '▲ Bull Cross' : crossedBelow ? '▼ Bear Cross' : aboveNow ? 'Above' : 'Below', status: crossedAbove ? 'bullish' : crossedBelow ? 'bearish' : 'neutral' },
+    ],
+    stopPoints:   stopPts,
+    targetPoints: limitPts,
+    riskReward:   `${(limitPts / stopPts).toFixed(1)}:1`,
+  };
+}
+
+/**
+ * Donchian / Turtle-style Breakout — daily candles
+ *
+ * Backtested best performer: +13.1% avg return/symbol, profit factor 1.55,
+ * 37/52 symbols profitable (Backtest Lab leaderboard).
+ * Entry: close breaks above the 20-day high (long) or below the 20-day low
+ * (short). Exit: opposite breakout of the shorter 10-day channel — the
+ * actual Turtle System 1 exit rule, letting winners run past the entry band.
+ */
+export function donchianSignal(candles: Candle[], entryPeriod = 20, exitPeriod = 10): StrategySignal {
+  if (candles.length < entryPeriod + 1) {
+    return { direction: 'HOLD', strength: 0, reason: `Need at least ${entryPeriod + 1} daily candles for Donchian(${entryPeriod}/${exitPeriod})`, indicators: [], stopPoints: 30, targetPoints: 90, riskReward: '3:1' };
+  }
+  const n = candles.length;
+  const entryWindow = candles.slice(n - 1 - entryPeriod, n - 1);
+  const exitWindow  = candles.slice(Math.max(0, n - 1 - exitPeriod), n - 1);
+  const curClose = candles[n - 1].close;
+  const entryHigh = Math.max(...entryWindow.map(c => c.high));
+  const entryLow  = Math.min(...entryWindow.map(c => c.low));
+  const exitHigh  = Math.max(...exitWindow.map(c => c.high));
+  const exitLow   = Math.min(...exitWindow.map(c => c.low));
+
+  let direction: SignalDirection = 'HOLD';
+  let strength = 0;
+  let reason = '';
+
+  if (curClose > entryHigh) {
+    direction = 'BUY';
+    strength = 85;
+    reason = `Breakout above ${entryPeriod}-day high ${entryHigh.toFixed(2)} — fresh long entry.`;
+  } else if (curClose < entryLow) {
+    direction = 'SELL';
+    strength = 85;
+    reason = `Breakdown below ${entryPeriod}-day low ${entryLow.toFixed(2)} — fresh short entry.`;
+  } else {
+    reason = `Price ${curClose.toFixed(2)} inside ${entryPeriod}-day range ${entryLow.toFixed(2)}–${entryHigh.toFixed(2)} — no breakout yet.`;
+  }
+
+  const curAtr = atr(candles, 14);
+  const stopPts = Math.max(15, Math.round(curAtr * 2));
+  // No fixed target by design — the real exit is the opposite exitPeriod-day
+  // breakout (this is what let winners run in the backtest). targetPoints is
+  // a wide backstop only, sized off the exit channel width.
+  const limitPts = Math.max(stopPts * 3, Math.round((exitHigh - exitLow) * 3));
+
+  return {
+    direction,
+    strength,
+    reason,
+    indicators: [
+      { label: `${entryPeriod}d High`, value: entryHigh.toFixed(2), status: curClose > entryHigh ? 'bullish' : 'neutral' },
+      { label: `${entryPeriod}d Low`,  value: entryLow.toFixed(2),  status: curClose < entryLow  ? 'bearish' : 'neutral' },
+      { label: 'Price', value: curClose.toFixed(2), status: 'neutral' },
+      { label: `Exit (${exitPeriod}d)`, value: `${exitLow.toFixed(2)}–${exitHigh.toFixed(2)}`, status: 'neutral' },
+    ],
+    stopPoints:   stopPts,
+    targetPoints: limitPts,
+    riskReward:   `${(limitPts / stopPts).toFixed(1)}:1`,
+  };
+}
+
+/**
+ * MACD Signal-Line Crossover — daily candles
+ *
+ * Backtested: +10.4% avg return/symbol, profit factor 1.27, 30/52 symbols
+ * profitable (Backtest Lab leaderboard). Different lag profile than the
+ * EMA9/21 price cross — reacts to momentum turning, not price alone.
+ */
+export function macdCrossoverSignal(candles: Candle[]): StrategySignal {
+  if (candles.length < 36) {
+    return { direction: 'HOLD', strength: 0, reason: 'Need at least 36 daily candles for MACD(12,26,9)', indicators: [], stopPoints: 20, targetPoints: 50, riskReward: '2.5:1' };
+  }
+  const closes = candles.map(c => c.close);
+  const { macdLine, signalLine, histogram } = macd(closes);
+  if (macdLine.length < 2 || signalLine.length < 2) {
+    return { direction: 'HOLD', strength: 0, reason: 'MACD not ready', indicators: [], stopPoints: 20, targetPoints: 50, riskReward: '2.5:1' };
+  }
+
+  const offset = macdLine.length - signalLine.length;
+  const m  = macdLine[macdLine.length - 1];
+  const mp = macdLine[macdLine.length - 2];
+  const s  = signalLine[signalLine.length - 1];
+  const sp = signalLine[signalLine.length - 2];
+  const curHist = histogram[histogram.length - 1];
+  const curClose = closes[closes.length - 1];
+  void offset;
+
+  const crossedAbove = mp <= sp && m > s;
+  const crossedBelow = mp >= sp && m < s;
+
+  let direction: SignalDirection = 'HOLD';
+  let strength = 0;
+  let reason = '';
+
+  if (crossedAbove) {
+    direction = 'BUY';
+    strength = 82;
+    reason = `MACD crossed above signal line (${m.toFixed(3)} > ${s.toFixed(3)}) — fresh bullish momentum shift.`;
+  } else if (crossedBelow) {
+    direction = 'SELL';
+    strength = 82;
+    reason = `MACD crossed below signal line (${m.toFixed(3)} < ${s.toFixed(3)}) — fresh bearish momentum shift.`;
+  } else if (m > s) {
+    strength = 48;
+    reason = `MACD above signal — bullish momentum intact. Waiting for a fresh cross.`;
+  } else {
+    strength = 48;
+    reason = `MACD below signal — bearish momentum intact. Waiting for a fresh cross.`;
+  }
+
+  const curAtr   = atr(candles, 14);
+  const stopPts  = Math.max(10, Math.round(curAtr * 2));
+  const limitPts = Math.max(25, Math.round(curAtr * 5));
+
+  return {
+    direction,
+    strength,
+    reason,
+    indicators: [
+      { label: 'MACD',      value: m.toFixed(3), status: m > s ? 'bullish' : 'bearish' },
+      { label: 'Signal',    value: s.toFixed(3), status: m > s ? 'bullish' : 'bearish' },
+      { label: 'Histogram', value: curHist.toFixed(3), status: curHist > 0 ? 'bullish' : 'bearish' },
+      { label: 'Price',     value: curClose.toFixed(2), status: 'neutral' },
+    ],
+    stopPoints:   stopPts,
+    targetPoints: limitPts,
+    riskReward:   `${(limitPts / stopPts).toFixed(1)}:1`,
+  };
+}
+
 export function getSignal(timeframe: Timeframe, candles: Candle[]): StrategySignal {
-  if (timeframe === 'hourly')      return hourlySignal(candles);
-  if (timeframe === 'daily')       return dailySignal(candles);
-  if (timeframe === 'weekly')      return dailySignal(candles);  // same indicators, wider stops applied in sizing
-  if (timeframe === 'rsi2')        return rsi2Signal(candles);
-  if (timeframe === 'bollinger')   return bollingerSignal(candles);
-  if (timeframe === 'triple-ema')  return tripleEmaSignal(candles);
-  if (timeframe === 'supertrend')  return supertrendSignal(candles);
+  if (timeframe === 'hourly')        return hourlySignal(candles);
+  if (timeframe === 'daily')         return dailySignal(candles);
+  if (timeframe === 'weekly')        return dailySignal(candles);  // same indicators, wider stops applied in sizing
+  if (timeframe === 'rsi2')          return rsi2Signal(candles);
+  if (timeframe === 'bollinger')     return bollingerSignal(candles);
+  if (timeframe === 'triple-ema')    return tripleEmaSignal(candles);
+  if (timeframe === 'supertrend')    return supertrendSignal(candles);
+  if (timeframe === 'ema-crossover') return emaCrossoverSignal(candles);
+  if (timeframe === 'donchian')      return donchianSignal(candles);
+  if (timeframe === 'macd-crossover') return macdCrossoverSignal(candles);
   return longtermSignal(candles);
 }
 
@@ -831,6 +1032,9 @@ export const TIMEFRAME_CONFIG: Record<Timeframe, { resolution: string; max: numb
   bollinger:   { resolution: 'HOUR',     max: 50,  label: 'Bollinger Band Reversion', pollMs:  2 * 60 * 60_000, description: '1-hr candles · BB(20,2) mean reversion · buy lower band, sell upper band · polls every 2 hrs · ~65% win rate',     stopNote: 'ATR-based stops (1.5× ATR) · 2:1 R:R · mean reversion within 1–3 sessions' },
   'triple-ema':{ resolution: 'HOUR',     max: 80,  label: 'Triple EMA (8/21/55)',     pollMs:  4 * 60 * 60_000, description: '1-hr candles · all 3 EMAs aligned = high-probability trend · entry on alignment + price confirmation · ~70% WR',  stopNote: 'ATR-based stops (2× ATR) · 2.5:1 R:R · trend following, held hours to days' },
   supertrend:  { resolution: 'HOUR',     max: 50,  label: 'Supertrend (3,10)',        pollMs:  2 * 60 * 60_000, description: '1-hr candles · ATR-based supertrend band flips · highest win rate on direction change · ~68% win rate',           stopNote: 'ATR stop (2× ATR) · 2.5:1 R:R · holds trend until opposite band breach' },
+  'ema-crossover': { resolution: 'DAY', max: 60,  label: 'EMA Crossover (9/21)',     pollMs: 24 * 60 * 60_000, description: 'Daily candles · EMA9/21 cross · Backtest Lab winner: +10.8% avg return, 34/52 symbols profitable · polls once per day', stopNote: 'ATR-based stops (2× ATR) · 2.5:1 R:R · trend following, held days to weeks' },
+  donchian:        { resolution: 'DAY', max: 60,  label: 'Donchian Breakout (20/10)', pollMs: 24 * 60 * 60_000, description: 'Daily candles · 20-day breakout entry, 10-day opposite breakout exit (Turtle-style) · Backtest Lab BEST: +13.1% avg return, 37/52 symbols profitable · polls once per day', stopNote: 'ATR-based stop (2× ATR) · exit is the opposite 10-day breakout, not a fixed target · trend following, held days to weeks' },
+  'macd-crossover': { resolution: 'DAY', max: 60, label: 'MACD Crossover',           pollMs: 24 * 60 * 60_000, description: 'Daily candles · MACD(12,26,9) signal-line cross · Backtest Lab: +10.4% avg return, 30/52 symbols profitable · polls once per day', stopNote: 'ATR-based stops (2× ATR) · 2.5:1 R:R · trend following, held days to weeks' },
 };
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
