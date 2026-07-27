@@ -305,7 +305,7 @@ export async function placeMarketOrder(
   stopDist?:    number,
   profitDist?:  number,
   currencyCode = 'GBP',
-): Promise<{ dealId: string; level: number }> {
+): Promise<{ dealId: string; level: number; protectionOk: boolean; protectionError?: string }> {
   const base    = BASE[session.env];
   const payload = {
     epic, expiry: 'DFB', direction, size,
@@ -341,20 +341,42 @@ export async function placeMarketOrder(
   const dealId = confirm.dealId;
   const level  = confirm.level ?? 0;
 
-  // Apply SL/TP via PUT after deal accepted
+  // Apply SL/TP via PUT after deal accepted. One retry before giving up — a
+  // naked position (no broker-side stop or take-profit) only exits on the
+  // strategy's own thesis-reversal check, which is often lagging/one-sided,
+  // so a silently-failed attach here is the main way trades ride losses
+  // instead of taking profit.
+  let protectionOk = true;
+  let protectionError: string | undefined;
   if ((stopDist || profitDist) && level) {
     const slTp: Record<string, unknown> = { trailingStop: false };
     if (stopDist)   slTp.stopLevel  = Math.round((direction === 'BUY' ? level - stopDist  : level + stopDist)  * 100) / 100;
     if (profitDist) slTp.limitLevel = Math.round((direction === 'BUY' ? level + profitDist : level - profitDist) * 100) / 100;
-    try {
-      await fetch(`${base}/positions/otc/${encodeURIComponent(dealId)}`, {
-        method: 'PUT', headers: headers(session, '2'),
-        body: JSON.stringify(slTp), signal: AbortSignal.timeout(8_000),
-      });
-    } catch { /* non-critical */ }
+
+    const attemptSlTpPut = async (): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const r = await fetch(`${base}/positions/otc/${encodeURIComponent(dealId)}`, {
+          method: 'PUT', headers: headers(session, '2'),
+          body: JSON.stringify(slTp), signal: AbortSignal.timeout(8_000),
+        });
+        if (r.ok) return { ok: true };
+        const txt = await r.text();
+        return { ok: false, error: `${r.status} ${txt.slice(0, 200)}` };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    };
+
+    let result = await attemptSlTpPut();
+    if (!result.ok) {
+      await new Promise(res => setTimeout(res, 1_500));
+      result = await attemptSlTpPut();
+    }
+    protectionOk = result.ok;
+    protectionError = result.error;
   }
 
-  return { dealId, level };
+  return { dealId, level, protectionOk, protectionError };
 }
 
 export async function updatePositionLevels(

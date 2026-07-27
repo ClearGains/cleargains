@@ -598,9 +598,31 @@ export default function IGSharesAutoTrader() {
               forceOpen:    true,
             }),
           });
-          const data = await res.json() as { ok: boolean; dealReference?: string; dealStatus?: string; level?: number; error?: string };
+          const data = await res.json() as { ok: boolean; dealReference?: string; dealStatus?: string; level?: number; error?: string; dealId?: string; slTpResult?: { ok: boolean; error?: string } };
 
           if (data.ok) {
+            // Confirm the broker-side stop/take-profit actually attached — without
+            // it the position only exits via the scanner's next scoring pass,
+            // which is how trades were riding losses instead of taking profit.
+            if (data.slTpResult && !data.slTpResult.ok && data.dealId) {
+              addLog({ type: 'error', symbol, message: `${env.toUpperCase()} SL/TP failed to attach: ${data.slTpResult.error ?? 'unknown'} — retrying` });
+              try {
+                const retryRes = await fetch('/api/ig/order', {
+                  method: 'PATCH',
+                  headers: { ...igHeaders(session, env), 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ dealId: data.dealId, stopLevel: stopLossIg, limitLevel: takeProfitIg }),
+                });
+                const retryData = await retryRes.json() as { ok: boolean; error?: string };
+                if (retryData.ok) {
+                  addLog({ type: 'info', symbol, message: `${env.toUpperCase()} SL/TP attached on retry` });
+                } else {
+                  addLog({ type: 'error', symbol, message: `${env.toUpperCase()} 🚨 UNPROTECTED — ${symbol} has no stop or take-profit (${retryData.error ?? 'retry failed'}). Monitor manually.` });
+                }
+              } catch (e) {
+                addLog({ type: 'error', symbol, message: `${env.toUpperCase()} 🚨 UNPROTECTED — SL/TP retry failed: ${e instanceof Error ? e.message : String(e)}` });
+              }
+            }
+
             const trade: PlacedTrade = {
               id:          uid(),
               symbol,

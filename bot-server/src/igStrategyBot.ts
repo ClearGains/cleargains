@@ -3,7 +3,7 @@ import * as path from 'path';
 import {
   authenticate, getSession, fetchCandleHistory, fetchFullPositions,
   fetchAccountFunds, placeMarketOrder, closePosition as igClosePos,
-  fetchMarketDetails,
+  fetchMarketDetails, updatePositionLevels,
   type IGSession, type CandleBar, type FullPosition, type MarketDetail,
 } from './igApi';
 import {
@@ -381,12 +381,25 @@ async function executeIgSignal(
 
   addLog(mode, 'enter', name, `${action} — ${reason}`);
   addLog(mode, 'info',  name, `Stake: £${stake}/pt | Price: ~${currentPrice.toFixed(2)} | ~£${(stake * currentPrice).toFixed(0)} exposure`);
-  if (effectiveStopDist) addLog(mode, 'info', name, `Stop: ${effectiveStopDist.toFixed(2)} pts`);
-  if (profitDist)        addLog(mode, 'info', name, `TP:   ${profitDist.toFixed(2)} pts`);
 
   try {
-    const { dealId, level } = await placeMarketOrder(session, epic, direction, stake, effectiveStopDist, profitDist);
+    const { dealId, level, protectionOk, protectionError } =
+      await placeMarketOrder(session, epic, direction, stake, effectiveStopDist, profitDist);
     addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
+
+    // Only claim Stop/TP protection once it's actually confirmed attached —
+    // otherwise a silently-failed PUT leaves the position naked with no
+    // record of it, and it only ever exits via the strategy's own (often
+    // lagging) thesis-reversal check instead of taking profit.
+    if (effectiveStopDist || profitDist) {
+      if (protectionOk) {
+        if (effectiveStopDist) addLog(mode, 'info', name, `Stop attached: ${effectiveStopDist.toFixed(2)} pts`);
+        if (profitDist)        addLog(mode, 'info', name, `TP attached:   ${profitDist.toFixed(2)} pts`);
+      } else {
+        addLog(mode, 'error', name,
+          `🚨 UNPROTECTED — Stop/TP failed to attach after retry: ${protectionError ?? 'unknown error'}. Position has no broker-side protection; will retry on next poll.`);
+      }
+    }
   } catch (e) {
     addLog(mode, 'error', name, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -439,6 +452,32 @@ async function poll(mode: IgMode) {
     addLog(mode, 'error', '—', `Account fetch failed: ${e instanceof Error ? e.message : String(e)}`);
     schedule(mode, cfg);
     return;
+  }
+
+  // Self-heal naked positions — a failed SL/TP attach (at entry, or on a prior
+  // poll) otherwise leaves a position with no broker-side exit until the
+  // strategy's own thesis-reversal check fires, which is how trades were
+  // riding losses instead of taking profit. Checked against IG's own reported
+  // stopLevel/limitLevel, so this also repairs positions left naked before
+  // this fix existed.
+  for (const p of positions) {
+    if (p.stopLevel !== undefined && p.limitLevel !== undefined) continue;
+    const detail    = st.marketDetails.get(p.epic);
+    const minStop   = detail?.minStopDist ?? 1;
+    const fallbackStopDist   = Math.max(minStop, p.level * 0.015);
+    const fallbackProfitDist = Math.max(minStop, p.level * 0.03);
+    const fallbackStop  = p.direction === 'BUY' ? p.level - fallbackStopDist   : p.level + fallbackStopDist;
+    const fallbackLimit = p.direction === 'BUY' ? p.level + fallbackProfitDist : p.level - fallbackProfitDist;
+    const stopLevel  = p.stopLevel  ?? fallbackStop;
+    const limitLevel = p.limitLevel ?? fallbackLimit;
+    try {
+      await updatePositionLevels(st.session, p.dealId, stopLevel, limitLevel);
+      addLog(mode, 'info', epicName(p.epic),
+        `Self-heal: attached missing ${p.stopLevel === undefined ? 'stop' : ''}${p.stopLevel === undefined && p.limitLevel === undefined ? '/' : ''}${p.limitLevel === undefined ? 'TP' : ''} — was naked`);
+    } catch (e) {
+      addLog(mode, 'error', epicName(p.epic),
+        `🚨 UNPROTECTED — self-heal failed: ${e instanceof Error ? e.message : String(e)}. Monitor manually.`);
+    }
   }
 
   const openCount = positions.length;

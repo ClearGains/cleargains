@@ -1076,7 +1076,7 @@ export function IGStrategyTrader() {
   }, [sessions]);
 
   // ── Update stop/limit levels on open position ──────────────────────────────
-  async function updatePositionSL(env: 'demo'|'live', pos: IGPosition, stopLevel: number|null, limitLevel: number|null) {
+  async function updatePositionSL(env: 'demo'|'live', pos: Pick<IGPosition, 'dealId'>, stopLevel: number|null, limitLevel: number|null) {
     const sess = sessions[env];
     if (!sess) return { ok: false, error: `No ${env} session` };
     const r = await fetch('/api/ig/order', {
@@ -1208,7 +1208,7 @@ export function IGStrategyTrader() {
       }
     }
 
-    return r.json() as Promise<{ok:boolean;dealReference?:string;dealId?:string;dealStatus?:string;level?:number;reason?:string;error?:string;epic?:string;resolvedVia?:string;sentPayload?:unknown;igBody?:unknown;igStatus?:number}>;
+    return r.json() as Promise<{ok:boolean;dealReference?:string;dealId?:string;dealStatus?:string;level?:number;reason?:string;error?:string;epic?:string;resolvedVia?:string;sentPayload?:unknown;igBody?:unknown;igStatus?:number;slTpResult?:{ok:boolean;error?:string}}>;
   }
 
   async function closePos(env: 'demo'|'live', pos: IGPosition) {
@@ -1826,6 +1826,25 @@ export function IGStrategyTrader() {
           setCompletedTrades(completedTradesRef.current);
           slog(strat.id, tradeDir === 'BUY' ? 'buy' : 'sell',
             `[${env.toUpperCase()}] ✅ ${or.dealStatus ?? 'ACCEPTED'} — ref ${or.dealReference ?? 'n/a'} · filled @ ${or.level ?? '?'}`);
+
+          // Confirm the broker-side stop/take-profit actually attached — a naked
+          // position only exits via the strategy's own (often lagging) signal
+          // logic, which is how trades were riding losses instead of taking profit.
+          if (or.slTpResult && !or.slTpResult.ok && or.dealId && or.level) {
+            slog(strat.id, 'error',
+              `[${env.toUpperCase()}] ⚠️ SL/TP failed to attach for ${market.name}: ${or.slTpResult.error ?? 'unknown'} — retrying`);
+            const retryStop  = tradeDir === 'BUY' ? or.level - stopDist  : or.level + stopDist;
+            const retryLimit = tradeDir === 'BUY' ? or.level + limitDist : or.level - limitDist;
+            const retry = await updatePositionSL(env, { dealId: or.dealId }, retryStop, retryLimit);
+            if (retry.ok) {
+              slog(strat.id, 'info', `[${env.toUpperCase()}] ✅ SL/TP attached on retry for ${market.name}`);
+            } else {
+              slog(strat.id, 'error',
+                `[${env.toUpperCase()}] 🚨 UNPROTECTED — ${market.name} has no stop or take-profit (${retry.error ?? 'retry failed'}). Monitor manually.`);
+              showToast(false, `⚠️ ${market.name} UNPROTECTED — no SL/TP attached`);
+            }
+          }
+
           showToast(true, `[${env}] ${tradeDir} ${market.name}`);
           setTradeHistory(prev => recordTradeOpen(prev, {
             portfolioName: strat.name, market: market.name, epic: market.epic,

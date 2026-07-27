@@ -230,34 +230,55 @@ export async function POST(request: NextRequest) {
 
     // ── Apply SL/TP via separate PUT after deal is confirmed ACCEPTED ─────────
     // (Including these in the initial order causes rejections on some accounts)
+    // Accepts either distance-from-fill (stopDistance/profitDistance) or absolute
+    // levels (stopLevel/limitLevel) — callers may send either. One retry before
+    // giving up: a naked position (no broker-side stop or take-profit) is the
+    // single biggest cause of trades riding losses instead of exiting in profit.
     let slTpResult: { ok: boolean; error?: string } = { ok: true };
-    if (confirm.dealId && confirm.level && (body.stopDistance || body.profitDistance)) {
+    const wantsStop  = body.stopDistance !== undefined  || body.stopLevel  !== undefined;
+    const wantsLimit = body.profitDistance !== undefined || body.limitLevel !== undefined;
+    if (confirm.dealId && confirm.level && (wantsStop || wantsLimit)) {
       const fillPrice = confirm.level;
       const slTpPayload: Record<string, unknown> = { trailingStop: false };
-      if (body.stopDistance) {
+      if (body.stopLevel !== undefined) {
+        slTpPayload.stopLevel = body.stopLevel;
+      } else if (body.stopDistance) {
         slTpPayload.stopLevel = Math.round(
           (body.direction === 'BUY' ? fillPrice - body.stopDistance : fillPrice + body.stopDistance) * 100,
         ) / 100;
       }
-      if (body.profitDistance) {
+      if (body.limitLevel !== undefined) {
+        slTpPayload.limitLevel = body.limitLevel;
+      } else if (body.profitDistance) {
         slTpPayload.limitLevel = Math.round(
           (body.direction === 'BUY' ? fillPrice + body.profitDistance : fillPrice - body.profitDistance) * 100,
         ) / 100;
       }
-      console.log(`[ig/order] SL/TP PUT for ${confirm.dealId}:`, JSON.stringify(slTpPayload));
-      try {
-        const upd = await fetch(`${base}/positions/otc/${encodeURIComponent(confirm.dealId)}`, {
-          method: 'PUT',
-          headers: igHeaders(apiKey, cst, securityToken, '2'),
-          body: JSON.stringify(slTpPayload),
-        });
-        if (!upd.ok) {
+
+      const attemptSlTpPut = async (): Promise<{ ok: boolean; error?: string }> => {
+        try {
+          const upd = await fetch(`${base}/positions/otc/${encodeURIComponent(confirm.dealId!)}`, {
+            method: 'PUT',
+            headers: igHeaders(apiKey, cst, securityToken, '2'),
+            body: JSON.stringify(slTpPayload),
+          });
+          if (upd.ok) return { ok: true };
           const updText = await upd.text();
-          console.warn(`[ig/order] SL/TP update failed (${upd.status}):`, updText.slice(0, 200));
-          slTpResult = { ok: false, error: `SL/TP update failed: ${upd.status}` };
+          return { ok: false, error: `SL/TP update failed: ${upd.status} ${updText.slice(0, 200)}` };
+        } catch (e) {
+          return { ok: false, error: `SL/TP update error: ${e instanceof Error ? e.message : String(e)}` };
         }
-      } catch (e) {
-        slTpResult = { ok: false, error: `SL/TP update error: ${e instanceof Error ? e.message : String(e)}` };
+      };
+
+      console.log(`[ig/order] SL/TP PUT for ${confirm.dealId}:`, JSON.stringify(slTpPayload));
+      slTpResult = await attemptSlTpPut();
+      if (!slTpResult.ok) {
+        console.warn(`[ig/order] SL/TP attach failed, retrying once:`, slTpResult.error);
+        await new Promise(r => setTimeout(r, 1_500));
+        slTpResult = await attemptSlTpPut();
+        if (!slTpResult.ok) {
+          console.error(`[ig/order] 🚨 UNPROTECTED — SL/TP attach failed twice for ${confirm.dealId}:`, slTpResult.error);
+        }
       }
     }
 
