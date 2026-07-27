@@ -1,13 +1,14 @@
 'use client';
 
-import { useState } from 'react';
-import { FlaskConical, Play, AlertTriangle, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { FlaskConical, Play, AlertTriangle, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Loader2, Trophy } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { fetchYahooBars } from '@/lib/yahooClient';
 import {
   runBacktest, walkForward,
   BT_DEFAULT_PARAMS, BT_STRATEGY_LABELS, BT_DATA_NEEDS,
+  BT_UNIVERSE, BT_UNIVERSE_SYMBOLS, defaultSpreadBpsFor,
   type BTStrategy, type BTParams, type BTResult, type BTBar, type WalkForwardResult,
 } from '@/lib/backtest';
 
@@ -154,6 +155,20 @@ function ResultCard({ result }: { result: BTResult }) {
   );
 }
 
+type LbRow = {
+  strategy:           BTStrategy;
+  symbolsTested:      number;
+  symbolsSkipped:     number;
+  trades:             number;
+  avgReturnPct:       number;  // mean of each symbol's total return
+  winRate:            number;  // pooled across all trades
+  profitFactor:       number;  // pooled across all trades
+  avgMaxDrawdownPct:  number;
+  profitableSymbols:  number;
+};
+
+const LB_STORAGE_KEY = 'bt_leaderboard_v1';
+
 export default function BacktestPage() {
   const [symbolsInput, setSymbolsInput] = useState('SPY, QQQ, AAPL');
   const [strategy, setStrategy] = useState<BTStrategy>('rsi_mean_reversion');
@@ -162,6 +177,95 @@ export default function BacktestPage() {
   const [results, setResults] = useState<BTResult[]>([]);
   const [wfResults, setWfResults] = useState<WalkForwardResult[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
+
+  // ── Universe Leaderboard ──────────────────────────────────────────────────
+  const [lbRunning, setLbRunning]   = useState(false);
+  const [lbProgress, setLbProgress] = useState<{ done: number; total: number } | null>(null);
+  const [lbRows, setLbRows]         = useState<LbRow[]>([]);
+  const [lbLastRun, setLbLastRun]   = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(LB_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as { rows: LbRow[]; lastRun: string };
+        setLbRows(parsed.rows);
+        setLbLastRun(parsed.lastRun);
+      }
+    } catch {}
+  }, []);
+
+  const runLeaderboard = async () => {
+    setLbRunning(true);
+    const strategies = Object.keys(BT_STRATEGY_LABELS) as BTStrategy[];
+    const total = strategies.length * BT_UNIVERSE_SYMBOLS.length;
+    let done = 0;
+    setLbProgress({ done: 0, total });
+
+    // Bars only differ by (symbol, interval) — most strategies share an
+    // interval (5m or 1d), so this avoids re-fetching Yahoo per strategy.
+    const barCache = new Map<string, BTBar[] | null>();
+    const getBars = async (symbol: string, interval: '5m' | '1d', range: string): Promise<BTBar[] | null> => {
+      const key = `${symbol}:${interval}`;
+      if (barCache.has(key)) return barCache.get(key)!;
+      try {
+        const candles = await fetchYahooBars(symbol, interval, range);
+        const bars = candles.map(c => ({ t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume }));
+        barCache.set(key, bars);
+        return bars;
+      } catch {
+        barCache.set(key, null);
+        return null;
+      }
+    };
+
+    const rows: LbRow[] = [];
+    for (const strat of strategies) {
+      const { interval, range } = BT_DATA_NEEDS[strat];
+      const stratResults: BTResult[] = [];
+      let skipped = 0;
+
+      for (const symbol of BT_UNIVERSE_SYMBOLS) {
+        const bars = await getBars(symbol, interval, range);
+        done++;
+        if (done % 5 === 0) setLbProgress({ done, total });
+        if (!bars) { skipped++; continue; }
+        const r = runBacktest(symbol, strat, bars, { ...BT_DEFAULT_PARAMS, slippageBps: defaultSpreadBpsFor(symbol) });
+        if (!r) { skipped++; continue; }
+        stratResults.push(r);
+        // Yield periodically so the tab stays responsive during ~300 sim runs
+        if (done % 10 === 0) await new Promise(res => setTimeout(res, 0));
+      }
+
+      const allTrades = stratResults.flatMap(r => r.trades);
+      const wins = allTrades.filter(t => t.retPct > 0);
+      const losses = allTrades.filter(t => t.retPct <= 0);
+      const grossWin  = wins.reduce((s, t) => s + t.retPct, 0);
+      const grossLoss = Math.abs(losses.reduce((s, t) => s + t.retPct, 0));
+
+      rows.push({
+        strategy: strat,
+        symbolsTested:  stratResults.length,
+        symbolsSkipped: skipped,
+        trades: allTrades.length,
+        avgReturnPct: stratResults.length
+          ? stratResults.reduce((s, r) => s + r.stats.totalReturnPct, 0) / stratResults.length : 0,
+        winRate: allTrades.length ? (wins.length / allTrades.length) * 100 : 0,
+        profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? 99 : 0),
+        avgMaxDrawdownPct: stratResults.length
+          ? stratResults.reduce((s, r) => s + r.stats.maxDrawdownPct, 0) / stratResults.length : 0,
+        profitableSymbols: stratResults.filter(r => r.stats.totalReturnPct > 0).length,
+      });
+    }
+
+    rows.sort((a, b) => b.avgReturnPct - a.avgReturnPct);
+    const lastRun = new Date().toISOString();
+    setLbRows(rows);
+    setLbLastRun(lastRun);
+    setLbProgress(null);
+    setLbRunning(false);
+    try { localStorage.setItem(LB_STORAGE_KEY, JSON.stringify({ rows, lastRun })); } catch {}
+  };
 
   const setParam = (key: keyof BTParams, value: number | boolean) =>
     setParams(p => ({ ...p, [key]: value }));
@@ -342,6 +446,76 @@ export default function BacktestPage() {
             Walk-Forward Test
           </button>
         </div>
+      </Card>
+
+      {/* Universe Leaderboard */}
+      <Card className="mb-6">
+        <CardHeader
+          title="Universe Leaderboard"
+          subtitle={`Every strategy vs. every IG-tradable instrument (${BT_UNIVERSE_SYMBOLS.length} symbols: ${BT_UNIVERSE.fx.length} FX, ${BT_UNIVERSE.index.length} indices, ${BT_UNIVERSE.commodity.length} commodities, ${BT_UNIVERSE.crypto.length} crypto, ${BT_UNIVERSE.share.length} shares) — ranked by average return per symbol`}
+        />
+        <p className="text-xs text-gray-500 mb-4">
+          Runs each strategy&apos;s default parameters against the full universe using per-asset-class spread
+          estimates (FX tightest, crypto widest — not live IG pricing). Takes a couple of minutes; results are
+          saved on this device so they&apos;re here next time you open the page.
+        </p>
+
+        <div className="flex items-center gap-3 mb-4">
+          <button
+            onClick={() => { void runLeaderboard(); }}
+            disabled={lbRunning}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+              lbRunning ? 'bg-gray-700 text-gray-400 cursor-wait' : 'bg-amber-600 hover:bg-amber-500 text-white',
+            )}
+          >
+            {lbRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trophy className="h-4 w-4" />}
+            {lbRunning ? `Running… ${lbProgress ? `${lbProgress.done}/${lbProgress.total}` : ''}` : 'Run All Strategies vs. Universe'}
+          </button>
+          {lbLastRun && !lbRunning && (
+            <span className="text-[11px] text-gray-600">Last run {new Date(lbLastRun).toLocaleString()}</span>
+          )}
+        </div>
+
+        {lbRows.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-gray-500 border-b border-gray-800">
+                  <th className="py-2 pr-3">Strategy</th>
+                  <th className="py-2 pr-3">Avg return/symbol</th>
+                  <th className="py-2 pr-3">Win rate</th>
+                  <th className="py-2 pr-3">Profit factor</th>
+                  <th className="py-2 pr-3">Avg max DD</th>
+                  <th className="py-2 pr-3">Profitable</th>
+                  <th className="py-2 pr-3">Trades</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lbRows.map((row, idx) => (
+                  <tr key={row.strategy} className={clsx('border-b border-gray-900', idx === 0 && 'bg-amber-500/5')}>
+                    <td className="py-2 pr-3 font-medium text-white flex items-center gap-1.5">
+                      {idx === 0 && <Trophy className="h-3.5 w-3.5 text-amber-400" />}
+                      {BT_STRATEGY_LABELS[row.strategy]}
+                    </td>
+                    <td className={clsx('py-2 pr-3 font-mono', row.avgReturnPct > 0 ? 'text-emerald-400' : 'text-rose-400')}>
+                      {row.avgReturnPct >= 0 ? '+' : ''}{row.avgReturnPct.toFixed(2)}%
+                    </td>
+                    <td className="py-2 pr-3 font-mono text-gray-300">{row.winRate.toFixed(0)}%</td>
+                    <td className="py-2 pr-3 font-mono text-gray-300">{row.profitFactor.toFixed(2)}</td>
+                    <td className="py-2 pr-3 font-mono text-gray-300">−{row.avgMaxDrawdownPct.toFixed(1)}%</td>
+                    <td className="py-2 pr-3 font-mono text-gray-300">{row.profitableSymbols}/{row.symbolsTested}</td>
+                    <td className="py-2 pr-3 font-mono text-gray-500">{row.trades}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {!lbRunning && lbRows.length === 0 && (
+          <p className="text-xs text-gray-600 py-4 text-center">No leaderboard run yet.</p>
+        )}
       </Card>
 
       {/* Walk-forward results */}

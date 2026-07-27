@@ -13,6 +13,91 @@
 
 export type BTBar = { t: string; o: number; h: number; l: number; c: number; v: number };
 
+// ── IG universe ────────────────────────────────────────────────────────────
+// Yahoo tickers for the instruments actually tradable through the IG bots
+// (epics in app/api/ig/order/route.ts, candles in app/api/ig/candles/route.ts,
+// stock lists in components/ig/IGSharesAutoTrader.tsx). Grouped by asset class
+// so the simulator can charge each a realistic spread-bet cost instead of one
+// flat guess for everything.
+
+export type AssetClass = 'fx' | 'index' | 'commodity' | 'crypto' | 'share';
+
+export const BT_UNIVERSE: Record<AssetClass, { label: string; symbol: string }[]> = {
+  fx: [
+    { label: 'GBP/USD', symbol: 'GBPUSD=X' },
+    { label: 'EUR/USD', symbol: 'EURUSD=X' },
+    { label: 'EUR/GBP', symbol: 'EURGBP=X' },
+    { label: 'USD/JPY', symbol: 'JPY=X' },
+    { label: 'AUD/USD', symbol: 'AUDUSD=X' },
+  ],
+  index: [
+    { label: 'FTSE 100',   symbol: '^FTSE' },
+    { label: 'S&P 500',    symbol: '^GSPC' },
+    { label: 'NASDAQ 100', symbol: '^IXIC' },
+    { label: 'Germany 40', symbol: '^GDAXI' },
+    { label: 'Wall Street', symbol: '^DJI' },
+    { label: 'Japan 225',  symbol: '^N225' },
+  ],
+  commodity: [
+    { label: 'Gold',        symbol: 'GC=F' },
+    { label: 'Oil (WTI)',   symbol: 'CL=F' },
+    { label: 'Brent Crude', symbol: 'BZ=F' },
+    { label: 'Silver',      symbol: 'SI=F' },
+    { label: 'Natural Gas', symbol: 'NG=F' },
+  ],
+  crypto: [
+    { label: 'Bitcoin',  symbol: 'BTC-USD' },
+    { label: 'Ethereum', symbol: 'ETH-USD' },
+  ],
+  share: [
+    { label: 'AAPL', symbol: 'AAPL' }, { label: 'MSFT', symbol: 'MSFT' },
+    { label: 'NVDA', symbol: 'NVDA' }, { label: 'TSLA', symbol: 'TSLA' },
+    { label: 'AMZN', symbol: 'AMZN' }, { label: 'META', symbol: 'META' },
+    { label: 'GOOGL', symbol: 'GOOGL' }, { label: 'AMD', symbol: 'AMD' },
+    { label: 'NFLX', symbol: 'NFLX' }, { label: 'PLTR', symbol: 'PLTR' },
+    { label: 'COIN', symbol: 'COIN' }, { label: 'SNAP', symbol: 'SNAP' },
+    { label: 'SOFI', symbol: 'SOFI' }, { label: 'RIVN', symbol: 'RIVN' },
+    { label: 'F', symbol: 'F' }, { label: 'BAC', symbol: 'BAC' },
+    { label: 'JPM', symbol: 'JPM' }, { label: 'XOM', symbol: 'XOM' },
+    { label: 'CVX', symbol: 'CVX' }, { label: 'UBER', symbol: 'UBER' },
+    { label: 'NIO', symbol: 'NIO' }, { label: 'INTC', symbol: 'INTC' },
+    { label: 'T', symbol: 'T' }, { label: 'VZ', symbol: 'VZ' },
+    { label: 'LLOY.L', symbol: 'LLOY.L' }, { label: 'BARC.L', symbol: 'BARC.L' },
+    { label: 'VOD.L', symbol: 'VOD.L' }, { label: 'BP.L', symbol: 'BP.L' },
+    { label: 'SHEL.L', symbol: 'SHEL.L' }, { label: 'AZN.L', symbol: 'AZN.L' },
+    { label: 'GSK.L', symbol: 'GSK.L' }, { label: 'HSBA.L', symbol: 'HSBA.L' },
+    { label: 'RR.L', symbol: 'RR.L' }, { label: 'NWG.L', symbol: 'NWG.L' },
+  ],
+};
+
+/** All universe symbols flattened, deduped. */
+export const BT_UNIVERSE_SYMBOLS: string[] = Array.from(
+  new Set(Object.values(BT_UNIVERSE).flat().map(x => x.symbol)),
+);
+
+function assetClassOf(symbol: string): AssetClass {
+  for (const [cls, list] of Object.entries(BT_UNIVERSE)) {
+    if (list.some(x => x.symbol === symbol)) return cls as AssetClass;
+  }
+  if (symbol.endsWith('=X')) return 'fx';
+  if (symbol.endsWith('-USD')) return 'crypto';
+  if (symbol.endsWith('=F')) return 'commodity';
+  if (symbol.startsWith('^')) return 'index';
+  return 'share';
+}
+
+// Rough, illustrative per-side spread costs by asset class — NOT pulled from
+// IG's live pricing. FX majors run tight; shares and crypto run wider. Meant
+// to differentiate strategies fairly across asset classes, not to predict an
+// exact fill price. Override via BTParams.slippageBps for a single-symbol run.
+export const BT_DEFAULT_SPREAD_BPS: Record<AssetClass, number> = {
+  fx: 3, index: 4, commodity: 5, crypto: 15, share: 8,
+};
+
+export function defaultSpreadBpsFor(symbol: string): number {
+  return BT_DEFAULT_SPREAD_BPS[assetClassOf(symbol)];
+}
+
 export type BTStrategy =
   | 'rsi_mean_reversion'
   | 'ema_crossover'
