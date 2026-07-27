@@ -5,3 +5,4 @@ bot-state.json
 alpaca-bot-state-*.json
 ig-strategy-bot-state-*.json
 trade-journal-*.json
+leaderboard-state.json

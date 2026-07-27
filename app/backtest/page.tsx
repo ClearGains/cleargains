@@ -67,6 +67,57 @@ function EquityCurve({ curve }: { curve: { t: string; equity: number }[] }) {
   );
 }
 
+type LbRow = {
+  strategy:           BTStrategy;
+  symbolsTested:      number;
+  symbolsSkipped:     number;
+  trades:             number;
+  avgReturnPct:       number;  // mean of each symbol's total return
+  winRate:            number;  // pooled across all trades
+  profitFactor:       number;  // pooled across all trades
+  avgMaxDrawdownPct:  number;
+  profitableSymbols:  number;
+};
+
+function LbTable({ rows }: { rows: LbRow[] }) {
+  if (!rows.length) return <p className="text-xs text-gray-600 py-4 text-center">No results yet.</p>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-left text-gray-500 border-b border-gray-800">
+            <th className="py-2 pr-3">Strategy</th>
+            <th className="py-2 pr-3">Avg return/symbol</th>
+            <th className="py-2 pr-3">Win rate</th>
+            <th className="py-2 pr-3">Profit factor</th>
+            <th className="py-2 pr-3">Avg max DD</th>
+            <th className="py-2 pr-3">Profitable</th>
+            <th className="py-2 pr-3">Trades</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, idx) => (
+            <tr key={row.strategy} className={clsx('border-b border-gray-900', idx === 0 && 'bg-amber-500/5')}>
+              <td className="py-2 pr-3 font-medium text-white flex items-center gap-1.5">
+                {idx === 0 && <Trophy className="h-3.5 w-3.5 text-amber-400" />}
+                {BT_STRATEGY_LABELS[row.strategy]}
+              </td>
+              <td className={clsx('py-2 pr-3 font-mono', row.avgReturnPct > 0 ? 'text-emerald-400' : 'text-rose-400')}>
+                {row.avgReturnPct >= 0 ? '+' : ''}{row.avgReturnPct.toFixed(2)}%
+              </td>
+              <td className="py-2 pr-3 font-mono text-gray-300">{row.winRate.toFixed(0)}%</td>
+              <td className="py-2 pr-3 font-mono text-gray-300">{row.profitFactor.toFixed(2)}</td>
+              <td className="py-2 pr-3 font-mono text-gray-300">−{row.avgMaxDrawdownPct.toFixed(1)}%</td>
+              <td className="py-2 pr-3 font-mono text-gray-300">{row.profitableSymbols}/{row.symbolsTested}</td>
+              <td className="py-2 pr-3 font-mono text-gray-500">{row.trades}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function StatCell({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' | 'muted' }) {
   return (
     <div>
@@ -155,18 +206,6 @@ function ResultCard({ result }: { result: BTResult }) {
   );
 }
 
-type LbRow = {
-  strategy:           BTStrategy;
-  symbolsTested:      number;
-  symbolsSkipped:     number;
-  trades:             number;
-  avgReturnPct:       number;  // mean of each symbol's total return
-  winRate:            number;  // pooled across all trades
-  profitFactor:       number;  // pooled across all trades
-  avgMaxDrawdownPct:  number;
-  profitableSymbols:  number;
-};
-
 const LB_STORAGE_KEY = 'bt_leaderboard_v1';
 
 export default function BacktestPage() {
@@ -194,6 +233,40 @@ export default function BacktestPage() {
       }
     } catch {}
   }, []);
+
+  // ── Server (Oracle VM) leaderboard — runs on its own schedule, no browser needed ──
+  const [svRows, setSvRows]           = useState<LbRow[]>([]);
+  const [svLastRun, setSvLastRun]     = useState<string | null>(null);
+  const [svRunning, setSvRunning]     = useState(false);
+  const [svLoading, setSvLoading]     = useState(true);
+  const [svError, setSvError]         = useState<string | null>(null);
+
+  const fetchServerLeaderboard = async () => {
+    try {
+      const res = await fetch('/api/leaderboard');
+      const data = await res.json() as { ok?: boolean; error?: string; rows?: LbRow[]; lastRun?: string; running?: boolean };
+      if (data.error) { setSvError(data.error); return; }
+      setSvRows(data.rows ?? []);
+      setSvLastRun(data.lastRun || null);
+      setSvRunning(!!data.running);
+      setSvError(null);
+    } catch (e) {
+      setSvError(e instanceof Error ? e.message : 'Failed to reach the server');
+    } finally {
+      setSvLoading(false);
+    }
+  };
+
+  useEffect(() => { void fetchServerLeaderboard(); }, []);
+
+  const triggerServerSweep = async () => {
+    setSvRunning(true);
+    try {
+      await fetch('/api/leaderboard', { method: 'POST' });
+    } catch {}
+    // The sweep takes a few minutes — poll occasionally rather than once
+    setTimeout(() => { void fetchServerLeaderboard(); }, 20_000);
+  };
 
   const runLeaderboard = async () => {
     setLbRunning(true);
@@ -448,16 +521,51 @@ export default function BacktestPage() {
         </div>
       </Card>
 
-      {/* Universe Leaderboard */}
+      {/* Server Leaderboard — always-on, runs on the Oracle VM every ~6h */}
       <Card className="mb-6">
         <CardHeader
-          title="Universe Leaderboard"
-          subtitle={`Every strategy vs. every IG-tradable instrument (${BT_UNIVERSE_SYMBOLS.length} symbols: ${BT_UNIVERSE.fx.length} FX, ${BT_UNIVERSE.index.length} indices, ${BT_UNIVERSE.commodity.length} commodities, ${BT_UNIVERSE.crypto.length} crypto, ${BT_UNIVERSE.share.length} shares) — ranked by average return per symbol`}
+          title="Universe Leaderboard — Oracle Server"
+          subtitle={`Runs unattended on your bot-server every 6h against the full IG universe (${BT_UNIVERSE_SYMBOLS.length} symbols) — no browser tab needed`}
+        />
+        <div className="flex items-center gap-3 mb-4">
+          <button
+            onClick={() => { void triggerServerSweep(); }}
+            disabled={svRunning || svLoading}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+              (svRunning || svLoading) ? 'bg-gray-700 text-gray-400 cursor-wait' : 'bg-amber-600 hover:bg-amber-500 text-white',
+            )}
+          >
+            {(svRunning || svLoading) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trophy className="h-4 w-4" />}
+            {svLoading ? 'Loading…' : svRunning ? 'Sweep running on server…' : 'Trigger Sweep Now'}
+          </button>
+          <button
+            onClick={() => { void fetchServerLeaderboard(); }}
+            className="text-xs text-gray-500 hover:text-gray-300 underline"
+          >
+            Refresh
+          </button>
+          {svLastRun && (
+            <span className="text-[11px] text-gray-600">Last completed {new Date(svLastRun).toLocaleString()}</span>
+          )}
+        </div>
+
+        {svError && (
+          <p className="text-xs text-rose-400 mb-3">{svError}</p>
+        )}
+        {!svError && <LbTable rows={svRows} />}
+      </Card>
+
+      {/* Browser Leaderboard — one-off, runs while this tab stays open */}
+      <Card className="mb-6">
+        <CardHeader
+          title="Universe Leaderboard — This Browser"
+          subtitle="Same sweep, run locally right now instead of waiting for the server's schedule"
         />
         <p className="text-xs text-gray-500 mb-4">
           Runs each strategy&apos;s default parameters against the full universe using per-asset-class spread
-          estimates (FX tightest, crypto widest — not live IG pricing). Takes a couple of minutes; results are
-          saved on this device so they&apos;re here next time you open the page.
+          estimates (FX tightest, crypto widest — not live IG pricing). Takes a couple of minutes and only runs
+          while this tab is open; results are saved on this device between visits.
         </p>
 
         <div className="flex items-center gap-3 mb-4">
@@ -465,8 +573,8 @@ export default function BacktestPage() {
             onClick={() => { void runLeaderboard(); }}
             disabled={lbRunning}
             className={clsx(
-              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
-              lbRunning ? 'bg-gray-700 text-gray-400 cursor-wait' : 'bg-amber-600 hover:bg-amber-500 text-white',
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors border',
+              lbRunning ? 'border-gray-700 text-gray-500 cursor-wait' : 'border-amber-500/50 text-amber-300 hover:bg-amber-500/10',
             )}
           >
             {lbRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trophy className="h-4 w-4" />}
@@ -477,45 +585,7 @@ export default function BacktestPage() {
           )}
         </div>
 
-        {lbRows.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left text-gray-500 border-b border-gray-800">
-                  <th className="py-2 pr-3">Strategy</th>
-                  <th className="py-2 pr-3">Avg return/symbol</th>
-                  <th className="py-2 pr-3">Win rate</th>
-                  <th className="py-2 pr-3">Profit factor</th>
-                  <th className="py-2 pr-3">Avg max DD</th>
-                  <th className="py-2 pr-3">Profitable</th>
-                  <th className="py-2 pr-3">Trades</th>
-                </tr>
-              </thead>
-              <tbody>
-                {lbRows.map((row, idx) => (
-                  <tr key={row.strategy} className={clsx('border-b border-gray-900', idx === 0 && 'bg-amber-500/5')}>
-                    <td className="py-2 pr-3 font-medium text-white flex items-center gap-1.5">
-                      {idx === 0 && <Trophy className="h-3.5 w-3.5 text-amber-400" />}
-                      {BT_STRATEGY_LABELS[row.strategy]}
-                    </td>
-                    <td className={clsx('py-2 pr-3 font-mono', row.avgReturnPct > 0 ? 'text-emerald-400' : 'text-rose-400')}>
-                      {row.avgReturnPct >= 0 ? '+' : ''}{row.avgReturnPct.toFixed(2)}%
-                    </td>
-                    <td className="py-2 pr-3 font-mono text-gray-300">{row.winRate.toFixed(0)}%</td>
-                    <td className="py-2 pr-3 font-mono text-gray-300">{row.profitFactor.toFixed(2)}</td>
-                    <td className="py-2 pr-3 font-mono text-gray-300">−{row.avgMaxDrawdownPct.toFixed(1)}%</td>
-                    <td className="py-2 pr-3 font-mono text-gray-300">{row.profitableSymbols}/{row.symbolsTested}</td>
-                    <td className="py-2 pr-3 font-mono text-gray-500">{row.trades}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {!lbRunning && lbRows.length === 0 && (
-          <p className="text-xs text-gray-600 py-4 text-center">No leaderboard run yet.</p>
-        )}
+        <LbTable rows={lbRows} />
       </Card>
 
       {/* Walk-forward results */}

@@ -16,6 +16,7 @@ import {
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
+import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } from './leaderboard';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -353,6 +354,20 @@ app.get('/alpaca/:mode/journal', auth, (req: Request, res: Response) => {
   res.json(getJournal(mode, limit));
 });
 
+// ── Backtest leaderboard (/leaderboard) ──────────────────────────────────────
+// Runs every strategy against the full IG-tradable universe on a schedule
+// (see leaderboard.ts) so results are available without needing a browser
+// tab open — GET returns whatever the last completed sweep found.
+
+app.get('/leaderboard', auth, (_req: Request, res: Response) => {
+  res.json(getLeaderboardState());
+});
+
+app.post('/leaderboard/run', auth, (_req: Request, res: Response) => {
+  res.json({ ok: true, message: 'Sweep starting…' });
+  void runLeaderboardSweep().catch(e => console.error('[leaderboard] Manual run failed:', e));
+});
+
 // ── IG Strategy bot routes (/ig-strategy/:mode/*) ────────────────────────────
 
 function resolveIgMode(req: Request, res: Response): IgMode | null {
@@ -415,6 +430,8 @@ app.post('/ig-strategy/:mode/resume', auth, (req: Request, res: Response) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[bot-server] Listening on 0.0.0.0:${PORT}`);
   console.log(`[bot-server] Multi-account mode: demo + live`);
+
+  startLeaderboardSchedule();
 
   // Auto-resume legacy single-account bot if it was running before restart
   const saved = loadSavedState();
