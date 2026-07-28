@@ -517,7 +517,7 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
 function IgSpreadBetTab() {
   const [igMode, setIgMode]         = useState<IgMode>('demo');
   const [strategy, setStrategy]     = useState<IgStrategyName>('donchian_breakout');
-  const [notional, setNotional]     = useState('200');
+  const [maxRisk, setMaxRisk]       = useState('20');
   const [maxPos, setMaxPos]         = useState('3');
   const [allowShorts, setAllowShorts] = useState(false);
 
@@ -581,7 +581,7 @@ function IgSpreadBetTab() {
   const handleStart = () => {
     void post('start', {
       strategy,
-      notionalGbp:  parseFloat(notional) || 200,
+      maxRiskGbp:   parseFloat(maxRisk) || 20,
       maxPositions: parseInt(maxPos, 10) || 3,
       allowShorts,
     });
@@ -666,19 +666,20 @@ function IgSpreadBetTab() {
               {stratMeta && <p className="text-xs text-slate-500 mt-2">{stratMeta.description}</p>}
             </div>
 
-            {/* Notional & max positions */}
+            {/* Max risk & max positions */}
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-xs text-slate-400 mb-1.5">Notional (£)</label>
+                <label className="block text-xs text-slate-400 mb-1.5">Max risk / trade (£)</label>
                 <input
                   type="number"
-                  value={notional}
-                  onChange={e => setNotional(e.target.value)}
+                  value={maxRisk}
+                  onChange={e => setMaxRisk(e.target.value)}
                   disabled={isRunning}
-                  min="50"
-                  step="50"
+                  min="5"
+                  step="5"
                   className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 disabled:opacity-50"
                 />
+                <p className="text-[10px] text-slate-500 mt-1">Max £ lost if the stop is hit — stake auto-sizes to this, not a notional target</p>
               </div>
               <div>
                 <label className="block text-xs text-slate-400 mb-1.5">Max positions</label>

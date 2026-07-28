@@ -45,7 +45,11 @@ export type IgStrategyConfig = {
   mode:             IgMode;
   strategy:         IgStrategyName;
   epics:            string[];   // populated by scanner at start
-  notionalGbp:      number;    // target exposure per position in £
+  // Max £ lost if the stop is hit — NOT a notional-exposure target. Stake is
+  // derived as maxRiskGbp ÷ stop-distance-in-points, which is scale-agnostic
+  // (works correctly for FX at ~1.3 with a 0.0001 point size, and indices at
+  // ~10,000 with a 1.0 point size alike) unlike a price-based notional calc.
+  maxRiskGbp:       number;
   maxPositions:     number;
   allowShorts:      boolean;
   maxDailyLossPct?: number;    // circuit breaker: no new entries after balance drops this % from day start (default 3)
@@ -177,10 +181,14 @@ function igBarToAlpacaBar(b: CandleBar): AlpacaBar {
   };
 }
 
-// Stake (£/point) from a target GBP notional and current mid price
-function calcStake(notionalGbp: number, midPrice: number): number {
-  if (midPrice <= 0) return 0.5;
-  const raw = notionalGbp / midPrice;
+// Risk-based sizing: stake (£/point) = £risk ÷ stop-distance-in-points.
+// Deliberately never divides by price — a price-based notional calc
+// (£notional ÷ price) silently produces wildly oversized stakes on FX, where
+// price (~1.3) and point size (0.0001) are unrelated scales, unlike indices
+// where price and point size roughly coincide.
+function calcStake(maxRiskGbp: number, stopDist: number): number {
+  if (stopDist <= 0) return 0.1;
+  const raw = maxRiskGbp / stopDist;
   return Math.max(0.1, Math.round(raw * 10) / 10);
 }
 
@@ -397,8 +405,6 @@ async function executeIgSignal(
   const minDeal = detail?.minDealSize ?? 0.5;
   const minStop = detail?.minStopDist ?? 1;
 
-  const rawStake   = calcStake(cfg.notionalGbp, currentPrice);
-  const stake      = Math.max(minDeal, rawStake);
   const stopDist   = stopPrice        ? Math.abs(currentPrice - stopPrice)        : undefined;
   const profitDistRaw = takeProfitPrice ? Math.abs(currentPrice - takeProfitPrice) : undefined;
 
@@ -407,12 +413,19 @@ async function executeIgSignal(
   const effectiveStopDist = effectiveStopDistRaw !== undefined ? Math.max(minStop, effectiveStopDistRaw) : undefined;
   const profitDist        = profitDistRaw !== undefined ? Math.max(minStop, profitDistRaw) : undefined;
 
+  // Sizing needs a stop distance to divide by — strategies should always
+  // provide one, but fall back to a conservative 1.5% price-based distance
+  // rather than crash if one somehow didn't.
+  const sizingStopDist = effectiveStopDist ?? Math.max(minStop, currentPrice * 0.015);
+  const rawStake = calcStake(cfg.maxRiskGbp, sizingStopDist);
+  const stake    = Math.max(minDeal, rawStake);
+
   if (rawStake < minDeal) {
     addLog(mode, 'info', name, `Stake £${rawStake}/pt below IG minimum £${minDeal}/pt for this instrument — using minimum`);
   }
 
   addLog(mode, 'enter', name, `${action} — ${reason}`);
-  addLog(mode, 'info',  name, `Stake: £${stake}/pt | Price: ~${currentPrice.toFixed(2)} | ~£${(stake * currentPrice).toFixed(0)} exposure`);
+  addLog(mode, 'info',  name, `Stake: £${stake}/pt | Price: ~${currentPrice.toFixed(2)} | max loss at stop: ~£${(stake * sizingStopDist).toFixed(0)}`);
 
   try {
     const { dealId, level, protectionOk, protectionError } =
@@ -644,7 +657,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
   scheduleSessionRefresh(mode, st.session);
 
   addLog(mode, 'info', '—', `Bot started — ${STRATEGY_META[cfg.strategy].label} | ${mode} | ${cfg.epics.map(epicName).join(', ')}`);
-  addLog(mode, 'info', '—', `Notional: £${cfg.notionalGbp} | Max positions: ${cfg.maxPositions} | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
+  addLog(mode, 'info', '—', `Max risk/trade: £${cfg.maxRiskGbp} | Max positions: ${cfg.maxPositions} | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
 
   void poll(mode);
   return { ok: true };

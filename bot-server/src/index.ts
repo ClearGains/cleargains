@@ -394,7 +394,7 @@ app.post('/ig-strategy/:mode/start', auth, (req: Request, res: Response) => {
     mode,
     strategy:     body.strategy     ?? 'rsi_mean_reversion',
     epics:        [],                // filled by scanner
-    notionalGbp:  body.notionalGbp  ?? 200,
+    maxRiskGbp:   body.maxRiskGbp   ?? 20,
     maxPositions: body.maxPositions ?? 3,
     allowShorts:  body.allowShorts  ?? false,
   };

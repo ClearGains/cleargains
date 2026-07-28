@@ -4,10 +4,18 @@ import type { AlpacaBar } from './alpacaApi';
 import type { IgStrategyName } from './igStrategyBot';
 
 // ── Curated liquid IG epic universe ───────────────────────────────────────────
-// Indices + major US and UK stocks. FX/commodities excluded to keep stake
-// calculations simple (price-in-points is unambiguous for these instruments).
+// Indices, major US/UK stocks, and FX majors. Stake sizing is risk-based
+// (£risk ÷ stop-distance-in-points, computed off actual returned prices) —
+// scale-agnostic, so it's correct for FX's ~1.3 price / 0.0001 point size
+// alongside indices' ~10,000 price / 1.0 point size without special-casing.
 
 export const IG_EPICS: { epic: string; name: string }[] = [
+  // FX majors
+  { epic: 'CS.D.GBPUSD.TODAY.IP', name: 'GBP/USD'      },
+  { epic: 'CS.D.EURUSD.TODAY.IP', name: 'EUR/USD'      },
+  { epic: 'CS.D.USDJPY.TODAY.IP', name: 'USD/JPY'      },
+  { epic: 'CS.D.EURGBP.TODAY.IP', name: 'EUR/GBP'      },
+  { epic: 'CS.D.AUDUSD.TODAY.IP', name: 'AUD/USD'      },
   // US indices
   { epic: 'IX.D.DOW.DAILY.IP',    name: 'Wall St'      },
   { epic: 'IX.D.NASDAQ.DAILY.IP', name: 'US Tech 100'  },
