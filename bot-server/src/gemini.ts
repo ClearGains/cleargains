@@ -143,3 +143,80 @@ Respond with JSON only, no markdown:
     return rules;
   }
 }
+
+// ── Daily-timeframe second opinion ───────────────────────────────────────────
+// Same role as the Demo Trader tab's /api/gemini/verdict route (confirm/override/
+// skip a signal already produced by a daily-timeframe strategy), ported here so
+// the persistent bot gets the same check instead of running unchecked.
+
+export type DailyVerdictRequest = {
+  instrumentName: string;
+  direction:      'BUY' | 'SELL';
+  strength:       number;
+  price:          number;
+  changePercent:  number;
+  stopPoints:     number;
+  tpPoints:       number;
+};
+
+export type DailyVerdict = {
+  direction:  'BUY' | 'SELL' | 'SKIP';
+  confidence: number;
+  reason:     string;
+  engine:     'gemini' | 'passthrough';
+};
+
+export async function askGeminiDailyVerdict(req: DailyVerdictRequest): Promise<DailyVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return { direction: req.direction, confidence: req.strength, reason: 'No Gemini key — using signal strength', engine: 'passthrough' };
+  }
+
+  const rrRatio = req.stopPoints > 0 ? (req.tpPoints / req.stopPoints).toFixed(1) : '?';
+  const pctStr  = `${req.changePercent >= 0 ? '+' : ''}${req.changePercent.toFixed(2)}%`;
+
+  const prompt = `You are a second-opinion filter for a spread betting strategy.
+Signal: ${req.direction} ${req.instrumentName}
+Price: ${req.price.toFixed(2)}, Daily change: ${pctStr}
+Signal strength: ${req.strength}%
+Stop: ${req.stopPoints}pts, TP: ${req.tpPoints}pts (${rrRatio}:1 R:R)
+
+Should we take this trade? Confirm, override, or SKIP if the setup looks poor.
+Respond with JSON only, no markdown:
+{"direction":"BUY","confidence":72,"reason":"max 12 words"}`;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents:         [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 100 },
+        }),
+        signal: AbortSignal.timeout(8_000),
+      }
+    );
+
+    if (!res.ok) {
+      return { direction: req.direction, confidence: req.strength, reason: `Gemini ${res.status}`, engine: 'passthrough' };
+    }
+
+    const data    = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
+
+    const dir = (['BUY', 'SELL', 'SKIP'].includes(parsed.direction)) ? parsed.direction as DailyVerdict['direction'] : 'SKIP';
+
+    return {
+      direction:  dir,
+      confidence: Math.max(0, Math.min(100, parsed.confidence ?? req.strength)),
+      reason:     parsed.reason ?? '',
+      engine:     'gemini',
+    };
+  } catch {
+    return { direction: req.direction, confidence: req.strength, reason: 'Gemini failed — using signal', engine: 'passthrough' };
+  }
+}

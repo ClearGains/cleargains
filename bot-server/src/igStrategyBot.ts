@@ -13,6 +13,7 @@ import {
   type StrategySignal,
 } from './alpacaStrategies';
 import { scanIgEpics, epicName } from './igStrategyScanner';
+import { askGeminiDailyVerdict } from './gemini';
 import type { AlpacaBar } from './alpacaApi';
 import {
   isNYSEOpen, isInOpeningRange, isNearClose,
@@ -399,6 +400,15 @@ async function evaluateEpic(
 
 // ── Order execution ───────────────────────────────────────────────────────────
 
+// Mirrors the Demo Trader tab's classification: indices/FX are driven by liquid
+// price-action data with no edge from an LLM opinion (and it adds ~8s latency
+// per call) — only shares get the Gemini second-opinion check.
+function classifyMarketType(epic: string): 'INDEX' | 'FOREX' | 'SHARES' {
+  if (epic.startsWith('CS.')) return 'FOREX';
+  if (epic.startsWith('IX.')) return 'INDEX';
+  return 'SHARES';
+}
+
 async function executeIgSignal(
   mode:         IgMode,
   epic:         string,
@@ -494,12 +504,37 @@ async function executeIgSignal(
     return;
   }
 
-  addLog(mode, 'enter', name, `${action} — ${reason}`);
+  // Gemini second opinion — SHARES only, same scope as the Demo Trader tab.
+  // Indices/FX are liquid price-action markets where an LLM opinion adds ~8s
+  // of latency per call with no edge (no live feed of its own); shares are
+  // where a sanity check on the setup earns its cost.
+  let effectiveDirection: 'BUY' | 'SELL' = direction;
+  if (classifyMarketType(epic) === 'SHARES') {
+    try {
+      const verdict = await askGeminiDailyVerdict({
+        instrumentName: name,
+        direction,
+        strength:       70,  // no granular numeric score at this layer — fixed moderate default
+        price:          currentPrice,
+        changePercent:  0,   // not available at this layer; doesn't affect the direction check
+        stopPoints:     sizingStopDist,
+        tpPoints:       profitDist ?? sizingStopDist * 2.5,
+      });
+      addLog(mode, 'info', name, `[GEMINI] ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+      if (verdict.direction === 'SKIP' || verdict.confidence < 50) {
+        addLog(mode, 'wait', name, `[GEMINI] Skipped entry — ${verdict.direction} ${verdict.confidence}%`);
+        return;
+      }
+      if (verdict.direction === 'BUY' || verdict.direction === 'SELL') effectiveDirection = verdict.direction;
+    } catch { /* Gemini unavailable — proceed with original signal */ }
+  }
+
+  addLog(mode, 'enter', name, `${effectiveDirection} — ${reason}`);
   addLog(mode, 'info',  name, `Stake: £${stake}/pt | Price: ~${currentPrice.toFixed(2)} | max loss at stop: ~£${(stake * sizingStopDist).toFixed(0)}`);
 
   try {
     const { dealId, level, protectionOk, protectionError } =
-      await placeMarketOrder(session, epic, direction, stake, effectiveStopDist, profitDist);
+      await placeMarketOrder(session, epic, effectiveDirection, stake, effectiveStopDist, profitDist);
     addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
 
     // Only claim Stop/TP protection once it's actually confirmed attached —
