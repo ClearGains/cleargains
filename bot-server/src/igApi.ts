@@ -270,7 +270,7 @@ export type FullPosition = IGPosition & {
 
 export async function fetchFullPositions(session: IGSession): Promise<FullPosition[]> {
   const base = BASE[session.env];
-  const r = await fetch(`${base}/positions/otc`, { headers: headers(session, '2'), signal: AbortSignal.timeout(8_000) });
+  const r = await fetch(`${base}/positions`, { headers: headers(session, '2'), signal: AbortSignal.timeout(8_000) });
   if (!r.ok) return [];
   const d = await r.json() as {
     positions?: Array<{
