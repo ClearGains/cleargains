@@ -182,7 +182,11 @@ export async function scanIgEpics(
     } catch {
       // Epic unavailable or market closed — skip silently
     }
-    await new Promise(r => setTimeout(r, 150)); // avoid rate limit
+    // IG's non-trading allowance is exceeded (403 error.public-api.exceeded-*-allowance)
+    // by a 30-call scan at 150ms spacing — confirmed empirically, and once tripped it
+    // doesn't clear for a while, taking the whole account (not just the scan) down with
+    // it for the next several minutes. 1.2s keeps a full scan under that ceiling.
+    await new Promise(r => setTimeout(r, 1200));
   }
 
   const top = scored
