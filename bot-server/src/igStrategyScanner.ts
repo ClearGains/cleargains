@@ -2,6 +2,7 @@ import { fetchCandleHistory, type IGSession, type CandleBar } from './igApi';
 import { calcRsi, calcEma, calcAtr, calcVwap, calcSma, calcMacdHist } from './alpacaStrategies';
 import type { AlpacaBar } from './alpacaApi';
 import type { IgStrategyName } from './igStrategyBot';
+import { fetchYahooBars, EPIC_TO_YAHOO } from './yahooFetch';
 
 // ── Curated liquid IG epic universe ───────────────────────────────────────────
 // Indices, major US/UK stocks, and FX majors. Stake sizing is risk-based
@@ -165,6 +166,15 @@ function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
   return { epic, name, score: (crossed ? 40 : 0) + momentum * 1000 };
 }
 
+// Daily-timeframe strategies (the only ones actually selectable in the live
+// bot) score off free Yahoo daily bars instead of IG's allowance-limited
+// candle API — a 44-epic scan was burning a meaningful chunk of IG's weekly
+// historical-data allowance on every bot start or strategy switch, on top of
+// the per-poll confirm calls. Intraday/weekly strategies keep using IG's own
+// data — they're not real candidates (all backtest negative) and are gated
+// to market hours anyway, so their scan frequency never mattered as much.
+const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>(['donchian_breakout', 'ema_crossover', 'macd_crossover']);
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function scanIgEpics(
@@ -175,15 +185,17 @@ export async function scanIgEpics(
   log:      (msg: string) => void = console.log,
 ): Promise<string[]> {
   const pool = IG_EPICS.filter(e => !exclude.includes(e.epic));
-  log(`[ig-scanner] Fetching bars for ${pool.length} epics (strategy: ${strategy})…`);
+  const useYahoo = YAHOO_SCAN_STRATEGIES.has(strategy);
+  log(`[ig-scanner] Fetching bars for ${pool.length} epics (strategy: ${strategy}, source: ${useYahoo ? 'yahoo (free)' : 'ig'})…`);
 
   const { resolution, count: barCount } = SCAN_RESOLUTION[strategy];
   const scored: Scored[] = [];
 
   for (const { epic, name } of pool) {
     try {
-      const raw  = await fetchCandleHistory(session, epic, resolution, barCount);
-      const bars = raw.map(igBarToAlpacaBar);
+      const bars = useYahoo
+        ? (EPIC_TO_YAHOO[epic] ? await fetchYahooBars(EPIC_TO_YAHOO[epic], '1d', '6mo') ?? [] : [])
+        : (await fetchCandleHistory(session, epic, resolution, barCount)).map(igBarToAlpacaBar);
       let s: Scored;
       switch (strategy) {
         case 'rsi_mean_reversion': s = scoreRsi(bars, epic, name);    break;
@@ -202,8 +214,9 @@ export async function scanIgEpics(
     // IG's non-trading allowance is exceeded (403 error.public-api.exceeded-*-allowance)
     // by a 30-call scan at 150ms spacing — confirmed empirically, and once tripped it
     // doesn't clear for a while, taking the whole account (not just the scan) down with
-    // it for the next several minutes. 1.2s keeps a full scan under that ceiling.
-    await new Promise(r => setTimeout(r, 1200));
+    // it for the next several minutes. Yahoo has no such allowance, so only throttle
+    // when actually calling IG.
+    await new Promise(r => setTimeout(r, useYahoo ? 250 : 1200));
   }
 
   const top = scored
