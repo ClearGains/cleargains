@@ -1,0 +1,101 @@
+import type { AlpacaBar } from './alpacaApi';
+
+// ── Yahoo bars fetch ──────────────────────────────────────────────────────────
+// Yahoo blocks server requests that look automated (missing browser headers) —
+// a bare request from this VM returns 429. A normal User-Agent/Accept-Language
+// is enough to get real data back (confirmed manually against this exact host).
+// No historical-data allowance cost, unlike IG's own candle API — used for
+// frequent, free directional pre-checks; IG's own data is still the source of
+// truth for anything involving actual price levels, stops, or sizing.
+
+type YahooChartRaw = {
+  chart?: {
+    result?: Array<{
+      timestamp?: number[];
+      indicators?: {
+        quote?: Array<{
+          open?: (number | null)[]; high?: (number | null)[];
+          low?: (number | null)[]; close?: (number | null)[]; volume?: (number | null)[];
+        }>;
+      };
+    }>;
+    error?: unknown;
+  };
+};
+
+export async function fetchYahooBars(
+  symbol:   string,
+  interval: '5m' | '1h' | '1d',
+  range:    string,
+): Promise<AlpacaBar[] | null> {
+  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
+    `?interval=${interval}&range=${range}&includePrePost=false`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return null;
+    const raw = await res.json() as YahooChartRaw;
+    if (raw.chart?.error) return null;
+    const result = raw.chart?.result?.[0];
+    if (!result) return null;
+    const timestamps = result.timestamp ?? [];
+    const q = result.indicators?.quote?.[0] ?? {};
+    const bars: AlpacaBar[] = timestamps.map((ts, i) => ({
+      t: interval === '1d'
+        ? new Date(ts * 1000).toISOString().slice(0, 10)
+        : new Date(ts * 1000).toISOString(),
+      o: q.open?.[i] ?? 0, h: q.high?.[i] ?? 0, l: q.low?.[i] ?? 0, c: q.close?.[i] ?? 0, v: q.volume?.[i] ?? 0,
+    })).filter(b => b.c > 0);
+    return bars;
+  } catch {
+    return null;
+  }
+}
+
+// ── Epic → Yahoo ticker map ───────────────────────────────────────────────────
+// Covers the IG_EPICS universe in igStrategyScanner.ts. Only used for the
+// cheap directional pre-check — an epic missing here just skips the pre-check
+// and falls back to the normal once-daily IG-only path.
+
+export const EPIC_TO_YAHOO: Record<string, string> = {
+  // FX majors
+  'CS.D.GBPUSD.TODAY.IP': 'GBPUSD=X',
+  'CS.D.EURUSD.TODAY.IP': 'EURUSD=X',
+  'CS.D.USDJPY.TODAY.IP': 'JPY=X',
+  'CS.D.EURGBP.TODAY.IP': 'EURGBP=X',
+  'CS.D.AUDUSD.TODAY.IP': 'AUDUSD=X',
+  // Indices
+  'IX.D.DOW.DAILY.IP':    '^DJI',
+  'IX.D.NASDAQ.DAILY.IP': '^IXIC',
+  'IX.D.SANDA.DAILY.IP':  '^GSPC',
+  'IX.D.FTSE.DAILY.IP':   '^FTSE',
+  'IX.D.EUROST.DAILY.IP': '^STOXX50E',
+  'IX.D.DAX.DAILY.IP':    '^GDAXI',
+  // US stocks
+  'UA.D.AAPL.CASH.IP':  'AAPL',
+  'UA.D.MSFT.CASH.IP':  'MSFT',
+  'UA.D.NVDA.CASH.IP':  'NVDA',
+  'UA.D.AMZN.CASH.IP':  'AMZN',
+  'UA.D.GOOGL.CASH.IP': 'GOOGL',
+  'UA.D.META.CASH.IP':  'META',
+  'UA.D.TSLA.CASH.IP':  'TSLA',
+  'UA.D.NFLX.CASH.IP':  'NFLX',
+  'UA.D.JPM.CASH.IP':   'JPM',
+  'UA.D.V.CASH.IP':     'V',
+  'UA.D.UNH.CASH.IP':   'UNH',
+  'UA.D.XOM.CASH.IP':   'XOM',
+  // UK stocks
+  'UC.D.BARC.CASH.IP': 'BARC.L',
+  'UC.D.BP.CASH.IP':   'BP.L',
+  'UC.D.HSBA.CASH.IP': 'HSBA.L',
+  'UC.D.SHEL.CASH.IP': 'SHEL.L',
+  'UC.D.GSK.CASH.IP':  'GSK.L',
+  'UC.D.AZN.CASH.IP':  'AZN.L',
+  'UC.D.LLOY.CASH.IP': 'LLOY.L',
+};

@@ -18,6 +18,7 @@ import {
   isNYSEOpen, isInOpeningRange, isNearClose,
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
 } from './alpacaApi';
+import { fetchYahooBars, EPIC_TO_YAHOO } from './yahooFetch';
 
 // ── State persistence ─────────────────────────────────────────────────────────
 // Mirrors alpacaBot.ts — without this, a PM2 restart while the bot is running
@@ -146,6 +147,46 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
 };
+
+// Daily-timeframe strategies poll far more often here than STRATEGY_META's
+// shared pollMs (an hourly value really meant for the once-a-day gate below) —
+// IG-bot-specific, so it doesn't touch the Alpaca bot's own cadence for
+// ema_crossover. Safe to run this often because each cycle tries a free
+// Yahoo pre-check before ever touching IG's own (allowance-limited) candle
+// API — see evaluateEpic.
+const IG_POLL_MS_OVERRIDE: Partial<Record<IgStrategyName, number>> = {
+  ema_crossover:     15 * 60_000,
+  donchian_breakout: 15 * 60_000,
+  macd_crossover:    15 * 60_000,
+};
+function pollIntervalFor(strategy: IgStrategyName): number {
+  return IG_POLL_MS_OVERRIDE[strategy] ?? STRATEGY_META[strategy].pollMs;
+}
+
+// ── Yahoo directional pre-check ─────────────────────────────────────────────
+// Yahoo has no historical-data allowance cost, unlike IG's own candle API.
+// Used ONLY for a directional yes/no (BUY/SELL/CLOSE_LONG/CLOSE_SHORT/HOLD) —
+// never for actual price levels. Yahoo and IG quote the same instrument on
+// completely different numeric scales (confirmed empirically: GBP/USD reads
+// ~1.33 on Yahoo vs ~13,289 on IG's own feed), so mixing a Yahoo-derived stop/
+// target into a real IG order would be meaningless. When this flags a real
+// signal, the caller re-evaluates against IG's own data before doing anything.
+async function yahooPreCheckAction(
+  strategy:   IgStrategyName,
+  yahooSym:   string,
+  inPosition: boolean,
+  side?:      'long' | 'short',
+): Promise<StrategySignal['action'] | null> {
+  const bars = await fetchYahooBars(yahooSym, '1d', '6mo');
+  if (!bars || bars.length < 40) return null;  // Yahoo unavailable — caller decides fallback
+
+  switch (strategy) {
+    case 'ema_crossover':      return emaCrossoverSignal(bars, inPosition, side).action;
+    case 'donchian_breakout':  return donchianBreakoutSignal(bars, inPosition, side).action;
+    case 'macd_crossover':     return macdCrossoverSignal(bars, inPosition, side).action;
+    default:                   return null;
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -289,6 +330,18 @@ async function evaluateEpic(
   const openPos    = positions.find(p => p.epic === epic);
   const inPosition = !!openPos;
   const side       = openPos ? (openPos.direction === 'BUY' ? 'long' : 'short') as 'long' | 'short' : undefined;
+
+  // ── Yahoo pre-check gate (daily-timeframe strategies, outside the guaranteed
+  // once-daily window) — skip IG's allowance-limited candle fetch entirely
+  // unless Yahoo's free data already suggests something worth confirming.
+  const meta = STRATEGY_META[cfg.strategy];
+  if (meta.timeframe === 'daily' && !isDailyCheckTime()) {
+    const yahooSym = EPIC_TO_YAHOO[epic];
+    if (!yahooSym) return;  // can't pre-check — wait for the guaranteed daily window
+    const preAction = await yahooPreCheckAction(cfg.strategy, yahooSym, inPosition, side);
+    if (preAction === null || preAction === 'HOLD') return;  // no signal, or Yahoo unavailable — skip this cycle
+    addLog(mode, 'info', epicName(epic), `Yahoo pre-check flagged ${preAction} — confirming against IG's own data`);
+  }
 
   const { resolution, count } = IG_RES[cfg.strategy];
   let bars: AlpacaBar[];
@@ -509,7 +562,10 @@ async function poll(mode: IgMode) {
   }
 
   if (meta.timeframe === 'intraday' && !isNYSEOpen()) { schedule(mode, cfg); return; }
-  if (meta.timeframe === 'daily'    && !isDailyCheckTime())  { schedule(mode, cfg); return; }
+  // 'daily' strategies no longer gate the whole poll on isDailyCheckTime() —
+  // they now run every pollIntervalFor() cycle (see IG_POLL_MS_OVERRIDE) and
+  // gate per-epic inside evaluateEpic via the free Yahoo pre-check instead,
+  // so a real signal doesn't have to wait for the once-a-day window.
   if (meta.timeframe === 'weekly'   && !isWeeklyCheckTime()) { schedule(mode, cfg); return; }
 
   if (cfg.strategy === 'orb' && isInOpeningRange()) {
@@ -602,7 +658,7 @@ async function poll(mode: IgMode) {
 function schedule(mode: IgMode, cfg: IgStrategyConfig) {
   const st = ms(mode);
   if (!st.running) return;
-  const delay  = STRATEGY_META[cfg.strategy].pollMs;
+  const delay  = pollIntervalFor(cfg.strategy);
   st.nextRunMs = Date.now() + delay;
   st.pollTimer = setTimeout(() => { void poll(mode); }, delay);
 }

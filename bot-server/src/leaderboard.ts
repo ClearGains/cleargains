@@ -5,56 +5,12 @@ import {
   BT_UNIVERSE_SYMBOLS, defaultSpreadBpsFor,
   type BTStrategy, type BTBar, type BTResult,
 } from './backtest';
+import { fetchYahooBars as fetchYahooBarsShared } from './yahooFetch';
 
-// ── Yahoo bars fetch ──────────────────────────────────────────────────────────
-// Yahoo blocks server requests that look automated (missing browser headers) —
-// a bare request from this VM returns 429. A normal User-Agent/Accept-Language
-// is enough to get real data back (confirmed manually against this exact host).
-
-type YahooChartRaw = {
-  chart?: {
-    result?: Array<{
-      timestamp?: number[];
-      indicators?: {
-        quote?: Array<{
-          open?: (number | null)[]; high?: (number | null)[];
-          low?: (number | null)[]; close?: (number | null)[]; volume?: (number | null)[];
-        }>;
-      };
-    }>;
-    error?: unknown;
-  };
-};
-
+// Backtest sim only needs 5m/1d; the shared fetcher also supports 1h for the
+// IG bot's daily-strategy pre-checks.
 async function fetchYahooBars(symbol: string, interval: '5m' | '1d', range: string): Promise<BTBar[] | null> {
-  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
-    `?interval=${interval}&range=${range}&includePrePost=false`;
-  try {
-    const res = await fetch(url, {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) return null;
-    const raw = await res.json() as YahooChartRaw;
-    if (raw.chart?.error) return null;
-    const result = raw.chart?.result?.[0];
-    if (!result) return null;
-    const timestamps = result.timestamp ?? [];
-    const q = result.indicators?.quote?.[0] ?? {};
-    const bars = timestamps.map((ts, i) => ({
-      t: interval === '5m'
-        ? new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
-        : new Date(ts * 1000).toISOString().slice(0, 10),
-      o: q.open?.[i] ?? 0, h: q.high?.[i] ?? 0, l: q.low?.[i] ?? 0, c: q.close?.[i] ?? 0, v: q.volume?.[i] ?? 0,
-    })).filter(b => b.c > 0);
-    return bars;
-  } catch {
-    return null;
-  }
+  return fetchYahooBarsShared(symbol, interval, range);
 }
 
 // ── Sweep ─────────────────────────────────────────────────────────────────────
