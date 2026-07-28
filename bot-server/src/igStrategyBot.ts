@@ -477,6 +477,23 @@ async function executeIgSignal(
     addLog(mode, 'info', name, `Stake £${rawStake}/pt below IG minimum £${minDeal}/pt for this instrument — using minimum`);
   }
 
+  // Final live guard — ask IG directly before committing funds. `openPos` was
+  // resolved once at the top of poll() and can be stale by the time execution
+  // reaches here; re-check fresh immediately before placing the order. Same
+  // pattern the Demo Trader tab already uses, as defense-in-depth on top of
+  // the fetchFullPositions endpoint fix — if we can't verify the account is
+  // actually flat on this epic, don't risk a duplicate entry.
+  try {
+    const freshPositions = await fetchFullPositions(session);
+    if (freshPositions.some(p => p.epic === epic)) {
+      addLog(mode, 'wait', name, '🛡 Live guard — position already exists on this epic, aborting entry');
+      return;
+    }
+  } catch (e) {
+    addLog(mode, 'error', name, `🛡 Live guard check failed — aborting entry to be safe: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+
   addLog(mode, 'enter', name, `${action} — ${reason}`);
   addLog(mode, 'info',  name, `Stake: £${stake}/pt | Price: ~${currentPrice.toFixed(2)} | max loss at stop: ~£${(stake * sizingStopDist).toFixed(0)}`);
 
