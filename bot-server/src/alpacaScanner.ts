@@ -238,6 +238,8 @@ const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit
   vwap:                { tf: '1Min',  limit: 60 },
   weekly_momentum:     { tf: '1Week', limit: 16 },
   options_directional: { tf: '5Min',  limit: 60 },
+  donchian_breakout:   { tf: '1Day',  limit: 30 },
+  macd_crossover:      { tf: '1Day',  limit: 40 },
 };
 
 /**

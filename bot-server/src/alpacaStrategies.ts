@@ -405,9 +405,112 @@ export function optionsDirectionalSignal(
   return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} — not extreme enough for options entry` };
 }
 
+// ── 7. Donchian / Turtle-style Breakout (daily bars — hold days to weeks) ─────
+// Backtested best performer: +8.9% avg return/symbol after financing costs,
+// profit factor 1.38, 30/52 symbols profitable (Backtest Lab leaderboard).
+// Entry: close breaks above the 20-day high (long) or below the 20-day low
+// (short). Exit: opposite breakout of the shorter 10-day channel — the actual
+// Turtle System 1 exit rule, letting winners run past the entry band. No fixed
+// take-profit by design — takeProfitPrice below is a wide backstop only (also
+// keeps the bot's naked-position self-heal from clamping it to a tight one).
+export function donchianBreakoutSignal(
+  bars:        AlpacaBar[],
+  inPosition:  boolean,
+  side?:       PositionSide,
+  entryPeriod = 20,
+  exitPeriod  = 10,
+): StrategySignal {
+  if (bars.length < entryPeriod + 1) return { action: 'HOLD', reason: 'insufficient bars' };
+
+  const n = bars.length;
+  const entryWindow = bars.slice(n - 1 - entryPeriod, n - 1);
+  const exitWindow  = bars.slice(Math.max(0, n - 1 - exitPeriod), n - 1);
+  const last = bars[n - 1].c;
+  const entryHigh = Math.max(...entryWindow.map(b => b.h));
+  const entryLow  = Math.min(...entryWindow.map(b => b.l));
+  const exitHigh  = Math.max(...exitWindow.map(b => b.h));
+  const exitLow   = Math.min(...exitWindow.map(b => b.l));
+  const atr = calcAtr(bars) ?? last * 0.015;
+
+  if (inPosition) {
+    if (side === 'long'  && last < exitLow)  return { action: 'CLOSE_LONG',  reason: `Broke below ${exitPeriod}-day low ${exitLow.toFixed(2)}` };
+    if (side === 'short' && last > exitHigh) return { action: 'CLOSE_SHORT', reason: `Broke above ${exitPeriod}-day high ${exitHigh.toFixed(2)}` };
+    return { action: 'HOLD', reason: `Inside ${exitPeriod}-day exit channel ${exitLow.toFixed(2)}–${exitHigh.toFixed(2)} — holding` };
+  }
+
+  if (last > entryHigh) {
+    return {
+      action:           'BUY',
+      reason:           `Breakout above ${entryPeriod}-day high ${entryHigh.toFixed(2)}`,
+      stopPrice:        +(last - atr * 2).toFixed(2),
+      takeProfitPrice:  +(last + atr * 10).toFixed(2),
+      orderType:        'market',
+    };
+  }
+  if (last < entryLow) {
+    return {
+      action:           'SELL',
+      reason:           `Breakdown below ${entryPeriod}-day low ${entryLow.toFixed(2)}`,
+      stopPrice:        +(last + atr * 2).toFixed(2),
+      takeProfitPrice:  +(last - atr * 10).toFixed(2),
+      orderType:        'market',
+    };
+  }
+  return { action: 'HOLD', reason: `Price ${last.toFixed(2)} inside ${entryPeriod}-day range ${entryLow.toFixed(2)}–${entryHigh.toFixed(2)}` };
+}
+
+// ── 8. MACD Signal-Line Crossover (daily bars — hold days to weeks) ───────────
+// Backtested: +6.1% avg return/symbol after financing costs, profit factor
+// 1.17, 21/52 symbols profitable. Different lag profile than the EMA9/21
+// price cross above — reacts to momentum turning, not price alone. A
+// histogram crossing zero is exactly the MACD line crossing its signal line,
+// so this reuses calcMacdHist rather than re-deriving both lines.
+// Entry: MACD crosses its own signal line. Exit: opposite crossover.
+export function macdCrossoverSignal(
+  bars:       AlpacaBar[],
+  inPosition: boolean,
+  side?:      PositionSide,
+): StrategySignal {
+  if (bars.length < 36) return { action: 'HOLD', reason: 'insufficient bars' };
+
+  const macd = calcMacdHist(bars);
+  const atr  = calcAtr(bars);
+  const last = bars[bars.length - 1].c;
+  if (macd === null || atr === null) return { action: 'HOLD', reason: 'indicators not ready' };
+
+  const crossedAbove = macd.prevHist <= 0 && macd.hist > 0;
+  const crossedBelow = macd.prevHist >= 0 && macd.hist < 0;
+
+  if (inPosition) {
+    if (side === 'long'  && crossedBelow) return { action: 'CLOSE_LONG',  reason: `MACD crossed below signal (hist ${macd.hist.toFixed(3)})` };
+    if (side === 'short' && crossedAbove) return { action: 'CLOSE_SHORT', reason: `MACD crossed above signal (hist ${macd.hist.toFixed(3)})` };
+    return { action: 'HOLD', reason: `MACD hist ${macd.hist.toFixed(3)} — in position` };
+  }
+
+  if (crossedAbove) {
+    return {
+      action:           'BUY',
+      reason:           `MACD crossed above signal line (hist ${macd.hist.toFixed(3)})`,
+      stopPrice:        +(last - atr * 2).toFixed(2),
+      takeProfitPrice:  +(last + atr * 5).toFixed(2),
+      orderType:        'market',
+    };
+  }
+  if (crossedBelow) {
+    return {
+      action:           'SELL',
+      reason:           `MACD crossed below signal line (hist ${macd.hist.toFixed(3)})`,
+      stopPrice:        +(last + atr * 2).toFixed(2),
+      takeProfitPrice:  +(last - atr * 5).toFixed(2),
+      orderType:        'market',
+    };
+  }
+  return { action: 'HOLD', reason: `MACD hist ${macd.hist.toFixed(3)} — no crossover` };
+}
+
 // ── Strategy metadata ─────────────────────────────────────────────────────────
 
-export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional';
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'macd_crossover';
 
 export const STRATEGY_META: Record<StrategyName, {
   label:     string;
@@ -422,4 +525,6 @@ export const STRATEGY_META: Record<StrategyName, {
   vwap:                { label: 'VWAP Reversion',         timeframe: 'intraday', pollMs: 60_000,      barPeriod: '1Min',  barsNeeded: 60  },
   weekly_momentum:     { label: 'Weekly Momentum',        timeframe: 'weekly',   pollMs: 60 * 60_000, barPeriod: '1Week', barsNeeded: 20  },
   options_directional: { label: 'Options Directional',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5Min',  barsNeeded: 60  },
+  donchian_breakout:   { label: 'Donchian Breakout',       timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
+  macd_crossover:      { label: 'MACD Crossover',          timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
 };

@@ -8,7 +8,8 @@ import {
 } from './igApi';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
-  vwapSignal, weeklyMomentumSignal, STRATEGY_META,
+  vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal,
+  STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
 import { scanIgEpics, epicName } from './igStrategyScanner';
@@ -37,7 +38,7 @@ export function loadSavedIgStrategyState(mode: IgMode): IgStrategyConfig | null 
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum';
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'macd_crossover';
 export type IgMode         = 'demo' | 'live';
 
 export type IgStrategyConfig = {
@@ -138,6 +139,8 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   orb:                { resolution: 'MINUTE',    count: 60 },
   vwap:               { resolution: 'MINUTE',    count: 60 },
   weekly_momentum:    { resolution: 'WEEK',       count: 20 },
+  donchian_breakout:  { resolution: 'DAY',       count: 40 },
+  macd_crossover:     { resolution: 'DAY',       count: 50 },
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -318,6 +321,14 @@ async function evaluateEpic(
       signal = weeklyMomentumSignal(bars, dailyBars, inPosition, side);
       break;
     }
+
+    case 'donchian_breakout':
+      signal = donchianBreakoutSignal(bars, inPosition, side);
+      break;
+
+    case 'macd_crossover':
+      signal = macdCrossoverSignal(bars, inPosition, side);
+      break;
 
     default: return;
   }

@@ -456,7 +456,7 @@ function RecommendationPanel({
 
 // ── IG Spread Bet tab ─────────────────────────────────────────────────────────
 
-type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum';
+type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'macd_crossover';
 type IgMode         = 'demo' | 'live';
 
 type IgOpenPosition = {
@@ -495,11 +495,13 @@ type IgBotStatus = {
 };
 
 const IG_STRATEGIES: { value: IgStrategyName; label: string; timeframe: string; description: string }[] = [
-  { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion',    timeframe: 'Intraday (5-min)', description: 'Buy RSI < 30, sell RSI > 70. Spread bets on liquid large-caps & indices. Stop: 1.5× ATR.' },
-  { value: 'ema_crossover',      label: 'EMA Crossover',          timeframe: 'Swing (Daily)',    description: 'Enter on EMA9 × EMA21 crossover. Hold days to weeks. Stop: 2× ATR.' },
-  { value: 'orb',                label: 'Opening Range Breakout', timeframe: 'Intraday (Daily)', description: 'Trade breakouts above/below the first 30-min range. Exit at EOD or midpoint stop.' },
-  { value: 'vwap',               label: 'VWAP Reversion',         timeframe: 'Intraday (1-min)', description: 'Bet on price returning to VWAP when it dips 0.5% below and RSI < 45.' },
-  { value: 'weekly_momentum',    label: 'Weekly Momentum',        timeframe: 'Position (Weekly)', description: 'Ride weekly trends: above 12-week SMA + 4-week momentum > 1% + RSI 50–70.' },
+  { value: 'donchian_breakout',  label: '🏆 Donchian Breakout',    timeframe: 'Swing (Daily)',    description: 'BEST backtested: +8.9% avg return after financing, PF 1.38. 20-day breakout entry, 10-day opposite breakout exit. No fixed target — let winners run.' },
+  { value: 'ema_crossover',      label: '✅ EMA Crossover',         timeframe: 'Swing (Daily)',    description: 'Backtested: +7.2% avg return after financing, PF 1.26. Enter on EMA9 × EMA21 crossover. Hold days to weeks. Stop: 2× ATR.' },
+  { value: 'macd_crossover',     label: '✅ MACD Crossover',        timeframe: 'Swing (Daily)',    description: 'Backtested: +6.1% avg return after financing, PF 1.17. Enter on MACD signal-line crossover. Stop: 2× ATR, target: 5× ATR.' },
+  { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion',    timeframe: 'Intraday (5-min)', description: 'Buy RSI < 30, sell RSI > 70. Spread bets on liquid large-caps & indices. Stop: 1.5× ATR. Backtested negative after costs.' },
+  { value: 'orb',                label: 'Opening Range Breakout', timeframe: 'Intraday (Daily)', description: 'Trade breakouts above/below the first 30-min range. Exit at EOD or midpoint stop. Backtested negative after costs.' },
+  { value: 'vwap',               label: 'VWAP Reversion',         timeframe: 'Intraday (1-min)', description: 'Bet on price returning to VWAP when it dips 0.5% below and RSI < 45. Backtested negative after costs.' },
+  { value: 'weekly_momentum',    label: 'Weekly Momentum',        timeframe: 'Position (Weekly)', description: 'Ride weekly trends: above 12-week SMA + 4-week momentum > 1% + RSI 50–70. Backtested negative after financing costs.' },
 ];
 
 const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
@@ -508,11 +510,13 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
   orb:                'Opening Range Breakout',
   vwap:               'VWAP Reversion',
   weekly_momentum:    'Weekly Momentum',
+  donchian_breakout:  'Donchian Breakout',
+  macd_crossover:     'MACD Crossover',
 };
 
 function IgSpreadBetTab() {
   const [igMode, setIgMode]         = useState<IgMode>('demo');
-  const [strategy, setStrategy]     = useState<IgStrategyName>('rsi_mean_reversion');
+  const [strategy, setStrategy]     = useState<IgStrategyName>('donchian_breakout');
   const [notional, setNotional]     = useState('200');
   const [maxPos, setMaxPos]         = useState('3');
   const [allowShorts, setAllowShorts] = useState(false);

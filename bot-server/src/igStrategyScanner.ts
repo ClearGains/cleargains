@@ -1,5 +1,5 @@
 import { fetchCandleHistory, type IGSession, type CandleBar } from './igApi';
-import { calcRsi, calcEma, calcAtr, calcVwap, calcSma } from './alpacaStrategies';
+import { calcRsi, calcEma, calcAtr, calcVwap, calcSma, calcMacdHist } from './alpacaStrategies';
 import type { AlpacaBar } from './alpacaApi';
 import type { IgStrategyName } from './igStrategyBot';
 
@@ -47,6 +47,8 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   orb:                { resolution: 'MINUTE_5',  count: 60 },
   vwap:               { resolution: 'MINUTE',    count: 60 },
   weekly_momentum:    { resolution: 'WEEK',       count: 20 },
+  donchian_breakout:  { resolution: 'DAY',       count: 40 },
+  macd_crossover:     { resolution: 'DAY',       count: 50 },
 };
 
 // ── Bar conversion ────────────────────────────────────────────────────────────
@@ -118,6 +120,26 @@ function scoreWeekly(bars: AlpacaBar[], epic: string, name: string): Scored {
   return { epic, name, score: (price / sma12 - 1) * 100 + Math.max(0, mom) };
 }
 
+function scoreDonchian(bars: AlpacaBar[], epic: string, name: string): Scored {
+  if (bars.length < 21) return { epic, name, score: -1 };
+  const n = bars.length;
+  const window = bars.slice(n - 21, n - 1);
+  const last = bars[n - 1].c;
+  const high = Math.max(...window.map(b => b.h));
+  const low  = Math.min(...window.map(b => b.l));
+  // Positive = already broken out (favour these); negative = how close to breaking
+  const proximity = Math.max((last - high) / high * 100, (low - last) / low * 100);
+  return { epic, name, score: proximity > 0 ? 50 + proximity * 20 : 20 + proximity };
+}
+
+function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
+  const macd = calcMacdHist(bars);
+  if (!macd) return { epic, name, score: -1 };
+  const crossed = (macd.hist > 0 && macd.prevHist <= 0) || (macd.hist < 0 && macd.prevHist >= 0);
+  const momentum = Math.abs(macd.hist - macd.prevHist);
+  return { epic, name, score: (crossed ? 40 : 0) + momentum * 1000 };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function scanIgEpics(
@@ -144,6 +166,8 @@ export async function scanIgEpics(
         case 'orb':                s = scoreOrb(bars, epic, name);    break;
         case 'vwap':               s = scoreVwap(bars, epic, name);   break;
         case 'weekly_momentum':    s = scoreWeekly(bars, epic, name); break;
+        case 'donchian_breakout':  s = scoreDonchian(bars, epic, name); break;
+        case 'macd_crossover':     s = scoreMacd(bars, epic, name);   break;
         default:                   s = { epic, name, score: -1 };
       }
       scored.push(s);
