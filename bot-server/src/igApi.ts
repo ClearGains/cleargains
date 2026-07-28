@@ -276,25 +276,36 @@ export async function fetchFullPositions(session: IGSession): Promise<FullPositi
     positions?: Array<{
       position: {
         dealId: string; size: number; direction: string; level: number;
-        upl: number; limitLevel: number | null; stopLevel: number | null;
+        upl?: number; limitLevel: number | null; stopLevel: number | null;
         currency: string;
       };
       market: { epic: string; instrumentName: string; bid: number; offer: number };
     }>;
   };
-  return (d.positions ?? []).map(p => ({
-    dealId:         p.position.dealId,
-    epic:           p.market.epic,
-    direction:      p.position.direction as 'BUY' | 'SELL',
-    size:           p.position.size,
-    level:          p.position.level,
-    instrumentName: p.market.instrumentName,
-    upl:            p.position.upl,
-    bid:            p.market.bid,
-    offer:          p.market.offer,
-    stopLevel:      p.position.stopLevel ?? undefined,
-    limitLevel:     p.position.limitLevel ?? undefined,
-  }));
+  // IG's own /positions response doesn't actually include `upl` (confirmed
+  // against the live account — every position comes back with it absent),
+  // despite it being a documented field on some API versions. Compute it
+  // from level vs bid/offer rather than trust a field that isn't there —
+  // an undefined upl reaching the UI crashes any .toFixed() render of it.
+  return (d.positions ?? []).map(p => {
+    const direction = p.position.direction as 'BUY' | 'SELL';
+    const computedUpl = direction === 'BUY'
+      ? (p.market.bid   - p.position.level) * p.position.size
+      : (p.position.level - p.market.offer) * p.position.size;
+    return {
+      dealId:         p.position.dealId,
+      epic:           p.market.epic,
+      direction,
+      size:           p.position.size,
+      level:          p.position.level,
+      instrumentName: p.market.instrumentName,
+      upl:            typeof p.position.upl === 'number' ? p.position.upl : computedUpl,
+      bid:            p.market.bid,
+      offer:          p.market.offer,
+      stopLevel:      p.position.stopLevel ?? undefined,
+      limitLevel:     p.position.limitLevel ?? undefined,
+    };
+  });
 }
 
 export async function placeMarketOrder(

@@ -814,8 +814,8 @@ function IgSpreadBetTab() {
                       <div className="font-medium text-sm text-white">
                         {(p.direction === 'BUY' ? p.bid : p.offer).toFixed(2)}
                       </div>
-                      <div className={clsx('text-xs font-medium', p.upl >= 0 ? 'text-green-400' : 'text-red-400')}>
-                        {p.upl >= 0 ? '+' : ''}£{p.upl.toFixed(2)}
+                      <div className={clsx('text-xs font-medium', (p.upl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
+                        {(p.upl ?? 0) >= 0 ? '+' : ''}£{(p.upl ?? 0).toFixed(2)}
                       </div>
                     </div>
                   </div>
