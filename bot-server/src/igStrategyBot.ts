@@ -715,7 +715,12 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
   addLog(mode, 'info', '—', `Bot started — ${STRATEGY_META[cfg.strategy].label} | ${mode} | ${cfg.epics.map(epicName).join(', ')}`);
   addLog(mode, 'info', '—', `Max risk/trade: £${cfg.maxRiskGbp} | Max positions: ${cfg.maxPositions} | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
 
-  void poll(mode);
+  // Startup just fired a burst of IG calls (auth + balance + up to
+  // maxPositions+2 sequential candle fetches while scanning for instruments).
+  // Hitting the API again immediately with poll()'s own balance/positions/
+  // market-details calls was intermittently getting a 403 — give it a few
+  // seconds to clear before the first real poll.
+  st.pollTimer = setTimeout(() => { void poll(mode); }, 10_000);
   return { ok: true };
 }
 
