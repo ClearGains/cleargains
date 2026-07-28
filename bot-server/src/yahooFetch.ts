@@ -90,6 +90,25 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'UA.D.V.CASH.IP':     'V',
   'UA.D.UNH.CASH.IP':   'UNH',
   'UA.D.XOM.CASH.IP':   'XOM',
+  // Semiconductor / storage / legacy tech
+  'SA.D.AMD.DAILY.IP':    'AMD',
+  'UA.D.AVGO.DAILY.IP':   'AVGO',
+  'UB.D.INTC.DAILY.IP':   'INTC',
+  'UC.D.QCOM.DAILY.IP':   'QCOM',
+  'UC.D.MU.DAILY.IP':     'MU',
+  'SG.D.TSM.DAILY.IP':    'TSM',
+  'UD.D.SNDKUS.DAILY.IP': 'SNDK',
+  'UD.D.STX.DAILY.IP':    'STX',
+  'UC.D.MRVL.DAILY.IP':   'MRVL',
+  // No liquid US ADR ticker on Yahoo for SK Hynix — its Korean primary listing
+  // tracks the same underlying and is close enough for a free directional
+  // pre-check (never used for actual price levels or sizing).
+  'UD.D.SKHYUS.DAILY.IP': '000660.KS',
+  'UD.D.WDC.DAILY.IP':    'WDC',
+  'SB.D.DELLUS.DAILY.IP': 'DELL',
+  'UC.D.RIMM.DAILY.IP':   'BB',
+  // Helsinki listing, not the US ADR (NOK) — matches IG's actual traded epic.
+  'EC.D.NOKIAFP.DAILY.IP': 'NOKIA.HE',
   // UK stocks
   'UC.D.BARC.CASH.IP': 'BARC.L',
   'UC.D.BP.CASH.IP':   'BP.L',

@@ -37,6 +37,23 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'UA.D.V.CASH.IP',       name: 'Visa'         },
   { epic: 'UA.D.UNH.CASH.IP',     name: 'UnitedHealth' },
   { epic: 'UA.D.XOM.CASH.IP',     name: 'ExxonMobil'   },
+  // Semiconductor / storage / legacy tech — added for the sector's characteristically
+  // sharp trend moves (rally-then-reversal), which is exactly what the
+  // trend-following strategies (Donchian/EMA/MACD) are built to catch.
+  { epic: 'SA.D.AMD.DAILY.IP',    name: 'AMD'          },
+  { epic: 'UA.D.AVGO.DAILY.IP',   name: 'Broadcom'     },
+  { epic: 'UB.D.INTC.DAILY.IP',   name: 'Intel'        },
+  { epic: 'UC.D.QCOM.DAILY.IP',   name: 'Qualcomm'     },
+  { epic: 'UC.D.MU.DAILY.IP',     name: 'Micron'       },
+  { epic: 'SG.D.TSM.DAILY.IP',    name: 'TSMC'         },
+  { epic: 'UD.D.SNDKUS.DAILY.IP', name: 'SanDisk'      },
+  { epic: 'UD.D.STX.DAILY.IP',    name: 'Seagate'      },
+  { epic: 'UC.D.MRVL.DAILY.IP',   name: 'Marvell'      },
+  { epic: 'UD.D.SKHYUS.DAILY.IP', name: 'SK Hynix'     },
+  { epic: 'UD.D.WDC.DAILY.IP',    name: 'Western Digital' },
+  { epic: 'SB.D.DELLUS.DAILY.IP', name: 'Dell'         },
+  { epic: 'UC.D.RIMM.DAILY.IP',   name: 'BlackBerry'   },
+  { epic: 'EC.D.NOKIAFP.DAILY.IP', name: 'Nokia'       },
   // Major UK stocks
   { epic: 'UC.D.BARC.CASH.IP',    name: 'Barclays'     },
   { epic: 'UC.D.BP.CASH.IP',      name: 'BP'           },
