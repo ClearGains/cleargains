@@ -480,7 +480,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
         case 'ema_crossover':      signal = emaCrossoverSignal(bars, false); break;
         case 'vwap':               signal = vwapSignal(bars, bars[bars.length - 1].c, false); break;
         case 'donchian_breakout':  signal = donchianBreakoutSignal(bars, false); break;
-        case 'donchian_hourly':    signal = donchianBreakoutSignal(bars, false, undefined, 24, 12); break;
+        case 'donchian_hourly':    signal = donchianBreakoutSignal(bars, false, undefined, 24, 12, 'hour'); break;
         case 'macd_crossover':     signal = macdCrossoverSignal(bars, false); break;
         default: break;  // orb/weekly_momentum need extra state this scan doesn't track
       }
@@ -676,7 +676,7 @@ async function evaluateEpic(
     // exit channel instead of 20-day/10-day, for a hours-to-~2-day hold
     // instead of days-to-weeks.
     case 'donchian_hourly':
-      signal = donchianBreakoutSignal(bars, inPosition, side, 24, 12);
+      signal = donchianBreakoutSignal(bars, inPosition, side, 24, 12, 'hour');
       break;
 
     case 'macd_crossover':

@@ -419,6 +419,7 @@ export function donchianBreakoutSignal(
   side?:       PositionSide,
   entryPeriod = 20,
   exitPeriod  = 10,
+  periodUnit: 'day' | 'hour' = 'day',
 ): StrategySignal {
   if (bars.length < entryPeriod + 1) return { action: 'HOLD', reason: 'insufficient bars' };
 
@@ -442,15 +443,15 @@ export function donchianBreakoutSignal(
   const stopDist = Math.min(atr * 2, last * 0.03);
 
   if (inPosition) {
-    if (side === 'long'  && last < exitLow)  return { action: 'CLOSE_LONG',  reason: `Broke below ${exitPeriod}-day low ${exitLow.toFixed(2)}` };
-    if (side === 'short' && last > exitHigh) return { action: 'CLOSE_SHORT', reason: `Broke above ${exitPeriod}-day high ${exitHigh.toFixed(2)}` };
-    return { action: 'HOLD', reason: `Inside ${exitPeriod}-day exit channel ${exitLow.toFixed(2)}–${exitHigh.toFixed(2)} — holding` };
+    if (side === 'long'  && last < exitLow)  return { action: 'CLOSE_LONG',  reason: `Broke below ${exitPeriod}-${periodUnit} low ${exitLow.toFixed(2)}` };
+    if (side === 'short' && last > exitHigh) return { action: 'CLOSE_SHORT', reason: `Broke above ${exitPeriod}-${periodUnit} high ${exitHigh.toFixed(2)}` };
+    return { action: 'HOLD', reason: `Inside ${exitPeriod}-${periodUnit} exit channel ${exitLow.toFixed(2)}–${exitHigh.toFixed(2)} — holding` };
   }
 
   if (last > entryHigh) {
     return {
       action:           'BUY',
-      reason:           `Breakout above ${entryPeriod}-day high ${entryHigh.toFixed(2)}`,
+      reason:           `Breakout above ${entryPeriod}-${periodUnit} high ${entryHigh.toFixed(2)}`,
       stopPrice:        +(last - stopDist).toFixed(2),
       takeProfitPrice:  +(last + atr * 10).toFixed(2),
       orderType:        'market',
@@ -459,13 +460,13 @@ export function donchianBreakoutSignal(
   if (last < entryLow) {
     return {
       action:           'SELL',
-      reason:           `Breakdown below ${entryPeriod}-day low ${entryLow.toFixed(2)}`,
+      reason:           `Breakdown below ${entryPeriod}-${periodUnit} low ${entryLow.toFixed(2)}`,
       stopPrice:        +(last + stopDist).toFixed(2),
       takeProfitPrice:  +(last - atr * 10).toFixed(2),
       orderType:        'market',
     };
   }
-  return { action: 'HOLD', reason: `Price ${last.toFixed(2)} inside ${entryPeriod}-day range ${entryLow.toFixed(2)}–${entryHigh.toFixed(2)}` };
+  return { action: 'HOLD', reason: `Price ${last.toFixed(2)} inside ${entryPeriod}-${periodUnit} range ${entryLow.toFixed(2)}–${entryHigh.toFixed(2)}` };
 }
 
 // ── 8. MACD Signal-Line Crossover (daily bars — hold days to weeks) ───────────
