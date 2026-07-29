@@ -169,6 +169,7 @@ export type DailyVerdictRequest = {
   changePercent:  number;
   stopPoints:     number;
   tpPoints:       number;
+  headlines?:     string[];  // recent real news for this instrument, if available — see newsFetch.ts
 };
 
 export type DailyVerdict = {
@@ -186,16 +187,19 @@ export async function askGeminiDailyVerdict(req: DailyVerdictRequest): Promise<D
 
   const rrRatio = req.stopPoints > 0 ? (req.tpPoints / req.stopPoints).toFixed(1) : '?';
   const pctStr  = `${req.changePercent >= 0 ? '+' : ''}${req.changePercent.toFixed(2)}%`;
+  const headlineBlock = req.headlines?.length
+    ? `\nRecent news (last 7 days):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '';
 
   const prompt = `You are a second-opinion filter for a spread betting strategy.
 Signal: ${req.direction} ${req.instrumentName}
 Price: ${req.price.toFixed(2)}, Daily change: ${pctStr}
 Signal strength: ${req.strength}%
 Stop: ${req.stopPoints}pts, TP: ${req.tpPoints}pts (${rrRatio}:1 R:R)
-
-Should we take this trade? Confirm, override, or SKIP if the setup looks poor.
+${headlineBlock}
+Should we take this trade? Consider the technical signal AND whether the recent news supports or contradicts it (e.g. don't confirm a SELL right after clearly positive news, or a BUY right after clearly negative news) — if no news is listed above, judge on the technicals alone. Confirm, override, or SKIP if the setup looks poor.
 Respond with JSON only, no markdown:
-{"direction":"BUY","confidence":72,"reason":"max 12 words"}`;
+{"direction":"BUY","confidence":72,"reason":"max 15 words"}`;
 
   try {
     const res = await fetch(

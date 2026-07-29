@@ -15,6 +15,7 @@ import {
 import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy } from './igStrategyScanner';
 import { askGeminiDailyVerdict } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
+import { fetchCompanyHeadlines } from './newsFetch';
 import type { AlpacaBar } from './alpacaApi';
 import {
   isNYSEOpen, isInOpeningRange, isNearClose,
@@ -919,6 +920,10 @@ async function executeIgSignal(
   let effectiveDirection: 'BUY' | 'SELL' = direction;
   if (classifyMarketType(epic) === 'SHARES') {
     try {
+      // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
+      // Gemini still runs on technicals alone in that case (see prompt).
+      const ticker    = EPIC_TO_ALPACA[epic];
+      const headlines = ticker ? await fetchCompanyHeadlines(ticker) : [];
       const verdict = await askGeminiDailyVerdict({
         instrumentName: name,
         direction,
@@ -927,6 +932,7 @@ async function executeIgSignal(
         changePercent:  0,   // not available at this layer; doesn't affect the direction check
         stopPoints:     sizingStopDist,
         tpPoints:       profitDist ?? sizingStopDist * 2.5,
+        headlines,
       });
       addLog(mode, 'info', name, `[GEMINI] ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
       if (verdict.direction === 'SKIP' || verdict.confidence < 50) {

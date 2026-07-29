@@ -215,13 +215,18 @@ Return ONLY this JSON (no markdown, no other text):
 {"signal":"BUY"|"SELL"|"HOLD"|"WATCH","confidence":<1-10>,"reasoning":"<2 sentences on current direction and momentum>"}`;
 
         const gRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+          // "latest" alias, not a pinned dated model — gemini-2.0-flash was
+          // retired outright (confirmed live: free-tier quota set to 0).
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${geminiKey}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+              // No thinkingConfig — the alias resolves to a reasoning model
+              // that rejects thinkingBudget outright (confirmed live: flat
+              // 400 INVALID_ARGUMENT). maxOutputTokens raised for headroom.
               contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { maxOutputTokens: 256, temperature: 0.1 },
+              generationConfig: { maxOutputTokens: 600, temperature: 0.1 },
             }),
             signal: AbortSignal.timeout(15_000),
           },
@@ -237,7 +242,7 @@ Return ONLY this JSON (no markdown, no other text):
           signal     = (parsed.signal ?? 'HOLD') as RawSignal;
           confidence = Math.min(10, Math.max(1, parsed.confidence ?? 5));
           reasoning  = parsed.reasoning ?? '';
-          usedEngine = 'gemini-2.0-flash';
+          usedEngine = 'gemini-flash-latest';
         }
       } catch {
         // Gemini failed — fall through to rule-based

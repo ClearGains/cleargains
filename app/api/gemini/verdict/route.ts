@@ -47,13 +47,18 @@ Respond with JSON only, no markdown:
 
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      // "latest" alias, not a pinned dated model — gemini-2.0-flash was
+      // retired outright (confirmed live: free-tier quota set to 0).
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 100 },
+          // No thinkingConfig — the alias resolves to a reasoning model that
+          // rejects thinkingBudget outright (confirmed live: flat 400
+          // INVALID_ARGUMENT). maxOutputTokens raised for headroom.
+          generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
         }),
         signal: AbortSignal.timeout(8_000),
       }

@@ -215,13 +215,23 @@ Rules: keyHeadlines = 3-5 most market-moving only. allowShorts only if clearly b
 
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      // "latest" alias, not a pinned dated model — gemini-2.0-flash was
+      // retired outright (confirmed live elsewhere in this codebase:
+      // free-tier quota set to 0 for it), so pinning a specific version
+      // again would just repeat that failure whenever Google retires this
+      // one too. The alias is Google's own responsibility to keep pointing
+      // at a working current model.
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.3, maxOutputTokens: 512 },
+          // No thinkingConfig — the alias resolves to a reasoning model that
+          // rejects thinkingBudget outright (confirmed live: flat 400
+          // INVALID_ARGUMENT). maxOutputTokens raised so hidden thinking
+          // tokens can't eat the whole budget before the JSON answer.
+          generationConfig: { temperature: 0.3, maxOutputTokens: 800 },
         }),
         signal: AbortSignal.timeout(12_000),
       },
