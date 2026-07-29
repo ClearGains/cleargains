@@ -469,6 +469,7 @@ type IgOpenPosition = {
   upl:       number;
   bid:       number;
   offer:     number;
+  openedAt?: string;
 };
 
 type IgLogEntry = {
@@ -836,7 +837,22 @@ function IgSpreadBetTab() {
                         ? <TrendingUp   className="w-4 h-4 text-green-400" />
                         : <TrendingDown className="w-4 h-4 text-red-400"   />}
                       <div>
-                        <div className="font-medium text-white text-sm">{p.name || p.epic}</div>
+                        <div className="font-medium text-white text-sm flex items-center gap-2">
+                          {p.name || p.epic}
+                          {p.openedAt && (() => {
+                            const heldHrs   = (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000;
+                            const longTerm  = heldHrs >= 24;
+                            const heldLabel = longTerm ? `${(heldHrs / 24).toFixed(1)}d` : `${heldHrs.toFixed(1)}h`;
+                            return (
+                              <span className={clsx(
+                                'text-[10px] px-1.5 py-0.5 rounded font-normal shrink-0',
+                                longTerm ? 'text-blue-400 bg-blue-500/10' : 'text-amber-400 bg-amber-500/10',
+                              )}>
+                                {longTerm ? 'Long-term' : 'Short-term'} · {heldLabel}
+                              </span>
+                            );
+                          })()}
+                        </div>
                         <div className="text-xs text-slate-500">
                           {p.direction} · £{p.size}/pt · entry {p.level.toFixed(2)}
                         </div>

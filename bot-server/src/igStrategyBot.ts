@@ -75,6 +75,7 @@ export type IgOpenPosition = {
   upl:       number;    // unrealised P/L in £
   bid:       number;
   offer:     number;
+  openedAt?: string;    // ISO timestamp — see FullPosition.openedAt
 };
 
 export type IgStrategyBotStatus = {
@@ -960,6 +961,7 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
         upl:       p.upl,
         bid:       p.bid,
         offer:     p.offer,
+        openedAt:  p.openedAt,
       }));
     } catch {}
   }

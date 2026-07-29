@@ -266,6 +266,7 @@ export type FullPosition = IGPosition & {
   offer:      number;
   stopLevel?:  number;
   limitLevel?: number;
+  openedAt?:   string;  // IG's createdDateUTC, e.g. "2026-07-29T13:58:03" — no trailing Z, but is UTC
 };
 
 export async function fetchFullPositions(session: IGSession): Promise<FullPosition[]> {
@@ -277,7 +278,7 @@ export async function fetchFullPositions(session: IGSession): Promise<FullPositi
       position: {
         dealId: string; size: number; direction: string; level: number;
         upl?: number; limitLevel: number | null; stopLevel: number | null;
-        currency: string;
+        currency: string; createdDateUTC?: string;
       };
       market: { epic: string; instrumentName: string; bid: number; offer: number };
     }>;
@@ -304,6 +305,7 @@ export async function fetchFullPositions(session: IGSession): Promise<FullPositi
       offer:          p.market.offer,
       stopLevel:      p.position.stopLevel ?? undefined,
       limitLevel:     p.position.limitLevel ?? undefined,
+      openedAt:       p.position.createdDateUTC ? `${p.position.createdDateUTC}Z` : undefined,
     };
   });
 }
