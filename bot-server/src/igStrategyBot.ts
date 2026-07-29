@@ -38,6 +38,25 @@ export function loadSavedIgStrategyState(mode: IgMode): IgStrategyConfig | null 
   try { return JSON.parse(fs.readFileSync(stateFile(mode), 'utf8')) as IgStrategyConfig; } catch { return null; }
 }
 
+// Allowance-blocked epics survive a restart too — see blockedEpics on ModeState.
+const BLOCK_COOLDOWN_MS = 6 * 60 * 60_000;  // re-try after 6h, not "forever" or "every restart"
+
+function blockedEpicsFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-blocked-epics-${mode}.json`);
+}
+function saveBlockedEpics(mode: IgMode, map: Map<string, number>): void {
+  try { fs.writeFileSync(blockedEpicsFile(mode), JSON.stringify([...map]), 'utf8'); } catch {}
+}
+function loadBlockedEpics(mode: IgMode): Map<string, number> {
+  try {
+    const pairs = JSON.parse(fs.readFileSync(blockedEpicsFile(mode), 'utf8')) as [string, number][];
+    const now = Date.now();
+    return new Map(pairs.filter(([, unblockAt]) => unblockAt > now));  // drop any already-expired on load
+  } catch {
+    return new Map();
+  }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'macd_crossover';
@@ -78,6 +97,20 @@ export type IgOpenPosition = {
   openedAt?: string;    // ISO timestamp — see FullPosition.openedAt
 };
 
+// A signal computed off IG's own native data for an epic that's currently
+// allowance-blocked from normal automated trading — manual-only suggestion,
+// see refreshBlockedRecommendations.
+export type IgRecommendation = {
+  epic:             string;
+  name:             string;
+  action:           'BUY' | 'SELL';
+  reason:           string;
+  level:            number;   // price at the time this was computed
+  stopPrice?:       number;
+  takeProfitPrice?: number;
+  computedAt:       string;   // ISO timestamp
+};
+
 export type IgStrategyBotStatus = {
   running:    boolean;
   paused:     boolean;
@@ -98,6 +131,7 @@ export type IgStrategyBotStatus = {
   orbState:   Record<string, OrbState>;
   sessionOk:  boolean;
   lossLock:   boolean;   // daily-loss circuit breaker engaged
+  recommendations: IgRecommendation[];
 };
 
 type OrbState  = { high: number; low: number; established: boolean };
@@ -117,9 +151,19 @@ type ModeState = {
   authFailCount:        number;
   sessionRefreshTimer:  ReturnType<typeof setTimeout> | null;
   marketDetails:        Map<string, MarketDetail>;
-  // Epics dropped for the rest of this run after IG's own historical-data
-  // allowance rejected them — see blockEpicOnAllowance.
-  blockedEpics:         Set<string>;
+  // Epics IG's own historical-data allowance rejected — value is the epoch ms
+  // when the block expires and it's worth trying again. Persisted to disk
+  // (see loadBlockedEpics/saveBlockedEpics) so a PM2 restart doesn't lose the
+  // block and re-fail the same epic on every single restart, which is what
+  // was happening before — SK Hynix scores highest almost every scan, so it
+  // got picked and re-failed on every one of today's several restarts.
+  blockedEpics:         Map<string, number>;
+  // Signal computed off IG's own (correctly-scaled) data for a currently
+  // blocked epic, refreshed every few hours — see refreshBlockedRecommendations.
+  // Surfaced to the UI as a manual-only suggestion since the epic can't be
+  // safely auto-confirmed at normal poll frequency without burning the
+  // allowance further.
+  recommendations:      Map<string, IgRecommendation>;
   // Daily-loss circuit breaker
   dayKey:               string;   // UTC date the balance baseline belongs to
   dayStartBalance:      number;
@@ -134,7 +178,8 @@ function makeModeState(): ModeState {
     log: [], pollTimer: null, nextRunMs: null, lastPollTs: null,
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
     marketDetails: new Map(),
-    blockedEpics: new Set(),
+    blockedEpics: new Map(),
+    recommendations: new Map(),
     dayKey: '', dayStartBalance: 0, lossLock: false,
     weekendGuardDate: '',
   };
@@ -144,6 +189,7 @@ const modeStates = new Map<IgMode, ModeState>([
   ['demo', makeModeState()],
   ['live', makeModeState()],
 ]);
+for (const [mode, st] of modeStates) st.blockedEpics = loadBlockedEpics(mode);
 
 function ms(mode: IgMode): ModeState { return modeStates.get(mode)!; }
 
@@ -337,22 +383,91 @@ async function buildOrbRange(mode: IgMode, session: IGSession, epics: string[]) 
 function blockEpicOnAllowance(mode: IgMode, cfg: IgStrategyConfig, session: IGSession, badEpic: string): void {
   const st   = ms(mode);
   const name = epicName(badEpic);
-  st.blockedEpics.add(badEpic);
+  st.blockedEpics.set(badEpic, Date.now() + BLOCK_COOLDOWN_MS);
+  saveBlockedEpics(mode, st.blockedEpics);
   void (async () => {
     try {
       const current = st.config?.epics ?? [];
       const held    = (await fetchFullPositions(session)).map(p => p.epic);
-      const exclude = [...new Set([...current, ...held, ...st.blockedEpics])];
+      const exclude = [...new Set([...current, ...held, ...st.blockedEpics.keys()])];
       const picks   = await scanIgEpics(cfg.strategy, session, exclude, 1, msg => addLog(mode, 'info', '—', msg));
       if (picks[0] && st.config) {
         const idx = st.config.epics.indexOf(badEpic);
         if (idx !== -1) st.config.epics[idx] = picks[0];
-        addLog(mode, 'info', '—', `Blocked (IG allowance) — ${name} → ${epicName(picks[0])}`);
+        addLog(mode, 'info', '—', `Blocked (IG allowance, retry in 6h) — ${name} → ${epicName(picks[0])}`);
       } else {
-        addLog(mode, 'info', '—', `Blocked (IG allowance) — ${name} dropped, no replacement found this scan`);
+        addLog(mode, 'info', '—', `Blocked (IG allowance, retry in 6h) — ${name} dropped, no replacement found this scan`);
       }
     } catch {}
   })();
+}
+
+// Periodically (see startBlockedRecommendationRefresh) tries IG's own native
+// data — once the cooldown's passed, not every poll — for currently-blocked
+// epics. Deliberately IG's own data only, never a foreign/ADR proxy: an
+// epic ended up on this list specifically because it's not Alpaca-covered,
+// and those are exactly the ones where a substitute listing needs a real
+// currency conversion the codebase doesn't do (see EPIC_TO_ALPACA comment) —
+// using IG's native data keeps this recommendation actually correctly
+// scaled instead of repeating the ×100 class of bug. A successful fetch also
+// means the allowance recovered, so the epic gets unblocked for the real bot
+// too, not just used for the recommendation.
+async function refreshBlockedRecommendations(mode: IgMode): Promise<void> {
+  const st = ms(mode);
+  if (!st.running || !st.session || !st.config) return;
+  const cfg = st.config;
+  const { resolution, count } = IG_RES[cfg.strategy];
+
+  for (const [epic, unblockAt] of [...st.blockedEpics]) {
+    if (Date.now() < unblockAt) continue;
+    const name = epicName(epic);
+    try {
+      const bars = (await fetchCandleHistory(st.session, epic, resolution, count)).map(igBarToAlpacaBar);
+      if (!bars.length) throw new Error('No bar data');
+
+      // Fetch succeeded — allowance recovered, unblock for real trading too.
+      st.blockedEpics.delete(epic);
+      saveBlockedEpics(mode, st.blockedEpics);
+      addLog(mode, 'info', name, 'Allowance recovered — unblocked');
+
+      let signal: StrategySignal | null = null;
+      switch (cfg.strategy) {
+        case 'rsi_mean_reversion': signal = rsiMeanReversionSignal(bars, false); break;
+        case 'ema_crossover':      signal = emaCrossoverSignal(bars, false); break;
+        case 'vwap':               signal = vwapSignal(bars, bars[bars.length - 1].c, false); break;
+        case 'donchian_breakout':  signal = donchianBreakoutSignal(bars, false); break;
+        case 'macd_crossover':     signal = macdCrossoverSignal(bars, false); break;
+        default: break;  // orb/weekly_momentum need extra state this refresher doesn't track
+      }
+
+      if (signal && (signal.action === 'BUY' || signal.action === 'SELL')) {
+        st.recommendations.set(epic, {
+          epic, name, action: signal.action, reason: signal.reason,
+          level: bars[bars.length - 1].c,
+          stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice,
+          computedAt: new Date().toISOString(),
+        });
+        addLog(mode, 'info', name, `[Recommendation] ${signal.action} — ${signal.reason} (manual only — was allowance-limited)`);
+      } else {
+        st.recommendations.delete(epic);
+      }
+    } catch {
+      // Still blocked — reset the cooldown and try again next refresh cycle.
+      st.blockedEpics.set(epic, Date.now() + BLOCK_COOLDOWN_MS);
+      saveBlockedEpics(mode, st.blockedEpics);
+    }
+    await new Promise(r => setTimeout(r, 1200));  // same IG-call spacing as the scanner uses
+  }
+}
+
+const RECOMMENDATION_REFRESH_MS = 60 * 60_000;  // hourly check — actual IG calls only happen for epics past cooldown
+let recommendationTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startBlockedRecommendationRefresh(): void {
+  if (recommendationTimer) return;
+  recommendationTimer = setInterval(() => {
+    for (const mode of ['demo', 'live'] as const) void refreshBlockedRecommendations(mode);
+  }, RECOMMENDATION_REFRESH_MS);
 }
 
 // ── Signal evaluation ─────────────────────────────────────────────────────────
@@ -383,11 +498,20 @@ async function evaluateEpic(
   const usesFreeData = epic in EPIC_TO_ALPACA;
   const confirmSource = usesFreeData ? 'Alpaca/Yahoo (×100 scaled)' : "IG's own data";
 
-  // Already rejected by IG's historical-data allowance this run — observed
-  // live not clearing for 30+ minutes across repeated polls, so retrying on
-  // every cycle just wastes calls. Skip silently; the slot gets a fresh scan
-  // pick from blockEpicOnAllowance below instead of hammering IG again.
-  if (!usesFreeData && ms(mode).blockedEpics.has(epic)) return;
+  // Already rejected by IG's historical-data allowance — persists across
+  // restarts (see blockedEpics on ModeState), retried again after
+  // BLOCK_COOLDOWN_MS rather than every single poll or every restart. Skip
+  // silently; the slot gets a fresh scan pick from blockEpicOnAllowance
+  // instead of hammering IG again in the meantime.
+  if (!usesFreeData) {
+    const st         = ms(mode);
+    const unblockAt  = st.blockedEpics.get(epic);
+    if (unblockAt !== undefined) {
+      if (Date.now() < unblockAt) return;
+      st.blockedEpics.delete(epic);
+      saveBlockedEpics(mode, st.blockedEpics);
+    }
+  }
 
   // ── Yahoo pre-check gate (daily-timeframe strategies, outside the guaranteed
   // once-daily window) — skip IG's allowance-limited candle fetch entirely
@@ -1007,5 +1131,6 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     orbState:   { ...st.orbState },
     sessionOk:  !!st.session && Date.now() < st.session.expiresAt,
     lossLock:   st.lossLock,
+    recommendations: [...st.recommendations.values()],
   };
 }

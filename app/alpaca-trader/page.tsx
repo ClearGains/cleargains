@@ -495,6 +495,21 @@ type IgBotStatus = {
   nextRunMs:  number | null;
   lastPollTs: string | null;
   sessionOk:  boolean;
+  recommendations?: IgRecommendation[];
+};
+
+// A signal computed off IG's own data for an epic that's currently blocked
+// from automated trading by IG's historical-data allowance — manual-only,
+// refreshed every hour or so once the epic's cooldown has passed.
+type IgRecommendation = {
+  epic:             string;
+  name:             string;
+  action:           'BUY' | 'SELL';
+  reason:           string;
+  level:            number;
+  stopPrice?:       number;
+  takeProfitPrice?: number;
+  computedAt:       string;
 };
 
 // Any open IG position for the account, however it was opened (manually,
@@ -877,6 +892,44 @@ function IgSpreadBetTab() {
                     </span>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* Recommended (manual only) — signals computed off IG's own data for
+              epics currently blocked by IG's historical-data allowance. These
+              can't be auto-confirmed at normal poll frequency without burning
+              the allowance further, so they're surfaced here for you to open
+              manually (IG's own app, or the Demo Trader manual panel) instead
+              of just being silently dropped. */}
+          {!!status?.recommendations?.length && (
+            <div className="bg-slate-900/60 border border-purple-900/50 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-300">Recommended — Manual Only</h2>
+                <span className="text-xs text-slate-500">{status.recommendations.length}</span>
+              </div>
+              <div className="px-4 py-2 text-xs text-slate-500 border-b border-slate-800/60">
+                Allowance-blocked for automated trading, but a real signal exists off IG&apos;s own data — worth opening yourself if you agree with it.
+              </div>
+              <div className="divide-y divide-slate-800/60">
+                {status.recommendations.map(r => (
+                  <div key={r.epic} className="px-4 py-3 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      {r.action === 'BUY'
+                        ? <TrendingUp   className="w-4 h-4 text-green-400" />
+                        : <TrendingDown className="w-4 h-4 text-red-400"   />}
+                      <div>
+                        <div className="font-medium text-white text-sm">{r.name || r.epic}</div>
+                        <div className="text-xs text-slate-500">{r.reason}</div>
+                      </div>
+                    </div>
+                    <div className="text-right text-xs">
+                      <div className="text-white font-medium">{r.action} @ {r.level.toFixed(2)}</div>
+                      {r.stopPrice !== undefined && <div className="text-slate-500">Stop {r.stopPrice.toFixed(2)}</div>}
+                      {r.takeProfitPrice !== undefined && <div className="text-slate-500">TP {r.takeProfitPrice.toFixed(2)}</div>}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
