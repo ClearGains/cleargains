@@ -14,12 +14,12 @@ import {
 } from './alpacaStrategies';
 import { scanIgEpics, epicName } from './igStrategyScanner';
 import { askGeminiDailyVerdict } from './gemini';
+import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO } from './yahooFetch';
 import type { AlpacaBar } from './alpacaApi';
 import {
   isNYSEOpen, isInOpeningRange, isNearClose,
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
 } from './alpacaApi';
-import { fetchYahooBars, EPIC_TO_YAHOO } from './yahooFetch';
 
 // ── State persistence ─────────────────────────────────────────────────────────
 // Mirrors alpacaBot.ts — without this, a PM2 restart while the bot is running
@@ -346,11 +346,23 @@ async function evaluateEpic(
 
   const { resolution, count } = IG_RES[cfg.strategy];
   let bars: AlpacaBar[];
-  try {
-    bars = (await fetchCandleHistory(session, epic, resolution, count)).map(igBarToAlpacaBar);
-  } catch (e) {
-    addLog(mode, 'error', epicName(epic), `Bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
-    return;
+  // FX keeps using IG's own data — Yahoo/Alpaca's raw decimal FX quoting
+  // doesn't match IG's point-scaled prices, and computing a real stop/TP
+  // distance off the wrong scale is exactly the sizing bug this account
+  // already hit once. Shares/indices are the same real-world price on every
+  // source, so those route through the free fallback chain (Alpaca then
+  // Yahoo) instead of burning IG's allowance-limited candle API.
+  if (meta.timeframe === 'daily' && classifyMarketType(epic) !== 'FOREX') {
+    const fallbackBars = await fetchBarsWithFallback(epic, '6mo');
+    if (!fallbackBars?.length) { addLog(mode, 'wait', epicName(epic), 'No bar data (Alpaca/Yahoo unavailable)'); return; }
+    bars = fallbackBars.slice(-count);
+  } else {
+    try {
+      bars = (await fetchCandleHistory(session, epic, resolution, count)).map(igBarToAlpacaBar);
+    } catch (e) {
+      addLog(mode, 'error', epicName(epic), `Bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
   }
   if (!bars.length) { addLog(mode, 'wait', epicName(epic), 'No bar data'); return; }
 

@@ -118,3 +118,64 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'UC.D.AZN.CASH.IP':  'AZN.L',
   'UC.D.LLOY.CASH.IP': 'LLOY.L',
 };
+
+// ── Epic → Alpaca ticker map ──────────────────────────────────────────────────
+// US-listed shares only — Alpaca has no indices, FX, or UK-listed stocks.
+// Same real-world price as IG for all of these (no scale conversion needed,
+// unlike FX), and Alpaca's an official brokerage data feed rather than
+// Yahoo's unofficial one, so it's tried first for anything it covers.
+export const EPIC_TO_ALPACA: Record<string, string> = {
+  'UA.D.AAPL.CASH.IP':    'AAPL',
+  'UA.D.MSFT.CASH.IP':    'MSFT',
+  'UA.D.NVDA.CASH.IP':    'NVDA',
+  'UA.D.AMZN.CASH.IP':    'AMZN',
+  'UA.D.GOOGL.CASH.IP':   'GOOGL',
+  'UA.D.META.CASH.IP':    'META',
+  'UA.D.TSLA.CASH.IP':    'TSLA',
+  'UA.D.NFLX.CASH.IP':    'NFLX',
+  'UA.D.JPM.CASH.IP':     'JPM',
+  'UA.D.V.CASH.IP':       'V',
+  'UA.D.UNH.CASH.IP':     'UNH',
+  'UA.D.XOM.CASH.IP':     'XOM',
+  'SA.D.AMD.DAILY.IP':    'AMD',
+  'UA.D.AVGO.DAILY.IP':   'AVGO',
+  'UB.D.INTC.DAILY.IP':   'INTC',
+  'UC.D.QCOM.DAILY.IP':   'QCOM',
+  'UC.D.MU.DAILY.IP':     'MU',
+  'SG.D.TSM.DAILY.IP':    'TSM',
+  'UD.D.SNDKUS.DAILY.IP': 'SNDK',
+  'UD.D.STX.DAILY.IP':    'STX',
+  'UC.D.MRVL.DAILY.IP':   'MRVL',
+  'UD.D.WDC.DAILY.IP':    'WDC',
+  'SB.D.DELLUS.DAILY.IP': 'DELL',
+  'UC.D.RIMM.DAILY.IP':   'BB',
+  // SK Hynix (Korean primary listing) and Nokia (Helsinki listing) aren't
+  // Alpaca-tradable US symbols — Yahoo-only for those two, as before.
+};
+
+// ── Bars with fallback ────────────────────────────────────────────────────────
+// Tries Alpaca first for anything it covers (more reliable — official feed,
+// no anti-bot header spoofing needed), falls back to Yahoo on any failure or
+// for epics Alpaca doesn't cover (indices, UK stocks). FX is never routed
+// through this — callers keep using IG's own data for FX, since Yahoo/Alpaca's
+// raw decimal quoting doesn't match IG's point-scaled FX prices and a wrong
+// conversion there is exactly the sizing bug this account already hit once.
+export async function fetchBarsWithFallback(
+  epic:  string,
+  range: string,
+): Promise<AlpacaBar[] | null> {
+  const alpacaSym = EPIC_TO_ALPACA[epic];
+  if (alpacaSym) {
+    try {
+      const { getBars } = await import('./alpacaApi');
+      const result = await getBars([alpacaSym], '1Day', 130, 'paper');
+      const bars = result[alpacaSym];
+      if (bars?.length) return bars;
+    } catch {
+      // fall through to Yahoo
+    }
+  }
+  const yahooSym = EPIC_TO_YAHOO[epic];
+  if (!yahooSym) return null;
+  return fetchYahooBars(yahooSym, '1d', range);
+}

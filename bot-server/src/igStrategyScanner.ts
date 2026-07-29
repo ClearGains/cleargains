@@ -2,7 +2,7 @@ import { fetchCandleHistory, type IGSession, type CandleBar } from './igApi';
 import { calcRsi, calcEma, calcAtr, calcVwap, calcSma, calcMacdHist } from './alpacaStrategies';
 import type { AlpacaBar } from './alpacaApi';
 import type { IgStrategyName } from './igStrategyBot';
-import { fetchYahooBars, EPIC_TO_YAHOO } from './yahooFetch';
+import { fetchBarsWithFallback } from './yahooFetch';
 
 // ── Curated liquid IG epic universe ───────────────────────────────────────────
 // Indices, major US/UK stocks, and FX majors. Stake sizing is risk-based
@@ -194,7 +194,7 @@ export async function scanIgEpics(
   for (const { epic, name } of pool) {
     try {
       const bars = useYahoo
-        ? (EPIC_TO_YAHOO[epic] ? await fetchYahooBars(EPIC_TO_YAHOO[epic], '1d', '6mo') ?? [] : [])
+        ? await fetchBarsWithFallback(epic, '6mo') ?? []
         : (await fetchCandleHistory(session, epic, resolution, barCount)).map(igBarToAlpacaBar);
       let s: Scored;
       switch (strategy) {
