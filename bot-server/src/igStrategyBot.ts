@@ -510,6 +510,11 @@ async function ensureDailyPick(mode: IgMode, force = false): Promise<void> {
   const st    = ms(mode);
   const today = new Date().toISOString().slice(0, 10);
   if (!force && st.dailyPickDate === today) return;
+  // Bot not actually up yet (e.g. this fires from the boot-time immediate
+  // check before auto-resume's async auth/scan has finished) — don't lock
+  // in an empty pick for the whole day off a scan that never really ran.
+  // Retry on the next tick instead of marking today "done".
+  if (!st.running || !st.session || !st.config) return;
 
   await refreshRecommendations(mode, force);
   const best = [...st.recommendations.values()].sort((a, b) => b.score - a.score)[0] ?? null;
