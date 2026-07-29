@@ -412,6 +412,8 @@ export type MarketDetail = {
   epic:         string;
   minDealSize:  number;   // minimum £/point bet size
   minStopDist:  number;   // minimum stop distance in points
+  bid?:         number;   // live snapshot — this endpoint isn't subject to the
+  offer?:       number;   // historical-data allowance, unlike fetchCandleHistory
 };
 
 export async function fetchMarketDetails(
@@ -441,6 +443,7 @@ export async function fetchMarketDetails(
             minControlledRiskStopDistance?: { value?: number };
             minNormalStopOrLimitDistance?:  { value?: number };
           };
+          snapshot?: { bid?: number; offer?: number };
         }>;
       };
       for (const m of d.marketDetails ?? []) {
@@ -450,7 +453,7 @@ export async function fetchMarketDetails(
         const minStop    = m.dealingRules?.minNormalStopOrLimitDistance?.value
                         ?? m.dealingRules?.minControlledRiskStopDistance?.value
                         ?? 1;
-        result.set(epic, { epic, minDealSize: minDeal, minStopDist: minStop });
+        result.set(epic, { epic, minDealSize: minDeal, minStopDist: minStop, bid: m.snapshot?.bid, offer: m.snapshot?.offer });
       }
     } catch (e) {
       console.warn(`[igApi] fetchMarketDetails batch failed: ${e instanceof Error ? e.message : String(e)}`);

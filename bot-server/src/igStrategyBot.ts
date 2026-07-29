@@ -420,7 +420,39 @@ async function evaluateEpic(
     default: return;
   }
 
-  await executeIgSignal(mode, epic, signal, openPos ?? null, cfg, session, bars[bars.length - 1].c);
+  let executionPrice  = bars[bars.length - 1].c;
+  let executionSignal = signal;
+
+  // For free-data-confirmed shares, anchor the final absolute stop/TP levels
+  // to IG's own live quote rather than the free-data close — this removes
+  // any dependence on the manual points-scale conversion being exactly right
+  // at the moment of execution; only the *distance* (how far the stop/TP sit
+  // from price) needs to have been correctly scaled, which was verified
+  // against the live account already. fetchMarketDetails is a live snapshot
+  // call, not historical data, so it's unaffected by the allowance limit —
+  // suggested after a live sizing bug (TSMC) showed relying on the scaled
+  // free-data price indefinitely, rather than IG's own number at execution
+  // time, was more fragile than it needed to be.
+  if (usesFreeData && (signal.action === 'BUY' || signal.action === 'SELL')) {
+    try {
+      const liveDetails = await fetchMarketDetails(session, [epic]);
+      const live = liveDetails.get(epic);
+      if (live?.bid && live?.offer) {
+        const livePrice     = (live.bid + live.offer) / 2;
+        const freeDataPrice = executionPrice;
+        const stopDist      = signal.stopPrice       !== undefined ? Math.abs(freeDataPrice - signal.stopPrice)       : undefined;
+        const profitDist    = signal.takeProfitPrice  !== undefined ? Math.abs(freeDataPrice - signal.takeProfitPrice) : undefined;
+        executionSignal = {
+          ...signal,
+          stopPrice:       stopDist   !== undefined ? (signal.action === 'BUY' ? livePrice - stopDist   : livePrice + stopDist)   : signal.stopPrice,
+          takeProfitPrice: profitDist !== undefined ? (signal.action === 'BUY' ? livePrice + profitDist : livePrice - profitDist) : signal.takeProfitPrice,
+        };
+        executionPrice = livePrice;
+      }
+    } catch { /* fall back to the free-data price if the live snapshot fails */ }
+  }
+
+  await executeIgSignal(mode, epic, executionSignal, openPos ?? null, cfg, session, executionPrice);
 }
 
 // ── Order execution ───────────────────────────────────────────────────────────
@@ -508,22 +540,25 @@ async function executeIgSignal(
   const rawStake = calcStake(cfg.maxRiskGbp, sizingStopDist);
   const stake    = Math.max(minDeal, rawStake);
 
-  // When an instrument's own minimum stake is coarser than what the target
-  // risk would size, the realized max loss silently exceeds cfg.maxRiskGbp
-  // with no bound at all — clamping up to minDeal always "succeeded" before
-  // regardless of how far over target that pushed it. Accept up to 3x the
-  // configured risk (proportional, so it scales if maxRiskGbp ever changes)
-  // as the cost of trading a coarser-grained instrument; skip entirely
-  // beyond that rather than accept an open-ended loss on a bet the account
-  // never actually chose to size that large.
+  // Any time the stake actually used ends up above what the target risk
+  // would size — whether because IG's minDealSize forced it up, or because
+  // calcStake's own internal floor (min 0.1/pt) did — the realized max loss
+  // can silently exceed cfg.maxRiskGbp with no bound at all. Confirmed live:
+  // a genuinely volatile instrument's wide ATR-based stop combined with
+  // calcStake's 0.1 floor produced a real £310 max loss against a £20
+  // target, and the previous version of this check only looked at whether
+  // minDeal specifically was the cause — missed this because calcStake's
+  // own floor was what did it here, not IG's minimum. Checking the actual
+  // realized loss directly, unconditionally, closes that gap regardless of
+  // which mechanism pushed the stake up.
+  const actualMaxLoss = stake * sizingStopDist;
+  const lossCeiling    = cfg.maxRiskGbp * 3;
+  if (actualMaxLoss > lossCeiling) {
+    addLog(mode, 'wait', name,
+      `Skipped — sizing works out to £${actualMaxLoss.toFixed(0)} max loss (stake £${stake}/pt × ${sizingStopDist.toFixed(0)}pt stop), above the £${lossCeiling.toFixed(0)} ceiling (3× target)`);
+    return;
+  }
   if (rawStake < minDeal) {
-    const actualMaxLoss = stake * sizingStopDist;
-    const lossCeiling    = cfg.maxRiskGbp * 3;
-    if (actualMaxLoss > lossCeiling) {
-      addLog(mode, 'wait', name,
-        `Skipped — minimum stake £${minDeal}/pt forces max loss to £${actualMaxLoss.toFixed(0)}, above the £${lossCeiling.toFixed(0)} ceiling (3× target)`);
-      return;
-    }
     addLog(mode, 'info', name,
       `Stake £${rawStake}/pt below IG minimum £${minDeal}/pt — using minimum (max loss £${actualMaxLoss.toFixed(0)}, within the £${lossCeiling.toFixed(0)} ceiling)`);
   }
