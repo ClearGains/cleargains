@@ -166,7 +166,7 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
 // API — see evaluateEpic.
 const IG_POLL_MS_OVERRIDE: Partial<Record<IgStrategyName, number>> = {
   ema_crossover:     15 * 60_000,
-  donchian_breakout: 15 * 60_000,
+  donchian_breakout: 5 * 60_000,
   macd_crossover:    15 * 60_000,
 };
 function pollIntervalFor(strategy: IgStrategyName): number {
@@ -802,6 +802,31 @@ async function poll(mode: IgMode) {
     } catch (e) {
       addLog(mode, 'error', epicName(p.epic),
         `🚨 UNPROTECTED — self-heal failed: ${e instanceof Error ? e.message : String(e)}. Monitor manually.`);
+    }
+  }
+
+  // Trailing stop (donchian_breakout only) — ratchets the stop toward price
+  // at the same 3%-of-price distance used at entry, but only ever tightens,
+  // never loosens. Locks in gains as a trend continues instead of capping
+  // the upside with a fixed take-profit, which would cut short exactly the
+  // sustained directional moves this strategy exists to catch. A sharp move
+  // *against* an open position is unaffected by this — that's still bounded
+  // by whatever stop is already live on IG's side, checked every poll cycle
+  // (short here, see pollIntervalFor) independent of this trail logic.
+  if (cfg.strategy === 'donchian_breakout') {
+    for (const p of positions) {
+      if (p.stopLevel === undefined) continue;  // naked — self-heal above handles it
+      const currentPrice = p.direction === 'BUY' ? p.bid : p.offer;
+      const trailDist     = currentPrice * 0.03;
+      const candidateStop = p.direction === 'BUY' ? currentPrice - trailDist : currentPrice + trailDist;
+      const wouldTighten  = p.direction === 'BUY' ? candidateStop > p.stopLevel : candidateStop < p.stopLevel;
+      if (!wouldTighten) continue;
+      try {
+        await updatePositionLevels(st.session, p.dealId, candidateStop, p.limitLevel ?? null);
+        addLog(mode, 'info', epicName(p.epic), `Trailing stop tightened: ${p.stopLevel.toFixed(2)} → ${candidateStop.toFixed(2)}`);
+      } catch (e) {
+        addLog(mode, 'error', epicName(p.epic), `Trailing stop update failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
 
