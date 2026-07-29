@@ -202,6 +202,26 @@ export async function closeAllPositions(mode: AccountMode): Promise<void> {
 
 export type Timeframe = '1Min' | '5Min' | '15Min' | '1Hour' | '1Day' | '1Week';
 
+// Without an explicit `start`, Alpaca's bars endpoint defaults to a very
+// narrow recent window (empirically: as little as a single bar for daily
+// timeframes) regardless of `limit` — `limit` only caps the response from
+// whatever window is actually queried, it doesn't widen it. Compute a
+// generous calendar-day lookback per timeframe so `limit` bars are actually
+// available to return; harmless to overshoot since `limit` still caps it.
+function startDateFor(timeframe: Timeframe, limit: number): string {
+  let daysBack: number;
+  switch (timeframe) {
+    case '1Min':  daysBack = Math.max(5,  Math.ceil(limit / 390) * 3 + 3); break;
+    case '5Min':  daysBack = Math.max(5,  Math.ceil(limit / 78)  * 3 + 3); break;
+    case '15Min': daysBack = Math.max(5,  Math.ceil(limit / 26)  * 3 + 3); break;
+    case '1Hour': daysBack = Math.max(10, Math.ceil(limit / 7)   * 3 + 3); break;
+    case '1Day':  daysBack = Math.ceil(limit * 1.6) + 15; break;
+    case '1Week': daysBack = limit * 8 + 20; break;
+    default:      daysBack = 30;
+  }
+  return new Date(Date.now() - daysBack * 86_400_000).toISOString();
+}
+
 export async function getBars(
   symbols:   string[],
   timeframe: Timeframe,
@@ -215,6 +235,7 @@ export async function getBars(
     symbols:   symbols.join(','),
     timeframe,
     limit:     String(limit),
+    start:     startDateFor(timeframe, limit),
     feed:      'iex',     // IEX is free; switch to 'sip' with paid data plan
     sort:      'asc',
   });
