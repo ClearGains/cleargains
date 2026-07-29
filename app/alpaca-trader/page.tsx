@@ -896,12 +896,11 @@ function IgSpreadBetTab() {
             </div>
           )}
 
-          {/* Recommended (manual only) — signals computed off IG's own data for
-              epics currently blocked by IG's historical-data allowance. These
-              can't be auto-confirmed at normal poll frequency without burning
-              the allowance further, so they're surfaced here for you to open
-              manually (IG's own app, or the Demo Trader manual panel) instead
-              of just being silently dropped. */}
+          {/* Recommended (manual only) — full 38-name universe scan, not just
+              the current watch list. Covers signals the bot can't act on
+              itself for any reason: outside the current top-N watch slots,
+              skipped for sizing/ceiling reasons, or IG-allowance-blocked.
+              Surfaced here to open yourself instead of silently discarded. */}
           {!!status?.running && (
             <div className="bg-slate-900/60 border border-purple-900/50 rounded-xl overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
@@ -918,7 +917,7 @@ function IgSpreadBetTab() {
                 </div>
               </div>
               <div className="px-4 py-2 text-xs text-slate-500 border-b border-slate-800/60">
-                Allowance-blocked for automated trading, but a real signal exists off IG&apos;s own data — worth opening yourself if you agree with it.
+                Scanned across the full instrument universe, not just what&apos;s currently watched — covers setups outside the bot&apos;s current scope, skipped for sizing, or allowance-blocked. Worth opening yourself if you agree.
               </div>
               {!status.recommendations?.length ? (
                 <div className="px-4 py-6 text-center text-slate-600 text-sm">None right now</div>

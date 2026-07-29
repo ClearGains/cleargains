@@ -12,8 +12,8 @@ import {
 } from './alpacaBot';
 import {
   startIgStrategyBot, stopIgStrategyBot, pauseIgStrategyBot, resumeIgStrategyBot,
-  getIgStrategyBotStatus, loadSavedIgStrategyState, startBlockedRecommendationRefresh,
-  refreshBlockedRecommendations,
+  getIgStrategyBotStatus, loadSavedIgStrategyState, startRecommendationRefresh,
+  refreshRecommendations,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
@@ -465,7 +465,7 @@ app.delete('/ig-strategy/:mode/watch/:dealId', auth, (req: Request, res: Respons
 app.post('/ig-strategy/:mode/refresh-recommendations', auth, async (req: Request, res: Response) => {
   const mode = resolveIgMode(req, res);
   if (!mode) return;
-  await refreshBlockedRecommendations(mode, true);
+  await refreshRecommendations(mode, true);
   res.json({ ok: true });
 });
 
@@ -476,7 +476,7 @@ app.listen(PORT, '0.0.0.0', () => {
 
   startLeaderboardSchedule();
   startGeminiWatch();
-  startBlockedRecommendationRefresh();
+  startRecommendationRefresh();
 
   // Auto-resume legacy single-account bot if it was running before restart
   const saved = loadSavedState();

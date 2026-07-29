@@ -12,7 +12,7 @@ import {
   STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
-import { scanIgEpics, epicName } from './igStrategyScanner';
+import { scanIgEpics, epicName, IG_EPICS } from './igStrategyScanner';
 import { askGeminiDailyVerdict } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import type { AlpacaBar } from './alpacaApi';
@@ -402,17 +402,18 @@ function blockEpicOnAllowance(mode: IgMode, cfg: IgStrategyConfig, session: IGSe
   })();
 }
 
-// Periodically (see startBlockedRecommendationRefresh) tries IG's own native
-// data — once the cooldown's passed, not every poll — for currently-blocked
-// epics. Deliberately IG's own data only, never a foreign/ADR proxy: an
-// epic ended up on this list specifically because it's not Alpaca-covered,
-// and those are exactly the ones where a substitute listing needs a real
-// currency conversion the codebase doesn't do (see EPIC_TO_ALPACA comment) —
-// using IG's native data keeps this recommendation actually correctly
-// scaled instead of repeating the ×100 class of bug. A successful fetch also
-// means the allowance recovered, so the epic gets unblocked for the real bot
-// too, not just used for the recommendation.
-export async function refreshBlockedRecommendations(mode: IgMode, force = false): Promise<void> {
+// Periodically (see startRecommendationRefresh) scans the FULL 38-name IG
+// universe — not just the handful the bot is currently watching — for a
+// live BUY/SELL signal, so a good setup outside the current top-N watch
+// slots (or one that's watched but got skipped for sizing/ceiling reasons)
+// is still surfaced instead of silently discarded. Alpaca/Yahoo-covered
+// names (the majority) are free and checked every cycle; IG-only names
+// (indices, FX, UK stocks, and proxies like SK Hynix/Nokia) respect the
+// same allowance cooldown as the main bot — never a foreign/ADR proxy for
+// those, for the same currency-conversion-risk reason evaluateEpic avoids
+// it (see EPIC_TO_ALPACA comment). A successful IG-only fetch also means
+// the allowance recovered, unblocking that epic for real trading too.
+export async function refreshRecommendations(mode: IgMode, force = false): Promise<void> {
   const st = ms(mode);
   if (!st.running || !st.session || !st.config) {
     if (force) addLog(mode, 'error', '—', '[Recommendation check] Bot not running — nothing to check');
@@ -421,23 +422,40 @@ export async function refreshBlockedRecommendations(mode: IgMode, force = false)
   const cfg = st.config;
   const { resolution, count } = IG_RES[cfg.strategy];
 
-  const toCheck = [...st.blockedEpics].filter(([, unblockAt]) => force || Date.now() >= unblockAt);
-  if (force) {
-    addLog(mode, 'info', '—', toCheck.length
-      ? `[Recommendation check] Checking ${toCheck.length} blocked epic(s): ${toCheck.map(([e]) => epicName(e)).join(', ')}`
-      : `[Recommendation check] No blocked epics to check (${st.blockedEpics.size} on cooldown)`);
-  }
+  let heldEpics = new Set<string>();
+  try { heldEpics = new Set((await fetchFullPositions(st.session)).map(p => p.epic)); } catch {}
 
-  for (const [epic] of toCheck) {
-    const name = epicName(epic);
+  const candidates = IG_EPICS.map(e => e.epic).filter(epic => !heldEpics.has(epic));
+  if (force) addLog(mode, 'info', '—', `[Recommendation check] Scanning ${candidates.length} instrument(s)…`);
+
+  let checked = 0, found = 0, blocked = 0;
+
+  for (const epic of candidates) {
+    const name         = epicName(epic);
+    const usesFreeData = epic in EPIC_TO_ALPACA;
+
+    if (!usesFreeData) {
+      const unblockAt = st.blockedEpics.get(epic);
+      if (unblockAt !== undefined && !force && Date.now() < unblockAt) continue;
+    }
+
     try {
-      const bars = (await fetchCandleHistory(st.session, epic, resolution, count)).map(igBarToAlpacaBar);
+      let bars: AlpacaBar[];
+      if (usesFreeData) {
+        const fetched = await fetchBarsWithFallback(epic, '6mo');
+        if (!fetched?.length) continue;
+        bars = fetched.slice(-count);
+      } else {
+        bars = (await fetchCandleHistory(st.session, epic, resolution, count)).map(igBarToAlpacaBar);
+      }
       if (!bars.length) throw new Error('No bar data');
+      checked++;
 
-      // Fetch succeeded — allowance recovered, unblock for real trading too.
-      st.blockedEpics.delete(epic);
-      saveBlockedEpics(mode, st.blockedEpics);
-      addLog(mode, 'info', name, 'Allowance recovered — unblocked');
+      if (!usesFreeData && st.blockedEpics.has(epic)) {
+        st.blockedEpics.delete(epic);
+        saveBlockedEpics(mode, st.blockedEpics);
+        addLog(mode, 'info', name, 'Allowance recovered — unblocked');
+      }
 
       let signal: StrategySignal | null = null;
       switch (cfg.strategy) {
@@ -446,37 +464,43 @@ export async function refreshBlockedRecommendations(mode: IgMode, force = false)
         case 'vwap':               signal = vwapSignal(bars, bars[bars.length - 1].c, false); break;
         case 'donchian_breakout':  signal = donchianBreakoutSignal(bars, false); break;
         case 'macd_crossover':     signal = macdCrossoverSignal(bars, false); break;
-        default: break;  // orb/weekly_momentum need extra state this refresher doesn't track
+        default: break;  // orb/weekly_momentum need extra state this scan doesn't track
       }
 
       if (signal && (signal.action === 'BUY' || signal.action === 'SELL')) {
+        found++;
         st.recommendations.set(epic, {
           epic, name, action: signal.action, reason: signal.reason,
           level: bars[bars.length - 1].c,
           stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice,
           computedAt: new Date().toISOString(),
         });
-        addLog(mode, 'info', name, `[Recommendation] ${signal.action} — ${signal.reason} (manual only — was allowance-limited)`);
       } else {
         st.recommendations.delete(epic);
       }
     } catch (e) {
-      // Still blocked — reset the cooldown and try again next refresh cycle.
-      st.blockedEpics.set(epic, Date.now() + BLOCK_COOLDOWN_MS);
-      saveBlockedEpics(mode, st.blockedEpics);
-      addLog(mode, 'info', name, `[Recommendation check] Still blocked, retry in 6h: ${e instanceof Error ? e.message : String(e)}`);
+      st.recommendations.delete(epic);
+      if (!usesFreeData) {
+        blocked++;
+        st.blockedEpics.set(epic, Date.now() + BLOCK_COOLDOWN_MS);
+        saveBlockedEpics(mode, st.blockedEpics);
+        if (force) addLog(mode, 'info', name, `[Recommendation check] Still blocked, retry in 6h: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
-    await new Promise(r => setTimeout(r, 1200));  // same IG-call spacing as the scanner uses
+    // Only IG's own calls share the allowance — free-data ones get the scanner's lighter spacing.
+    await new Promise(r => setTimeout(r, usesFreeData ? 250 : 1200));
   }
+
+  if (force) addLog(mode, 'info', '—', `[Recommendation check] Done — ${checked} checked, ${found} signal(s) found, ${blocked} allowance-blocked`);
 }
 
-const RECOMMENDATION_REFRESH_MS = 60 * 60_000;  // hourly check — actual IG calls only happen for epics past cooldown
+const RECOMMENDATION_REFRESH_MS = 30 * 60_000;  // full-universe sweep every 30min — cheap for free-data names, cooldown-gated for IG-only ones
 let recommendationTimer: ReturnType<typeof setInterval> | null = null;
 
-export function startBlockedRecommendationRefresh(): void {
+export function startRecommendationRefresh(): void {
   if (recommendationTimer) return;
   recommendationTimer = setInterval(() => {
-    for (const mode of ['demo', 'live'] as const) void refreshBlockedRecommendations(mode);
+    for (const mode of ['demo', 'live'] as const) void refreshRecommendations(mode);
   }, RECOMMENDATION_REFRESH_MS);
 }
 
