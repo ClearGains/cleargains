@@ -414,12 +414,21 @@ function blockEpicOnAllowance(mode: IgMode, cfg: IgStrategyConfig, session: IGSe
 // too, not just used for the recommendation.
 export async function refreshBlockedRecommendations(mode: IgMode, force = false): Promise<void> {
   const st = ms(mode);
-  if (!st.running || !st.session || !st.config) return;
+  if (!st.running || !st.session || !st.config) {
+    if (force) addLog(mode, 'error', '—', '[Recommendation check] Bot not running — nothing to check');
+    return;
+  }
   const cfg = st.config;
   const { resolution, count } = IG_RES[cfg.strategy];
 
-  for (const [epic, unblockAt] of [...st.blockedEpics]) {
-    if (!force && Date.now() < unblockAt) continue;
+  const toCheck = [...st.blockedEpics].filter(([, unblockAt]) => force || Date.now() >= unblockAt);
+  if (force) {
+    addLog(mode, 'info', '—', toCheck.length
+      ? `[Recommendation check] Checking ${toCheck.length} blocked epic(s): ${toCheck.map(([e]) => epicName(e)).join(', ')}`
+      : `[Recommendation check] No blocked epics to check (${st.blockedEpics.size} on cooldown)`);
+  }
+
+  for (const [epic] of toCheck) {
     const name = epicName(epic);
     try {
       const bars = (await fetchCandleHistory(st.session, epic, resolution, count)).map(igBarToAlpacaBar);
@@ -451,10 +460,11 @@ export async function refreshBlockedRecommendations(mode: IgMode, force = false)
       } else {
         st.recommendations.delete(epic);
       }
-    } catch {
+    } catch (e) {
       // Still blocked — reset the cooldown and try again next refresh cycle.
       st.blockedEpics.set(epic, Date.now() + BLOCK_COOLDOWN_MS);
       saveBlockedEpics(mode, st.blockedEpics);
+      addLog(mode, 'info', name, `[Recommendation check] Still blocked, retry in 6h: ${e instanceof Error ? e.message : String(e)}`);
     }
     await new Promise(r => setTimeout(r, 1200));  // same IG-call spacing as the scanner uses
   }
