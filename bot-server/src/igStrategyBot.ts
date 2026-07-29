@@ -412,14 +412,14 @@ function blockEpicOnAllowance(mode: IgMode, cfg: IgStrategyConfig, session: IGSe
 // scaled instead of repeating the ×100 class of bug. A successful fetch also
 // means the allowance recovered, so the epic gets unblocked for the real bot
 // too, not just used for the recommendation.
-async function refreshBlockedRecommendations(mode: IgMode): Promise<void> {
+export async function refreshBlockedRecommendations(mode: IgMode, force = false): Promise<void> {
   const st = ms(mode);
   if (!st.running || !st.session || !st.config) return;
   const cfg = st.config;
   const { resolution, count } = IG_RES[cfg.strategy];
 
   for (const [epic, unblockAt] of [...st.blockedEpics]) {
-    if (Date.now() < unblockAt) continue;
+    if (!force && Date.now() < unblockAt) continue;
     const name = epicName(epic);
     try {
       const bars = (await fetchCandleHistory(st.session, epic, resolution, count)).map(igBarToAlpacaBar);

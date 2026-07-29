@@ -12,7 +12,8 @@ import {
 } from './alpacaBot';
 import {
   startIgStrategyBot, stopIgStrategyBot, pauseIgStrategyBot, resumeIgStrategyBot,
-  getIgStrategyBotStatus, loadSavedIgStrategyState,
+  getIgStrategyBotStatus, loadSavedIgStrategyState, startBlockedRecommendationRefresh,
+  refreshBlockedRecommendations,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
@@ -459,6 +460,15 @@ app.delete('/ig-strategy/:mode/watch/:dealId', auth, (req: Request, res: Respons
   res.json({ ok: true });
 });
 
+// Manual trigger for allowance-blocked recommendation refresh, bypassing the
+// normal 6h cooldown — otherwise waits for the hourly background check.
+app.post('/ig-strategy/:mode/refresh-recommendations', auth, async (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  await refreshBlockedRecommendations(mode, true);
+  res.json({ ok: true });
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[bot-server] Listening on 0.0.0.0:${PORT}`);
@@ -466,6 +476,7 @@ app.listen(PORT, '0.0.0.0', () => {
 
   startLeaderboardSchedule();
   startGeminiWatch();
+  startBlockedRecommendationRefresh();
 
   // Auto-resume legacy single-account bot if it was running before restart
   const saved = loadSavedState();

@@ -72,5 +72,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}`, 'POST');
   }
 
+  if (action === 'refresh-recommendations') return proxyTo(`/ig-strategy/${mode}/refresh-recommendations`, 'POST');
+
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
 }

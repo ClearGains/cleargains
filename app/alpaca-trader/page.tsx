@@ -902,15 +902,27 @@ function IgSpreadBetTab() {
               the allowance further, so they're surfaced here for you to open
               manually (IG's own app, or the Demo Trader manual panel) instead
               of just being silently dropped. */}
-          {!!status?.recommendations?.length && (
+          {!!status?.running && (
             <div className="bg-slate-900/60 border border-purple-900/50 rounded-xl overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-slate-300">Recommended — Manual Only</h2>
-                <span className="text-xs text-slate-500">{status.recommendations.length}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-500">{status.recommendations?.length ?? 0}</span>
+                  <button
+                    onClick={() => void post('refresh-recommendations')}
+                    disabled={loading}
+                    className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    Refresh now
+                  </button>
+                </div>
               </div>
               <div className="px-4 py-2 text-xs text-slate-500 border-b border-slate-800/60">
                 Allowance-blocked for automated trading, but a real signal exists off IG&apos;s own data — worth opening yourself if you agree with it.
               </div>
+              {!status.recommendations?.length ? (
+                <div className="px-4 py-6 text-center text-slate-600 text-sm">None right now</div>
+              ) : (
               <div className="divide-y divide-slate-800/60">
                 {status.recommendations.map(r => (
                   <div key={r.epic} className="px-4 py-3 flex items-center justify-between">
@@ -931,6 +943,7 @@ function IgSpreadBetTab() {
                   </div>
                 ))}
               </div>
+              )}
             </div>
           )}
 
