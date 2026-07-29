@@ -70,6 +70,26 @@ function loadPausedEpics(mode: IgMode): Set<string> {
   catch { return new Set(); }
 }
 
+// Last entry trigger per epic (fresh-breakout re-entry filter) — was
+// in-memory only, wiped on every restart. Confirmed live this actually
+// matters: a PM2 restart 33 seconds before a poll cycle let Qualcomm
+// re-enter on the exact same "20-day low 16227.00" the filter was built to
+// block, purely because the restart erased the record of the prior entry.
+function lastEntryTriggerFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-last-entry-trigger-${mode}.json`);
+}
+function saveLastEntryTrigger(mode: IgMode, map: Map<string, { level: number; direction: 'BUY' | 'SELL' }>): void {
+  try { fs.writeFileSync(lastEntryTriggerFile(mode), JSON.stringify([...map]), 'utf8'); } catch {}
+}
+function loadLastEntryTrigger(mode: IgMode): Map<string, { level: number; direction: 'BUY' | 'SELL' }> {
+  try {
+    const pairs = JSON.parse(fs.readFileSync(lastEntryTriggerFile(mode), 'utf8')) as [string, { level: number; direction: 'BUY' | 'SELL' }][];
+    return new Map(pairs);
+  } catch {
+    return new Map();
+  }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
@@ -222,8 +242,9 @@ const modeStates = new Map<IgMode, ModeState>([
   ['live', makeModeState()],
 ]);
 for (const [mode, st] of modeStates) {
-  st.blockedEpics = loadBlockedEpics(mode);
-  st.pausedEpics  = loadPausedEpics(mode);
+  st.blockedEpics    = loadBlockedEpics(mode);
+  st.pausedEpics     = loadPausedEpics(mode);
+  st.lastEntryTrigger = loadLastEntryTrigger(mode);
 }
 
 export function isPaused(mode: IgMode, epic: string): boolean { return ms(mode).pausedEpics.has(epic); }
@@ -952,6 +973,7 @@ async function executeIgSignal(
     addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
     if (signal.triggerLevel !== undefined) {
       st.lastEntryTrigger.set(epic, { level: signal.triggerLevel, direction: effectiveDirection });
+      saveLastEntryTrigger(mode, st.lastEntryTrigger);
     }
 
     // Only claim Stop/TP protection once it's actually confirmed attached —
