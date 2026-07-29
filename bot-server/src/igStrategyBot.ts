@@ -338,17 +338,19 @@ async function evaluateEpic(
   const side       = openPos ? (openPos.direction === 'BUY' ? 'long' : 'short') as 'long' | 'short' : undefined;
 
   // Only epics with a genuine Alpaca mapping (EPIC_TO_ALPACA) use the free
-  // fallback chain for real price levels — those are individually confirmed
-  // US-listed shares on the same real-world price as IG. Everything else
-  // (indices, UK stocks, and non-USD-listing Yahoo proxies like SK Hynix's
-  // Korean-won primary listing or Nokia's Helsinki/EUR listing) keeps using
-  // IG's own data. This almost shipped a live SELL sized off SK Hynix's
-  // ₩1,401,000 Yahoo price as if it were points — IG rejected it (margin/
-  // validation), but the fix is to not trust "shares are same scale
-  // everywhere" without per-instrument verification, not to rely on luck.
+  // fallback chain for real price levels — those are individually verified
+  // US-listed shares. Everything else (indices, UK stocks, and non-USD-
+  // listing Yahoo proxies like SK Hynix's Korean-won primary listing or
+  // Nokia's Helsinki/EUR listing) keeps using IG's own data — those aren't
+  // a clean scale factor away (real currency conversion, not just points
+  // scaling), confirmed by checking their actual IG-vs-source ratios
+  // directly rather than assuming. IG quotes the Alpaca-covered shares in
+  // points = cents (×100 vs the raw Alpaca/Yahoo dollar price) — also
+  // confirmed live across all 24, not assumed — and fetchBarsWithFallback
+  // applies that conversion before returning bars for this set.
   const meta         = STRATEGY_META[cfg.strategy];
   const usesFreeData = epic in EPIC_TO_ALPACA;
-  const confirmSource = usesFreeData ? 'Alpaca/Yahoo' : "IG's own data";
+  const confirmSource = usesFreeData ? 'Alpaca/Yahoo (×100 scaled)' : "IG's own data";
 
   // ── Yahoo pre-check gate (daily-timeframe strategies, outside the guaranteed
   // once-daily window) — skip IG's allowance-limited candle fetch entirely

@@ -160,22 +160,38 @@ export const EPIC_TO_ALPACA: Record<string, string> = {
 // through this — callers keep using IG's own data for FX, since Yahoo/Alpaca's
 // raw decimal quoting doesn't match IG's point-scaled FX prices and a wrong
 // conversion there is exactly the sizing bug this account already hit once.
+// IG quotes US shares in points = cents, not raw dollars — confirmed live
+// against the account across all 24 EPIC_TO_ALPACA names (AAPL real ~341,
+// IG shows ~33952; AMD real ~433, IG shows ~43361; consistent ×100 within
+// normal bid/ask spread, not a per-instrument quirk). Raw Alpaca/Yahoo
+// dollar prices need this applied before use for any real stop/TP/price
+// level — skipping it is what caused a live SELL to size off an entry
+// price ~100x too low (TSMC, rejected by IG's own margin check rather
+// than filling, but not something to rely on luck for twice).
+const IG_SHARE_POINTS_PER_UNIT = 100;
+
+function scaleBars(bars: AlpacaBar[], factor: number): AlpacaBar[] {
+  return bars.map(b => ({ ...b, o: b.o * factor, h: b.h * factor, l: b.l * factor, c: b.c * factor }));
+}
+
 export async function fetchBarsWithFallback(
   epic:  string,
   range: string,
 ): Promise<AlpacaBar[] | null> {
+  const isShare  = epic in EPIC_TO_ALPACA;
   const alpacaSym = EPIC_TO_ALPACA[epic];
   if (alpacaSym) {
     try {
       const { getBars } = await import('./alpacaApi');
       const result = await getBars([alpacaSym], '1Day', 130, 'paper');
       const bars = result[alpacaSym];
-      if (bars?.length) return bars;
+      if (bars?.length) return isShare ? scaleBars(bars, IG_SHARE_POINTS_PER_UNIT) : bars;
     } catch {
       // fall through to Yahoo
     }
   }
   const yahooSym = EPIC_TO_YAHOO[epic];
   if (!yahooSym) return null;
-  return fetchYahooBars(yahooSym, '1d', range);
+  const yahooBars = await fetchYahooBars(yahooSym, '1d', range);
+  return yahooBars && isShare ? scaleBars(yahooBars, IG_SHARE_POINTS_PER_UNIT) : yahooBars;
 }
