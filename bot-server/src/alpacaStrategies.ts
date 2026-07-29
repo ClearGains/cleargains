@@ -432,6 +432,15 @@ export function donchianBreakoutSignal(
   const exitLow   = Math.min(...exitWindow.map(b => b.l));
   const atr = calcAtr(bars) ?? last * 0.015;
 
+  // Stop distance: tighter of 2×ATR or 3% of price. Pure 2×ATR blows out
+  // during genuinely volatile stretches (a real semiconductor-sector
+  // selloff drove ATR-implied stops to 5-9x a name's own price live) —
+  // every signal ends up skipped by the account's loss ceiling instead of
+  // trading at a smaller, still-real size. Same 3% ratio the self-heal
+  // fallback already uses for naked positions, so this isn't a new number,
+  // just applying it up front instead of after the fact.
+  const stopDist = Math.min(atr * 2, last * 0.03);
+
   if (inPosition) {
     if (side === 'long'  && last < exitLow)  return { action: 'CLOSE_LONG',  reason: `Broke below ${exitPeriod}-day low ${exitLow.toFixed(2)}` };
     if (side === 'short' && last > exitHigh) return { action: 'CLOSE_SHORT', reason: `Broke above ${exitPeriod}-day high ${exitHigh.toFixed(2)}` };
@@ -442,7 +451,7 @@ export function donchianBreakoutSignal(
     return {
       action:           'BUY',
       reason:           `Breakout above ${entryPeriod}-day high ${entryHigh.toFixed(2)}`,
-      stopPrice:        +(last - atr * 2).toFixed(2),
+      stopPrice:        +(last - stopDist).toFixed(2),
       takeProfitPrice:  +(last + atr * 10).toFixed(2),
       orderType:        'market',
     };
@@ -451,7 +460,7 @@ export function donchianBreakoutSignal(
     return {
       action:           'SELL',
       reason:           `Breakdown below ${entryPeriod}-day low ${entryLow.toFixed(2)}`,
-      stopPrice:        +(last + atr * 2).toFixed(2),
+      stopPrice:        +(last + stopDist).toFixed(2),
       takeProfitPrice:  +(last - atr * 10).toFixed(2),
       orderType:        'market',
     };
