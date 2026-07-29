@@ -116,6 +116,9 @@ type ModeState = {
   authFailCount:        number;
   sessionRefreshTimer:  ReturnType<typeof setTimeout> | null;
   marketDetails:        Map<string, MarketDetail>;
+  // Epics dropped for the rest of this run after IG's own historical-data
+  // allowance rejected them — see blockEpicOnAllowance.
+  blockedEpics:         Set<string>;
   // Daily-loss circuit breaker
   dayKey:               string;   // UTC date the balance baseline belongs to
   dayStartBalance:      number;
@@ -130,6 +133,7 @@ function makeModeState(): ModeState {
     log: [], pollTimer: null, nextRunMs: null, lastPollTs: null,
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
     marketDetails: new Map(),
+    blockedEpics: new Set(),
     dayKey: '', dayStartBalance: 0, lossLock: false,
     weekendGuardDate: '',
   };
@@ -324,6 +328,32 @@ async function buildOrbRange(mode: IgMode, session: IGSession, epics: string[]) 
   }
 }
 
+// Non-Alpaca-covered epics (indices, and proxies like SK Hynix/Nokia) always
+// need IG's own historical candle data to get a confirmed signal. Once IG
+// rejects one with an allowance error, retrying every poll just burns more
+// calls for no benefit — block it for the rest of this run and pull in a
+// fresh scan pick so the watch-list slot isn't dead weight.
+function blockEpicOnAllowance(mode: IgMode, cfg: IgStrategyConfig, session: IGSession, badEpic: string): void {
+  const st   = ms(mode);
+  const name = epicName(badEpic);
+  st.blockedEpics.add(badEpic);
+  void (async () => {
+    try {
+      const current = st.config?.epics ?? [];
+      const held    = (await fetchFullPositions(session)).map(p => p.epic);
+      const exclude = [...new Set([...current, ...held, ...st.blockedEpics])];
+      const picks   = await scanIgEpics(cfg.strategy, session, exclude, 1, msg => addLog(mode, 'info', '—', msg));
+      if (picks[0] && st.config) {
+        const idx = st.config.epics.indexOf(badEpic);
+        if (idx !== -1) st.config.epics[idx] = picks[0];
+        addLog(mode, 'info', '—', `Blocked (IG allowance) — ${name} → ${epicName(picks[0])}`);
+      } else {
+        addLog(mode, 'info', '—', `Blocked (IG allowance) — ${name} dropped, no replacement found this scan`);
+      }
+    } catch {}
+  })();
+}
+
 // ── Signal evaluation ─────────────────────────────────────────────────────────
 
 async function evaluateEpic(
@@ -352,6 +382,12 @@ async function evaluateEpic(
   const usesFreeData = epic in EPIC_TO_ALPACA;
   const confirmSource = usesFreeData ? 'Alpaca/Yahoo (×100 scaled)' : "IG's own data";
 
+  // Already rejected by IG's historical-data allowance this run — observed
+  // live not clearing for 30+ minutes across repeated polls, so retrying on
+  // every cycle just wastes calls. Skip silently; the slot gets a fresh scan
+  // pick from blockEpicOnAllowance below instead of hammering IG again.
+  if (!usesFreeData && ms(mode).blockedEpics.has(epic)) return;
+
   // ── Yahoo pre-check gate (daily-timeframe strategies, outside the guaranteed
   // once-daily window) — skip IG's allowance-limited candle fetch entirely
   // unless Yahoo's free data already suggests something worth confirming.
@@ -373,7 +409,9 @@ async function evaluateEpic(
     try {
       bars = (await fetchCandleHistory(session, epic, resolution, count)).map(igBarToAlpacaBar);
     } catch (e) {
-      addLog(mode, 'error', epicName(epic), `Bar fetch failed (${confirmSource}): ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      addLog(mode, 'error', epicName(epic), `Bar fetch failed (${confirmSource}): ${msg}`);
+      if (msg.toLowerCase().includes('allowance')) blockEpicOnAllowance(mode, cfg, session, epic);
       return;
     }
   }
