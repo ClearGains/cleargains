@@ -226,7 +226,7 @@ Return ONLY this JSON (no markdown, no other text):
               // that rejects thinkingBudget outright (confirmed live: flat
               // 400 INVALID_ARGUMENT). maxOutputTokens raised for headroom.
               contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { maxOutputTokens: 600, temperature: 0.1 },
+              generationConfig: { maxOutputTokens: 1500, temperature: 0.1 },
             }),
             signal: AbortSignal.timeout(15_000),
           },

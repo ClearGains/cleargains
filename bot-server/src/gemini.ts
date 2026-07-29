@@ -113,9 +113,13 @@ Respond with JSON only, no markdown:
           // (confirmed live: {"thinkingConfig":{"thinkingBudget":0}} gets a
           // flat 400 INVALID_ARGUMENT, breaking every call). Thinking stays
           // on instead — cheap regardless — with maxOutputTokens raised to
-          // 400 so hidden thinking tokens can't eat the whole budget before
-          // the visible JSON answer gets generated.
-          generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
+          // 1500: 400 wasn't enough either, confirmed live — a longer
+          // prompt (with news headlines added) pushed thinking to 381
+          // tokens, hit MAX_TOKENS, and truncated the JSON mid-word before
+          // the visible answer finished. Thinking-token usage isn't
+          // something this can control precisely, so headroom needs to be
+          // generous rather than tightly tuned.
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
         }),
         signal: AbortSignal.timeout(8_000),
       }
@@ -214,7 +218,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
         }),
         signal: AbortSignal.timeout(8_000),
       }
@@ -301,7 +305,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
         }),
         signal: AbortSignal.timeout(8_000),
       },

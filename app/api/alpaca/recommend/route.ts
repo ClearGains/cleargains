@@ -231,7 +231,7 @@ Rules: keyHeadlines = 3-5 most market-moving only. allowShorts only if clearly b
           // rejects thinkingBudget outright (confirmed live: flat 400
           // INVALID_ARGUMENT). maxOutputTokens raised so hidden thinking
           // tokens can't eat the whole budget before the JSON answer.
-          generationConfig: { temperature: 0.3, maxOutputTokens: 800 },
+          generationConfig: { temperature: 0.3, maxOutputTokens: 1500 },
         }),
         signal: AbortSignal.timeout(12_000),
       },

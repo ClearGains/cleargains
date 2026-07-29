@@ -58,7 +58,7 @@ Respond with JSON only, no markdown:
           // No thinkingConfig — the alias resolves to a reasoning model that
           // rejects thinkingBudget outright (confirmed live: flat 400
           // INVALID_ARGUMENT). maxOutputTokens raised for headroom.
-          generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
         }),
         signal: AbortSignal.timeout(8_000),
       }
