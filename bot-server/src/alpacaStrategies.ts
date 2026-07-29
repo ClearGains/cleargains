@@ -519,13 +519,13 @@ export function macdCrossoverSignal(
 
 // ── Strategy metadata ─────────────────────────────────────────────────────────
 
-export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'macd_crossover';
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
 
 export const STRATEGY_META: Record<StrategyName, {
   label:     string;
-  timeframe: 'intraday' | 'daily' | 'weekly';
+  timeframe: 'intraday' | 'hourly' | 'daily' | 'weekly';
   pollMs:    number;   // how often to poll for signals
-  barPeriod: '5Min' | '1Min' | '1Day' | '1Week';
+  barPeriod: '5Min' | '1Min' | '1Hour' | '1Day' | '1Week';
   barsNeeded: number;
 }> = {
   rsi_mean_reversion:  { label: 'RSI Mean Reversion',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5Min',  barsNeeded: 60  },
@@ -535,5 +535,10 @@ export const STRATEGY_META: Record<StrategyName, {
   weekly_momentum:     { label: 'Weekly Momentum',        timeframe: 'weekly',   pollMs: 60 * 60_000, barPeriod: '1Week', barsNeeded: 20  },
   options_directional: { label: 'Options Directional',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5Min',  barsNeeded: 60  },
   donchian_breakout:   { label: 'Donchian Breakout',       timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
+  // Same Donchian logic, hourly bars instead of daily — holds across hours to
+  // ~1-2 days instead of days-to-weeks. Uses the exact same donchianBreakoutSignal
+  // function (it's bar-resolution-agnostic), just fed hourly candles with
+  // shorter entry/exit windows sized in hours instead of days.
+  donchian_hourly:     { label: 'Donchian Breakout (Hourly)', timeframe: 'hourly', pollMs: 15 * 60_000, barPeriod: '1Hour', barsNeeded: 40 },
   macd_crossover:      { label: 'MACD Crossover',          timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
 };

@@ -177,13 +177,16 @@ function scaleBars(bars: AlpacaBar[], factor: number): AlpacaBar[] {
 export async function fetchBarsWithFallback(
   epic:  string,
   range: string,
+  opts?: { alpacaTimeframe?: 'unused' | '1Hour' | '1Day'; yahooInterval?: '5m' | '1h' | '1d' },
 ): Promise<AlpacaBar[] | null> {
+  const alpacaTimeframe = opts?.alpacaTimeframe === '1Hour' ? '1Hour' : '1Day';
+  const yahooInterval   = opts?.yahooInterval   ?? '1d';
   const isShare  = epic in EPIC_TO_ALPACA;
   const alpacaSym = EPIC_TO_ALPACA[epic];
   if (alpacaSym) {
     try {
       const { getBars } = await import('./alpacaApi');
-      const result = await getBars([alpacaSym], '1Day', 130, 'paper');
+      const result = await getBars([alpacaSym], alpacaTimeframe, 130, 'paper');
       const bars = result[alpacaSym];
       if (bars?.length) return isShare ? scaleBars(bars, IG_SHARE_POINTS_PER_UNIT) : bars;
     } catch {
@@ -192,6 +195,6 @@ export async function fetchBarsWithFallback(
   }
   const yahooSym = EPIC_TO_YAHOO[epic];
   if (!yahooSym) return null;
-  const yahooBars = await fetchYahooBars(yahooSym, '1d', range);
+  const yahooBars = await fetchYahooBars(yahooSym, yahooInterval, range);
   return yahooBars && isShare ? scaleBars(yahooBars, IG_SHARE_POINTS_PER_UNIT) : yahooBars;
 }

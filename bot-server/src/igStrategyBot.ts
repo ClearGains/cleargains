@@ -59,7 +59,7 @@ function loadBlockedEpics(mode: IgMode): Map<string, number> {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'macd_crossover';
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
 export type IgMode         = 'demo' | 'live';
 
 export type IgStrategyConfig = {
@@ -206,7 +206,15 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   vwap:               { resolution: 'MINUTE',    count: 60 },
   weekly_momentum:    { resolution: 'WEEK',       count: 20 },
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
+  donchian_hourly:    { resolution: 'HOUR',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
+};
+
+// Free-data params for strategies that need something other than the daily
+// bars fetchBarsWithFallback defaults to — see the free-data branch in
+// evaluateEpic and refreshRecommendations.
+const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: '1Hour'; yahooInterval: '1h' }>> = {
+  donchian_hourly: { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
 };
 
 // Daily-timeframe strategies poll far more often here than STRATEGY_META's
@@ -214,7 +222,9 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
 // IG-bot-specific, so it doesn't touch the Alpaca bot's own cadence for
 // ema_crossover. Safe to run this often because each cycle tries a free
 // Yahoo pre-check before ever touching IG's own (allowance-limited) candle
-// API — see evaluateEpic.
+// API — see evaluateEpic. donchian_hourly isn't gated the same way (see
+// evaluateEpic — 'hourly' timeframe skips the once-daily-window gate
+// entirely) so it just uses STRATEGY_META's own pollMs directly.
 const IG_POLL_MS_OVERRIDE: Partial<Record<IgStrategyName, number>> = {
   ema_crossover:     15 * 60_000,
   donchian_breakout: 5 * 60_000,
@@ -446,7 +456,10 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
     try {
       let bars: AlpacaBar[];
       if (usesFreeData) {
-        const fetched = await fetchBarsWithFallback(epic, '6mo');
+        const freeParams = FREE_DATA_PARAMS[cfg.strategy];
+        const fetched     = freeParams
+          ? await fetchBarsWithFallback(epic, freeParams.range, freeParams)
+          : await fetchBarsWithFallback(epic, '6mo');
         if (!fetched?.length) continue;
         bars = fetched.slice(-count);
       } else {
@@ -467,6 +480,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
         case 'ema_crossover':      signal = emaCrossoverSignal(bars, false); break;
         case 'vwap':               signal = vwapSignal(bars, bars[bars.length - 1].c, false); break;
         case 'donchian_breakout':  signal = donchianBreakoutSignal(bars, false); break;
+        case 'donchian_hourly':    signal = donchianBreakoutSignal(bars, false, undefined, 24, 12); break;
         case 'macd_crossover':     signal = macdCrossoverSignal(bars, false); break;
         default: break;  // orb/weekly_momentum need extra state this scan doesn't track
       }
@@ -605,8 +619,11 @@ async function evaluateEpic(
 
   const { resolution, count } = IG_RES[cfg.strategy];
   let bars: AlpacaBar[];
-  if (meta.timeframe === 'daily' && usesFreeData) {
-    const fallbackBars = await fetchBarsWithFallback(epic, '6mo');
+  if ((meta.timeframe === 'daily' || meta.timeframe === 'hourly') && usesFreeData) {
+    const freeParams   = FREE_DATA_PARAMS[cfg.strategy];
+    const fallbackBars = freeParams
+      ? await fetchBarsWithFallback(epic, freeParams.range, freeParams)
+      : await fetchBarsWithFallback(epic, '6mo');
     if (!fallbackBars?.length) { addLog(mode, 'wait', epicName(epic), 'No bar data (Alpaca/Yahoo unavailable)'); return; }
     bars = fallbackBars.slice(-count);
   } else {
@@ -653,6 +670,13 @@ async function evaluateEpic(
 
     case 'donchian_breakout':
       signal = donchianBreakoutSignal(bars, inPosition, side);
+      break;
+
+    // Same signal function, hourly bars, shorter windows — 24h entry / 12h
+    // exit channel instead of 20-day/10-day, for a hours-to-~2-day hold
+    // instead of days-to-weeks.
+    case 'donchian_hourly':
+      signal = donchianBreakoutSignal(bars, inPosition, side, 24, 12);
       break;
 
     case 'macd_crossover':

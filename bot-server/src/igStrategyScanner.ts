@@ -74,6 +74,7 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   vwap:               { resolution: 'MINUTE',    count: 60 },
   weekly_momentum:    { resolution: 'WEEK',       count: 20 },
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
+  donchian_hourly:    { resolution: 'HOUR',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
 };
 
@@ -173,7 +174,7 @@ function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
 // the per-poll confirm calls. Intraday/weekly strategies keep using IG's own
 // data — they're not real candidates (all backtest negative) and are gated
 // to market hours anyway, so their scan frequency never mattered as much.
-const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>(['donchian_breakout', 'ema_crossover', 'macd_crossover']);
+const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>(['donchian_breakout', 'donchian_hourly', 'ema_crossover', 'macd_crossover']);
 
 // Shared with the recommendations feature in igStrategyBot.ts, which needs
 // the same conviction score to rank "best pick of the day" — not just a
@@ -187,6 +188,7 @@ export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], ep
     case 'vwap':               return scoreVwap(bars, epic, name).score;
     case 'weekly_momentum':    return scoreWeekly(bars, epic, name).score;
     case 'donchian_breakout':  return scoreDonchian(bars, epic, name).score;
+    case 'donchian_hourly':    return scoreDonchian(bars, epic, name).score;
     case 'macd_crossover':     return scoreMacd(bars, epic, name).score;
     default:                   return -1;
   }
@@ -211,20 +213,11 @@ export async function scanIgEpics(
   for (const { epic, name } of pool) {
     try {
       const bars = useYahoo
-        ? await fetchBarsWithFallback(epic, '6mo') ?? []
+        ? strategy === 'donchian_hourly'
+          ? await fetchBarsWithFallback(epic, '1mo', { alpacaTimeframe: '1Hour', yahooInterval: '1h' }) ?? []
+          : await fetchBarsWithFallback(epic, '6mo') ?? []
         : (await fetchCandleHistory(session, epic, resolution, barCount)).map(igBarToAlpacaBar);
-      let s: Scored;
-      switch (strategy) {
-        case 'rsi_mean_reversion': s = scoreRsi(bars, epic, name);    break;
-        case 'ema_crossover':      s = scoreEma(bars, epic, name);    break;
-        case 'orb':                s = scoreOrb(bars, epic, name);    break;
-        case 'vwap':               s = scoreVwap(bars, epic, name);   break;
-        case 'weekly_momentum':    s = scoreWeekly(bars, epic, name); break;
-        case 'donchian_breakout':  s = scoreDonchian(bars, epic, name); break;
-        case 'macd_crossover':     s = scoreMacd(bars, epic, name);   break;
-        default:                   s = { epic, name, score: -1 };
-      }
-      scored.push(s);
+      scored.push({ epic, name, score: scoreForStrategy(strategy, bars, epic, name) });
     } catch {
       // Epic unavailable or market closed — skip silently
     }

@@ -456,7 +456,7 @@ function RecommendationPanel({
 
 // ── IG Spread Bet tab ─────────────────────────────────────────────────────────
 
-type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'macd_crossover';
+type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
 type IgMode         = 'demo' | 'live';
 
 type IgOpenPosition = {
@@ -534,6 +534,7 @@ type WatchPosition = {
 
 const IG_STRATEGIES: { value: IgStrategyName; label: string; timeframe: string; description: string }[] = [
   { value: 'donchian_breakout',  label: '🏆 Donchian Breakout',    timeframe: 'Swing (Daily)',    description: 'BEST backtested: +8.9% avg return after financing, PF 1.38. 20-day breakout entry, 10-day opposite breakout exit. No fixed target — let winners run.' },
+  { value: 'donchian_hourly',    label: 'Donchian Breakout (Hourly)', timeframe: 'Hours–2 days',  description: 'Same Donchian logic on hourly bars — 24-hour breakout entry, 12-hour opposite breakout exit. Holds hours to ~2 days instead of days-to-weeks. Untested — new strategy, no backtest history yet.' },
   { value: 'ema_crossover',      label: '✅ EMA Crossover',         timeframe: 'Swing (Daily)',    description: 'Backtested: +7.2% avg return after financing, PF 1.26. Enter on EMA9 × EMA21 crossover. Hold days to weeks. Stop: 2× ATR.' },
   { value: 'macd_crossover',     label: '✅ MACD Crossover',        timeframe: 'Swing (Daily)',    description: 'Backtested: +6.1% avg return after financing, PF 1.17. Enter on MACD signal-line crossover. Stop: 2× ATR, target: 5× ATR.' },
   { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion',    timeframe: 'Intraday (5-min)', description: 'Buy RSI < 30, sell RSI > 70. Spread bets on liquid large-caps & indices. Stop: 1.5× ATR. Backtested negative after costs.' },
@@ -549,6 +550,7 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
   vwap:               'VWAP Reversion',
   weekly_momentum:    'Weekly Momentum',
   donchian_breakout:  'Donchian Breakout',
+  donchian_hourly:    'Donchian Breakout (Hourly)',
   macd_crossover:     'MACD Crossover',
 };
 
