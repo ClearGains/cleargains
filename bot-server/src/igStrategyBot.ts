@@ -506,8 +506,24 @@ async function executeIgSignal(
   const rawStake = calcStake(cfg.maxRiskGbp, sizingStopDist);
   const stake    = Math.max(minDeal, rawStake);
 
+  // When an instrument's own minimum stake is coarser than what the target
+  // risk would size, the realized max loss silently exceeds cfg.maxRiskGbp
+  // with no bound at all — clamping up to minDeal always "succeeded" before
+  // regardless of how far over target that pushed it. Accept up to 3x the
+  // configured risk (proportional, so it scales if maxRiskGbp ever changes)
+  // as the cost of trading a coarser-grained instrument; skip entirely
+  // beyond that rather than accept an open-ended loss on a bet the account
+  // never actually chose to size that large.
   if (rawStake < minDeal) {
-    addLog(mode, 'info', name, `Stake £${rawStake}/pt below IG minimum £${minDeal}/pt for this instrument — using minimum`);
+    const actualMaxLoss = stake * sizingStopDist;
+    const lossCeiling    = cfg.maxRiskGbp * 3;
+    if (actualMaxLoss > lossCeiling) {
+      addLog(mode, 'wait', name,
+        `Skipped — minimum stake £${minDeal}/pt forces max loss to £${actualMaxLoss.toFixed(0)}, above the £${lossCeiling.toFixed(0)} ceiling (3× target)`);
+      return;
+    }
+    addLog(mode, 'info', name,
+      `Stake £${rawStake}/pt below IG minimum £${minDeal}/pt — using minimum (max loss £${actualMaxLoss.toFixed(0)}, within the £${lossCeiling.toFixed(0)} ceiling)`);
   }
 
   // Final live guard — ask IG directly before committing funds. `openPos` was
