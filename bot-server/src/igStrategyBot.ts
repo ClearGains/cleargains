@@ -806,6 +806,28 @@ async function poll(mode: IgMode) {
     }
   }
 
+  // Severe-loss circuit breaker — every stop this bot sets is non-guaranteed
+  // (guaranteedStop: false throughout igApi.ts), so it CAN slip past its set
+  // level on a fast gap rather than fill exactly there. These share CFDs are
+  // 24-hour instruments with no market-hours gate protecting them, so that
+  // risk exists around the clock, not just during a session. Independent of
+  // the strategy's own exit logic and of which stop mechanism was supposed
+  // to protect it: if a position's actual realized loss has blown past 5x
+  // the per-trade risk target regardless of why, close it immediately rather
+  // than trust whatever was meant to have already stopped it out.
+  const severeLossCeiling = cfg.maxRiskGbp * 5;
+  for (const p of positions) {
+    if (p.upl >= -severeLossCeiling) continue;
+    const name = epicName(p.epic);
+    addLog(mode, 'error', name,
+      `🚨 Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing immediately, stop may have slipped`);
+    try {
+      await igClosePos(st.session, p.dealId, p.direction, p.size);
+    } catch (e) {
+      addLog(mode, 'error', name, `🚨 Severe loss guard close FAILED: ${e instanceof Error ? e.message : String(e)}. Manual intervention needed.`);
+    }
+  }
+
   // Trailing stop (donchian_breakout only) — ratchets the stop toward price
   // at the same 3%-of-price distance used at entry, but only ever tightens,
   // never loosens. Locks in gains as a trend continues instead of capping
