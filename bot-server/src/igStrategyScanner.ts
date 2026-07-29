@@ -2,7 +2,7 @@ import { fetchCandleHistory, type IGSession, type CandleBar } from './igApi';
 import { calcRsi, calcEma, calcAtr, calcVwap, calcSma, calcMacdHist } from './alpacaStrategies';
 import type { AlpacaBar } from './alpacaApi';
 import type { IgStrategyName } from './igStrategyBot';
-import { fetchBarsWithFallback } from './yahooFetch';
+import { fetchBarsWithFallback, EPIC_TO_ALPACA } from './yahooFetch';
 
 // ── Curated liquid IG epic universe ───────────────────────────────────────────
 // Indices, major US/UK stocks, and FX majors. Stake sizing is risk-based
@@ -219,12 +219,36 @@ export async function scanIgEpics(
     await new Promise(r => setTimeout(r, useYahoo ? 250 : 1200));
   }
 
-  const top = scored
+  let top = scored
     .filter(s => s.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, count);
 
-  log(`[ig-scanner] Best picks: ${top.map(s => `${s.name}(${s.score.toFixed(1)})`).join(', ') || 'none'}`);
+  // When IG's own historical-data allowance is exhausted, only Alpaca-covered
+  // epics can actually get their entry signal confirmed and sized (see
+  // evaluateEpic in igStrategyBot.ts) — everything else just sits unconfirmed.
+  // A pure top-score list can end up with zero Alpaca-covered picks purely by
+  // chance (exactly what happened live: SK Hynix/FX/indices outscored every
+  // share this cycle), leaving the bot watching instruments it can't actually
+  // act on. Guarantee at least half the slots are Alpaca-covered when enough
+  // scored candidates exist, swapping in the best-scoring ones that didn't
+  // make the raw cut rather than leaving the list to chance.
+  const minAlpaca = Math.ceil(count / 2);
+  const alpacaInTop = top.filter(s => s.epic in EPIC_TO_ALPACA).length;
+  if (alpacaInTop < minAlpaca) {
+    const alpacaCandidates = scored
+      .filter(s => s.score > 0 && s.epic in EPIC_TO_ALPACA && !top.some(t => t.epic === s.epic))
+      .sort((a, b) => b.score - a.score);
+    const need = minAlpaca - alpacaInTop;
+    const nonAlpaca = top.filter(s => !(s.epic in EPIC_TO_ALPACA));
+    const alreadyAlpaca = top.filter(s => s.epic in EPIC_TO_ALPACA);
+    const backfilled = alpacaCandidates.slice(0, need);
+    // Drop the lowest-scoring non-Alpaca picks to make room, keeping the list length stable.
+    const trimmedNonAlpaca = nonAlpaca.sort((a, b) => b.score - a.score).slice(0, Math.max(0, count - alreadyAlpaca.length - backfilled.length));
+    top = [...alreadyAlpaca, ...backfilled, ...trimmedNonAlpaca].sort((a, b) => b.score - a.score);
+  }
+
+  log(`[ig-scanner] Best picks: ${top.map(s => `${s.name}(${s.score.toFixed(1)}${s.epic in EPIC_TO_ALPACA ? ', alpaca' : ''})`).join(', ') || 'none'}`);
   return top.length >= count
     ? top.map(s => s.epic)
     : [...top.map(s => s.epic), ...pool.map(e => e.epic).filter(e => !top.some(t => t.epic === e)).slice(0, count - top.length)];

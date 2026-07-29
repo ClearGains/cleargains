@@ -83,6 +83,11 @@ export type IgStrategyBotStatus = {
   mode:       IgMode;
   strategy:   IgStrategyName;
   epics:      string[];
+  // Which data source each watched epic's real signal/pricing confirm step
+  // actually uses right now — 'alpaca' (free, unaffected by IG's allowance),
+  // or 'ig' (needs IG's own candle data, currently allowance-limited).
+  epicDataSource: Record<string, 'alpaca' | 'ig'>;
+  epicNames:  Record<string, string>;
   balance:    number;
   available:  number;
   positions:  IgOpenPosition[];
@@ -332,20 +337,6 @@ async function evaluateEpic(
   const inPosition = !!openPos;
   const side       = openPos ? (openPos.direction === 'BUY' ? 'long' : 'short') as 'long' | 'short' : undefined;
 
-  // ── Yahoo pre-check gate (daily-timeframe strategies, outside the guaranteed
-  // once-daily window) — skip IG's allowance-limited candle fetch entirely
-  // unless Yahoo's free data already suggests something worth confirming.
-  const meta = STRATEGY_META[cfg.strategy];
-  if (meta.timeframe === 'daily' && !isDailyCheckTime()) {
-    const yahooSym = EPIC_TO_YAHOO[epic];
-    if (!yahooSym) return;  // can't pre-check — wait for the guaranteed daily window
-    const preAction = await yahooPreCheckAction(cfg.strategy, yahooSym, inPosition, side);
-    if (preAction === null || preAction === 'HOLD') return;  // no signal, or Yahoo unavailable — skip this cycle
-    addLog(mode, 'info', epicName(epic), `Yahoo pre-check flagged ${preAction} — confirming against IG's own data`);
-  }
-
-  const { resolution, count } = IG_RES[cfg.strategy];
-  let bars: AlpacaBar[];
   // Only epics with a genuine Alpaca mapping (EPIC_TO_ALPACA) use the free
   // fallback chain for real price levels — those are individually confirmed
   // US-listed shares on the same real-world price as IG. Everything else
@@ -355,7 +346,24 @@ async function evaluateEpic(
   // ₩1,401,000 Yahoo price as if it were points — IG rejected it (margin/
   // validation), but the fix is to not trust "shares are same scale
   // everywhere" without per-instrument verification, not to rely on luck.
-  if (meta.timeframe === 'daily' && epic in EPIC_TO_ALPACA) {
+  const meta         = STRATEGY_META[cfg.strategy];
+  const usesFreeData = epic in EPIC_TO_ALPACA;
+  const confirmSource = usesFreeData ? 'Alpaca/Yahoo' : "IG's own data";
+
+  // ── Yahoo pre-check gate (daily-timeframe strategies, outside the guaranteed
+  // once-daily window) — skip IG's allowance-limited candle fetch entirely
+  // unless Yahoo's free data already suggests something worth confirming.
+  if (meta.timeframe === 'daily' && !isDailyCheckTime()) {
+    const yahooSym = EPIC_TO_YAHOO[epic];
+    if (!yahooSym) return;  // can't pre-check — wait for the guaranteed daily window
+    const preAction = await yahooPreCheckAction(cfg.strategy, yahooSym, inPosition, side);
+    if (preAction === null || preAction === 'HOLD') return;  // no signal, or Yahoo unavailable — skip this cycle
+    addLog(mode, 'info', epicName(epic), `Yahoo pre-check flagged ${preAction} — confirming against ${confirmSource}`);
+  }
+
+  const { resolution, count } = IG_RES[cfg.strategy];
+  let bars: AlpacaBar[];
+  if (meta.timeframe === 'daily' && usesFreeData) {
     const fallbackBars = await fetchBarsWithFallback(epic, '6mo');
     if (!fallbackBars?.length) { addLog(mode, 'wait', epicName(epic), 'No bar data (Alpaca/Yahoo unavailable)'); return; }
     bars = fallbackBars.slice(-count);
@@ -363,7 +371,7 @@ async function evaluateEpic(
     try {
       bars = (await fetchCandleHistory(session, epic, resolution, count)).map(igBarToAlpacaBar);
     } catch (e) {
-      addLog(mode, 'error', epicName(epic), `Bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+      addLog(mode, 'error', epicName(epic), `Bar fetch failed (${confirmSource}): ${e instanceof Error ? e.message : String(e)}`);
       return;
     }
   }
@@ -847,6 +855,10 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     mode,
     strategy:   st.config?.strategy  ?? 'rsi_mean_reversion',
     epics:      st.config?.epics     ?? [],
+    epicDataSource: Object.fromEntries(
+      (st.config?.epics ?? []).map(e => [e, (e in EPIC_TO_ALPACA ? 'alpaca' : 'ig') as 'alpaca' | 'ig']),
+    ),
+    epicNames: Object.fromEntries((st.config?.epics ?? []).map(e => [e, epicName(e)])),
     balance,
     available,
     positions,

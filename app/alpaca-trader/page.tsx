@@ -485,6 +485,8 @@ type IgBotStatus = {
   mode:       IgMode;
   strategy:   IgStrategyName;
   epics:      string[];
+  epicDataSource: Record<string, 'alpaca' | 'ig'>;
+  epicNames:  Record<string, string>;
   balance:    number;
   available:  number;
   positions:  IgOpenPosition[];
@@ -786,6 +788,36 @@ function IgSpreadBetTab() {
               <span className="text-slate-600">{IG_STRATEGY_LABEL[status.strategy]}</span>
             )}
           </div>
+
+          {/* Watchlist — which data source each instrument's real signal actually
+              uses right now. IG's historical-data allowance can run out and block
+              confirmation for IG-sourced instruments while Alpaca-sourced ones
+              keep trading fine — this makes that visible instead of it looking
+              like the bot has just stopped doing anything. */}
+          {!!status?.epics.length && (
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3">
+              <div className="text-xs text-slate-500 mb-2">Watching ({status.epics.length})</div>
+              <div className="flex flex-wrap gap-1.5">
+                {status.epics.map(epic => {
+                  const source = status.epicDataSource?.[epic] ?? 'ig';
+                  const isAlpaca = source === 'alpaca';
+                  return (
+                    <span
+                      key={epic}
+                      title={isAlpaca ? 'Confirmed via Alpaca/Yahoo — unaffected by IG data limits' : "Confirmed via IG's own data — blocked if IG's allowance is exhausted"}
+                      className={clsx(
+                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border',
+                        isAlpaca ? 'border-green-800 bg-green-950/40 text-green-400' : 'border-amber-800 bg-amber-950/40 text-amber-400',
+                      )}
+                    >
+                      {status.epicNames?.[epic] ?? epic}
+                      <span className="opacity-60">{isAlpaca ? 'alpaca' : 'ig'}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Open positions */}
           <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
