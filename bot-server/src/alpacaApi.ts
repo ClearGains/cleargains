@@ -231,14 +231,26 @@ export async function getBars(
   const { key, secret } = getKeys(mode);
   if (!key || !secret) throw new Error('Alpaca credentials not configured');
 
+  // Single-symbol requests use an explicit start date, over-fetch at the API
+  // level, then take the tail client-side for the true most-recent `limit`
+  // bars. With sort:asc and a limit passed straight to the API, Alpaca
+  // returns the OLDEST `limit` bars within the window, not the most recent —
+  // confirmed live: asking for 130 daily bars from a ~223-day-back start
+  // returned bars ending a full month in the past, not today. Scoped to
+  // single-symbol calls only: multi-symbol batch requests (the intraday
+  // scanner) apply `limit` across the combined response rather than
+  // per-symbol, so widening it there risks uneven per-symbol pagination
+  // instead of just fixing the count — left on its existing (working)
+  // behavior rather than risk that.
+  const singleSymbol = symbols.length === 1;
   const params = new URLSearchParams({
     symbols:   symbols.join(','),
     timeframe,
-    limit:     String(limit),
-    start:     startDateFor(timeframe, limit),
+    limit:     String(singleSymbol ? Math.min(10_000, limit * 20) : limit),
     feed:      'iex',     // IEX is free; switch to 'sip' with paid data plan
     sort:      'asc',
   });
+  if (singleSymbol) params.set('start', startDateFor(timeframe, limit));
 
   const url = `https://data.alpaca.markets/v2/stocks/bars?${params.toString()}`;
   const res = await fetch(url, {
@@ -254,7 +266,9 @@ export async function getBars(
   }
 
   const data = await res.json() as { bars?: Record<string, AlpacaBar[]> };
-  return data.bars ?? {};
+  const bars = data.bars ?? {};
+  for (const sym of Object.keys(bars)) bars[sym] = bars[sym].slice(-limit);
+  return bars;
 }
 
 export async function getLatestBars(
