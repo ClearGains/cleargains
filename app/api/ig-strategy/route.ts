@@ -37,6 +37,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   if (!validMode(mode)) return NextResponse.json({ ok: false, error: 'mode must be demo or live' }, { status: 400 });
   if (action === 'status') return proxyTo(`/ig-strategy/${mode}/status`, 'GET');
+  if (action === 'watch')  return proxyTo(`/ig-strategy/${mode}/watch`,  'GET');
+  return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
+}
+
+export async function DELETE(req: NextRequest): Promise<NextResponse> {
+  const mode   = req.nextUrl.searchParams.get('mode') ?? 'demo';
+  const action = req.nextUrl.searchParams.get('action') ?? '';
+  const dealId = req.nextUrl.searchParams.get('dealId') ?? '';
+
+  if (!validMode(mode)) return NextResponse.json({ ok: false, error: 'mode must be demo or live' }, { status: 400 });
+  if (action === 'watch' && dealId) return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}`, 'DELETE');
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
 }
 
@@ -53,6 +64,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (action === 'start') {
     const body = await req.json() as unknown;
     return proxyTo(`/ig-strategy/${mode}/start`, 'POST', body);
+  }
+
+  if (action === 'watch') {
+    const { dealId } = await req.json() as { dealId?: string };
+    if (!dealId) return NextResponse.json({ ok: false, error: 'dealId required' }, { status: 400 });
+    return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}`, 'POST');
   }
 
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });

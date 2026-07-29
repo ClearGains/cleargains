@@ -97,13 +97,25 @@ Respond with JSON only, no markdown:
 
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      // "latest" alias, not a pinned dated model — gemini-2.0-flash was
+      // retired outright (confirmed live: free-tier quota set to 0), and
+      // pinning a specific version again would just repeat that failure
+      // whenever Google retires this one too. The alias is Google's own
+      // responsibility to keep pointing at a working current model.
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 150 },
+          // thinkingBudget: 0 — the "latest" alias now resolves to a reasoning
+          // model; without this, hidden thinking tokens can eat the whole
+          // maxOutputTokens budget before the visible JSON answer is
+          // generated, leaving an empty response that fails to parse and
+          // silently falls back — the same class of silent failure as the
+          // dead-model bug, just via a different mechanism. Not needed for
+          // a plain structured classification like this anyway.
+          generationConfig: { temperature: 0.2, maxOutputTokens: 150, thinkingConfig: { thinkingBudget: 0 } },
         }),
         signal: AbortSignal.timeout(8_000),
       }
@@ -187,13 +199,18 @@ Respond with JSON only, no markdown:
 
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      // "latest" alias, not a pinned dated model — gemini-2.0-flash was
+      // retired outright (confirmed live: free-tier quota set to 0), and
+      // pinning a specific version again would just repeat that failure
+      // whenever Google retires this one too. The alias is Google's own
+      // responsibility to keep pointing at a working current model.
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 100 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 100, thinkingConfig: { thinkingBudget: 0 } },
         }),
         signal: AbortSignal.timeout(8_000),
       }
@@ -218,5 +235,95 @@ Respond with JSON only, no markdown:
     };
   } catch {
     return { direction: req.direction, confidence: req.strength, reason: 'Gemini failed — using signal', engine: 'passthrough' };
+  }
+}
+
+// ── Open-position review (hold/close) ────────────────────────────────────────
+// Distinct from the entry-confirmation verdicts above — this reviews a
+// position that's already open (manually opened or otherwise flagged for
+// watching) and decides whether to close it now or keep holding. Always
+// defaults to HOLD on any failure — a real IG stop is attached independently
+// of this at watch-time, so "do nothing" on a Gemini outage is the safe
+// default, not a silent risk.
+
+export type PositionVerdict = {
+  action:     'HOLD' | 'CLOSE';
+  confidence: number;
+  reason:     string;
+  engine:     'gemini' | 'passthrough';
+};
+
+export type PositionReviewRequest = {
+  instrumentName: string;
+  direction:      'BUY' | 'SELL';
+  entryLevel:     number;
+  currentLevel:   number;
+  uplGbp:         number;
+  heldHours:      number;
+  stopLevel?:     number;
+  limitLevel?:    number;
+};
+
+export async function askGeminiPositionVerdict(req: PositionReviewRequest): Promise<PositionVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return { action: 'HOLD', confidence: 0, reason: 'No Gemini key configured — holding, stop still protects the position', engine: 'passthrough' };
+  }
+
+  const pctMove = req.entryLevel > 0 ? (req.currentLevel - req.entryLevel) / req.entryLevel * 100 : 0;
+  const signedPct = req.direction === 'BUY' ? pctMove : -pctMove;  // positive = favorable regardless of side
+
+  const prompt = `You are reviewing an already-open spread bet position to decide whether to close it now or keep holding.
+
+Instrument: ${req.instrumentName}
+Direction: ${req.direction}
+Entry level: ${req.entryLevel.toFixed(2)}
+Current level: ${req.currentLevel.toFixed(2)} (${signedPct >= 0 ? '+' : ''}${signedPct.toFixed(2)}% favorable move)
+Unrealized P/L: £${req.uplGbp.toFixed(2)}
+Held for: ${req.heldHours.toFixed(1)} hours
+${req.stopLevel !== undefined ? `Stop-loss already attached at: ${req.stopLevel.toFixed(2)}` : 'No stop currently attached'}
+${req.limitLevel !== undefined ? `Take-profit already attached at: ${req.limitLevel.toFixed(2)}` : 'No take-profit currently set'}
+
+A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss. Decide only: is there a clear reason to close now (lock in a gain, or cut a loss before it likely gets worse), or is holding for the stop/take-profit to do its job still reasonable?
+
+Respond with JSON only, no markdown:
+{"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          contents:         [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 100, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+        signal: AbortSignal.timeout(8_000),
+      },
+    );
+
+    if (!res.ok) {
+      return { action: 'HOLD', confidence: 0, reason: `Gemini ${res.status} — holding, stop still protects the position`, engine: 'passthrough' };
+    }
+
+    const data    = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const parsed  = JSON.parse(cleaned) as { action: string; confidence: number; reason: string };
+
+    return {
+      action:     parsed.action === 'CLOSE' ? 'CLOSE' : 'HOLD',
+      confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
+      reason:     parsed.reason ?? '',
+      engine:     'gemini',
+    };
+  } catch (e) {
+    return {
+      action:     'HOLD',
+      confidence: 0,
+      reason:     `Gemini failed — holding, stop still protects the position (${e instanceof Error ? e.message : String(e)})`,
+      engine:     'passthrough',
+    };
   }
 }

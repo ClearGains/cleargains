@@ -214,7 +214,7 @@ function isNearWeekendClose(leadMinutes = 120): boolean {
   return utcMins >= closeMins - leadMinutes && utcMins < closeMins;
 }
 
-function addLog(mode: IgMode, type: IgLogEntry['type'], epic: string, msg: string) {
+export function addLog(mode: IgMode, type: IgLogEntry['type'], epic: string, msg: string) {
   const st    = ms(mode);
   const entry: IgLogEntry = { id: uid(), ts: now(), type, epic, msg };
   st.log.unshift(entry);
@@ -244,7 +244,7 @@ function calcStake(maxRiskGbp: number, stopDist: number): number {
   return Math.max(0.1, Math.round(raw * 10) / 10);
 }
 
-function resolveCredentials(mode: IgMode) {
+export function resolveCredentials(mode: IgMode) {
   if (mode === 'live') {
     return {
       apiKey:   process.env.IG_LIVE_API_KEY   ?? '',

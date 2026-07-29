@@ -17,6 +17,8 @@ import {
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
 import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } from './leaderboard';
+import { startGeminiWatch, getWatchedDealIds, addToWatch, removeFromWatch } from './geminiWatch';
+import { fetchFullPositions, getSession } from './igApi';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -426,12 +428,44 @@ app.post('/ig-strategy/:mode/resume', auth, (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+// ── Gemini position watch ─────────────────────────────────────────────────────
+// Lists all currently open IG positions for the account (however they were
+// opened — manually, via the strategy bot, anywhere) alongside which ones are
+// flagged for Gemini to periodically review and potentially close.
+app.get('/ig-strategy/:mode/watch', auth, async (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const session = getSession(`igstrat:${mode}`);
+  if (!session) { res.json({ ok: true, positions: [], watchedDealIds: getWatchedDealIds(mode) }); return; }
+  try {
+    const positions = await fetchFullPositions(session);
+    res.json({ ok: true, positions, watchedDealIds: getWatchedDealIds(mode) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+app.post('/ig-strategy/:mode/watch/:dealId', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  addToWatch(mode, req.params.dealId);
+  res.json({ ok: true });
+});
+
+app.delete('/ig-strategy/:mode/watch/:dealId', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  removeFromWatch(mode, req.params.dealId);
+  res.json({ ok: true });
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[bot-server] Listening on 0.0.0.0:${PORT}`);
   console.log(`[bot-server] Multi-account mode: demo + live`);
 
   startLeaderboardSchedule();
+  startGeminiWatch();
 
   // Auto-resume legacy single-account bot if it was running before restart
   const saved = loadSavedState();

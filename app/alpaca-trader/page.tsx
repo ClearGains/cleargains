@@ -497,6 +497,24 @@ type IgBotStatus = {
   sessionOk:  boolean;
 };
 
+// Any open IG position for the account, however it was opened (manually,
+// via the strategy bot, elsewhere) — used by the Gemini watch panel, which
+// covers positions the strategy bot itself doesn't know about.
+type WatchPosition = {
+  dealId:         string;
+  epic:           string;
+  instrumentName: string;
+  direction:      'BUY' | 'SELL';
+  size:           number;
+  level:          number;
+  upl:            number;
+  bid:            number;
+  offer:          number;
+  stopLevel?:     number;
+  limitLevel?:    number;
+  openedAt?:      string;
+};
+
 const IG_STRATEGIES: { value: IgStrategyName; label: string; timeframe: string; description: string }[] = [
   { value: 'donchian_breakout',  label: '🏆 Donchian Breakout',    timeframe: 'Swing (Daily)',    description: 'BEST backtested: +8.9% avg return after financing, PF 1.38. 20-day breakout entry, 10-day opposite breakout exit. No fixed target — let winners run.' },
   { value: 'ema_crossover',      label: '✅ EMA Crossover',         timeframe: 'Swing (Daily)',    description: 'Backtested: +7.2% avg return after financing, PF 1.26. Enter on EMA9 × EMA21 crossover. Hold days to weeks. Stop: 2× ATR.' },
@@ -529,7 +547,12 @@ function IgSpreadBetTab() {
   const [error, setError]     = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [watchPositions, setWatchPositions] = useState<WatchPosition[]>([]);
+  const [watchedDealIds, setWatchedDealIds] = useState<Set<string>>(new Set());
+  const [watchBusy, setWatchBusy]           = useState<string | null>(null);
+
+  const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null);
+  const watchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -561,6 +584,44 @@ function IgSpreadBetTab() {
   }, [startPolling, stopPolling]);
 
   useEffect(() => { startPolling(); }, [igMode, startPolling]);
+
+  // Gemini watch panel — separate, slower poll (positions + which are
+  // watched don't change nearly as often as the strategy bot's own status).
+  const fetchWatch = useCallback(async () => {
+    try {
+      const res  = await fetch(`/api/ig-strategy?mode=${igMode}&action=watch`);
+      const data = await res.json() as { ok: boolean; positions?: WatchPosition[]; watchedDealIds?: string[] };
+      if (data.ok) {
+        setWatchPositions(data.positions ?? []);
+        setWatchedDealIds(new Set(data.watchedDealIds ?? []));
+      }
+    } catch { /* silent — this panel is secondary, main status polling already surfaces errors */ }
+  }, [igMode]);
+
+  useEffect(() => {
+    void fetchWatch();
+    if (watchPollRef.current) clearInterval(watchPollRef.current);
+    watchPollRef.current = setInterval(() => { void fetchWatch(); }, 15_000);
+    return () => { if (watchPollRef.current) clearInterval(watchPollRef.current); };
+  }, [fetchWatch]);
+
+  const toggleWatch = async (dealId: string, currentlyWatched: boolean) => {
+    setWatchBusy(dealId);
+    try {
+      if (currentlyWatched) {
+        await fetch(`/api/ig-strategy?mode=${igMode}&action=watch&dealId=${encodeURIComponent(dealId)}`, { method: 'DELETE' });
+      } else {
+        await fetch(`/api/ig-strategy?mode=${igMode}&action=watch`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ dealId }),
+        });
+      }
+      await fetchWatch();
+    } finally {
+      setWatchBusy(null);
+    }
+  };
 
   const post = async (action: string, body?: object) => {
     setLoading(true);
@@ -868,6 +929,63 @@ function IgSpreadBetTab() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* Gemini position watch */}
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-slate-300">Gemini Position Watch</h2>
+              <span className="text-xs text-slate-500">{watchedDealIds.size} watched</span>
+            </div>
+            <div className="px-4 py-2 text-xs text-slate-500 border-b border-slate-800/60">
+              Flag any open position (opened here, in IG&apos;s app, anywhere) for Gemini to review every ~15 min and close if it judges that&apos;s warranted.
+              A stop-loss stays attached independently, regardless of Gemini&apos;s availability.
+            </div>
+            {!watchPositions.length ? (
+              <div className="px-4 py-8 text-center text-slate-600 text-sm">No open positions to watch</div>
+            ) : (
+              <div className="divide-y divide-slate-800/60">
+                {watchPositions.map(p => {
+                  const isWatched = watchedDealIds.has(p.dealId);
+                  const isBusy    = watchBusy === p.dealId;
+                  return (
+                    <div key={p.dealId} className="px-4 py-3 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        {p.direction === 'BUY'
+                          ? <TrendingUp   className="w-4 h-4 text-green-400" />
+                          : <TrendingDown className="w-4 h-4 text-red-400"   />}
+                        <div>
+                          <div className="font-medium text-white text-sm">{p.instrumentName || p.epic}</div>
+                          <div className="text-xs text-slate-500">
+                            {p.direction} · £{p.size}/pt · entry {p.level.toFixed(2)}
+                            {p.stopLevel === undefined && <span className="text-amber-400"> · no stop</span>}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <div className="text-right">
+                          <div className={clsx('text-xs font-medium', (p.upl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
+                            {(p.upl ?? 0) >= 0 ? '+' : ''}£{(p.upl ?? 0).toFixed(2)}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => void toggleWatch(p.dealId, isWatched)}
+                          disabled={isBusy}
+                          className={clsx(
+                            'text-xs px-2.5 py-1 rounded font-medium transition-colors disabled:opacity-50',
+                            isWatched
+                              ? 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/30'
+                              : 'bg-slate-800 text-slate-400 hover:bg-slate-700',
+                          )}
+                        >
+                          {isBusy ? '…' : isWatched ? '✦ Watching' : 'Watch'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
