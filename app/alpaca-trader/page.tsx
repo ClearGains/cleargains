@@ -496,11 +496,12 @@ type IgBotStatus = {
   lastPollTs: string | null;
   sessionOk:  boolean;
   recommendations?: IgRecommendation[];
+  dailyPick?: IgRecommendation | null;
 };
 
-// A signal computed off IG's own data for an epic that's currently blocked
-// from automated trading by IG's historical-data allowance — manual-only,
-// refreshed every hour or so once the epic's cooldown has passed.
+// A signal computed off IG's own data for an epic the bot isn't acting on
+// itself — manual-only, refreshed roughly every 30min across the full
+// instrument universe.
 type IgRecommendation = {
   epic:             string;
   name:             string;
@@ -510,6 +511,7 @@ type IgRecommendation = {
   stopPrice?:       number;
   takeProfitPrice?: number;
   computedAt:       string;
+  score:            number;
 };
 
 // Any open IG position for the account, however it was opened (manually,
@@ -893,6 +895,48 @@ function IgSpreadBetTab() {
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {/* Today's Pick — single best-scored signal across the full universe,
+              decided once overnight/first-thing and held stable through the
+              day, unlike the general Recommended list below which keeps
+              refreshing every 30min as price action evolves. */}
+          {!!status?.running && (
+            <div className="bg-gradient-to-r from-purple-950/40 to-slate-900/60 border border-purple-800/60 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-purple-300">★ Today&apos;s Pick</h2>
+                <button
+                  onClick={() => void post('refresh-daily-pick')}
+                  disabled={loading}
+                  className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 hover:bg-slate-700 disabled:opacity-50"
+                >
+                  Redecide
+                </button>
+              </div>
+              {!status.dailyPick ? (
+                <div className="px-4 py-6 text-center text-slate-600 text-sm">
+                  No signal strong enough across the universe today — check back tomorrow.
+                </div>
+              ) : (
+                <div className="px-4 py-3 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    {status.dailyPick.action === 'BUY'
+                      ? <TrendingUp   className="w-5 h-5 text-green-400" />
+                      : <TrendingDown className="w-5 h-5 text-red-400"   />}
+                    <div>
+                      <div className="font-semibold text-white text-sm">{status.dailyPick.name}</div>
+                      <div className="text-xs text-slate-400">{status.dailyPick.reason}</div>
+                      <div className="text-xs text-slate-600">score {status.dailyPick.score.toFixed(1)}</div>
+                    </div>
+                  </div>
+                  <div className="text-right text-xs">
+                    <div className="text-white font-medium">{status.dailyPick.action} @ {status.dailyPick.level.toFixed(2)}</div>
+                    {status.dailyPick.stopPrice !== undefined && <div className="text-slate-500">Stop {status.dailyPick.stopPrice.toFixed(2)}</div>}
+                    {status.dailyPick.takeProfitPrice !== undefined && <div className="text-slate-500">TP {status.dailyPick.takeProfitPrice.toFixed(2)}</div>}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

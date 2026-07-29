@@ -175,6 +175,23 @@ function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
 // to market hours anyway, so their scan frequency never mattered as much.
 const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>(['donchian_breakout', 'ema_crossover', 'macd_crossover']);
 
+// Shared with the recommendations feature in igStrategyBot.ts, which needs
+// the same conviction score to rank "best pick of the day" — not just a
+// bare BUY/SELL, since more than one instrument can have a live signal at
+// once and only the strongest is worth a single daily highlight.
+export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], epic: string, name: string): number {
+  switch (strategy) {
+    case 'rsi_mean_reversion': return scoreRsi(bars, epic, name).score;
+    case 'ema_crossover':      return scoreEma(bars, epic, name).score;
+    case 'orb':                return scoreOrb(bars, epic, name).score;
+    case 'vwap':               return scoreVwap(bars, epic, name).score;
+    case 'weekly_momentum':    return scoreWeekly(bars, epic, name).score;
+    case 'donchian_breakout':  return scoreDonchian(bars, epic, name).score;
+    case 'macd_crossover':     return scoreMacd(bars, epic, name).score;
+    default:                   return -1;
+  }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function scanIgEpics(

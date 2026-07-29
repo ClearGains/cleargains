@@ -13,7 +13,7 @@ import {
 import {
   startIgStrategyBot, stopIgStrategyBot, pauseIgStrategyBot, resumeIgStrategyBot,
   getIgStrategyBotStatus, loadSavedIgStrategyState, startRecommendationRefresh,
-  refreshRecommendations,
+  refreshRecommendations, refreshDailyPick,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
@@ -466,6 +466,13 @@ app.post('/ig-strategy/:mode/refresh-recommendations', auth, async (req: Request
   const mode = resolveIgMode(req, res);
   if (!mode) return;
   await refreshRecommendations(mode, true);
+  res.json({ ok: true });
+});
+
+app.post('/ig-strategy/:mode/refresh-daily-pick', auth, async (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  await refreshDailyPick(mode);
   res.json({ ok: true });
 });
 

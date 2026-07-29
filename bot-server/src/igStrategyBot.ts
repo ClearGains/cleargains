@@ -12,7 +12,7 @@ import {
   STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
-import { scanIgEpics, epicName, IG_EPICS } from './igStrategyScanner';
+import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy } from './igStrategyScanner';
 import { askGeminiDailyVerdict } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import type { AlpacaBar } from './alpacaApi';
@@ -97,9 +97,8 @@ export type IgOpenPosition = {
   openedAt?: string;    // ISO timestamp — see FullPosition.openedAt
 };
 
-// A signal computed off IG's own native data for an epic that's currently
-// allowance-blocked from normal automated trading — manual-only suggestion,
-// see refreshBlockedRecommendations.
+// A signal computed off IG's own native data for an epic the bot itself
+// isn't acting on — manual-only suggestion, see refreshRecommendations.
 export type IgRecommendation = {
   epic:             string;
   name:             string;
@@ -109,6 +108,7 @@ export type IgRecommendation = {
   stopPrice?:       number;
   takeProfitPrice?: number;
   computedAt:       string;   // ISO timestamp
+  score:            number;   // same conviction score the scanner uses to rank the watch list
 };
 
 export type IgStrategyBotStatus = {
@@ -132,6 +132,7 @@ export type IgStrategyBotStatus = {
   sessionOk:  boolean;
   lossLock:   boolean;   // daily-loss circuit breaker engaged
   recommendations: IgRecommendation[];
+  dailyPick:  IgRecommendation | null;
 };
 
 type OrbState  = { high: number; low: number; established: boolean };
@@ -158,12 +159,14 @@ type ModeState = {
   // was happening before — SK Hynix scores highest almost every scan, so it
   // got picked and re-failed on every one of today's several restarts.
   blockedEpics:         Map<string, number>;
-  // Signal computed off IG's own (correctly-scaled) data for a currently
-  // blocked epic, refreshed every few hours — see refreshBlockedRecommendations.
-  // Surfaced to the UI as a manual-only suggestion since the epic can't be
-  // safely auto-confirmed at normal poll frequency without burning the
-  // allowance further.
+  // Full-universe manual-only suggestions — see refreshRecommendations.
   recommendations:      Map<string, IgRecommendation>;
+  // Single best-scored recommendation for the day, set once (first refresh
+  // after UTC midnight — effectively overnight for a UK day) and held stable
+  // through the day rather than flipping every 30min refresh like the
+  // general recommendations list above does — see ensureDailyPick.
+  dailyPick:             IgRecommendation | null;
+  dailyPickDate:         string;   // UTC date the current dailyPick was set for
   // Daily-loss circuit breaker
   dayKey:               string;   // UTC date the balance baseline belongs to
   dayStartBalance:      number;
@@ -180,6 +183,7 @@ function makeModeState(): ModeState {
     marketDetails: new Map(),
     blockedEpics: new Map(),
     recommendations: new Map(),
+    dailyPick: null, dailyPickDate: '',
     dayKey: '', dayStartBalance: 0, lossLock: false,
     weekendGuardDate: '',
   };
@@ -474,6 +478,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
           level: bars[bars.length - 1].c,
           stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice,
           computedAt: new Date().toISOString(),
+          score: scoreForStrategy(cfg.strategy, bars, epic, name),
         });
       } else {
         st.recommendations.delete(epic);
@@ -494,14 +499,49 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
   if (force) addLog(mode, 'info', '—', `[Recommendation check] Done — ${checked} checked, ${found} signal(s) found, ${blocked} allowance-blocked`);
 }
 
+// Sets today's single best-scored pick the first time this runs after UTC
+// midnight (effectively overnight/first-thing-in-the-morning for a UK day),
+// then leaves it untouched for the rest of the day — a stable "here's the
+// one to look at today" rather than the general recommendations list, which
+// keeps changing every 30min as the day's price action evolves. Always
+// re-runs a full scan rather than reusing whatever's already in
+// st.recommendations, since those could be hours stale by the next morning.
+async function ensureDailyPick(mode: IgMode, force = false): Promise<void> {
+  const st    = ms(mode);
+  const today = new Date().toISOString().slice(0, 10);
+  if (!force && st.dailyPickDate === today) return;
+
+  await refreshRecommendations(mode, force);
+  const best = [...st.recommendations.values()].sort((a, b) => b.score - a.score)[0] ?? null;
+
+  st.dailyPick     = best;
+  st.dailyPickDate = today;
+  addLog(mode, 'info', '—', best
+    ? `[Daily pick] ${best.name} — ${best.action} (score ${best.score.toFixed(1)}) — ${best.reason}`
+    : '[Daily pick] No signal strong enough across the universe today');
+}
+
+// Manual override — re-decides today's pick right now regardless of whether
+// one was already set today. Useful for testing, or if you just want a
+// fresh read given how the day's traded so far.
+export async function refreshDailyPick(mode: IgMode): Promise<void> {
+  await ensureDailyPick(mode, true);
+}
+
 const RECOMMENDATION_REFRESH_MS = 30 * 60_000;  // full-universe sweep every 30min — cheap for free-data names, cooldown-gated for IG-only ones
 let recommendationTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startRecommendationRefresh(): void {
   if (recommendationTimer) return;
   recommendationTimer = setInterval(() => {
-    for (const mode of ['demo', 'live'] as const) void refreshRecommendations(mode);
+    for (const mode of ['demo', 'live'] as const) {
+      void refreshRecommendations(mode);
+      void ensureDailyPick(mode);
+    }
   }, RECOMMENDATION_REFRESH_MS);
+  // Also check once immediately on boot — otherwise a server that's been up
+  // since before midnight won't get today's pick until the next 30min tick.
+  for (const mode of ['demo', 'live'] as const) void ensureDailyPick(mode);
 }
 
 // ── Signal evaluation ─────────────────────────────────────────────────────────
@@ -1166,5 +1206,6 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     sessionOk:  !!st.session && Date.now() < st.session.expiresAt,
     lossLock:   st.lossLock,
     recommendations: [...st.recommendations.values()],
+    dailyPick:  st.dailyPick,
   };
 }
