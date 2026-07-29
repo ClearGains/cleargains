@@ -14,7 +14,7 @@ import {
 } from './alpacaStrategies';
 import { scanIgEpics, epicName } from './igStrategyScanner';
 import { askGeminiDailyVerdict } from './gemini';
-import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO } from './yahooFetch';
+import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import type { AlpacaBar } from './alpacaApi';
 import {
   isNYSEOpen, isInOpeningRange, isNearClose,
@@ -346,13 +346,16 @@ async function evaluateEpic(
 
   const { resolution, count } = IG_RES[cfg.strategy];
   let bars: AlpacaBar[];
-  // FX keeps using IG's own data — Yahoo/Alpaca's raw decimal FX quoting
-  // doesn't match IG's point-scaled prices, and computing a real stop/TP
-  // distance off the wrong scale is exactly the sizing bug this account
-  // already hit once. Shares/indices are the same real-world price on every
-  // source, so those route through the free fallback chain (Alpaca then
-  // Yahoo) instead of burning IG's allowance-limited candle API.
-  if (meta.timeframe === 'daily' && classifyMarketType(epic) !== 'FOREX') {
+  // Only epics with a genuine Alpaca mapping (EPIC_TO_ALPACA) use the free
+  // fallback chain for real price levels — those are individually confirmed
+  // US-listed shares on the same real-world price as IG. Everything else
+  // (indices, UK stocks, and non-USD-listing Yahoo proxies like SK Hynix's
+  // Korean-won primary listing or Nokia's Helsinki/EUR listing) keeps using
+  // IG's own data. This almost shipped a live SELL sized off SK Hynix's
+  // ₩1,401,000 Yahoo price as if it were points — IG rejected it (margin/
+  // validation), but the fix is to not trust "shares are same scale
+  // everywhere" without per-instrument verification, not to rely on luck.
+  if (meta.timeframe === 'daily' && epic in EPIC_TO_ALPACA) {
     const fallbackBars = await fetchBarsWithFallback(epic, '6mo');
     if (!fallbackBars?.length) { addLog(mode, 'wait', epicName(epic), 'No bar data (Alpaca/Yahoo unavailable)'); return; }
     bars = fallbackBars.slice(-count);
