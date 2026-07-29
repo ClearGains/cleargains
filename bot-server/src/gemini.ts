@@ -108,14 +108,14 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          // thinkingBudget: 0 — the "latest" alias now resolves to a reasoning
-          // model; without this, hidden thinking tokens can eat the whole
-          // maxOutputTokens budget before the visible JSON answer is
-          // generated, leaving an empty response that fails to parse and
-          // silently falls back — the same class of silent failure as the
-          // dead-model bug, just via a different mechanism. Not needed for
-          // a plain structured classification like this anyway.
-          generationConfig: { temperature: 0.2, maxOutputTokens: 150, thinkingConfig: { thinkingBudget: 0 } },
+          // No thinkingConfig — the "latest" alias resolves to a reasoning
+          // model (gemini-3.6-flash) that rejects thinkingBudget outright
+          // (confirmed live: {"thinkingConfig":{"thinkingBudget":0}} gets a
+          // flat 400 INVALID_ARGUMENT, breaking every call). Thinking stays
+          // on instead — cheap regardless — with maxOutputTokens raised to
+          // 400 so hidden thinking tokens can't eat the whole budget before
+          // the visible JSON answer gets generated.
+          generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
         }),
         signal: AbortSignal.timeout(8_000),
       }
@@ -210,7 +210,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 100, thinkingConfig: { thinkingBudget: 0 } },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
         }),
         signal: AbortSignal.timeout(8_000),
       }
@@ -297,7 +297,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 100, thinkingConfig: { thinkingBudget: 0 } },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
         }),
         signal: AbortSignal.timeout(8_000),
       },
