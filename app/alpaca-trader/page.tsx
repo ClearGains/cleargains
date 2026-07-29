@@ -708,14 +708,14 @@ function IgSpreadBetTab() {
                 {(['demo', 'live'] as IgMode[]).map(m => (
                   <button
                     key={m}
-                    onClick={() => { if (!isRunning) setIgMode(m); }}
-                    disabled={isRunning}
+                    onClick={() => { if (!loading) setIgMode(m); }}
+                    disabled={loading}
                     className={clsx(
                       'flex-1 py-2 font-medium transition-colors capitalize',
                       igMode === m
                         ? m === 'live' ? 'bg-rose-600 text-white' : 'bg-emerald-700 text-white'
                         : 'bg-slate-800 text-slate-400 hover:bg-slate-700',
-                      isRunning && 'opacity-50 cursor-not-allowed',
+                      loading && 'opacity-50 cursor-not-allowed',
                     )}
                   >
                     {m === 'live' ? '🔴 Live' : '📄 Demo'}
