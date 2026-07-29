@@ -236,8 +236,12 @@ export async function scanIgEpics(
   const minAlpaca = Math.ceil(count / 2);
   const alpacaInTop = top.filter(s => s.epic in EPIC_TO_ALPACA).length;
   if (alpacaInTop < minAlpaca) {
+    // No score>0 floor here deliberately — an Alpaca-covered epic sitting at
+    // a middling/negative score is still confirmable right now, which beats
+    // an IG-only epic that can't be confirmed at all while the allowance is
+    // exhausted, regardless of how good that epic's raw score looks.
     const alpacaCandidates = scored
-      .filter(s => s.score > 0 && s.epic in EPIC_TO_ALPACA && !top.some(t => t.epic === s.epic))
+      .filter(s => s.epic in EPIC_TO_ALPACA && s.score !== -1 && !top.some(t => t.epic === s.epic))
       .sort((a, b) => b.score - a.score);
     const need = minAlpaca - alpacaInTop;
     const nonAlpaca = top.filter(s => !(s.epic in EPIC_TO_ALPACA));
