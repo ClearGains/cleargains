@@ -497,6 +497,7 @@ type IgBotStatus = {
   sessionOk:  boolean;
   recommendations?: IgRecommendation[];
   dailyPick?: IgRecommendation | null;
+  pausedEpics?: string[];
 };
 
 // A signal computed off IG's own data for an epic the bot isn't acting on
@@ -639,6 +640,25 @@ function IgSpreadBetTab() {
       await fetchWatch();
     } finally {
       setWatchBusy(null);
+    }
+  };
+
+  const [pauseBusy, setPauseBusy] = useState<string | null>(null);
+  const togglePauseEpic = async (epic: string, currentlyPaused: boolean) => {
+    setPauseBusy(epic);
+    try {
+      if (currentlyPaused) {
+        await fetch(`/api/ig-strategy?mode=${igMode}&action=pause-epic&epic=${encodeURIComponent(epic)}`, { method: 'DELETE' });
+      } else {
+        await fetch(`/api/ig-strategy?mode=${igMode}&action=pause-epic`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ epic }),
+        });
+      }
+      await fetchStatus();
+    } finally {
+      setPauseBusy(null);
     }
   };
 
@@ -893,9 +913,43 @@ function IgSpreadBetTab() {
                     >
                       {status.epicNames?.[epic] ?? epic}
                       <span className="opacity-60">{isAlpaca ? 'alpaca' : 'ig'}</span>
+                      <button
+                        onClick={() => void togglePauseEpic(epic, false)}
+                        disabled={pauseBusy === epic}
+                        title="Pause — exclude from scanning and entries until resumed"
+                        className="opacity-50 hover:opacity-100 disabled:opacity-30 ml-0.5"
+                      >
+                        ⏸
+                      </button>
                     </span>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* Paused epics — user-excluded from scanning and entries entirely,
+              so they no longer show up in Watching above at all. */}
+          {!!status?.pausedEpics?.length && (
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3">
+              <div className="text-xs text-slate-500 mb-2">Paused ({status.pausedEpics.length})</div>
+              <div className="flex flex-wrap gap-1.5">
+                {status.pausedEpics.map(epic => (
+                  <span
+                    key={epic}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border border-slate-700 bg-slate-800/60 text-slate-400"
+                  >
+                    {status.epicNames?.[epic] ?? epic}
+                    <button
+                      onClick={() => void togglePauseEpic(epic, true)}
+                      disabled={pauseBusy === epic}
+                      title="Resume — allow scanning and entries again"
+                      className="opacity-60 hover:opacity-100 disabled:opacity-30 ml-0.5 text-purple-400"
+                    >
+                      ▶
+                    </button>
+                  </span>
+                ))}
               </div>
             </div>
           )}

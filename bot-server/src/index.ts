@@ -14,6 +14,7 @@ import {
   startIgStrategyBot, stopIgStrategyBot, pauseIgStrategyBot, resumeIgStrategyBot,
   getIgStrategyBotStatus, loadSavedIgStrategyState, startRecommendationRefresh,
   refreshRecommendations, refreshDailyPick,
+  getPausedEpics, pauseEpic, resumeEpic,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
@@ -473,6 +474,28 @@ app.post('/ig-strategy/:mode/refresh-daily-pick', auth, async (req: Request, res
   const mode = resolveIgMode(req, res);
   if (!mode) return;
   await refreshDailyPick(mode);
+  res.json({ ok: true });
+});
+
+// ── Manual pause/resume — user-chosen instruments excluded from scanning
+// and new entries until resumed. No auto-expiry.
+app.get('/ig-strategy/:mode/paused', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  res.json({ ok: true, pausedEpics: getPausedEpics(mode) });
+});
+
+app.post('/ig-strategy/:mode/paused/:epic', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  pauseEpic(mode, req.params.epic);
+  res.json({ ok: true });
+});
+
+app.delete('/ig-strategy/:mode/paused/:epic', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  resumeEpic(mode, req.params.epic);
   res.json({ ok: true });
 });
 

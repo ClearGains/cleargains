@@ -176,22 +176,54 @@ function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
 // to market hours anyway, so their scan frequency never mattered as much.
 const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>(['donchian_breakout', 'donchian_hourly', 'ema_crossover', 'macd_crossover']);
 
+// Volatility-matched routing — a fast (hourly) strategy wants instruments
+// that actually move enough intraday to matter; a slow (daily) strategy
+// wants calmer ones, since extreme volatility on a multi-day hold is what
+// blew stop-sizing past the loss ceiling repeatedly on semiconductors
+// today (SanDisk/Micron/AMD etc — confirmed live, ATR-implied stops came
+// out 5-9x the instrument's own price). Rather than a hard filter, this
+// scales the score so the "right" timeframe for an instrument's own
+// volatility naturally outranks the "wrong" one instead of excluding
+// anything outright — a calm stock can still win a slot on the daily
+// strategy if nothing more volatile is currently breaking out.
+function volatilityMultiplier(strategy: IgStrategyName, bars: AlpacaBar[]): number {
+  if (strategy !== 'donchian_breakout' && strategy !== 'donchian_hourly') return 1;
+  if (!bars.length) return 1;
+  const atr      = calcAtr(bars);
+  const price    = bars[bars.length - 1].c;
+  if (!atr || price <= 0) return 1;
+  const atrPct = (atr / price) * 100;
+
+  if (strategy === 'donchian_hourly') {
+    // Hourly wants movement — a name barely moving intraday just gets
+    // chopped by noise. Penalize (not exclude) anything too calm.
+    return atrPct < 1.5 ? 0.4 : 1;
+  }
+  // donchian_breakout (daily) wants steadier multi-day trends — extreme
+  // volatility is exactly what's been forcing the loss-ceiling to skip
+  // entries all day. Penalize (not exclude) anything this hot.
+  return atrPct > 4 ? 0.4 : 1;
+}
+
 // Shared with the recommendations feature in igStrategyBot.ts, which needs
 // the same conviction score to rank "best pick of the day" — not just a
 // bare BUY/SELL, since more than one instrument can have a live signal at
 // once and only the strongest is worth a single daily highlight.
 export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], epic: string, name: string): number {
-  switch (strategy) {
-    case 'rsi_mean_reversion': return scoreRsi(bars, epic, name).score;
-    case 'ema_crossover':      return scoreEma(bars, epic, name).score;
-    case 'orb':                return scoreOrb(bars, epic, name).score;
-    case 'vwap':               return scoreVwap(bars, epic, name).score;
-    case 'weekly_momentum':    return scoreWeekly(bars, epic, name).score;
-    case 'donchian_breakout':  return scoreDonchian(bars, epic, name).score;
-    case 'donchian_hourly':    return scoreDonchian(bars, epic, name).score;
-    case 'macd_crossover':     return scoreMacd(bars, epic, name).score;
-    default:                   return -1;
-  }
+  const base = (() => {
+    switch (strategy) {
+      case 'rsi_mean_reversion': return scoreRsi(bars, epic, name).score;
+      case 'ema_crossover':      return scoreEma(bars, epic, name).score;
+      case 'orb':                return scoreOrb(bars, epic, name).score;
+      case 'vwap':               return scoreVwap(bars, epic, name).score;
+      case 'weekly_momentum':    return scoreWeekly(bars, epic, name).score;
+      case 'donchian_breakout':  return scoreDonchian(bars, epic, name).score;
+      case 'donchian_hourly':    return scoreDonchian(bars, epic, name).score;
+      case 'macd_crossover':     return scoreMacd(bars, epic, name).score;
+      default:                   return -1;
+    }
+  })();
+  return base <= 0 ? base : base * volatilityMultiplier(strategy, bars);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

@@ -48,6 +48,10 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
   if (!validMode(mode)) return NextResponse.json({ ok: false, error: 'mode must be demo or live' }, { status: 400 });
   if (action === 'watch' && dealId) return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}`, 'DELETE');
+
+  const epic = req.nextUrl.searchParams.get('epic') ?? '';
+  if (action === 'pause-epic' && epic) return proxyTo(`/ig-strategy/${mode}/paused/${encodeURIComponent(epic)}`, 'DELETE');
+
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
 }
 
@@ -74,6 +78,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (action === 'refresh-recommendations') return proxyTo(`/ig-strategy/${mode}/refresh-recommendations`, 'POST');
   if (action === 'refresh-daily-pick')      return proxyTo(`/ig-strategy/${mode}/refresh-daily-pick`,      'POST');
+
+  if (action === 'pause-epic') {
+    const { epic } = await req.json() as { epic?: string };
+    if (!epic) return NextResponse.json({ ok: false, error: 'epic required' }, { status: 400 });
+    return proxyTo(`/ig-strategy/${mode}/paused/${encodeURIComponent(epic)}`, 'POST');
+  }
 
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
 }

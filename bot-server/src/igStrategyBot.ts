@@ -57,6 +57,18 @@ function loadBlockedEpics(mode: IgMode): Map<string, number> {
   }
 }
 
+// User-paused epics — manual only, no auto-expiry, survives restarts.
+function pausedEpicsFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-paused-epics-${mode}.json`);
+}
+function savePausedEpics(mode: IgMode, set: Set<string>): void {
+  try { fs.writeFileSync(pausedEpicsFile(mode), JSON.stringify([...set]), 'utf8'); } catch {}
+}
+function loadPausedEpics(mode: IgMode): Set<string> {
+  try { return new Set(JSON.parse(fs.readFileSync(pausedEpicsFile(mode), 'utf8')) as string[]); }
+  catch { return new Set(); }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
@@ -133,6 +145,7 @@ export type IgStrategyBotStatus = {
   lossLock:   boolean;   // daily-loss circuit breaker engaged
   recommendations: IgRecommendation[];
   dailyPick:  IgRecommendation | null;
+  pausedEpics: string[];
 };
 
 type OrbState  = { high: number; low: number; established: boolean };
@@ -167,6 +180,18 @@ type ModeState = {
   // general recommendations list above does — see ensureDailyPick.
   dailyPick:             IgRecommendation | null;
   dailyPickDate:         string;   // UTC date the current dailyPick was set for
+  // Per-epic level that triggered the last entry (Donchian strategies only —
+  // signal.triggerLevel). A new signal only executes if it's a genuinely
+  // more extreme breakout than this, not just "still past the same old
+  // level" — otherwise a stopped-out (or manually closed) position on a
+  // multi-hour decline just re-enters again on the very next poll, since
+  // the 20-day low it broke below is still valid days later. Confirmed
+  // live: Qualcomm cycled through 4 separate entries in under 3 hours, all
+  // citing the identical "20-day low 16227.00".
+  lastEntryTrigger:      Map<string, { level: number; direction: 'BUY' | 'SELL' }>;
+  // User-paused epics — excluded from scanning and entries until manually
+  // resumed. Persisted, no auto-expiry (see pausedEpics.ts pattern below).
+  pausedEpics:           Set<string>;
   // Daily-loss circuit breaker
   dayKey:               string;   // UTC date the balance baseline belongs to
   dayStartBalance:      number;
@@ -184,6 +209,8 @@ function makeModeState(): ModeState {
     blockedEpics: new Map(),
     recommendations: new Map(),
     dailyPick: null, dailyPickDate: '',
+    lastEntryTrigger: new Map(),
+    pausedEpics: new Set(),
     dayKey: '', dayStartBalance: 0, lossLock: false,
     weekendGuardDate: '',
   };
@@ -193,7 +220,25 @@ const modeStates = new Map<IgMode, ModeState>([
   ['demo', makeModeState()],
   ['live', makeModeState()],
 ]);
-for (const [mode, st] of modeStates) st.blockedEpics = loadBlockedEpics(mode);
+for (const [mode, st] of modeStates) {
+  st.blockedEpics = loadBlockedEpics(mode);
+  st.pausedEpics  = loadPausedEpics(mode);
+}
+
+export function isPaused(mode: IgMode, epic: string): boolean { return ms(mode).pausedEpics.has(epic); }
+export function getPausedEpics(mode: IgMode): string[] { return [...ms(mode).pausedEpics]; }
+export function pauseEpic(mode: IgMode, epic: string): void {
+  const st = ms(mode);
+  st.pausedEpics.add(epic);
+  savePausedEpics(mode, st.pausedEpics);
+  addLog(mode, 'info', epicName(epic), '⏸ Paused by user — excluded from scanning and entries until resumed');
+}
+export function resumeEpic(mode: IgMode, epic: string): void {
+  const st = ms(mode);
+  st.pausedEpics.delete(epic);
+  savePausedEpics(mode, st.pausedEpics);
+  addLog(mode, 'info', epicName(epic), '▶ Resumed by user');
+}
 
 function ms(mode: IgMode): ModeState { return modeStates.get(mode)!; }
 
@@ -403,7 +448,7 @@ function blockEpicOnAllowance(mode: IgMode, cfg: IgStrategyConfig, session: IGSe
     try {
       const current = st.config?.epics ?? [];
       const held    = (await fetchFullPositions(session)).map(p => p.epic);
-      const exclude = [...new Set([...current, ...held, ...st.blockedEpics.keys()])];
+      const exclude = [...new Set([...current, ...held, ...st.blockedEpics.keys(), ...st.pausedEpics])];
       const picks   = await scanIgEpics(cfg.strategy, session, exclude, 1, msg => addLog(mode, 'info', '—', msg));
       if (picks[0] && st.config) {
         const idx = st.config.epics.indexOf(badEpic);
@@ -439,7 +484,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
   let heldEpics = new Set<string>();
   try { heldEpics = new Set((await fetchFullPositions(st.session)).map(p => p.epic)); } catch {}
 
-  const candidates = IG_EPICS.map(e => e.epic).filter(epic => !heldEpics.has(epic));
+  const candidates = IG_EPICS.map(e => e.epic).filter(epic => !heldEpics.has(epic) && !st.pausedEpics.has(epic));
   if (force) addLog(mode, 'info', '—', `[Recommendation check] Scanning ${candidates.length} instrument(s)…`);
 
   let checked = 0, found = 0, blocked = 0;
@@ -758,7 +803,7 @@ async function executeIgSignal(
         try {
           const current = st.config?.epics ?? [];
           const held    = (await fetchFullPositions(session)).map(p => p.epic);
-          const exclude = [...new Set([...current, ...held])].filter(e => e !== epic);
+          const exclude = [...new Set([...current, ...held, ...st.pausedEpics])].filter(e => e !== epic || st.pausedEpics.has(e));
           const picks   = await scanIgEpics(cfg.strategy, session, exclude, 1, msg => addLog(mode, 'info', '—', msg));
           if (picks[0] && st.config) {
             const idx = st.config.epics.indexOf(epic);
@@ -779,8 +824,30 @@ async function executeIgSignal(
   if (action === 'SELL' && !cfg.allowShorts) { addLog(mode, 'wait', name, 'Shorts disabled'); return; }
   if (openPos)                          { addLog(mode, 'wait', name, `Already in position — skipping ${action}`); return; }
   if (isNearClose())                    { addLog(mode, 'wait', name, '⏸ Market closing <15 min — no new entries'); return; }
+  if (st.pausedEpics.has(epic))         { addLog(mode, 'wait', name, '⏸ Paused by user — skipping entry'); return; }
 
   const direction  = action === 'BUY' ? 'BUY' : 'SELL';
+
+  // Fresh-breakout-only re-entry (Donchian strategies) — the new signal's
+  // trigger level must be more extreme than whatever triggered the last
+  // entry on this epic, not just "still past the same old level". Otherwise
+  // a stopped-out (or manually closed) position on a multi-hour move just
+  // re-enters again on the very next poll, since the historical high/low it
+  // broke past hasn't itself been surpassed yet — confirmed live: Qualcomm
+  // cycled through 4 separate entries in under 3 hours, all citing the
+  // identical "20-day low 16227.00".
+  if (signal.triggerLevel !== undefined) {
+    const lastTrigger = st.lastEntryTrigger.get(epic);
+    if (lastTrigger && lastTrigger.direction === direction) {
+      const moreExtreme = direction === 'BUY'
+        ? signal.triggerLevel > lastTrigger.level
+        : signal.triggerLevel < lastTrigger.level;
+      if (!moreExtreme) {
+        addLog(mode, 'wait', name, `Same breakout level as last entry (${lastTrigger.level.toFixed(2)}) — waiting for a fresh one`);
+        return;
+      }
+    }
+  }
 
   // IG rejects (or silently adjusts) stakes/stops below the instrument's own
   // minimums — without clamping to these, entries can fail outright or leave
@@ -877,6 +944,9 @@ async function executeIgSignal(
     const { dealId, level, protectionOk, protectionError } =
       await placeMarketOrder(session, epic, effectiveDirection, stake, effectiveStopDist, profitDist);
     addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
+    if (signal.triggerLevel !== undefined) {
+      st.lastEntryTrigger.set(epic, { level: signal.triggerLevel, direction: effectiveDirection });
+    }
 
     // Only claim Stop/TP protection once it's actually confirmed attached —
     // otherwise a silently-failed PUT leaves the position naked with no
@@ -1055,6 +1125,27 @@ async function poll(mode: IgMode) {
     }
   }
 
+  // Profit-lock circuit breaker — banks a healthy win outright once it's
+  // reached, rather than trusting the trailing stop / channel-exit to
+  // eventually catch it. Confirmed live this matters: visible gains have
+  // gone back to red because nothing closed the position in time. Doesn't
+  // need active monitoring — checked every poll alongside the loss guard
+  // above, same cadence. Threshold is a clear, worthwhile multiple of what
+  // was risked (not a token amount), so it's banking real wins, not just
+  // clipping tiny ones early.
+  const profitLockFloor = cfg.maxRiskGbp * 1.5;
+  for (const p of positions) {
+    if (p.upl < profitLockFloor) continue;
+    const name = epicName(p.epic);
+    addLog(mode, 'exit', name,
+      `💰 Profit lock — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it`);
+    try {
+      await igClosePos(st.session, p.dealId, p.direction, p.size);
+    } catch (e) {
+      addLog(mode, 'error', name, `Profit lock close failed: ${e instanceof Error ? e.message : String(e)}. Will retry next poll.`);
+    }
+  }
+
   // Trailing stop (donchian_breakout only) — ratchets the stop toward price
   // at the same 3%-of-price distance used at entry, but only ever tightens,
   // never loosens. Locks in gains as a trend continues instead of capping
@@ -1142,7 +1233,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
 
   addLog(mode, 'info', '—', 'Scanning for best instruments…');
   try {
-    const best = await scanIgEpics(cfg.strategy, st.session, [], cfg.maxPositions + 2, msg => addLog(mode, 'info', '—', msg));
+    const best = await scanIgEpics(cfg.strategy, st.session, [...st.pausedEpics], cfg.maxPositions + 2, msg => addLog(mode, 'info', '—', msg));
     cfg.epics = best;
   } catch (e) {
     addLog(mode, 'info', '—', `Scan failed — using default indices: ${e instanceof Error ? e.message : String(e)}`);
@@ -1236,5 +1327,6 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     lossLock:   st.lossLock,
     recommendations: [...st.recommendations.values()],
     dailyPick:  st.dailyPick,
+    pausedEpics: [...st.pausedEpics],
   };
 }

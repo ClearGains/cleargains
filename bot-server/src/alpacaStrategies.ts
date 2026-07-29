@@ -86,6 +86,11 @@ export type StrategySignal = {
   optionType?:      'call' | 'put';   // options_directional: direction of the options trade
   optionContract?:  string;           // OCC symbol to order (filled in by evaluateSymbol)
   optionQty?:       number;           // contracts to buy (filled in by evaluateSymbol)
+  // Donchian only: the exact entryHigh/entryLow that triggered a BUY/SELL.
+  // Lets a caller require a genuinely new/more-extreme breakout before
+  // re-entering, instead of re-firing on the same still-valid historical
+  // level all day — see igStrategyBot.ts's lastEntryTrigger check.
+  triggerLevel?:    number;
 };
 
 export type PositionSide = 'long' | 'short';
@@ -455,6 +460,7 @@ export function donchianBreakoutSignal(
       stopPrice:        +(last - stopDist).toFixed(2),
       takeProfitPrice:  +(last + atr * 10).toFixed(2),
       orderType:        'market',
+      triggerLevel:     entryHigh,
     };
   }
   if (last < entryLow) {
@@ -464,6 +470,7 @@ export function donchianBreakoutSignal(
       stopPrice:        +(last + stopDist).toFixed(2),
       takeProfitPrice:  +(last - atr * 10).toFixed(2),
       orderType:        'market',
+      triggerLevel:     entryLow,
     };
   }
   return { action: 'HOLD', reason: `Price ${last.toFixed(2)} inside ${entryPeriod}-${periodUnit} range ${entryLow.toFixed(2)}–${entryHigh.toFixed(2)}` };
