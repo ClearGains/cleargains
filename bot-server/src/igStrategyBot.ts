@@ -428,28 +428,27 @@ async function evaluateEpic(
   // any dependence on the manual points-scale conversion being exactly right
   // at the moment of execution; only the *distance* (how far the stop/TP sit
   // from price) needs to have been correctly scaled, which was verified
-  // against the live account already. fetchMarketDetails is a live snapshot
-  // call, not historical data, so it's unaffected by the allowance limit —
-  // suggested after a live sizing bug (TSMC) showed relying on the scaled
-  // free-data price indefinitely, rather than IG's own number at execution
-  // time, was more fragile than it needed to be.
+  // against the live account already. Reuses st.marketDetails (poll()
+  // already refreshes it for the whole watch list every cycle, line ~707)
+  // instead of issuing a second live fetchMarketDetails call here — an
+  // earlier version fetched fresh per-signal, which duplicated a call IG
+  // had just made moments earlier in the same poll and tripped the
+  // account-wide non-trading allowance (error.public-api.exceeded-*-allowance),
+  // locking the whole account out, not just this epic.
   if (usesFreeData && (signal.action === 'BUY' || signal.action === 'SELL')) {
-    try {
-      const liveDetails = await fetchMarketDetails(session, [epic]);
-      const live = liveDetails.get(epic);
-      if (live?.bid && live?.offer) {
-        const livePrice     = (live.bid + live.offer) / 2;
-        const freeDataPrice = executionPrice;
-        const stopDist      = signal.stopPrice       !== undefined ? Math.abs(freeDataPrice - signal.stopPrice)       : undefined;
-        const profitDist    = signal.takeProfitPrice  !== undefined ? Math.abs(freeDataPrice - signal.takeProfitPrice) : undefined;
-        executionSignal = {
-          ...signal,
-          stopPrice:       stopDist   !== undefined ? (signal.action === 'BUY' ? livePrice - stopDist   : livePrice + stopDist)   : signal.stopPrice,
-          takeProfitPrice: profitDist !== undefined ? (signal.action === 'BUY' ? livePrice + profitDist : livePrice - profitDist) : signal.takeProfitPrice,
-        };
-        executionPrice = livePrice;
-      }
-    } catch { /* fall back to the free-data price if the live snapshot fails */ }
+    const live = st.marketDetails.get(epic);
+    if (live?.bid && live?.offer) {
+      const livePrice     = (live.bid + live.offer) / 2;
+      const freeDataPrice = executionPrice;
+      const stopDist      = signal.stopPrice       !== undefined ? Math.abs(freeDataPrice - signal.stopPrice)       : undefined;
+      const profitDist    = signal.takeProfitPrice  !== undefined ? Math.abs(freeDataPrice - signal.takeProfitPrice) : undefined;
+      executionSignal = {
+        ...signal,
+        stopPrice:       stopDist   !== undefined ? (signal.action === 'BUY' ? livePrice - stopDist   : livePrice + stopDist)   : signal.stopPrice,
+        takeProfitPrice: profitDist !== undefined ? (signal.action === 'BUY' ? livePrice + profitDist : livePrice - profitDist) : signal.takeProfitPrice,
+      };
+      executionPrice = livePrice;
+    }
   }
 
   await executeIgSignal(mode, epic, executionSignal, openPos ?? null, cfg, session, executionPrice);
