@@ -49,7 +49,17 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
   const set = watched.get(mode)!;
   set.delete(dealId);
   saveWatch(mode, set);
+  lastReview.delete(dealId);
 }
+
+// Throttle — a position that hasn't moved meaningfully since its last actual
+// Gemini call gets skipped rather than re-asked every single 15-min cycle
+// for no new information. In-memory only (not persisted): worst case after
+// a restart, every watched position gets one extra call it might not have
+// strictly needed, which is a fine tradeoff against added persisted state.
+const lastReview = new Map<string, { upl: number; at: number }>();
+const MOVE_THRESHOLD_GBP = 3;          // re-ask once P&L has moved at least this much since the last call
+const MAX_SILENCE_MS     = 45 * 60_000; // ...or at least this long has passed, even if flat
 
 // Reuses the strategy bot's own session if one's already authenticated
 // (same sessionKey pattern, 'igstrat:<mode>') rather than logging in twice —
@@ -88,6 +98,13 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
 
   const heldHours    = p.openedAt ? (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000 : 0;
   const currentLevel = p.direction === 'BUY' ? p.bid : p.offer;
+
+  const last  = lastReview.get(p.dealId);
+  const moved = !last || Math.abs(p.upl - last.upl) >= MOVE_THRESHOLD_GBP;
+  const stale = !last || (Date.now() - last.at) >= MAX_SILENCE_MS;
+  if (!moved && !stale) return;  // nothing meaningful changed since the last actual call — skip it
+
+  lastReview.set(p.dealId, { upl: p.upl, at: Date.now() });
 
   const verdict = await askGeminiPositionVerdict({
     instrumentName: name,

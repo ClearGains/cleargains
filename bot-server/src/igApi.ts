@@ -208,6 +208,17 @@ export async function closePosition(
     if (r.status !== 404 && r.status !== 405) throw new Error(`closePosition failed ${r.status}: ${d.errorCode ?? attempt.url}`);
     // otherwise fall through to next attempt
   }
+  // Every endpoint variant 404'd — this is the same code that closes
+  // positions successfully constantly elsewhere, so a genuinely broken
+  // endpoint is unlikely. Far more likely: the position is already gone
+  // (IG's own broker-side stop/limit closed it before this software-side
+  // attempt reached IG). Confirming that here makes close idempotent —
+  // "close an already-closed position" succeeds as a no-op instead of
+  // throwing a misleading error for something that isn't actually broken.
+  try {
+    const stillOpen = (await fetchFullPositions(session)).some(p => p.dealId === dealId);
+    if (!stillOpen) return;
+  } catch { /* fall through to the throw below if we can't even check */ }
   throw new Error(`closePosition: all endpoints returned 404 for dealId=${dealId}`);
 }
 
