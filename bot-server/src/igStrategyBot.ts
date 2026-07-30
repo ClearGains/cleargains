@@ -16,7 +16,7 @@ import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy } from './igStrategyS
 import { askGeminiDailyVerdict } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
-import type { AlpacaBar } from './alpacaApi';
+import type { AlpacaBar, Timeframe } from './alpacaApi';
 import {
   isNYSEOpen, isInOpeningRange, isNearClose,
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
@@ -279,9 +279,18 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
 
 // Free-data params for strategies that need something other than the daily
 // bars fetchBarsWithFallback defaults to — see the free-data branch in
-// evaluateEpic and refreshRecommendations.
-const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: '1Hour'; yahooInterval: '1h' }>> = {
-  donchian_hourly: { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
+// evaluateEpic and refreshRecommendations. Every strategy gets an entry now
+// (not just the hourly one) — IG's own candle API is allowance-limited and
+// intraday strategies poll far more often than daily ones, which is exactly
+// what makes them the most likely to burn through it (confirmed live:
+// daily-timeframe polling alone was already tripping the allowance before
+// this existed at all).
+const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '1h' | '1wk' }>> = {
+  rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
+  orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
+  vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
+  weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },
+  donchian_hourly:    { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
 };
 
 // Daily-timeframe strategies poll far more often here than STRATEGY_META's
@@ -445,6 +454,17 @@ async function buildOrbRange(mode: IgMode, session: IGSession, epics: string[]) 
   const st = ms(mode);
   for (const epic of epics) {
     try {
+      const usesFreeData = epic in EPIC_TO_ALPACA;
+      if (usesFreeData) {
+        const bars = await fetchBarsWithFallback(epic, '5d', { alpacaTimeframe: '1Min', yahooInterval: '1m' });
+        const last30 = (bars ?? []).slice(-30);
+        if (!last30.length) continue;
+        const high = Math.max(...last30.map(b => b.h));
+        const low  = Math.min(...last30.map(b => b.l));
+        st.orbState[epic] = { high, low, established: true };
+        addLog(mode, 'info', epicName(epic), `ORB: ${low.toFixed(2)}–${high.toFixed(2)}`);
+        continue;
+      }
       const raw  = await fetchCandleHistory(session, epic, 'MINUTE', 60);
       const last30 = raw.slice(-30);
       if (!last30.length) continue;
@@ -686,7 +706,11 @@ async function evaluateEpic(
 
   const { resolution, count } = IG_RES[cfg.strategy];
   let bars: AlpacaBar[];
-  if ((meta.timeframe === 'daily' || meta.timeframe === 'hourly') && usesFreeData) {
+  // Free data (Alpaca/Yahoo) is used for every strategy now, not just daily/
+  // hourly ones — usesFreeData already restricts this to genuinely-mapped
+  // Alpaca shares (EPIC_TO_ALPACA), so there's no timeframe restriction left
+  // to apply on top of that.
+  if (usesFreeData) {
     const freeParams   = FREE_DATA_PARAMS[cfg.strategy];
     const fallbackBars = freeParams
       ? await fetchBarsWithFallback(epic, freeParams.range, freeParams)

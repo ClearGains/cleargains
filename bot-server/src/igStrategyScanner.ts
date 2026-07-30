@@ -167,14 +167,30 @@ function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
   return { epic, name, score: (crossed ? 40 : 0) + momentum * 1000 };
 }
 
-// Daily-timeframe strategies (the only ones actually selectable in the live
-// bot) score off free Yahoo daily bars instead of IG's allowance-limited
-// candle API — a 44-epic scan was burning a meaningful chunk of IG's weekly
-// historical-data allowance on every bot start or strategy switch, on top of
-// the per-poll confirm calls. Intraday/weekly strategies keep using IG's own
-// data — they're not real candidates (all backtest negative) and are gated
-// to market hours anyway, so their scan frequency never mattered as much.
-const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>(['donchian_breakout', 'donchian_hourly', 'ema_crossover', 'macd_crossover']);
+// Every strategy scores off free Alpaca/Yahoo bars instead of IG's allowance-
+// limited candle API — a 44-epic scan was burning a meaningful chunk of IG's
+// weekly historical-data allowance on every bot start or strategy switch, on
+// top of the per-poll confirm calls, and a 30-call IG scan alone was enough
+// to trip the account-wide non-trading allowance and lock the whole account
+// out for several minutes (confirmed live) — not something worth risking
+// even once per strategy. EPIC_TO_YAHOO covers the full IG_EPICS universe,
+// so every strategy can scan for free; per-strategy timeframe/interval is
+// looked up below instead of defaulting every strategy to daily bars.
+const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>([
+  'donchian_breakout', 'donchian_hourly', 'ema_crossover', 'macd_crossover',
+  'rsi_mean_reversion', 'orb', 'vwap', 'weekly_momentum',
+]);
+
+// Mirrors igStrategyBot.ts's FREE_DATA_PARAMS — duplicated rather than
+// imported to avoid a circular import (igStrategyBot.ts already imports
+// scanIgEpics from this file).
+const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: '1Min' | '5Min' | '1Hour' | '1Week'; yahooInterval: '1m' | '5m' | '1h' | '1wk' }>> = {
+  rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
+  orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
+  vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
+  weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },
+  donchian_hourly:    { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
+};
 
 // Volatility-matched routing — a fast (hourly) strategy wants instruments
 // that actually move enough intraday to matter; a slow (daily) strategy
@@ -242,11 +258,12 @@ export async function scanIgEpics(
   const { resolution, count: barCount } = SCAN_RESOLUTION[strategy];
   const scored: Scored[] = [];
 
+  const freeParams = SCAN_FREE_PARAMS[strategy];
   for (const { epic, name } of pool) {
     try {
       const bars = useYahoo
-        ? strategy === 'donchian_hourly'
-          ? await fetchBarsWithFallback(epic, '1mo', { alpacaTimeframe: '1Hour', yahooInterval: '1h' }) ?? []
+        ? freeParams
+          ? await fetchBarsWithFallback(epic, freeParams.range, freeParams) ?? []
           : await fetchBarsWithFallback(epic, '6mo') ?? []
         : (await fetchCandleHistory(session, epic, resolution, barCount)).map(igBarToAlpacaBar);
       scored.push({ epic, name, score: scoreForStrategy(strategy, bars, epic, name) });

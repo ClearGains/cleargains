@@ -1,4 +1,4 @@
-import type { AlpacaBar } from './alpacaApi';
+import type { AlpacaBar, Timeframe } from './alpacaApi';
 
 // ── Yahoo bars fetch ──────────────────────────────────────────────────────────
 // Yahoo blocks server requests that look automated (missing browser headers) —
@@ -25,7 +25,7 @@ type YahooChartRaw = {
 
 export async function fetchYahooBars(
   symbol:   string,
-  interval: '5m' | '1h' | '1d',
+  interval: '1m' | '5m' | '15m' | '1h' | '1d' | '1wk',
   range:    string,
 ): Promise<AlpacaBar[] | null> {
   const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
@@ -46,8 +46,9 @@ export async function fetchYahooBars(
     if (!result) return null;
     const timestamps = result.timestamp ?? [];
     const q = result.indicators?.quote?.[0] ?? {};
+    const dateOnly = interval === '1d' || interval === '1wk';
     const bars: AlpacaBar[] = timestamps.map((ts, i) => ({
-      t: interval === '1d'
+      t: dateOnly
         ? new Date(ts * 1000).toISOString().slice(0, 10)
         : new Date(ts * 1000).toISOString(),
       o: q.open?.[i] ?? 0, h: q.high?.[i] ?? 0, l: q.low?.[i] ?? 0, c: q.close?.[i] ?? 0, v: q.volume?.[i] ?? 0,
@@ -177,9 +178,9 @@ function scaleBars(bars: AlpacaBar[], factor: number): AlpacaBar[] {
 export async function fetchBarsWithFallback(
   epic:  string,
   range: string,
-  opts?: { alpacaTimeframe?: 'unused' | '1Hour' | '1Day'; yahooInterval?: '5m' | '1h' | '1d' },
+  opts?: { alpacaTimeframe?: Timeframe; yahooInterval?: '1m' | '5m' | '15m' | '1h' | '1d' | '1wk' },
 ): Promise<AlpacaBar[] | null> {
-  const alpacaTimeframe = opts?.alpacaTimeframe === '1Hour' ? '1Hour' : '1Day';
+  const alpacaTimeframe = opts?.alpacaTimeframe ?? '1Day';
   const yahooInterval   = opts?.yahooInterval   ?? '1d';
   const isShare  = epic in EPIC_TO_ALPACA;
   const alpacaSym = EPIC_TO_ALPACA[epic];
