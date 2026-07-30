@@ -90,6 +90,40 @@ function loadLastEntryTrigger(mode: IgMode): Map<string, { level: number; direct
   }
 }
 
+// Deal IDs the bot itself opened — used to tell those apart from positions
+// that exist on a watched epic for some other reason (opened manually via
+// the IG app, or anywhere else outside this bot). Confirmed live this
+// matters: a manually-opened Micron position got closed automatically
+// within a second of the bot discovering it, because the strategy's own
+// exit rule was already satisfied — no chance to let it play out. The bot
+// now only auto-manages exits on deals it opened itself, or ones explicitly
+// released (see releasedDeals below).
+function botOpenedDealsFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-bot-opened-deals-${mode}.json`);
+}
+function saveBotOpenedDeals(mode: IgMode, set: Set<string>): void {
+  try { fs.writeFileSync(botOpenedDealsFile(mode), JSON.stringify([...set]), 'utf8'); } catch {}
+}
+function loadBotOpenedDeals(mode: IgMode): Set<string> {
+  try { return new Set(JSON.parse(fs.readFileSync(botOpenedDealsFile(mode), 'utf8')) as string[]); }
+  catch { return new Set(); }
+}
+
+// Deal IDs explicitly released by the user — "you can close it now". Applies
+// to any position (manually-opened, or a bot-opened one the user separately
+// asked to hold and is now letting go). Union with botOpenedDeals is what
+// executeIgSignal checks before actually closing anything.
+function releasedDealsFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-released-deals-${mode}.json`);
+}
+function saveReleasedDeals(mode: IgMode, set: Set<string>): void {
+  try { fs.writeFileSync(releasedDealsFile(mode), JSON.stringify([...set]), 'utf8'); } catch {}
+}
+function loadReleasedDeals(mode: IgMode): Set<string> {
+  try { return new Set(JSON.parse(fs.readFileSync(releasedDealsFile(mode), 'utf8')) as string[]); }
+  catch { return new Set(); }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
@@ -167,6 +201,10 @@ export type IgStrategyBotStatus = {
   recommendations: IgRecommendation[];
   dailyPick:  IgRecommendation | null;
   pausedEpics: string[];
+  // Deal IDs the bot will auto-manage (opened by the bot itself, or
+  // explicitly released) — anything open but NOT in this list is a
+  // manually-opened position the bot is deliberately leaving alone.
+  managedDeals: string[];
 };
 
 type OrbState  = { high: number; low: number; established: boolean };
@@ -219,6 +257,12 @@ type ModeState = {
   lossLock:             boolean;  // true = no new entries until the next trading day
   // Weekend risk-window guard
   weekendGuardDate:     string;   // UTC date the guard last fired — one-shot per Friday
+  // Deal IDs the bot itself opened (see botOpenedDealsFile above) — only
+  // these, plus anything in releasedDeals, get automatically closed by the
+  // strategy's own exit logic.
+  botOpenedDeals:       Set<string>;
+  // Deal IDs explicitly released by the user — "you can close it now".
+  releasedDeals:        Set<string>;
 };
 
 function makeModeState(): ModeState {
@@ -234,6 +278,7 @@ function makeModeState(): ModeState {
     pausedEpics: new Set(),
     dayKey: '', dayStartBalance: 0, lossLock: false,
     weekendGuardDate: '',
+    botOpenedDeals: new Set(), releasedDeals: new Set(),
   };
 }
 
@@ -245,6 +290,27 @@ for (const [mode, st] of modeStates) {
   st.blockedEpics    = loadBlockedEpics(mode);
   st.pausedEpics     = loadPausedEpics(mode);
   st.lastEntryTrigger = loadLastEntryTrigger(mode);
+  st.botOpenedDeals  = loadBotOpenedDeals(mode);
+  st.releasedDeals   = loadReleasedDeals(mode);
+}
+
+export function isDealManaged(mode: IgMode, dealId: string): boolean {
+  const st = ms(mode);
+  return st.botOpenedDeals.has(dealId) || st.releasedDeals.has(dealId);
+}
+export function releaseDeal(mode: IgMode, dealId: string): void {
+  const st = ms(mode);
+  st.releasedDeals.add(dealId);
+  saveReleasedDeals(mode, st.releasedDeals);
+  addLog(mode, 'info', '—', `🔓 Deal ${dealId} released — bot can now manage/close it`);
+}
+export function holdDeal(mode: IgMode, dealId: string): void {
+  const st = ms(mode);
+  st.releasedDeals.delete(dealId);
+  st.botOpenedDeals.delete(dealId);
+  saveReleasedDeals(mode, st.releasedDeals);
+  saveBotOpenedDeals(mode, st.botOpenedDeals);
+  addLog(mode, 'info', '—', `🔒 Deal ${dealId} held — bot will not close it automatically`);
 }
 
 export function isPaused(mode: IgMode, epic: string): boolean { return ms(mode).pausedEpics.has(epic); }
@@ -840,6 +906,14 @@ async function executeIgSignal(
 
   if (action === 'CLOSE_LONG' || action === 'CLOSE_SHORT') {
     if (!openPos) return;
+    // Only auto-close deals the bot itself opened, or ones explicitly
+    // released by the user — a manually-opened position (e.g. via the IG
+    // app directly) is left alone by default, since the strategy's exit
+    // logic wasn't what the user was trading on when they opened it.
+    if (!st.botOpenedDeals.has(openPos.dealId) && !st.releasedDeals.has(openPos.dealId)) {
+      addLog(mode, 'wait', name, `🔒 Manually-opened position — not closing automatically (would have: ${reason}). Release it to let the bot manage exits.`);
+      return;
+    }
     addLog(mode, 'exit', name, `Closing — ${reason}`);
     try {
       await igClosePos(session, openPos.dealId, openPos.direction, openPos.size);
@@ -1032,6 +1106,8 @@ async function executeIgSignal(
     const { dealId, level, protectionOk, protectionError } =
       await placeMarketOrder(session, epic, effectiveDirection, stake, effectiveStopDist, profitDist);
     addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
+    st.botOpenedDeals.add(dealId);
+    saveBotOpenedDeals(mode, st.botOpenedDeals);
     if (signal.triggerLevel !== undefined) {
       st.lastEntryTrigger.set(epic, { level: signal.triggerLevel, direction: effectiveDirection });
       saveLastEntryTrigger(mode, st.lastEntryTrigger);
@@ -1153,6 +1229,17 @@ async function poll(mode: IgMode) {
     addLog(mode, 'error', '—', `Account fetch failed: ${e instanceof Error ? e.message : String(e)}`);
     schedule(mode, cfg);
     return;
+  }
+
+  // Drop dealIds no longer open (closed by the bot, manually, or by any of
+  // the circuit breakers below) — otherwise botOpenedDeals/releasedDeals
+  // grow forever with stale IDs that can never matter again.
+  {
+    const openIds = new Set(positions.map(p => p.dealId));
+    let changed = false;
+    for (const id of st.botOpenedDeals) if (!openIds.has(id)) { st.botOpenedDeals.delete(id); changed = true; }
+    for (const id of st.releasedDeals)  if (!openIds.has(id)) { st.releasedDeals.delete(id);  changed = true; }
+    if (changed) { saveBotOpenedDeals(mode, st.botOpenedDeals); saveReleasedDeals(mode, st.releasedDeals); }
   }
 
   // ── Daily-loss circuit breaker ────────────────────────────────────────────
@@ -1426,5 +1513,6 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     recommendations: [...st.recommendations.values()],
     dailyPick:  st.dailyPick,
     pausedEpics: [...st.pausedEpics],
+    managedDeals: [...new Set([...st.botOpenedDeals, ...st.releasedDeals])],
   };
 }

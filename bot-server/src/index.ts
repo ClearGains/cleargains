@@ -15,6 +15,7 @@ import {
   getIgStrategyBotStatus, loadSavedIgStrategyState, startRecommendationRefresh,
   refreshRecommendations, refreshDailyPick,
   getPausedEpics, pauseEpic, resumeEpic,
+  releaseDeal, holdDeal,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
@@ -496,6 +497,25 @@ app.delete('/ig-strategy/:mode/paused/:epic', auth, (req: Request, res: Response
   const mode = resolveIgMode(req, res);
   if (!mode) return;
   resumeEpic(mode, req.params.epic);
+  res.json({ ok: true });
+});
+
+// ── Manual position protection — positions the bot didn't open itself are
+// left alone by default (see botOpenedDeals/releasedDeals in igStrategyBot.ts).
+// Release lets the bot manage/close it; hold pulls it back under protection
+// (also usable on a bot-opened position you want to keep past its own exit
+// signal).
+app.post('/ig-strategy/:mode/deals/:dealId/release', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  releaseDeal(mode, req.params.dealId);
+  res.json({ ok: true });
+});
+
+app.post('/ig-strategy/:mode/deals/:dealId/hold', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  holdDeal(mode, req.params.dealId);
   res.json({ ok: true });
 });
 
