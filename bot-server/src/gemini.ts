@@ -1,3 +1,48 @@
+import * as fs from 'fs';
+import * as path from 'path';
+
+// ── Hard daily call cap ──────────────────────────────────────────────────────
+// Google Cloud billing budgets are alert-only by default, not an automatic
+// stop — this is the real backstop against runaway cost, enforced locally
+// and instantly rather than depending on a billing alert's latency. Shared
+// across every Gemini call site (entry verdicts + position watch) and both
+// demo/live, since they all bill against the one project/key. 150/day is
+// generously above realistic usage (busiest estimated case was ~25-40/day
+// for VWAP) while still bounding worst-case cost to a fixed, known amount
+// regardless of what triggers excess calls upstream.
+const GEMINI_DAILY_CAP = 150;
+const CALL_COUNT_FILE  = path.join(__dirname, '..', 'gemini-daily-calls.json');
+
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+type CallCountState = { date: string; count: number };
+
+function loadCallState(): CallCountState {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CALL_COUNT_FILE, 'utf8')) as CallCountState;
+    return parsed.date === todayUtc() ? parsed : { date: todayUtc(), count: 0 };
+  } catch {
+    return { date: todayUtc(), count: 0 };
+  }
+}
+
+let callState = loadCallState();
+
+// Call before every actual Gemini fetch (not before the free rules-only
+// paths) — returns false once today's cap is hit, callers fall back to
+// their existing passthrough/rules verdict exactly as they already do on
+// any other Gemini failure.
+function reserveGeminiCall(): boolean {
+  const today = todayUtc();
+  if (callState.date !== today) callState = { date: today, count: 0 };
+  if (callState.count >= GEMINI_DAILY_CAP) return false;
+  callState.count++;
+  try { fs.writeFileSync(CALL_COUNT_FILE, JSON.stringify(callState)); } catch {}
+  return true;
+}
+
 export type GeminiVerdict = {
   direction:        'BUY' | 'SELL' | 'SKIP';
   confidence:       number;   // 0-100
@@ -63,6 +108,11 @@ export async function askGemini(signal: EntrySignal): Promise<GeminiVerdict> {
   // Stage 1: rules filter — always runs first
   const rules = fallbackVerdict(signal);
   if (!apiKey || rules.direction === 'SKIP') return rules;
+
+  if (!reserveGeminiCall()) {
+    console.warn('[gemini] Daily call cap reached — using rules verdict');
+    return rules;
+  }
 
   // Stage 2: Gemini second opinion — only reached if rules say enter
 
@@ -188,6 +238,9 @@ export async function askGeminiDailyVerdict(req: DailyVerdictRequest): Promise<D
   if (!apiKey) {
     return { direction: req.direction, confidence: req.strength, reason: 'No Gemini key — using signal strength', engine: 'passthrough' };
   }
+  if (!reserveGeminiCall()) {
+    return { direction: req.direction, confidence: req.strength, reason: 'Daily Gemini call cap reached — using signal strength', engine: 'passthrough' };
+  }
 
   const rrRatio = req.stopPoints > 0 ? (req.tpPoints / req.stopPoints).toFixed(1) : '?';
   const pctStr  = `${req.changePercent >= 0 ? '+' : ''}${req.changePercent.toFixed(2)}%`;
@@ -276,6 +329,9 @@ export async function askGeminiPositionVerdict(req: PositionReviewRequest): Prom
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return { action: 'HOLD', confidence: 0, reason: 'No Gemini key configured — holding, stop still protects the position', engine: 'passthrough' };
+  }
+  if (!reserveGeminiCall()) {
+    return { action: 'HOLD', confidence: 0, reason: 'Daily Gemini call cap reached — holding, stop still protects the position', engine: 'passthrough' };
   }
 
   const pctMove = req.entryLevel > 0 ? (req.currentLevel - req.entryLevel) / req.entryLevel * 100 : 0;
