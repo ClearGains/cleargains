@@ -834,6 +834,7 @@ async function executeIgSignal(
   const { action, reason, stopPrice, takeProfitPrice, trailPercent } = signal;
   const st   = ms(mode);
   const name = epicName(epic);
+  const is24hStrategy = cfg.strategy === 'vwap';
 
   if (action === 'HOLD') { addLog(mode, 'wait', name, reason); return; }
 
@@ -869,8 +870,22 @@ async function executeIgSignal(
   if (st.lossLock)                     { addLog(mode, 'wait', name, `🛑 Daily-loss limit hit — skipping ${action} (entries resume next day)`); return; }
   if (action === 'SELL' && !cfg.allowShorts) { addLog(mode, 'wait', name, 'Shorts disabled'); return; }
   if (openPos)                          { addLog(mode, 'wait', name, `Already in position — skipping ${action}`); return; }
-  if (isNearClose())                    { addLog(mode, 'wait', name, '⏸ Market closing <15 min — no new entries'); return; }
+  // isNearClose() means "NYSE closing in <15 min" — meaningless for a
+  // continuously-quoted 24h product with no session close to hold through.
+  if (!is24hStrategy && isNearClose())  { addLog(mode, 'wait', name, '⏸ Market closing <15 min — no new entries'); return; }
   if (st.pausedEpics.has(epic))         { addLog(mode, 'wait', name, '⏸ Paused by user — skipping entry'); return; }
+
+  // Real-time tradeability, not a fixed-hours guess — the "(24 Hours)"
+  // branding on these IG products isn't an unconditional guarantee (IG can
+  // still suspend dealing around news, extreme moves, or its own maintenance
+  // windows). Checked for every strategy, not just the 24h one — it's a pure
+  // safety addition that only ever blocks entries IG itself says can't be
+  // dealt right now, never blocks anything that was working before.
+  const marketStatus = st.marketDetails.get(epic)?.marketStatus;
+  if (marketStatus && marketStatus !== 'TRADEABLE') {
+    addLog(mode, 'wait', name, `⏸ Market not tradeable right now (${marketStatus})`);
+    return;
+  }
 
   const direction  = action === 'BUY' ? 'BUY' : 'SELL';
 
@@ -915,7 +930,29 @@ async function executeIgSignal(
   // provide one, but fall back to a conservative 1.5% price-based distance
   // rather than crash if one somehow didn't.
   const sizingStopDist = effectiveStopDist ?? Math.max(minStop, currentPrice * 0.015);
-  const rawStake = calcStake(cfg.maxRiskGbp, sizingStopDist);
+
+  // Overnight liquidity guard — outside NYSE cash hours, the 24h product's
+  // spread is the concrete symptom of thinner dealing depth. A spread eating
+  // a large share of the stop distance means either the "edge" the strategy
+  // computed is mostly spread cost, or a fill would land materially worse
+  // than the signal price. Checked for every strategy (never blocks anything
+  // that was already fine during normal hours), but this is the actual risk
+  // the 24h VWAP window introduces, so it matters most there.
+  if (detail?.bid !== undefined && detail?.offer !== undefined) {
+    const spread = detail.offer - detail.bid;
+    if (spread > sizingStopDist * 0.25) {
+      addLog(mode, 'wait', name,
+        `Skipped — spread ${spread.toFixed(2)} is >25% of the ${sizingStopDist.toFixed(2)}pt stop (thin liquidity right now)`);
+      return;
+    }
+  }
+
+  // Extra prudence for the newly-opened overnight window specifically — this
+  // account has no track record trading it yet, so entries taken outside
+  // NYSE hours risk half the normal size until that changes. Only applies to
+  // the 24h strategy; normal-hours sizing is untouched for everything else.
+  const overnightDerate = is24hStrategy && !isNYSEOpen() ? 0.5 : 1;
+  const rawStake = calcStake(cfg.maxRiskGbp * overnightDerate, sizingStopDist);
   const stake    = Math.max(minDeal, rawStake);
 
   // Any time the stake actually used ends up above what the target risk
@@ -1076,7 +1113,16 @@ async function poll(mode: IgMode) {
     }
   }
 
-  if (meta.timeframe === 'intraday' && !isNYSEOpen()) { schedule(mode, cfg); return; }
+  // VWAP trades IG's own individually-quoted "(24 Hours)" shares (confirmed
+  // live against the account — AAPL/AMD/QCOM/MU/WDC all show as TRADEABLE
+  // with live pricing well outside NYSE cash hours), not Alpaca's exchange-
+  // hours-only feed — so it isn't gated on isNYSEOpen() the way ORB/RSI Mean
+  // Reversion still are (ORB specifically needs a defined session open to
+  // build an opening range from; that concept doesn't exist on a continuously-
+  // quoted product). Per-epic real tradeability (marketStatus) and an
+  // overnight risk reduction are enforced instead, in executeIgSignal.
+  const is24hStrategy = cfg.strategy === 'vwap';
+  if (meta.timeframe === 'intraday' && !is24hStrategy && !isNYSEOpen()) { schedule(mode, cfg); return; }
   // 'daily' strategies no longer gate the whole poll on isDailyCheckTime() —
   // they now run every pollIntervalFor() cycle (see IG_POLL_MS_OVERRIDE) and
   // gate per-epic inside evaluateEpic via the free Yahoo pre-check instead,

@@ -411,11 +411,16 @@ export async function updatePositionLevels(
 }
 
 export type MarketDetail = {
-  epic:         string;
-  minDealSize:  number;   // minimum £/point bet size
-  minStopDist:  number;   // minimum stop distance in points
-  bid?:         number;   // live snapshot — this endpoint isn't subject to the
-  offer?:       number;   // historical-data allowance, unlike fetchCandleHistory
+  epic:          string;
+  minDealSize:   number;   // minimum £/point bet size
+  minStopDist:   number;   // minimum stop distance in points
+  bid?:          number;   // live snapshot — this endpoint isn't subject to the
+  offer?:        number;   // historical-data allowance, unlike fetchCandleHistory
+  marketStatus?: string;   // 'TRADEABLE' | 'CLOSED' | 'EDITS_ONLY' | 'OFFLINE' | ...
+                            // — IG's own real-time truth on whether this specific
+                            // epic can actually be dealt right now, used instead of
+                            // a fixed-hours guess for strategies that trade outside
+                            // the primary exchange's cash session.
 };
 
 export async function fetchMarketDetails(
@@ -445,7 +450,7 @@ export async function fetchMarketDetails(
             minControlledRiskStopDistance?: { value?: number };
             minNormalStopOrLimitDistance?:  { value?: number };
           };
-          snapshot?: { bid?: number; offer?: number };
+          snapshot?: { bid?: number; offer?: number; marketStatus?: string };
         }>;
       };
       for (const m of d.marketDetails ?? []) {
@@ -455,7 +460,10 @@ export async function fetchMarketDetails(
         const minStop    = m.dealingRules?.minNormalStopOrLimitDistance?.value
                         ?? m.dealingRules?.minControlledRiskStopDistance?.value
                         ?? 1;
-        result.set(epic, { epic, minDealSize: minDeal, minStopDist: minStop, bid: m.snapshot?.bid, offer: m.snapshot?.offer });
+        result.set(epic, {
+          epic, minDealSize: minDeal, minStopDist: minStop,
+          bid: m.snapshot?.bid, offer: m.snapshot?.offer, marketStatus: m.snapshot?.marketStatus,
+        });
       }
     } catch (e) {
       console.warn(`[igApi] fetchMarketDetails batch failed: ${e instanceof Error ? e.message : String(e)}`);
