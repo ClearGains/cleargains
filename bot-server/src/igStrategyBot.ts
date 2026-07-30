@@ -1557,11 +1557,18 @@ async function poll(mode: IgMode) {
     }
   }
 
-  const openCount = positions.length;
+  // Mutable, re-fetched after every epic — confirmed live this matters: with
+  // a single position snapshot reused for the whole loop, Intel and Micron
+  // both opened in the same poll cycle under maxPositions:1, because each
+  // epic's "is there room" check was still looking at the count from before
+  // either entry happened. Re-checking fresh after each epic closes that
+  // race instead of just narrowing it.
+  let livePositions = positions;
+  let openCount      = livePositions.length;
 
   for (const epic of cfg.epics) {
     if (!st.running) break;
-    const inPos = positions.find(p => p.epic === epic);
+    const inPos = livePositions.find(p => p.epic === epic);
     // gemini_opinion still evaluates flat candidates even when full — a
     // fresh idea here is what a full slot gets compared against for a
     // possible swap (see the position-rotation check in executeIgSignal).
@@ -1572,7 +1579,11 @@ async function poll(mode: IgMode) {
       addLog(mode, 'wait', epicName(epic), `Max positions (${cfg.maxPositions}) reached`);
       continue;
     }
-    await evaluateEpic(mode, epic, positions, cfg, st.session, available);
+    await evaluateEpic(mode, epic, livePositions, cfg, st.session, available);
+    try {
+      livePositions = await fetchFullPositions(st.session);
+      openCount     = livePositions.length;
+    } catch { /* keep the last known count on a fetch failure */ }
   }
 
   schedule(mode, cfg);
