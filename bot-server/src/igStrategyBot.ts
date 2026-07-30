@@ -1113,6 +1113,16 @@ async function executeIgSignal(
     addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
     st.botOpenedDeals.add(dealId);
     saveBotOpenedDeals(mode, st.botOpenedDeals);
+    // Auto-enrol every bot-opened deal in Gemini Position Watch — previously
+    // opt-in only (manually flagged via the UI), so a bot-opened position had
+    // no qualitative review at all beyond the fixed 1.5x profit-lock number.
+    // Dynamic import avoids a static circular dependency (geminiWatch.ts
+    // already imports from this file); safe here since it only runs well
+    // after both modules have finished initializing.
+    try {
+      const { addToWatch } = await import('./geminiWatch');
+      addToWatch(mode, dealId);
+    } catch {}
     if (signal.triggerLevel !== undefined) {
       st.lastEntryTrigger.set(epic, { level: signal.triggerLevel, direction: effectiveDirection });
       saveLastEntryTrigger(mode, st.lastEntryTrigger);
