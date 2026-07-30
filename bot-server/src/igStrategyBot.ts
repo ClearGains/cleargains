@@ -889,6 +889,18 @@ async function evaluateEpic(
     // beyond "Gemini thought so" to re-evaluate here.
     case 'gemini_opinion': {
       if (inPosition) { signal = { action: 'HOLD', reason: 'Open position — managed by Gemini Position Watch' }; break; }
+      // Data staleness kill switch — confirmed live this matters badly:
+      // Alpaca's paper-account historical bars for INTC were stuck ~3 weeks
+      // stale (last bar over 3 weeks old) despite the API call succeeding
+      // with no error, which fed a nonsense "-27% today" figure into
+      // Gemini's position review and got a genuinely fine position closed
+      // for a fabricated reason. A successful API response is not the same
+      // as fresh data — refuse to trust bars this old for anything.
+      const STALE_ENTRY_DATA_MS = 6 * 60 * 60_000;
+      if (barAgeMs > STALE_ENTRY_DATA_MS) {
+        signal = { action: 'HOLD', reason: `Data too stale to trust (${(barAgeMs / 3_600_000).toFixed(1)}h old) — skipping` };
+        break;
+      }
       const last  = bars[bars.length - 1].c;
       const rsi   = calcRsi(bars);
       const macd  = calcMacdHist(bars);

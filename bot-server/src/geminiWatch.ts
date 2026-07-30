@@ -151,10 +151,22 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     try {
       const bars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
       if (bars?.length) {
-        const todayUtc   = new Date().toISOString().slice(0, 10);
-        const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
-        const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
-        if (dayOpen) dayChangePercent = ((currentLevel - dayOpen) / dayOpen) * 100;
+        const latestBarAgeMs = Date.now() - new Date(bars[bars.length - 1].t).getTime();
+        const STALE_DATA_MS  = 6 * 60 * 60_000;
+        // Confirmed live this matters badly: Alpaca's paper-account bars
+        // for INTC were stuck ~3 weeks stale despite the fetch succeeding
+        // with no error, and the old fallback here (oldest bar in the
+        // whole 5-day window when nothing matched "today") produced a
+        // nonsense "-27% today" figure that got a genuinely fine position
+        // closed for a fabricated reason. No fallback to an older bar
+        // anymore — if the feed's stale, or nothing matches today, this
+        // just stays unset. No day-change context beats a wrong one.
+        if (latestBarAgeMs <= STALE_DATA_MS) {
+          const todayUtc   = new Date().toISOString().slice(0, 10);
+          const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
+          const dayOpen     = todaysBars[0]?.o;
+          if (dayOpen) dayChangePercent = ((currentLevel - dayOpen) / dayOpen) * 100;
+        }
       }
     } catch { /* best-effort — proceed without it */ }
   }
