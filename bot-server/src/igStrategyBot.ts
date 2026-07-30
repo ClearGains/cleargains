@@ -895,8 +895,17 @@ async function evaluateEpic(
       const atr   = calcAtr(bars);
       const ticker    = EPIC_TO_ALPACA[epic];
       const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, epicName(epic)) : [];
+      // How far this has already moved today, from the bars already
+      // fetched — no extra API call. Confirmed live this matters: Micron
+      // got bought at 86690 after running from a 73900 prior close, i.e.
+      // after ~17% of the day's move had already happened, and nothing in
+      // the prompt could tell Gemini that at the time.
+      const todayUtc   = new Date().toISOString().slice(0, 10);
+      const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
+      const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
+      const dayChangePercent = dayOpen ? ((last - dayOpen) / dayOpen) * 100 : undefined;
       const idea = await askGeminiTradeIdea({
-        instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines,
+        instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
       });
       // Fails closed — no underlying rule to fall back to the way VWAP
       // falls back to its own technicals when Gemini's unavailable. A

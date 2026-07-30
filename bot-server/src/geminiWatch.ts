@@ -6,7 +6,7 @@ import {
 } from './igApi';
 import { resolveCredentials, addLog, type IgMode } from './igStrategyBot';
 import { askGeminiPositionVerdict } from './gemini';
-import { EPIC_TO_ALPACA } from './yahooFetch';
+import { EPIC_TO_ALPACA, fetchBarsWithFallback } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
 
 // ── Gemini position watch — for positions opened outside the strategy bot
@@ -140,6 +140,25 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   const ticker    = EPIC_TO_ALPACA[p.epic];
   const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
 
+  // How far the instrument has moved today overall — distinct from this
+  // position's own entry-to-current P&L, since a position can be entered
+  // after most of the day's move already happened (confirmed live: Micron
+  // bought after already running ~17% that day). Best-effort — a fetch
+  // failure just means the review proceeds without this context, same as
+  // any other optional field here.
+  let dayChangePercent: number | undefined;
+  if (ticker) {
+    try {
+      const bars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
+      if (bars?.length) {
+        const todayUtc   = new Date().toISOString().slice(0, 10);
+        const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
+        const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
+        if (dayOpen) dayChangePercent = ((currentLevel - dayOpen) / dayOpen) * 100;
+      }
+    } catch { /* best-effort — proceed without it */ }
+  }
+
   const verdict = await askGeminiPositionVerdict({
     instrumentName: name,
     headlines,
@@ -150,6 +169,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     heldHours,
     stopLevel:      p.stopLevel,
     limitLevel:     p.limitLevel,
+    dayChangePercent,
   });
 
   addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);

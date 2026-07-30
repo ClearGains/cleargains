@@ -324,6 +324,13 @@ export type PositionReviewRequest = {
   stopLevel?:     number;
   limitLevel?:    number;
   headlines?:     string[];  // recent real news for this instrument, if available — see newsFetch.ts
+  // How far the instrument has already moved today (independent of this
+  // position's own entry/current levels) — confirmed live this matters:
+  // Micron was bought after it had already run ~17% that day, essentially
+  // at the top of the move, and neither the entry decision nor a hold
+  // review had any way to know how extended the day's move already was
+  // without this.
+  dayChangePercent?: number;
 };
 
 export async function askGeminiPositionVerdict(req: PositionReviewRequest): Promise<PositionVerdict> {
@@ -350,10 +357,11 @@ Entry level: ${req.entryLevel.toFixed(2)}
 Current level: ${req.currentLevel.toFixed(2)} (${signedPct >= 0 ? '+' : ''}${signedPct.toFixed(2)}% favorable move)
 Unrealized P/L: £${req.uplGbp.toFixed(2)}
 Held for: ${req.heldHours.toFixed(1)} hours
+${req.dayChangePercent !== undefined ? `Instrument's overall move today (independent of this position's own entry): ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
 ${req.stopLevel !== undefined ? `Stop-loss already attached at: ${req.stopLevel.toFixed(2)}` : 'No stop currently attached'}
 ${req.limitLevel !== undefined ? `Take-profit already attached at: ${req.limitLevel.toFixed(2)}` : 'No take-profit currently set'}
 ${headlineBlock}
-A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss. Decide only: is there a clear reason to close now — lock in a healthy gain, cut a loss before it likely gets worse, or genuine news/volatility that suggests today's conditions could completely reverse this position's favorability — or is holding for the stop/take-profit to do its job still reasonable? If no news is listed above, judge on price action alone.
+A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss. Decide only: is there a clear reason to close now — lock in a healthy gain, cut a loss before it likely gets worse, genuine news/volatility that could reverse this position's favorability, or the instrument already being significantly extended today (e.g. a large % move already behind it, meaning limited further room and real pullback risk even if the entry thesis was sound) — or is holding for the stop/take-profit to do its job still reasonable? If no news is listed above, judge on price action alone.
 
 Respond with JSON only, no markdown:
 {"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
@@ -414,6 +422,13 @@ export type TradeIdeaRequest = {
   macdHist:       number | null;
   atr:            number | null;
   headlines:      string[];
+  // How far the instrument has already moved today, independent of
+  // RSI/MACD — confirmed live this matters: Micron got bought after it had
+  // already run ~17% that day, essentially at the top of the move. RSI/MACD
+  // on hourly bars don't reliably surface how extended a move already is,
+  // and without this the model has no way to weigh "how much room is
+  // actually left" versus "how good does this look right now."
+  dayChangePercent?: number;
 };
 
 export type TradeIdeaVerdict = {
@@ -442,11 +457,12 @@ export async function askGeminiTradeIdea(req: TradeIdeaRequest): Promise<TradeId
 
 Instrument: ${req.instrumentName}
 Current price: ${req.price.toFixed(2)}
+${req.dayChangePercent !== undefined ? `Move so far today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
 RSI(14): ${req.rsi?.toFixed(1) ?? 'N/A'}
 MACD histogram: ${req.macdHist !== null ? (req.macdHist > 0 ? '+' : '') + req.macdHist.toFixed(5) : 'N/A'}
 ATR(14): ${req.atr?.toFixed(2) ?? 'N/A'} — volatility measure, use this to size a sensible stop
 ${headlineBlock}
-Decide BUY, SELL, or HOLD. Only pick BUY/SELL if you have genuine conviction — HOLD is the right answer most of the time when the picture is mixed or unclear. Consider both the technicals and the news together; don't recommend a direction the news directly contradicts.
+Decide BUY, SELL, or HOLD. Only pick BUY/SELL if you have genuine conviction — HOLD is the right answer most of the time when the picture is mixed or unclear. Consider both the technicals and the news together; don't recommend a direction the news directly contradicts. If the instrument has already moved significantly today, weigh how much of the move (and the good/bad news behind it) is likely already priced in — a large move already behind it means real chase risk, not automatically a reason to follow it further.
 
 stopPoints: stop distance in the SAME price units as current price (e.g. price=15000 → stopPoints=150 for a 1% stop; price=1.08 → stopPoints=0.01)
 takeProfitPoints: same units, aim for at least 1.5:1 reward/risk vs your stop
