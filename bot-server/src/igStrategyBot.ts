@@ -1110,12 +1110,25 @@ async function executeIgSignal(
         headlines,
       });
       addLog(mode, 'info', name, `[GEMINI] ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+      // Fail closed, not open — confirmed live this matters: a Qualcomm BUY
+      // went through unconfirmed purely because Gemini returned a 503 at
+      // that exact moment, on a 6.54%-below-VWAP setup extreme enough that
+      // it's exactly the kind of trade the news check exists to catch.
+      // "Gemini unavailable" should skip the entry, not silently trade the
+      // technical signal alone as if it had been reviewed and approved.
+      if (verdict.engine === 'passthrough') {
+        addLog(mode, 'wait', name, `[GEMINI] Unavailable (${verdict.reason}) — skipping entry rather than trading unconfirmed`);
+        return;
+      }
       if (verdict.direction === 'SKIP' || verdict.confidence < 50) {
         addLog(mode, 'wait', name, `[GEMINI] Skipped entry — ${verdict.direction} ${verdict.confidence}%`);
         return;
       }
       if (verdict.direction === 'BUY' || verdict.direction === 'SELL') effectiveDirection = verdict.direction;
-    } catch { /* Gemini unavailable — proceed with original signal */ }
+    } catch {
+      addLog(mode, 'wait', name, '[GEMINI] Call failed — skipping entry rather than trading unconfirmed');
+      return;
+    }
   }
 
   addLog(mode, 'enter', name, `${effectiveDirection} — ${reason}`);
