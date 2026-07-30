@@ -1104,6 +1104,29 @@ async function executeIgSignal(
     }
   }
 
+  // Margin-proportional risk target — when even the instrument's minimum
+  // viable stake ties up a large chunk of capital, the flat maxRiskGbp
+  // target badly under-uses the capital that's going to be committed
+  // regardless. Confirmed live: Dell's minimum stake alone needs £325
+  // margin against a £914 account — over a third of it — for a nominal £20
+  // risk target, meaning most of that committed capital wasn't actually
+  // backing any real risk/reward. Scales the effective target up toward a
+  // fraction of the margin actually being tied up, but never below the
+  // user's own flat target (cheap-margin instruments like Intel are
+  // untouched — the proportional figure comes out smaller than £20 there)
+  // and never more than 5x it (an absolute ceiling so a truly extreme
+  // instrument can't balloon sizing far past what's sane).
+  const RISK_TO_MARGIN_RATIO = 0.15;
+  let effectiveRiskGbp = cfg.maxRiskGbp;
+  if (detail?.marginFactorPct !== undefined) {
+    const minMargin = minDeal * currentPrice * (detail.marginFactorPct / 100);
+    effectiveRiskGbp = Math.min(cfg.maxRiskGbp * 5, Math.max(cfg.maxRiskGbp, minMargin * RISK_TO_MARGIN_RATIO));
+    if (effectiveRiskGbp > cfg.maxRiskGbp) {
+      addLog(mode, 'info', name,
+        `Risk target scaled to £${effectiveRiskGbp.toFixed(0)} (from £${cfg.maxRiskGbp}) — minimum stake here ties up ~£${minMargin.toFixed(0)} margin regardless`);
+    }
+  }
+
   // Size off actual data freshness, not the wall clock — "is it NYSE hours"
   // was only ever a rough proxy for "is the free-data feed current right
   // now", and a genuinely fresh feed at 9am UK deserves full size same as
@@ -1114,22 +1137,24 @@ async function executeIgSignal(
   // the 24h strategy; normal-hours sizing is untouched for everything else.
   const STALE_DATA_MS = 5 * 60_000;
   const overnightDerate = is24hStrategy && barAgeMs > STALE_DATA_MS ? 0.5 : 1;
-  const rawStake = calcStake(cfg.maxRiskGbp * overnightDerate, sizingStopDist, minDeal);
+  const rawStake = calcStake(effectiveRiskGbp * overnightDerate, sizingStopDist, minDeal);
   const stake    = Math.max(minDeal, rawStake);
 
   // Any time the stake actually used ends up above what the target risk
   // would size — whether because IG's minDealSize forced it up, or because
   // calcStake's own internal floor (min 0.1/pt) did — the realized max loss
-  // can silently exceed cfg.maxRiskGbp with no bound at all. Confirmed live:
+  // can silently exceed the target with no bound at all. Confirmed live:
   // a genuinely volatile instrument's wide ATR-based stop combined with
   // calcStake's 0.1 floor produced a real £310 max loss against a £20
   // target, and the previous version of this check only looked at whether
   // minDeal specifically was the cause — missed this because calcStake's
   // own floor was what did it here, not IG's minimum. Checking the actual
   // realized loss directly, unconditionally, closes that gap regardless of
-  // which mechanism pushed the stake up.
+  // which mechanism pushed the stake up. Ceiling uses effectiveRiskGbp, not
+  // the flat cfg value, so the margin-proportional scaling above isn't
+  // immediately undone by this check.
   const actualMaxLoss = stake * sizingStopDist;
-  const lossCeiling    = cfg.maxRiskGbp * 3;
+  const lossCeiling    = effectiveRiskGbp * 3;
   if (actualMaxLoss > lossCeiling) {
     addLog(mode, 'wait', name,
       `Skipped — sizing works out to £${actualMaxLoss.toFixed(0)} max loss (stake £${stake}/pt × ${sizingStopDist.toFixed(0)}pt stop), above the £${lossCeiling.toFixed(0)} ceiling (3× target)`);
