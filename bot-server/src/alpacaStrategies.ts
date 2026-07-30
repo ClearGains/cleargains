@@ -539,7 +539,7 @@ export function macdCrossoverSignal(
 
 // ── Strategy metadata ─────────────────────────────────────────────────────────
 
-export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'gemini_opinion';
 
 export const STRATEGY_META: Record<StrategyName, {
   label:     string;
@@ -561,4 +561,12 @@ export const STRATEGY_META: Record<StrategyName, {
   // shorter entry/exit windows sized in hours instead of days.
   donchian_hourly:     { label: 'Donchian Breakout (Hourly)', timeframe: 'hourly', pollMs: 15 * 60_000, barPeriod: '1Hour', barsNeeded: 40 },
   macd_crossover:      { label: 'MACD Crossover',          timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
+  // No technical entry rule at all — Gemini decides BUY/SELL/HOLD from
+  // scratch each cycle off price/RSI/MACD context plus real news, and also
+  // supplies its own stop/TP distances. Deliberately experimental: NYSE-
+  // hours-gated (timeframe: 'intraday') rather than given the 24h treatment
+  // VWAP earned through this session's hardening, since this strategy has
+  // no track record yet. Exits are handled entirely by Gemini Position
+  // Watch, not a technical exit rule — there isn't one to have.
+  gemini_opinion:      { label: 'Gemini Opinion (Experimental)', timeframe: 'intraday', pollMs: 15 * 60_000, barPeriod: '1Hour', barsNeeded: 40 },
 };

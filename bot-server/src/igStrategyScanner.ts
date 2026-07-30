@@ -76,6 +76,7 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
   donchian_hourly:    { resolution: 'HOUR',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
+  gemini_opinion:     { resolution: 'HOUR',       count: 40 },
 };
 
 // ── Bar conversion ────────────────────────────────────────────────────────────
@@ -178,7 +179,7 @@ function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
 // looked up below instead of defaulting every strategy to daily bars.
 const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>([
   'donchian_breakout', 'donchian_hourly', 'ema_crossover', 'macd_crossover',
-  'rsi_mean_reversion', 'orb', 'vwap', 'weekly_momentum',
+  'rsi_mean_reversion', 'orb', 'vwap', 'weekly_momentum', 'gemini_opinion',
 ]);
 
 // vwap/orb/rsi_mean_reversion are all timeframe 'intraday' — igStrategyBot.ts's
@@ -189,7 +190,7 @@ const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>([
 // confirmation on top. Restricting these strategies to Alpaca-covered epics
 // only means every watched slot is actually usable during the one window
 // the bot ever polls intraday strategies in.
-const ALPACA_ONLY_STRATEGIES = new Set<IgStrategyName>(['vwap', 'orb', 'rsi_mean_reversion']);
+const ALPACA_ONLY_STRATEGIES = new Set<IgStrategyName>(['vwap', 'orb', 'rsi_mean_reversion', 'gemini_opinion']);
 
 // Mirrors igStrategyBot.ts's FREE_DATA_PARAMS — duplicated rather than
 // imported to avoid a circular import (igStrategyBot.ts already imports
@@ -200,6 +201,7 @@ const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },
   donchian_hourly:    { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
+  gemini_opinion:     { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
 };
 
 // Volatility-matched routing — a fast (hourly) strategy wants instruments
@@ -246,6 +248,12 @@ export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], ep
       case 'donchian_breakout':  return scoreDonchian(bars, epic, name).score;
       case 'donchian_hourly':    return scoreDonchian(bars, epic, name).score;
       case 'macd_crossover':     return scoreMacd(bars, epic, name).score;
+      // No directional thesis of its own to score by design — Gemini
+      // decides direction from scratch. Reuses scoreOrb's relative-
+      // volume/ATR% read as a neutral "is there enough going on here to be
+      // worth asking about" proxy, rather than biasing candidate selection
+      // toward a specific technical thesis before Gemini ever looks at it.
+      case 'gemini_opinion':     return scoreOrb(bars, epic, name).score;
       default:                   return -1;
     }
   })();

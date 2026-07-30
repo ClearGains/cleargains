@@ -9,11 +9,12 @@ import {
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal,
+  calcRsi, calcMacdHist, calcAtr,
   STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
 import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy } from './igStrategyScanner';
-import { askGeminiDailyVerdict } from './gemini';
+import { askGeminiDailyVerdict, askGeminiTradeIdea } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
@@ -126,7 +127,7 @@ function loadReleasedDeals(mode: IgMode): Set<string> {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'gemini_opinion';
 export type IgMode         = 'demo' | 'live';
 
 export type IgStrategyConfig = {
@@ -341,6 +342,7 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
   donchian_hourly:    { resolution: 'HOUR',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
+  gemini_opinion:     { resolution: 'HOUR',       count: 40 },
 };
 
 // Free-data params for strategies that need something other than the daily
@@ -357,6 +359,7 @@ const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },
   donchian_hourly:    { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
+  gemini_opinion:     { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
 };
 
 // Daily-timeframe strategies poll far more often here than STRATEGY_META's
@@ -879,6 +882,41 @@ async function evaluateEpic(
       signal = macdCrossoverSignal(bars, inPosition, side);
       break;
 
+    // No technical rule at all — Gemini decides from scratch. No exit logic
+    // of its own either: an open position here is managed entirely by
+    // Gemini Position Watch (auto-enrolled at entry, same as every other
+    // strategy), not a thesis-reversal check, since there's no thesis
+    // beyond "Gemini thought so" to re-evaluate here.
+    case 'gemini_opinion': {
+      if (inPosition) { signal = { action: 'HOLD', reason: 'Open position — managed by Gemini Position Watch' }; break; }
+      const last  = bars[bars.length - 1].c;
+      const rsi   = calcRsi(bars);
+      const macd  = calcMacdHist(bars);
+      const atr   = calcAtr(bars);
+      const ticker    = EPIC_TO_ALPACA[epic];
+      const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, epicName(epic)) : [];
+      const idea = await askGeminiTradeIdea({
+        instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines,
+      });
+      // Fails closed — no underlying rule to fall back to the way VWAP
+      // falls back to its own technicals when Gemini's unavailable. A
+      // passthrough result (no key, cap reached, API error) means no
+      // signal at all here, and a low-confidence real verdict is treated
+      // the same as HOLD — this strategy only trades on real conviction.
+      if (idea.engine !== 'gemini' || idea.action === 'HOLD' || idea.confidence < 60) {
+        signal = { action: 'HOLD', reason: `[GEMINI] ${idea.action} ${idea.confidence}% — ${idea.reason} (${idea.engine})` };
+        break;
+      }
+      signal = {
+        action:           idea.action,
+        reason:           `[GEMINI] ${idea.reason}`,
+        stopPrice:        idea.action === 'BUY' ? last - idea.stopPoints : last + idea.stopPoints,
+        takeProfitPrice:  idea.action === 'BUY' ? last + idea.takeProfitPoints : last - idea.takeProfitPoints,
+        orderType:        'market',
+      };
+      break;
+    }
+
     default: return;
   }
 
@@ -1140,9 +1178,11 @@ async function executeIgSignal(
   // Gemini second opinion — SHARES only, same scope as the Demo Trader tab.
   // Indices/FX are liquid price-action markets where an LLM opinion adds ~8s
   // of latency per call with no edge (no live feed of its own); shares are
-  // where a sanity check on the setup earns its cost.
+  // where a sanity check on the setup earns its cost. Skipped entirely for
+  // gemini_opinion — the entry signal already IS Gemini's own judgment,
+  // asking it to confirm itself would just double the cost for no benefit.
   let effectiveDirection: 'BUY' | 'SELL' = direction;
-  if (classifyMarketType(epic) === 'SHARES') {
+  if (cfg.strategy !== 'gemini_opinion' && classifyMarketType(epic) === 'SHARES') {
     try {
       // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
       // Gemini still runs on technicals alone in that case (see prompt).

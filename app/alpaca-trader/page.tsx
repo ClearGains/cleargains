@@ -456,7 +456,7 @@ function RecommendationPanel({
 
 // ── IG Spread Bet tab ─────────────────────────────────────────────────────────
 
-type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
+type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'gemini_opinion';
 type IgMode         = 'demo' | 'live';
 
 type IgOpenPosition = {
@@ -546,6 +546,7 @@ const IG_STRATEGIES: { value: IgStrategyName; label: string; timeframe: string; 
   { value: 'orb',                label: 'Opening Range Breakout', timeframe: 'Intraday (Daily)', description: 'Trade breakouts above/below the first 30-min range. Exit at EOD or midpoint stop. Backtested negative after costs.' },
   { value: 'vwap',               label: 'VWAP Reversion',         timeframe: 'Intraday (1-min)', description: 'Bet on price returning to VWAP when it dips 0.5% below and RSI < 45. Backtested negative after costs.' },
   { value: 'weekly_momentum',    label: 'Weekly Momentum',        timeframe: 'Position (Weekly)', description: 'Ride weekly trends: above 12-week SMA + 4-week momentum > 1% + RSI 50–70. Backtested negative after financing costs.' },
+  { value: 'gemini_opinion',     label: '🧪 Gemini Opinion (Experimental)', timeframe: 'Intraday (Hourly)', description: 'No technical entry rule — Gemini decides BUY/SELL/HOLD from scratch off price, RSI/MACD context, and real news, and sets its own stop/TP. Exits handled entirely by Gemini Position Watch. No track record yet — start small.' },
 ];
 
 const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
@@ -557,6 +558,7 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
   donchian_breakout:  'Donchian Breakout',
   donchian_hourly:    'Donchian Breakout (Hourly)',
   macd_crossover:     'MACD Crossover',
+  gemini_opinion:     'Gemini Opinion (Experimental)',
 };
 
 function IgSpreadBetTab() {

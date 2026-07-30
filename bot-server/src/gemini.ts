@@ -396,3 +396,105 @@ Respond with JSON only, no markdown:
     };
   }
 }
+
+// ── Gemini-native trade idea (experimental "gemini_opinion" strategy) ───────
+// Distinct from every verdict above — those all confirm/veto a signal a
+// technical rule already generated. This one has no rule behind it at all:
+// Gemini decides BUY/SELL/HOLD from scratch each cycle off price/technical
+// context and real news, and supplies its own stop/TP distances. Fails
+// closed like everything else — no key, cap reached, or any error all
+// return HOLD/engine:'passthrough', and the caller (igStrategyBot.ts) never
+// trades on a passthrough result here, since there's no underlying rule to
+// fall back to the way VWAP falls back to its own technicals.
+
+export type TradeIdeaRequest = {
+  instrumentName: string;
+  price:          number;
+  rsi:            number | null;
+  macdHist:       number | null;
+  atr:            number | null;
+  headlines:      string[];
+};
+
+export type TradeIdeaVerdict = {
+  action:           'BUY' | 'SELL' | 'HOLD';
+  confidence:       number;
+  reason:           string;
+  stopPoints:       number;
+  takeProfitPoints: number;
+  engine:           'gemini' | 'passthrough';
+};
+
+export async function askGeminiTradeIdea(req: TradeIdeaRequest): Promise<TradeIdeaVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return { action: 'HOLD', confidence: 0, reason: 'No Gemini key configured', stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough' };
+  }
+  if (!reserveGeminiCall()) {
+    return { action: 'HOLD', confidence: 0, reason: 'Daily Gemini call cap reached', stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough' };
+  }
+
+  const headlineBlock = req.headlines.length
+    ? `\nRecent news (last 7 days):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '\nNo recent company-specific news found.\n';
+
+  const prompt = `You are deciding, entirely on your own judgment, whether to open a spread bet position on this instrument right now — there is no pre-existing technical signal to confirm or veto, you are the primary decision-maker.
+
+Instrument: ${req.instrumentName}
+Current price: ${req.price.toFixed(2)}
+RSI(14): ${req.rsi?.toFixed(1) ?? 'N/A'}
+MACD histogram: ${req.macdHist !== null ? (req.macdHist > 0 ? '+' : '') + req.macdHist.toFixed(5) : 'N/A'}
+ATR(14): ${req.atr?.toFixed(2) ?? 'N/A'} — volatility measure, use this to size a sensible stop
+${headlineBlock}
+Decide BUY, SELL, or HOLD. Only pick BUY/SELL if you have genuine conviction — HOLD is the right answer most of the time when the picture is mixed or unclear. Consider both the technicals and the news together; don't recommend a direction the news directly contradicts.
+
+stopPoints: stop distance in the SAME price units as current price (e.g. price=15000 → stopPoints=150 for a 1% stop; price=1.08 → stopPoints=0.01)
+takeProfitPoints: same units, aim for at least 1.5:1 reward/risk vs your stop
+
+Respond with JSON only, no markdown:
+{"action":"BUY","confidence":70,"reason":"max 20 words","stopPoints":150,"takeProfitPoints":300}`;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          contents:         [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 1500 },
+        }),
+        signal: AbortSignal.timeout(8_000),
+      },
+    );
+
+    if (!res.ok) {
+      return { action: 'HOLD', confidence: 0, reason: `Gemini ${res.status}`, stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough' };
+    }
+
+    const data    = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const parsed  = JSON.parse(cleaned) as {
+      action: string; confidence: number; reason: string;
+      stopPoints: number; takeProfitPoints: number;
+    };
+
+    const action = (['BUY', 'SELL', 'HOLD'].includes(parsed.action)) ? parsed.action as TradeIdeaVerdict['action'] : 'HOLD';
+
+    return {
+      action,
+      confidence:       Math.max(0, Math.min(100, parsed.confidence ?? 0)),
+      reason:           parsed.reason ?? '',
+      stopPoints:       Math.max(0, parsed.stopPoints ?? 0),
+      takeProfitPoints: Math.max(0, parsed.takeProfitPoints ?? 0),
+      engine:           'gemini',
+    };
+  } catch (e) {
+    return {
+      action: 'HOLD', confidence: 0,
+      reason: `Gemini failed (${e instanceof Error ? e.message : String(e)})`,
+      stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough',
+    };
+  }
+}
