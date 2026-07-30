@@ -252,21 +252,40 @@ export async function getBars(
   });
   if (singleSymbol) params.set('start', startDateFor(timeframe, limit));
 
-  const url = `https://data.alpaca.markets/v2/stocks/bars?${params.toString()}`;
-  const res = await fetch(url, {
-    headers: {
-      'APCA-API-KEY-ID':     key,
-      'APCA-API-SECRET-KEY': secret,
-    },
-  });
+  // Alpaca paginates this endpoint (confirmed live: a 60-day-back 1Hour
+  // request for a single symbol returned only 212 bars — the oldest ones,
+  // June 1 through July 8 — plus a non-null next_page_token that was
+  // silently never followed). Ignoring pagination meant every caller of
+  // this function was getting genuinely old data with no error at all,
+  // which fed a real, live position-close decision on a fabricated day-
+  // change figure. Follows every page until Alpaca stops returning a
+  // token, capped at 10 pages as a sane ceiling against something
+  // unexpected causing an unbounded loop.
+  const bars: Record<string, AlpacaBar[]> = {};
+  let pageToken: string | undefined;
+  for (let page = 0; page < 10; page++) {
+    if (pageToken) params.set('page_token', pageToken); else params.delete('page_token');
+    const url = `https://data.alpaca.markets/v2/stocks/bars?${params.toString()}`;
+    const res = await fetch(url, {
+      headers: {
+        'APCA-API-KEY-ID':     key,
+        'APCA-API-SECRET-KEY': secret,
+      },
+    });
 
-  if (!res.ok) {
-    const txt = await res.text().catch(() => res.statusText);
-    throw new Error(`Alpaca data ${res.status}: ${txt.slice(0, 200)}`);
+    if (!res.ok) {
+      const txt = await res.text().catch(() => res.statusText);
+      throw new Error(`Alpaca data ${res.status}: ${txt.slice(0, 200)}`);
+    }
+
+    const data = await res.json() as { bars?: Record<string, AlpacaBar[]>; next_page_token?: string | null };
+    for (const [sym, symBars] of Object.entries(data.bars ?? {})) {
+      (bars[sym] ??= []).push(...symBars);
+    }
+    pageToken = data.next_page_token ?? undefined;
+    if (!pageToken) break;
   }
 
-  const data = await res.json() as { bars?: Record<string, AlpacaBar[]> };
-  const bars = data.bars ?? {};
   for (const sym of Object.keys(bars)) bars[sym] = bars[sym].slice(-limit);
   return bars;
 }
