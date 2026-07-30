@@ -800,6 +800,14 @@ async function evaluateEpic(
   }
   if (!bars.length) { addLog(mode, 'wait', epicName(epic), 'No bar data'); return; }
 
+  // How current the free-data feed actually is right now — the execution
+  // price itself is always IG's live quote (see below), but the *signal*
+  // (VWAP/RSI) is computed off Alpaca's free bars, and during quiet hours
+  // that feed can go a while between real prints. Used in place of a clock-
+  // based "is it NYSE hours" guess — trade whenever the data itself is
+  // fresh, not whenever the wall clock says it should be.
+  const barAgeMs = Date.now() - new Date(bars[bars.length - 1].t).getTime();
+
   const st = ms(mode);
   let signal: StrategySignal;
 
@@ -879,7 +887,7 @@ async function evaluateEpic(
     }
   }
 
-  await executeIgSignal(mode, epic, executionSignal, openPos ?? null, cfg, session, executionPrice);
+  await executeIgSignal(mode, epic, executionSignal, openPos ?? null, cfg, session, executionPrice, barAgeMs);
 }
 
 // ── Order execution ───────────────────────────────────────────────────────────
@@ -901,6 +909,7 @@ async function executeIgSignal(
   cfg:          IgStrategyConfig,
   session:      IGSession,
   currentPrice: number,
+  barAgeMs      = 0,
 ): Promise<void> {
   const { action, reason, stopPrice, takeProfitPrice, trailPercent } = signal;
   const st   = ms(mode);
@@ -1026,11 +1035,16 @@ async function executeIgSignal(
     }
   }
 
-  // Extra prudence for the newly-opened overnight window specifically — this
-  // account has no track record trading it yet, so entries taken outside
-  // NYSE hours risk half the normal size until that changes. Only applies to
+  // Size off actual data freshness, not the wall clock — "is it NYSE hours"
+  // was only ever a rough proxy for "is the free-data feed current right
+  // now", and a genuinely fresh feed at 9am UK deserves full size same as
+  // one at 2pm UK; a stale feed deserves half size regardless of the hour.
+  // The execution price itself is always IG's live quote either way (see
+  // the free-data-confirm block above) — this only affects confidence in
+  // the *signal* that decided to trade in the first place. Only applies to
   // the 24h strategy; normal-hours sizing is untouched for everything else.
-  const overnightDerate = is24hStrategy && !isNYSEOpen() ? 0.5 : 1;
+  const STALE_DATA_MS = 5 * 60_000;
+  const overnightDerate = is24hStrategy && barAgeMs > STALE_DATA_MS ? 0.5 : 1;
   const rawStake = calcStake(cfg.maxRiskGbp * overnightDerate, sizingStopDist);
   const stake    = Math.max(minDeal, rawStake);
 
