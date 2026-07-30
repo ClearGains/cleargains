@@ -181,6 +181,16 @@ const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>([
   'rsi_mean_reversion', 'orb', 'vwap', 'weekly_momentum',
 ]);
 
+// vwap/orb/rsi_mean_reversion are all timeframe 'intraday' — igStrategyBot.ts's
+// poll() gates the *entire* cycle on isNYSEOpen() for these, not per-epic. A
+// non-Alpaca epic (different exchange, different real trading hours) gets
+// zero benefit from a watchlist slot: it's blocked by the NYSE-hours gate
+// exactly the same as everything else, but without free data or Gemini
+// confirmation on top. Restricting these strategies to Alpaca-covered epics
+// only means every watched slot is actually usable during the one window
+// the bot ever polls intraday strategies in.
+const ALPACA_ONLY_STRATEGIES = new Set<IgStrategyName>(['vwap', 'orb', 'rsi_mean_reversion']);
+
 // Mirrors igStrategyBot.ts's FREE_DATA_PARAMS — duplicated rather than
 // imported to avoid a circular import (igStrategyBot.ts already imports
 // scanIgEpics from this file).
@@ -251,7 +261,8 @@ export async function scanIgEpics(
   count:    number,
   log:      (msg: string) => void = console.log,
 ): Promise<string[]> {
-  const pool = IG_EPICS.filter(e => !exclude.includes(e.epic));
+  const alpacaOnly = ALPACA_ONLY_STRATEGIES.has(strategy);
+  const pool = IG_EPICS.filter(e => !exclude.includes(e.epic) && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
   const useYahoo = YAHOO_SCAN_STRATEGIES.has(strategy);
   log(`[ig-scanner] Fetching bars for ${pool.length} epics (strategy: ${strategy}, source: ${useYahoo ? 'yahoo (free)' : 'ig'})…`);
 
