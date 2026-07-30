@@ -910,6 +910,7 @@ async function evaluateEpic(
       signal = {
         action:           idea.action,
         reason:           `[GEMINI] ${idea.reason}`,
+        confidence:       idea.confidence,
         stopPrice:        idea.action === 'BUY' ? last - idea.stopPoints : last + idea.stopPoints,
         takeProfitPrice:  idea.action === 'BUY' ? last + idea.takeProfitPoints : last - idea.takeProfitPoints,
         orderType:        'market',
@@ -951,7 +952,7 @@ async function evaluateEpic(
     }
   }
 
-  await executeIgSignal(mode, epic, executionSignal, openPos ?? null, cfg, session, executionPrice, barAgeMs, available);
+  await executeIgSignal(mode, epic, executionSignal, openPos ?? null, cfg, session, executionPrice, barAgeMs, available, positions);
 }
 
 // ── Order execution ───────────────────────────────────────────────────────────
@@ -975,6 +976,7 @@ async function executeIgSignal(
   currentPrice: number,
   barAgeMs      = 0,
   available     = 0,
+  positions:    FullPosition[] = [],
 ): Promise<void> {
   const { action, reason, stopPrice, takeProfitPrice, trailPercent } = signal;
   const st   = ms(mode);
@@ -1031,6 +1033,35 @@ async function executeIgSignal(
   // continuously-quoted 24h product with no session close to hold through.
   if (!is24hStrategy && isNearClose())  { addLog(mode, 'wait', name, '⏸ Market closing <15 min — no new entries'); return; }
   if (st.pausedEpics.has(epic))         { addLog(mode, 'wait', name, '⏸ Paused by user — skipping entry'); return; }
+
+  // Position rotation (gemini_opinion only) — when there's no room for a
+  // new entry, compare this candidate against the weakest currently held
+  // position instead of just discarding it. Only swaps when the new idea
+  // clearly beats the weakest holding by a real margin — a fuzzy or too-
+  // eager version of this would just churn out of decent positions chasing
+  // slightly shinier ones, which is worse than holding steady.
+  if (cfg.strategy === 'gemini_opinion' && positions.length >= cfg.maxPositions) {
+    const SWAP_MARGIN = 15;
+    const { getWeakestConfidence } = await import('./geminiWatch');
+    const weakest       = getWeakestConfidence(positions.map(p => p.dealId));
+    const newConfidence = signal.confidence ?? 0;
+    if (!weakest || newConfidence < weakest.confidence + SWAP_MARGIN) {
+      addLog(mode, 'wait', name,
+        `Skipped — no room (${positions.length}/${cfg.maxPositions})${weakest ? `, ${newConfidence}% doesn't clear the weakest held position (${weakest.confidence}%) by the ${SWAP_MARGIN}pt swap margin` : ''}`);
+      return;
+    }
+    const weakPos = positions.find(p => p.dealId === weakest.dealId);
+    if (weakPos) {
+      addLog(mode, 'exit', epicName(weakPos.epic),
+        `💱 Rotating out — ${name}'s ${newConfidence}% idea beats this ${weakest.confidence}% held position by ${SWAP_MARGIN}+ points`);
+      try {
+        await igClosePos(session, weakPos.dealId, weakPos.direction, weakPos.size);
+      } catch (e) {
+        addLog(mode, 'error', epicName(weakPos.epic), `Rotation close failed: ${e instanceof Error ? e.message : String(e)}`);
+        return;  // couldn't actually free the slot — don't proceed with the new entry
+      }
+    }
+  }
 
   // Real-time tradeability, not a fixed-hours guess — the "(24 Hours)"
   // branding on these IG products isn't an unconditional guarantee (IG can
@@ -1261,8 +1292,14 @@ async function executeIgSignal(
     // already imports from this file); safe here since it only runs well
     // after both modules have finished initializing.
     try {
-      const { addToWatch } = await import('./geminiWatch');
+      const { addToWatch, recordEntryConfidence } = await import('./geminiWatch');
       addToWatch(mode, dealId);
+      // Seeds the position-rotation baseline with Gemini's own entry
+      // confidence, so a fresh gemini_opinion position has something real
+      // to be compared against immediately, not an arbitrary default.
+      if (cfg.strategy === 'gemini_opinion' && signal.confidence !== undefined) {
+        recordEntryConfidence(dealId, signal.confidence);
+      }
     } catch {}
     if (signal.triggerLevel !== undefined) {
       st.lastEntryTrigger.set(epic, { level: signal.triggerLevel, direction: effectiveDirection });
@@ -1525,7 +1562,13 @@ async function poll(mode: IgMode) {
   for (const epic of cfg.epics) {
     if (!st.running) break;
     const inPos = positions.find(p => p.epic === epic);
-    if (!inPos && openCount >= cfg.maxPositions) {
+    // gemini_opinion still evaluates flat candidates even when full — a
+    // fresh idea here is what a full slot gets compared against for a
+    // possible swap (see the position-rotation check in executeIgSignal).
+    // Every other strategy keeps the original behaviour: skip entirely
+    // when there's no room, since there's nothing to act on and no
+    // comparison logic that would use the extra call anyway.
+    if (!inPos && openCount >= cfg.maxPositions && cfg.strategy !== 'gemini_opinion') {
       addLog(mode, 'wait', epicName(epic), `Max positions (${cfg.maxPositions}) reached`);
       continue;
     }

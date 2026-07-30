@@ -59,9 +59,36 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
 // for no new information. In-memory only (not persisted): worst case after
 // a restart, every watched position gets one extra call it might not have
 // strictly needed, which is a fine tradeoff against added persisted state.
-const lastReview = new Map<string, { upl: number; at: number }>();
+// Also doubles as the confidence tracker for gemini_opinion's position-
+// rotation logic — "how convinced are we in holding this right now" is the
+// same information this throttle already needs, just also read externally.
+const lastReview = new Map<string, { upl: number; at: number; confidence: number }>();
 const MOVE_THRESHOLD_GBP = 3;          // re-ask once P&L has moved at least this much since the last call
 const MAX_SILENCE_MS     = 45 * 60_000; // ...or at least this long has passed, even if flat
+
+// Seeds a freshly-opened gemini_opinion position with its entry confidence,
+// so there's an immediate baseline to compare against rather than an
+// arbitrary default until the first real Position Watch review lands. `at:
+// 0` guarantees that first review isn't throttled away — it always runs on
+// the very next watch cycle regardless of how little the position has
+// moved, so the baseline gets refreshed with real judgment quickly.
+export function recordEntryConfidence(dealId: string, confidence: number): void {
+  if (!lastReview.has(dealId)) lastReview.set(dealId, { upl: 0, at: 0, confidence });
+}
+
+// Weakest-conviction currently-held position, for gemini_opinion's swap
+// check — a dealId never yet reviewed defaults to 60 (the same bar an
+// entry itself has to clear), a neutral assumption rather than treating an
+// unreviewed position as automatically weak or automatically safe.
+export function getWeakestConfidence(dealIds: string[]): { dealId: string; confidence: number } | null {
+  if (!dealIds.length) return null;
+  let weakest: { dealId: string; confidence: number } | null = null;
+  for (const dealId of dealIds) {
+    const confidence = lastReview.get(dealId)?.confidence ?? 60;
+    if (!weakest || confidence < weakest.confidence) weakest = { dealId, confidence };
+  }
+  return weakest;
+}
 
 // Reuses the strategy bot's own session if one's already authenticated
 // (same sessionKey pattern, 'igstrat:<mode>') rather than logging in twice —
@@ -106,8 +133,6 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   const stale = !last || (Date.now() - last.at) >= MAX_SILENCE_MS;
   if (!moved && !stale) return;  // nothing meaningful changed since the last actual call — skip it
 
-  lastReview.set(p.dealId, { upl: p.upl, at: Date.now() });
-
   // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
   // same pattern as the entry-confirmation flow. Lets Gemini weigh whether
   // today's news/volatility could reverse this position, not just P&L and
@@ -128,6 +153,14 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   });
 
   addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+
+  // Only update the tracked confidence on a real verdict — a Gemini outage
+  // (passthrough) shouldn't silently make a healthy position look weak in
+  // the rotation comparison, so it keeps whatever the last real reading was.
+  lastReview.set(p.dealId, {
+    upl: p.upl, at: Date.now(),
+    confidence: verdict.engine === 'gemini' ? verdict.confidence : (last?.confidence ?? 60),
+  });
 
   if (verdict.action === 'CLOSE') {
     try {

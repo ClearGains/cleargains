@@ -91,6 +91,11 @@ export type StrategySignal = {
   // re-entering, instead of re-firing on the same still-valid historical
   // level all day — see igStrategyBot.ts's lastEntryTrigger check.
   triggerLevel?:    number;
+  // gemini_opinion only: Gemini's own confidence in this idea (0-100). Lets
+  // a caller compare a fresh candidate against an already-held position's
+  // last-known confidence to decide whether it's worth swapping — see the
+  // position-rotation logic in igStrategyBot.ts.
+  confidence?:      number;
 };
 
 export type PositionSide = 'long' | 'short';
