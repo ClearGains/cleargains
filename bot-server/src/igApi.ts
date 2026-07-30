@@ -422,16 +422,20 @@ export async function updatePositionLevels(
 }
 
 export type MarketDetail = {
-  epic:          string;
-  minDealSize:   number;   // minimum £/point bet size
-  minStopDist:   number;   // minimum stop distance in points
-  bid?:          number;   // live snapshot — this endpoint isn't subject to the
-  offer?:        number;   // historical-data allowance, unlike fetchCandleHistory
-  marketStatus?: string;   // 'TRADEABLE' | 'CLOSED' | 'EDITS_ONLY' | 'OFFLINE' | ...
-                            // — IG's own real-time truth on whether this specific
-                            // epic can actually be dealt right now, used instead of
-                            // a fixed-hours guess for strategies that trade outside
-                            // the primary exchange's cash session.
+  epic:            string;
+  minDealSize:     number;   // minimum £/point bet size
+  minStopDist:     number;   // minimum stop distance in points
+  bid?:            number;   // live snapshot — this endpoint isn't subject to the
+  offer?:          number;   // historical-data allowance, unlike fetchCandleHistory
+  marketStatus?:   string;   // 'TRADEABLE' | 'CLOSED' | 'EDITS_ONLY' | 'OFFLINE' | ...
+                              // — IG's own real-time truth on whether this specific
+                              // epic can actually be dealt right now, used instead of
+                              // a fixed-hours guess for strategies that trade outside
+                              // the primary exchange's cash session.
+  marginFactorPct?: number;  // e.g. 20 = 20% of notional exposure required as margin —
+                              // confirmed live this varies a lot by instrument (higher-
+                              // priced-per-point shares need far more margin at even the
+                              // IG minimum stake than a small account can supply).
 };
 
 export async function fetchMarketDetails(
@@ -455,7 +459,7 @@ export async function fetchMarketDetails(
       }
       const d = await r.json() as {
         marketDetails?: Array<{
-          instrument?: { epic?: string };
+          instrument?: { epic?: string; marginFactor?: number };
           dealingRules?: {
             minDealSize?: { value?: number };
             minControlledRiskStopDistance?: { value?: number };
@@ -474,6 +478,7 @@ export async function fetchMarketDetails(
         result.set(epic, {
           epic, minDealSize: minDeal, minStopDist: minStop,
           bid: m.snapshot?.bid, offer: m.snapshot?.offer, marketStatus: m.snapshot?.marketStatus,
+          marginFactorPct: m.instrument?.marginFactor,
         });
       }
     } catch (e) {

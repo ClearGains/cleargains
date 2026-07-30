@@ -729,6 +729,7 @@ async function evaluateEpic(
   positions: FullPosition[],
   cfg:       IgStrategyConfig,
   session:   IGSession,
+  available = 0,
 ): Promise<void> {
   const openPos    = positions.find(p => p.epic === epic);
   const inPosition = !!openPos;
@@ -887,7 +888,7 @@ async function evaluateEpic(
     }
   }
 
-  await executeIgSignal(mode, epic, executionSignal, openPos ?? null, cfg, session, executionPrice, barAgeMs);
+  await executeIgSignal(mode, epic, executionSignal, openPos ?? null, cfg, session, executionPrice, barAgeMs, available);
 }
 
 // ── Order execution ───────────────────────────────────────────────────────────
@@ -910,6 +911,7 @@ async function executeIgSignal(
   session:      IGSession,
   currentPrice: number,
   barAgeMs      = 0,
+  available     = 0,
 ): Promise<void> {
   const { action, reason, stopPrice, takeProfitPrice, trailPercent } = signal;
   const st   = ms(mode);
@@ -1071,6 +1073,24 @@ async function executeIgSignal(
       `Stake £${rawStake}/pt below IG minimum £${minDeal}/pt — using minimum (max loss £${actualMaxLoss.toFixed(0)}, within the £${lossCeiling.toFixed(0)} ceiling)`);
   }
 
+  // Margin affordability — confirmed live this matters: Western Digital and
+  // Micron both got rejected with INSUFFICIENT_FUNDS at the IG minimum
+  // stake, with zero other positions open and the full account balance
+  // available — the required margin for even the smallest possible
+  // position exceeded what the account holds. No amount of stake-shrinking
+  // fixes that once already at the floor, so check it up front rather than
+  // wasting a live order attempt (and the 6h cooldown that follows a failed
+  // one) on an instrument this account structurally can't afford right now.
+  if (detail?.marginFactorPct !== undefined) {
+    const requiredMargin = stake * currentPrice * (detail.marginFactorPct / 100);
+    if (requiredMargin > available) {
+      addLog(mode, 'wait', name,
+        `Skipped — would need £${requiredMargin.toFixed(0)} margin (stake £${stake}/pt, ${detail.marginFactorPct}% factor), only £${available.toFixed(0)} available`);
+      blockEpicTemporarily(mode, cfg, session, epic, 'insufficient margin for this account size');
+      return;
+    }
+  }
+
   // Final live guard — ask IG directly before committing funds. `openPos` was
   // resolved once at the top of poll() and can be stale by the time execution
   // reaches here; re-check fresh immediately before placing the order. Same
@@ -1098,7 +1118,7 @@ async function executeIgSignal(
       // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
       // Gemini still runs on technicals alone in that case (see prompt).
       const ticker    = EPIC_TO_ALPACA[epic];
-      const headlines = ticker ? await fetchCompanyHeadlines(ticker) : [];
+      const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
       const verdict = await askGeminiDailyVerdict({
         instrumentName: name,
         direction,
@@ -1415,7 +1435,7 @@ async function poll(mode: IgMode) {
       addLog(mode, 'wait', epicName(epic), `Max positions (${cfg.maxPositions}) reached`);
       continue;
     }
-    await evaluateEpic(mode, epic, positions, cfg, st.session);
+    await evaluateEpic(mode, epic, positions, cfg, st.session, available);
   }
 
   schedule(mode, cfg);

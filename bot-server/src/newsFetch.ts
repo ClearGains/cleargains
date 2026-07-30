@@ -4,7 +4,17 @@
 // decisions for a specific instrument instead of a general strategy pick.
 // Best-effort: returns [] on any failure (no key, rate limit, network) so
 // callers just proceed without headlines rather than blocking the trade.
-export async function fetchCompanyHeadlines(ticker: string, limit = 5): Promise<string[]> {
+//
+// companyName filter: Finnhub's company-news endpoint, queried with
+// symbol=WDC, still returned sector-roundup articles that were actually
+// about Seagate/SanDisk/Micron/Intel with no WDC-specific content at all —
+// confirmed live, Gemini built a SELL reasoning off "memory crash" headlines
+// none of which explained WDC's own +15.8% move that same day. Finnhub
+// evidently cross-tags broad sector articles under every related ticker.
+// Requiring the actual company name to appear in the headline text filters
+// those out — better to surface fewer, genuinely-relevant headlines than
+// hand Gemini a stack of sector noise about competitors.
+export async function fetchCompanyHeadlines(ticker: string, limit = 5, companyName?: string): Promise<string[]> {
   const key = process.env.FINNHUB_API_KEY;
   if (!key) return [];
 
@@ -19,8 +29,19 @@ export async function fetchCompanyHeadlines(ticker: string, limit = 5): Promise<
     if (!res.ok) return [];
     const raw = await res.json() as Array<{ headline?: string; datetime?: number }>;
     if (!Array.isArray(raw)) return [];
+
+    // Match on the first word of the display name (e.g. "Western" out of
+    // "Western Digital") rather than the full name — headlines commonly
+    // abbreviate ("Western Digital Corp", "WD") but rarely drop the
+    // distinctive first word entirely.
+    const nameFragment = companyName?.split(' ')[0]?.toLowerCase();
+    const relevant = (h: string) => {
+      const lower = h.toLowerCase();
+      return lower.includes(ticker.toLowerCase()) || (!!nameFragment && lower.includes(nameFragment));
+    };
+
     return raw
-      .filter(a => !!a.headline)
+      .filter(a => !!a.headline && (!companyName || relevant(a.headline)))
       .sort((a, b) => (b.datetime ?? 0) - (a.datetime ?? 0))
       .slice(0, limit)
       .map(a => a.headline!);
