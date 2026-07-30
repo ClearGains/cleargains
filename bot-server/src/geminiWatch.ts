@@ -6,6 +6,8 @@ import {
 } from './igApi';
 import { resolveCredentials, addLog, type IgMode } from './igStrategyBot';
 import { askGeminiPositionVerdict } from './gemini';
+import { EPIC_TO_ALPACA } from './yahooFetch';
+import { fetchCompanyHeadlines } from './newsFetch';
 
 // ── Gemini position watch — for positions opened outside the strategy bot
 // (manually via IG's own app, the Demo Trader panel, or anywhere else) that
@@ -106,8 +108,16 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
 
   lastReview.set(p.dealId, { upl: p.upl, at: Date.now() });
 
+  // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
+  // same pattern as the entry-confirmation flow. Lets Gemini weigh whether
+  // today's news/volatility could reverse this position, not just P&L and
+  // hold time alone.
+  const ticker    = EPIC_TO_ALPACA[p.epic];
+  const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
+
   const verdict = await askGeminiPositionVerdict({
     instrumentName: name,
+    headlines,
     direction:      p.direction,
     entryLevel:     p.level,
     currentLevel,

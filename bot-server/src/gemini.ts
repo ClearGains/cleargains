@@ -323,6 +323,7 @@ export type PositionReviewRequest = {
   heldHours:      number;
   stopLevel?:     number;
   limitLevel?:    number;
+  headlines?:     string[];  // recent real news for this instrument, if available — see newsFetch.ts
 };
 
 export async function askGeminiPositionVerdict(req: PositionReviewRequest): Promise<PositionVerdict> {
@@ -337,6 +338,10 @@ export async function askGeminiPositionVerdict(req: PositionReviewRequest): Prom
   const pctMove = req.entryLevel > 0 ? (req.currentLevel - req.entryLevel) / req.entryLevel * 100 : 0;
   const signedPct = req.direction === 'BUY' ? pctMove : -pctMove;  // positive = favorable regardless of side
 
+  const headlineBlock = req.headlines?.length
+    ? `\nRecent news (last 7 days):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '';
+
   const prompt = `You are reviewing an already-open spread bet position to decide whether to close it now or keep holding.
 
 Instrument: ${req.instrumentName}
@@ -347,8 +352,8 @@ Unrealized P/L: £${req.uplGbp.toFixed(2)}
 Held for: ${req.heldHours.toFixed(1)} hours
 ${req.stopLevel !== undefined ? `Stop-loss already attached at: ${req.stopLevel.toFixed(2)}` : 'No stop currently attached'}
 ${req.limitLevel !== undefined ? `Take-profit already attached at: ${req.limitLevel.toFixed(2)}` : 'No take-profit currently set'}
-
-A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss. Decide only: is there a clear reason to close now (lock in a gain, or cut a loss before it likely gets worse), or is holding for the stop/take-profit to do its job still reasonable?
+${headlineBlock}
+A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss. Decide only: is there a clear reason to close now — lock in a healthy gain, cut a loss before it likely gets worse, or genuine news/volatility that suggests today's conditions could completely reverse this position's favorability — or is holding for the stop/take-profit to do its job still reasonable? If no news is listed above, judge on price action alone.
 
 Respond with JSON only, no markdown:
 {"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
