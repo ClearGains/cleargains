@@ -440,10 +440,20 @@ function igBarToAlpacaBar(b: CandleBar): AlpacaBar {
 // (£notional ÷ price) silently produces wildly oversized stakes on FX, where
 // price (~1.3) and point size (0.0001) are unrelated scales, unlike indices
 // where price and point size roughly coincide.
-function calcStake(maxRiskGbp: number, stopDist: number): number {
-  if (stopDist <= 0) return 0.1;
+// minStake defaults to 0.1 only as a last resort when an instrument's real
+// minimum couldn't be fetched — every real call site passes IG's actual
+// per-instrument minDealSize instead. Confirmed live this matters: this
+// function used to hardcode a 0.1 floor and round to 1 decimal place
+// regardless of the instrument, even though this exact account has
+// successfully traded Micron/WDC at 0.01-0.08 — IG's real minimum for both
+// is 0.01, not 0.1. The hardcoded floor was forcing stakes 3-10x larger
+// than necessary, which is what was actually driving the repeated
+// INSUFFICIENT_FUNDS rejections on higher-priced-per-point shares, not a
+// genuine lack of funds for the size that was actually needed.
+function calcStake(maxRiskGbp: number, stopDist: number, minStake = 0.1): number {
+  if (stopDist <= 0) return minStake;
   const raw = maxRiskGbp / stopDist;
-  return Math.max(0.1, Math.round(raw * 10) / 10);
+  return Math.max(minStake, Math.round(raw * 100) / 100);
 }
 
 export function resolveCredentials(mode: IgMode) {
@@ -1047,7 +1057,7 @@ async function executeIgSignal(
   // the 24h strategy; normal-hours sizing is untouched for everything else.
   const STALE_DATA_MS = 5 * 60_000;
   const overnightDerate = is24hStrategy && barAgeMs > STALE_DATA_MS ? 0.5 : 1;
-  const rawStake = calcStake(cfg.maxRiskGbp * overnightDerate, sizingStopDist);
+  const rawStake = calcStake(cfg.maxRiskGbp * overnightDerate, sizingStopDist, minDeal);
   const stake    = Math.max(minDeal, rawStake);
 
   // Any time the stake actually used ends up above what the target risk
