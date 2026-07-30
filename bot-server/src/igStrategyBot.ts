@@ -1002,7 +1002,7 @@ async function executeIgSignal(
   const { action, reason, stopPrice, takeProfitPrice, trailPercent } = signal;
   const st   = ms(mode);
   const name = epicName(epic);
-  const is24hStrategy = cfg.strategy === 'vwap';
+  const is24hStrategy = cfg.strategy === 'vwap' || cfg.strategy === 'gemini_opinion';
 
   if (action === 'HOLD') { addLog(mode, 'wait', name, reason); return; }
 
@@ -1411,15 +1411,17 @@ async function poll(mode: IgMode) {
     }
   }
 
-  // VWAP trades IG's own individually-quoted "(24 Hours)" shares (confirmed
-  // live against the account — AAPL/AMD/QCOM/MU/WDC all show as TRADEABLE
-  // with live pricing well outside NYSE cash hours), not Alpaca's exchange-
-  // hours-only feed — so it isn't gated on isNYSEOpen() the way ORB/RSI Mean
-  // Reversion still are (ORB specifically needs a defined session open to
-  // build an opening range from; that concept doesn't exist on a continuously-
-  // quoted product). Per-epic real tradeability (marketStatus) and an
-  // overnight risk reduction are enforced instead, in executeIgSignal.
-  const is24hStrategy = cfg.strategy === 'vwap';
+  // VWAP and Gemini Opinion both trade IG's own individually-quoted
+  // "(24 Hours)" shares (confirmed live against the account —
+  // AAPL/AMD/QCOM/MU/WDC/Dell all show as TRADEABLE with live pricing well
+  // outside NYSE cash hours), not Alpaca's exchange-hours-only feed — so
+  // neither is gated on isNYSEOpen() the way ORB/RSI Mean Reversion still
+  // are (ORB specifically needs a defined session open to build an opening
+  // range from; that concept doesn't exist on a continuously-quoted
+  // product, and Gemini Opinion has no technical rule tied to a session at
+  // all). Per-epic real tradeability (marketStatus) and an overnight risk
+  // reduction are enforced instead, in executeIgSignal.
+  const is24hStrategy = cfg.strategy === 'vwap' || cfg.strategy === 'gemini_opinion';
   if (meta.timeframe === 'intraday' && !is24hStrategy && !isNYSEOpen()) { schedule(mode, cfg); return; }
   // 'daily' strategies no longer gate the whole poll on isDailyCheckTime() —
   // they now run every pollIntervalFor() cycle (see IG_POLL_MS_OVERRIDE) and
