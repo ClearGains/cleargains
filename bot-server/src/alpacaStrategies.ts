@@ -255,7 +255,18 @@ export function orbSignal(
 
 // ── 4. VWAP Reversion (1-min intraday) ───────────────────────────────────────
 // Entry: price dips >0.5% below VWAP + RSI < 45 → buy bounce
-// Exit:  price reaches VWAP or 0.5% below VWAP stop
+// Exit:  price reaches VWAP or VWAP_STOP_BAND beyond VWAP stop
+//
+// VWAP_STOP_BAND was 1% (entries at ~0.5% away, so ~0.5% adverse from entry)
+// — widened to 1.5%, still a small, recoverable band, to give spread-bet-
+// scale noise a bit more room before treating a dip as thesis failure.
+// Every stop-band width is a tradeoff, not a free improvement: wider means
+// fewer trades get shaken out right before a real reversion, but bigger
+// realized losses on the (more common) trades that don't come back — this
+// isn't a "correct" number, just a deliberately modest widening rather than
+// loosening it enough to turn VWAP into an unsized trend-following bet.
+const VWAP_STOP_BAND = 0.015;
+
 export function vwapSignal(
   todayBars:    AlpacaBar[],
   currentPrice: number,
@@ -271,18 +282,19 @@ export function vwapSignal(
   if (!vwap) return { action: 'HOLD', reason: 'VWAP not calculated' };
 
   const pctFromVwap = (currentPrice - vwap) / vwap * 100;
+  const stopPct = (VWAP_STOP_BAND * 100).toFixed(1);
 
   if (inPosition) {
-    // Target: price reverts to VWAP. Stop: stretch extends to 1% beyond VWAP
-    // (entries happen at ~0.5% away, so this is ~0.5% adverse from entry —
-    // the server-side bracket stop is the primary protection).
+    // Target: price reverts to VWAP. Stop: stretch extends to VWAP_STOP_BAND
+    // beyond VWAP — the server-side bracket stop is the primary protection,
+    // this is the software-level backup check in case a gap slips past it.
     if (side === 'long') {
-      if (currentPrice >= vwap)         return { action: 'CLOSE_LONG',  reason: `Price reverted to VWAP ${vwap.toFixed(2)} — target hit` };
-      if (currentPrice < vwap * 0.99)   return { action: 'CLOSE_LONG',  reason: `Stop: stretched >1% below VWAP` };
+      if (currentPrice >= vwap)                            return { action: 'CLOSE_LONG',  reason: `Price reverted to VWAP ${vwap.toFixed(2)} — target hit` };
+      if (currentPrice < vwap * (1 - VWAP_STOP_BAND))       return { action: 'CLOSE_LONG',  reason: `Stop: stretched >${stopPct}% below VWAP` };
     }
     if (side === 'short') {
-      if (currentPrice <= vwap)         return { action: 'CLOSE_SHORT', reason: `Price reverted to VWAP ${vwap.toFixed(2)} — target hit` };
-      if (currentPrice > vwap * 1.01)   return { action: 'CLOSE_SHORT', reason: `Stop: stretched >1% above VWAP` };
+      if (currentPrice <= vwap)                             return { action: 'CLOSE_SHORT', reason: `Price reverted to VWAP ${vwap.toFixed(2)} — target hit` };
+      if (currentPrice > vwap * (1 + VWAP_STOP_BAND))        return { action: 'CLOSE_SHORT', reason: `Stop: stretched >${stopPct}% above VWAP` };
     }
     return { action: 'HOLD', reason: `VWAP=${vwap.toFixed(2)} price ${pctFromVwap > 0 ? '+' : ''}${pctFromVwap.toFixed(2)}%` };
   }
@@ -291,7 +303,7 @@ export function vwapSignal(
     return {
       action:           'BUY',
       reason:           `Price ${Math.abs(pctFromVwap).toFixed(2)}% below VWAP (${vwap.toFixed(2)}) RSI=${rsi?.toFixed(1) ?? 'N/A'}`,
-      stopPrice:        +Math.min(currentPrice - atr * 1.2, vwap * 0.99).toFixed(2),
+      stopPrice:        +Math.min(currentPrice - atr * 1.2, vwap * (1 - VWAP_STOP_BAND)).toFixed(2),
       takeProfitPrice:  +vwap.toFixed(2),
       orderType:        'market',
     };
@@ -301,7 +313,7 @@ export function vwapSignal(
     return {
       action:           'SELL',
       reason:           `Price ${pctFromVwap.toFixed(2)}% above VWAP (${vwap.toFixed(2)}) RSI=${rsi?.toFixed(1) ?? 'N/A'}`,
-      stopPrice:        +Math.max(currentPrice + atr * 1.2, vwap * 1.01).toFixed(2),
+      stopPrice:        +Math.max(currentPrice + atr * 1.2, vwap * (1 + VWAP_STOP_BAND)).toFixed(2),
       takeProfitPrice:  +vwap.toFixed(2),
       orderType:        'market',
     };
