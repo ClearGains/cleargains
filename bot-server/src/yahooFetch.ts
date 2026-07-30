@@ -175,6 +175,16 @@ function scaleBars(bars: AlpacaBar[], factor: number): AlpacaBar[] {
   return bars.map(b => ({ ...b, o: b.o * factor, h: b.h * factor, l: b.l * factor, c: b.c * factor }));
 }
 
+// Lightweight spot-check — just the most recent price, not a full bar
+// series. Used to cross-reference Alpaca's result before trusting it (see
+// fetchBarsWithFallback) rather than only falling back to Yahoo when
+// Alpaca outright errors.
+async function fetchYahooLastPrice(symbol: string): Promise<number | null> {
+  const bars = await fetchYahooBars(symbol, '1m', '1d');
+  const last = bars?.[bars.length - 1]?.c;
+  return last && last > 0 ? last : null;
+}
+
 export async function fetchBarsWithFallback(
   epic:  string,
   range: string,
@@ -184,17 +194,40 @@ export async function fetchBarsWithFallback(
   const yahooInterval   = opts?.yahooInterval   ?? '1d';
   const isShare  = epic in EPIC_TO_ALPACA;
   const alpacaSym = EPIC_TO_ALPACA[epic];
+  const yahooSym  = EPIC_TO_YAHOO[epic];
   if (alpacaSym) {
     try {
       const { getBars } = await import('./alpacaApi');
       const result = await getBars([alpacaSym], alpacaTimeframe, 130, 'paper');
       const bars = result[alpacaSym];
-      if (bars?.length) return isShare ? scaleBars(bars, IG_SHARE_POINTS_PER_UNIT) : bars;
+      if (bars?.length) {
+        // Cross-check against Yahoo (both compared in Alpaca's raw,
+        // unscaled units) before trusting it — confirmed live this
+        // matters: Alpaca's bars endpoint returned a fully successful
+        // response with silently ~3-week-stale data (a pagination bug,
+        // since fixed at the source), which fed a fabricated day-change
+        // figure into a real position-close decision. A cheap spot-check
+        // against an independent source catches "succeeded but wrong" in
+        // a way error handling alone never can, regardless of the cause.
+        let trustworthy = true;
+        if (yahooSym) {
+          const alpacaLast = bars[bars.length - 1].c;
+          const yahooLast  = await fetchYahooLastPrice(yahooSym);
+          if (yahooLast) {
+            const diffPct = Math.abs(alpacaLast - yahooLast) / yahooLast * 100;
+            if (diffPct > 8) {
+              trustworthy = false;
+              console.warn(`[yahooFetch] Alpaca/Yahoo mismatch for ${epic}: ${alpacaLast.toFixed(2)} vs ${yahooLast.toFixed(2)} (${diffPct.toFixed(1)}%) — discarding Alpaca data, falling back to Yahoo`);
+            }
+          }
+          // yahooLast missing (fetch failed) — can't cross-check, trust Alpaca rather than block on it
+        }
+        if (trustworthy) return isShare ? scaleBars(bars, IG_SHARE_POINTS_PER_UNIT) : bars;
+      }
     } catch {
       // fall through to Yahoo
     }
   }
-  const yahooSym = EPIC_TO_YAHOO[epic];
   if (!yahooSym) return null;
   const yahooBars = await fetchYahooBars(yahooSym, yahooInterval, range);
   return yahooBars && isShare ? scaleBars(yahooBars, IG_SHARE_POINTS_PER_UNIT) : yahooBars;
