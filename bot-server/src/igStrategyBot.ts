@@ -572,13 +572,28 @@ function blockEpicTemporarily(mode: IgMode, cfg: IgStrategyConfig, session: IGSe
       const current = st.config?.epics ?? [];
       const held    = (await fetchFullPositions(session)).map(p => p.epic);
       const exclude = [...new Set([...current, ...held, ...st.blockedEpics.keys(), ...st.pausedEpics])];
-      const picks   = await scanIgEpics(cfg.strategy, session, exclude, 1, msg => addLog(mode, 'info', '—', msg));
-      if (picks[0] && st.config) {
-        const idx = st.config.epics.indexOf(badEpic);
-        if (idx !== -1) st.config.epics[idx] = picks[0];
-        addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} → ${epicName(picks[0])}`);
+      // Ask for several candidates, not just one — two epics blocked in the
+      // same cycle can each start this scan before either has written its
+      // pick back, so both score the same top name as "best available" and
+      // pick it independently. Confirmed live: AUD/USD and USD/JPY both got
+      // blocked together and both replaced with BlackBerry, leaving it
+      // duplicated in the watchlist while one slot silently got nothing.
+      // The include-check and the write below are synchronous with no
+      // await between them, so re-checking the live array immediately
+      // before writing (rather than trusting the `current` snapshot taken
+      // before the scan) closes the race instead of just narrowing it.
+      const picks = await scanIgEpics(cfg.strategy, session, exclude, 5, msg => addLog(mode, 'info', '—', msg));
+      const idx = st.config?.epics.indexOf(badEpic) ?? -1;
+      if (idx === -1) {
+        addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} — slot already changed, nothing to replace`);
+        return;
+      }
+      const replacement = picks.find(p => !st.config!.epics.includes(p));
+      if (replacement) {
+        st.config!.epics[idx] = replacement;
+        addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} → ${epicName(replacement)}`);
       } else {
-        addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} dropped, no replacement found this scan`);
+        addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} dropped, no distinct replacement found this scan`);
       }
     } catch {}
   })();
@@ -945,19 +960,23 @@ async function executeIgSignal(
       await igClosePos(session, openPos.dealId, openPos.direction, openPos.size);
       addLog(mode, 'exit', name, `Closed deal ${openPos.dealId}`);
 
-      // Find replacement epic
+      // Find replacement epic — same race as blockEpicTemporarily below can
+      // apply here too if multiple positions close around the same time,
+      // so this uses the same fix: several candidates, and a synchronous
+      // re-check against the live array immediately before writing.
       void (async () => {
         try {
           const current = st.config?.epics ?? [];
           const held    = (await fetchFullPositions(session)).map(p => p.epic);
           const exclude = [...new Set([...current, ...held, ...st.pausedEpics])].filter(e => e !== epic || st.pausedEpics.has(e));
-          const picks   = await scanIgEpics(cfg.strategy, session, exclude, 1, msg => addLog(mode, 'info', '—', msg));
-          if (picks[0] && st.config) {
-            const idx = st.config.epics.indexOf(epic);
-            if (idx !== -1) st.config.epics[idx] = picks[0];
-            else st.config.epics.push(picks[0]);
-            addLog(mode, 'info', '—', `Slot replacement: ${name} → ${epicName(picks[0])}`);
-          }
+          const picks   = await scanIgEpics(cfg.strategy, session, exclude, 5, msg => addLog(mode, 'info', '—', msg));
+          if (!st.config) return;
+          const replacement = picks.find(p => !st.config!.epics.includes(p));
+          if (!replacement) return;
+          const idx = st.config.epics.indexOf(epic);
+          if (idx !== -1) st.config.epics[idx] = replacement;
+          else st.config.epics.push(replacement);
+          addLog(mode, 'info', '—', `Slot replacement: ${name} → ${epicName(replacement)}`);
         } catch {}
       })();
     } catch (e) {
