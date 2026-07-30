@@ -542,12 +542,17 @@ async function buildOrbRange(mode: IgMode, session: IGSession, epics: string[]) 
   }
 }
 
-// Non-Alpaca-covered epics (indices, and proxies like SK Hynix/Nokia) always
-// need IG's own historical candle data to get a confirmed signal. Once IG
-// rejects one with an allowance error, retrying every poll just burns more
-// calls for no benefit — block it for the rest of this run and pull in a
-// fresh scan pick so the watch-list slot isn't dead weight.
-function blockEpicOnAllowance(mode: IgMode, cfg: IgStrategyConfig, session: IGSession, badEpic: string): void {
+// Generic temporary block-and-replace — originally allowance-only, now also
+// used for orders IG rejects outright. Confirmed live: Amazon got a SELL
+// signal rejected with "Deal REJECTED: UNKNOWN" (an opaque IG-side reason,
+// not something missing on our end — placeMarketOrder already surfaces
+// whatever reason IG returns), and with no cooldown on a failed order the
+// bot retried the identical trade every single poll for hours, all rejected
+// the same way — the fresh-breakout filter never engaged because it only
+// records a trigger level after a *successful* entry. Same fix as the
+// allowance case: block the epic for a cooldown and pull in a fresh scan
+// pick instead of hammering IG with the same doomed order indefinitely.
+function blockEpicTemporarily(mode: IgMode, cfg: IgStrategyConfig, session: IGSession, badEpic: string, reason: string): void {
   const st   = ms(mode);
   const name = epicName(badEpic);
   st.blockedEpics.set(badEpic, Date.now() + BLOCK_COOLDOWN_MS);
@@ -561,9 +566,9 @@ function blockEpicOnAllowance(mode: IgMode, cfg: IgStrategyConfig, session: IGSe
       if (picks[0] && st.config) {
         const idx = st.config.epics.indexOf(badEpic);
         if (idx !== -1) st.config.epics[idx] = picks[0];
-        addLog(mode, 'info', '—', `Blocked (IG allowance, retry in 6h) — ${name} → ${epicName(picks[0])}`);
+        addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} → ${epicName(picks[0])}`);
       } else {
-        addLog(mode, 'info', '—', `Blocked (IG allowance, retry in 6h) — ${name} dropped, no replacement found this scan`);
+        addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} dropped, no replacement found this scan`);
       }
     } catch {}
   })();
@@ -789,7 +794,7 @@ async function evaluateEpic(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       addLog(mode, 'error', epicName(epic), `Bar fetch failed (${confirmSource}): ${msg}`);
-      if (msg.toLowerCase().includes('allowance')) blockEpicOnAllowance(mode, cfg, session, epic);
+      if (msg.toLowerCase().includes('allowance')) blockEpicTemporarily(mode, cfg, session, epic, 'IG allowance');
       return;
     }
   }
@@ -1127,7 +1132,15 @@ async function executeIgSignal(
       }
     }
   } catch (e) {
-    addLog(mode, 'error', name, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    addLog(mode, 'error', name, `Order failed: ${msg}`);
+    // A failed order never reaches the lastEntryTrigger write above, so the
+    // fresh-breakout filter has nothing to compare against — without this,
+    // an epic IG keeps rejecting just retries the identical trade every
+    // poll indefinitely. Confirmed live: Amazon SELL rejected 14 times over
+    // ~2 hours, "Deal REJECTED: UNKNOWN" every time, same signal, same
+    // stake, no backoff.
+    blockEpicTemporarily(mode, cfg, session, epic, `order rejected: ${msg.slice(0, 60)}`);
   }
 }
 

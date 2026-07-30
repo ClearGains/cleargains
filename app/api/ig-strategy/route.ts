@@ -85,5 +85,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return proxyTo(`/ig-strategy/${mode}/paused/${encodeURIComponent(epic)}`, 'POST');
   }
 
+  if (action === 'release-deal') {
+    const { dealId } = await req.json() as { dealId?: string };
+    if (!dealId) return NextResponse.json({ ok: false, error: 'dealId required' }, { status: 400 });
+    return proxyTo(`/ig-strategy/${mode}/deals/${encodeURIComponent(dealId)}/release`, 'POST');
+  }
+
+  if (action === 'hold-deal') {
+    const { dealId } = await req.json() as { dealId?: string };
+    if (!dealId) return NextResponse.json({ ok: false, error: 'dealId required' }, { status: 400 });
+    return proxyTo(`/ig-strategy/${mode}/deals/${encodeURIComponent(dealId)}/hold`, 'POST');
+  }
+
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
 }

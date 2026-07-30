@@ -498,6 +498,10 @@ type IgBotStatus = {
   recommendations?: IgRecommendation[];
   dailyPick?: IgRecommendation | null;
   pausedEpics?: string[];
+  // Deal IDs the bot will auto-manage (opened by the bot, or released) —
+  // anything open but not in here is a manually-opened position the bot is
+  // deliberately leaving alone.
+  managedDeals?: string[];
 };
 
 // A signal computed off IG's own data for an epic the bot isn't acting on
@@ -659,6 +663,21 @@ function IgSpreadBetTab() {
       await fetchStatus();
     } finally {
       setPauseBusy(null);
+    }
+  };
+
+  const [dealBusy, setDealBusy] = useState<string | null>(null);
+  const toggleDealManaged = async (dealId: string, currentlyManaged: boolean) => {
+    setDealBusy(dealId);
+    try {
+      await fetch(`/api/ig-strategy?mode=${igMode}&action=${currentlyManaged ? 'hold-deal' : 'release-deal'}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ dealId }),
+      });
+      await fetchStatus();
+    } finally {
+      setDealBusy(null);
     }
   };
 
@@ -1091,6 +1110,22 @@ function IgSpreadBetTab() {
                       <div className={clsx('text-xs font-medium', (p.upl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
                         {(p.upl ?? 0) >= 0 ? '+' : ''}£{(p.upl ?? 0).toFixed(2)}
                       </div>
+                      {(() => {
+                        const managed = status?.managedDeals?.includes(p.dealId) ?? true;
+                        return (
+                          <button
+                            onClick={() => void toggleDealManaged(p.dealId, managed)}
+                            disabled={dealBusy === p.dealId}
+                            className={clsx(
+                              'mt-1 text-[10px] px-1.5 py-0.5 rounded font-normal shrink-0 disabled:opacity-50',
+                              managed ? 'text-slate-400 bg-slate-500/10 hover:bg-slate-500/20' : 'text-amber-400 bg-amber-500/10 hover:bg-amber-500/20',
+                            )}
+                            title={managed ? 'Bot can close this — click to hold it instead' : 'Bot will not close this automatically — click to let it manage exits'}
+                          >
+                            {managed ? '🔓 Bot-managed' : '🔒 Manual — hold'}
+                          </button>
+                        );
+                      })()}
                     </div>
                   </div>
                 ))}
