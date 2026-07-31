@@ -456,6 +456,22 @@ export function isWeekend(): boolean {
   return day === 0 || day === 6;
 }
 
+// Extended quiet window for scan-only workloads (recommendation sweeps,
+// daily-pick refresh) — Saturday all day through Sunday 22:00 UTC, the same
+// FX-reopen boundary fxScalperBot.ts already uses for its own session
+// refresh. Nothing meaningful can be scanned in this window regardless of
+// strategy (stocks/indices closed until Monday, FX until Sunday 22:00 UTC),
+// so periodic scanning here was just burning IG allowance and Yahoo calls
+// for stale Friday-close data. Doesn't affect position management or
+// forced/manual scans — only the unattended periodic sweep skips.
+export function isScannerQuietWeekend(): boolean {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun, 6=Sat
+  if (day === 6) return true;
+  if (day === 0) return now.getUTCHours() < 22;
+  return false;
+}
+
 // Returns ms until Monday 13:00 UTC (30 min before NYSE open)
 export function msUntilMondayOpen(): number {
   const now = new Date();

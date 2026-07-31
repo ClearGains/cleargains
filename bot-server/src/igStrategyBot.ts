@@ -22,7 +22,7 @@ import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
 import {
   isNYSEOpen, isInOpeningRange, isNearClose,
-  isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
+  isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen, isScannerQuietWeekend,
 } from './alpacaApi';
 
 // ── State persistence ─────────────────────────────────────────────────────────
@@ -908,6 +908,7 @@ let recommendationTimer: ReturnType<typeof setInterval> | null = null;
 export function startRecommendationRefresh(): void {
   if (recommendationTimer) return;
   recommendationTimer = setInterval(() => {
+    if (isScannerQuietWeekend()) return;  // nothing tradeable to scan for — see isScannerQuietWeekend
     for (const mode of ['demo', 'live'] as const) {
       void refreshRecommendations(mode);
       void ensureDailyPick(mode);
@@ -915,7 +916,10 @@ export function startRecommendationRefresh(): void {
   }, RECOMMENDATION_REFRESH_MS);
   // Also check once immediately on boot — otherwise a server that's been up
   // since before midnight won't get today's pick until the next 30min tick.
-  for (const mode of ['demo', 'live'] as const) void ensureDailyPick(mode);
+  // Still skipped during the weekend quiet window, same as the periodic tick.
+  if (!isScannerQuietWeekend()) {
+    for (const mode of ['demo', 'live'] as const) void ensureDailyPick(mode);
+  }
 }
 
 // ── Signal evaluation ─────────────────────────────────────────────────────────
