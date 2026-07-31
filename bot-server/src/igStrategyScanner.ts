@@ -77,6 +77,20 @@ export const FX_EPICS = new Set(
   IG_EPICS.filter(e => e.epic.startsWith('CS.')).map(e => e.epic),
 );
 
+// Instruments worth surfacing as a manual heads-up but not worth the bot
+// actually auto-trading — excluded from scanIgEpics's live-trading pool
+// below, but NOT from refreshRecommendations' full-universe sweep (which
+// reads IG_EPICS directly, unfiltered), so they still show up under
+// "Recommended — Manual Only" for a human to act on if they agree.
+// SK Hynix: no real Alpaca/US-listed ticker — its Korean primary listing is
+// a proxy, "close enough" for a free directional read but not something to
+// size or auto-enter real positions off. BlackBerry: user call, not a data
+// quality issue — flagged as not worth the bot auto-trading either.
+export const MANUAL_ONLY_EPICS = new Set([
+  'UD.D.SKHYUS.DAILY.IP', // SK Hynix
+  'UC.D.RIMM.DAILY.IP',   // BlackBerry
+]);
+
 // ── IG resolution per strategy ────────────────────────────────────────────────
 
 const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: number }> = {
@@ -300,7 +314,7 @@ export async function scanIgEpics(
   const alpacaOnly = ALPACA_ONLY_STRATEGIES.has(strategy);
   // FX excluded unconditionally — fxScalperBot.ts owns FX trading exclusively
   // (dedicated Lightstreamer feed + its own risk checks), see FX_EPICS above.
-  const pool = IG_EPICS.filter(e => !exclude.includes(e.epic) && !FX_EPICS.has(e.epic) && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
+  const pool = IG_EPICS.filter(e => !exclude.includes(e.epic) && !FX_EPICS.has(e.epic) && !MANUAL_ONLY_EPICS.has(e.epic) && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
   const useYahoo = YAHOO_SCAN_STRATEGIES.has(strategy);
   log(`[ig-scanner] Fetching bars for ${pool.length} epics (strategy: ${strategy}, source: ${useYahoo ? 'yahoo (free)' : 'ig'})…`);
 
