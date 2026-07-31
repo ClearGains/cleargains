@@ -44,27 +44,32 @@ const MARKETS: MarketDef[] = [
   { name: 'USD/JPY',     yahooSymbol: 'JPY=X',     igEpic: 'CS.D.USDJPY.TODAY.IP',  type: 'FOREX',     priceFactor: 100,   marginPct: 0.03,  spread: 0.8 },
   { name: 'EUR/GBP',     yahooSymbol: 'EURGBP=X',  igEpic: 'CS.D.EURGBP.TODAY.IP',  type: 'FOREX',     priceFactor: 10000, marginPct: 0.03,  spread: 0.9 },
   { name: 'AUD/USD',     yahooSymbol: 'AUDUSD=X',  igEpic: 'CS.D.AUDUSD.TODAY.IP',  type: 'FOREX',     priceFactor: 10000, marginPct: 0.03,  spread: 1   },
-  // Commodities
-  { name: 'Gold',        yahooSymbol: 'GC=F',      igEpic: 'MT.D.GC.Month2.IP',     type: 'COMMODITY', priceFactor: 1,     marginPct: 0.05,  spread: 0.4 },
-  { name: 'Oil (WTI)',   yahooSymbol: 'CL=F',      igEpic: 'MT.D.CL.Month1.IP',     type: 'COMMODITY', priceFactor: 1,     marginPct: 0.05,  spread: 0.3 },
-  { name: 'Silver',      yahooSymbol: 'SI=F',      igEpic: 'MT.D.SI.Month1.IP',     type: 'COMMODITY', priceFactor: 1,     marginPct: 0.05,  spread: 0.02},
+  // Commodities — confirmed live against IG's market search; the old codes
+  // (MT.D.*.MonthN.IP) were stale/expired monthly-contract references, not
+  // the persistent (DFB) product these prices/levels actually correspond to.
+  { name: 'Gold',        yahooSymbol: 'GC=F',      igEpic: 'CS.D.USCGC.TODAY.IP',   type: 'COMMODITY', priceFactor: 1,     marginPct: 0.05,  spread: 0.4 },
+  { name: 'Oil (WTI)',   yahooSymbol: 'CL=F',      igEpic: 'CC.D.CL.USS.IP',        type: 'COMMODITY', priceFactor: 1,     marginPct: 0.05,  spread: 0.3 },
+  { name: 'Silver',      yahooSymbol: 'SI=F',      igEpic: 'CS.D.USCSI.TODAY.IP',   type: 'COMMODITY', priceFactor: 1,     marginPct: 0.05,  spread: 0.02},
   // Crypto
   { name: 'Bitcoin',     yahooSymbol: 'BTC-USD',   igEpic: 'CS.D.BITCOIN.TODAY.IP', type: 'CRYPTO',    priceFactor: 1,     marginPct: 0.50,  spread: 40  },
-  // UK Shares
-  { name: 'Lloyds',      yahooSymbol: 'LLOY.L',    igEpic: 'CS.D.LLOYDS.TODAY.IP',  type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
-  { name: 'Barclays',    yahooSymbol: 'BARC.L',    igEpic: 'CS.D.BARC.TODAY.IP',    type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
-  { name: 'BP',          yahooSymbol: 'BP.L',      igEpic: 'CS.D.BP.TODAY.IP',      type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
-  { name: 'Shell',       yahooSymbol: 'SHEL.L',    igEpic: 'CS.D.SHELL.TODAY.IP',   type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.5 },
-  { name: 'Rolls-Royce', yahooSymbol: 'RR.L',      igEpic: 'CS.D.RR.TODAY.IP',      type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
-  { name: 'Vodafone',    yahooSymbol: 'VOD.L',     igEpic: 'CS.D.VODAFONE.TODAY.IP',type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
-  { name: 'Barclays',    yahooSymbol: 'BARC.L',    igEpic: 'CS.D.BARC.TODAY.IP',    type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
-  // US Shares
-  { name: 'Apple',       yahooSymbol: 'AAPL',      igEpic: 'CS.D.AAPL.TODAY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 2   },
-  { name: 'NVIDIA',      yahooSymbol: 'NVDA',      igEpic: 'CS.D.NVDA.TODAY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 5   },
-  { name: 'Tesla',       yahooSymbol: 'TSLA',      igEpic: 'CS.D.TSLA.TODAY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 5   },
-  { name: 'Amazon',      yahooSymbol: 'AMZN',      igEpic: 'CS.D.AMZN.TODAY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 3   },
-  { name: 'Microsoft',   yahooSymbol: 'MSFT',      igEpic: 'CS.D.MSFT.TODAY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 2   },
-  { name: 'Meta',        yahooSymbol: 'META',      igEpic: 'CS.D.META.TODAY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 3   },
+  // UK Shares — confirmed live: these all previously used a CS.D.*.TODAY.IP
+  // scheme, which is for currencies/commodities, not shares (same class of
+  // bug found and fixed in stockBot.ts/ig-stock-epics.ts earlier). Real
+  // prefix for UK shares is KA.D.*.DAILY.IP.
+  { name: 'Lloyds',      yahooSymbol: 'LLOY.L',    igEpic: 'KA.D.LLOY.DAILY.IP',    type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
+  { name: 'Barclays',    yahooSymbol: 'BARC.L',    igEpic: 'KA.D.BARC.DAILY.IP',    type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
+  { name: 'BP',          yahooSymbol: 'BP.L',      igEpic: 'KA.D.BP.DAILY.IP',      type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
+  { name: 'Shell',       yahooSymbol: 'SHEL.L',    igEpic: 'KA.D.SHELLN.DAILY.IP',  type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.5 },
+  { name: 'Rolls-Royce', yahooSymbol: 'RR.L',      igEpic: 'KA.D.RR.DAILY.IP',      type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
+  { name: 'Vodafone',    yahooSymbol: 'VOD.L',     igEpic: 'KA.D.VOD.DAILY.IP',     type: 'SHARES_UK', priceFactor: 100,   marginPct: 0.20,  spread: 0.1 },
+  // US Shares — same wrong-prefix issue, real codes vary per instrument
+  // (no single scheme), individually verified live.
+  { name: 'Apple',       yahooSymbol: 'AAPL',      igEpic: 'UA.D.AAPL.DAILY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 2   },
+  { name: 'NVIDIA',      yahooSymbol: 'NVDA',      igEpic: 'UC.D.NVDA.DAILY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 5   },
+  { name: 'Tesla',       yahooSymbol: 'TSLA',      igEpic: 'UD.D.TSLA.DAILY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 5   },
+  { name: 'Amazon',      yahooSymbol: 'AMZN',      igEpic: 'UA.D.AMZN.DAILY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 3   },
+  { name: 'Microsoft',   yahooSymbol: 'MSFT',      igEpic: 'UC.D.MSFT.DAILY.IP',    type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 2   },
+  { name: 'Meta',        yahooSymbol: 'META',      igEpic: 'UB.D.FB.DAILY.IP',      type: 'SHARES_US', priceFactor: 100,   marginPct: 0.20,  spread: 3   },
 ];
 
 // De-duplicate by yahooSymbol
