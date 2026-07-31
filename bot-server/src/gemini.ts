@@ -6,11 +6,15 @@ import * as path from 'path';
 // stop — this is the real backstop against runaway cost, enforced locally
 // and instantly rather than depending on a billing alert's latency. Shared
 // across every Gemini call site (entry verdicts + position watch) and both
-// demo/live, since they all bill against the one project/key. 150/day is
-// generously above realistic usage (busiest estimated case was ~25-40/day
-// for VWAP) while still bounding worst-case cost to a fixed, known amount
-// regardless of what triggers excess calls upstream.
-const GEMINI_DAILY_CAP = 150;
+// demo/live, since they all bill against the one project/key. Originally set
+// to 150/day based on a single-bot estimate (~25-40/day for VWAP); confirmed
+// live on 2026-07-31 that with the stock bot (entry checks + position watch)
+// and the FX scalper all running concurrently, combined usage paces at
+// ~190-200/day, exhausting 150 by mid-afternoon and leaving live positions
+// on stop-loss-only for the rest of the day. Raised to 300/day — Gemini
+// Flash is cheap enough (low pence/day even at this volume) that the real
+// risk here is under-provisioning AI review on live positions, not overspend.
+const GEMINI_DAILY_CAP = 300;
 const CALL_COUNT_FILE  = path.join(__dirname, '..', 'gemini-daily-calls.json');
 
 function todayUtc(): string {
