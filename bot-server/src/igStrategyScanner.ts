@@ -182,15 +182,31 @@ const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>([
   'rsi_mean_reversion', 'orb', 'vwap', 'weekly_momentum', 'gemini_opinion',
 ]);
 
-// vwap/orb/rsi_mean_reversion are all timeframe 'intraday' — igStrategyBot.ts's
-// poll() gates the *entire* cycle on isNYSEOpen() for these, not per-epic. A
+// orb/rsi_mean_reversion are timeframe 'intraday' — igStrategyBot.ts's poll()
+// still gates the *entire* cycle on isNYSEOpen() for these, not per-epic. A
 // non-Alpaca epic (different exchange, different real trading hours) gets
 // zero benefit from a watchlist slot: it's blocked by the NYSE-hours gate
 // exactly the same as everything else, but without free data or Gemini
-// confirmation on top. Restricting these strategies to Alpaca-covered epics
-// only means every watched slot is actually usable during the one window
-// the bot ever polls intraday strategies in.
-const ALPACA_ONLY_STRATEGIES = new Set<IgStrategyName>(['vwap', 'orb', 'rsi_mean_reversion', 'gemini_opinion']);
+// confirmation on top. Restricting these two to Alpaca-covered epics only
+// means every watched slot is actually usable during the one window the bot
+// ever polls them in.
+//
+// vwap stays Alpaca-only for an unrelated reason: it needs real volume, and
+// Yahoo's FX bars report zero volume (OTC market, no central tape) — VWAP is
+// mathematically undefined there regardless of this filter (calcVwap returns
+// null on zero cumulative volume).
+//
+// gemini_opinion is deliberately NOT in this set (unlike when it first shipped)
+// — it was originally NYSE-hours-gated like ORB/RSI Mean Reversion, which is
+// why it started Alpaca-only too, but it was later extended to trade 24h (see
+// is24hStrategy in igStrategyBot.ts) same as vwap. Unlike vwap it needs no
+// volume data (its score comes from scoreOrb's relative-volume/ATR% read,
+// which degrates gracefully to ATR% alone when volume is zero) and its entry
+// path already handles a missing Alpaca ticker fine (EPIC_TO_ALPACA[epic]
+// undefined just means no company headlines, not a broken evaluation) — so
+// nothing actually requires excluding FX here anymore, and doing so was
+// silently keeping every FX pair out of its watchlist for good.
+const ALPACA_ONLY_STRATEGIES = new Set<IgStrategyName>(['vwap', 'orb', 'rsi_mean_reversion']);
 
 // Mirrors igStrategyBot.ts's FREE_DATA_PARAMS — duplicated rather than
 // imported to avoid a circular import (igStrategyBot.ts already imports

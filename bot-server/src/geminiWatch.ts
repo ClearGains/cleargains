@@ -52,6 +52,7 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
   set.delete(dealId);
   saveWatch(mode, set);
   lastReview.delete(dealId);
+  peakUpl.delete(dealId);
 }
 
 // Throttle — a position that hasn't moved meaningfully since its last actual
@@ -65,6 +66,15 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
 const lastReview = new Map<string, { upl: number; at: number; confidence: number }>();
 const MOVE_THRESHOLD_GBP = 3;          // re-ask once P&L has moved at least this much since the last call
 const MAX_SILENCE_MS     = 45 * 60_000; // ...or at least this long has passed, even if flat
+
+// High-water mark of unrealized P&L per watched position, updated every poll
+// regardless of throttle — lets a swing from meaningfully-in-profit to
+// in-loss be recognized as a distinct "reversedToRed" risk signal (see
+// reviewOne), not just folded into the ordinary move-threshold check.
+// In-memory only, same tradeoff as lastReview: worst case after a restart is
+// one missed reversal detection on an already-reversed position, not a
+// silent failure to protect it (the hard stop still applies regardless).
+const peakUpl = new Map<string, number>();
 
 // Seeds a freshly-opened gemini_opinion position with its entry confidence,
 // so there's an immediate baseline to compare against rather than an
@@ -128,25 +138,40 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   const heldHours    = p.openedAt ? (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000 : 0;
   const currentLevel = p.direction === 'BUY' ? p.bid : p.offer;
 
-  const last  = lastReview.get(p.dealId);
-  const moved = !last || Math.abs(p.upl - last.upl) >= MOVE_THRESHOLD_GBP;
-  const stale = !last || (Date.now() - last.at) >= MAX_SILENCE_MS;
-  if (!moved && !stale) return;  // nothing meaningful changed since the last actual call — skip it
+  const last = lastReview.get(p.dealId);
+
+  // High-water mark of this position's P&L, updated every poll regardless of
+  // throttle — a swing from meaningfully-in-profit to in-loss is a distinct
+  // risk signal (a real reversal, not just "P&L is down") worth flagging to
+  // Gemini even when news hasn't caught up to explain it yet.
+  const priorPeak = peakUpl.get(p.dealId) ?? p.upl;
+  const peak = Math.max(priorPeak, p.upl);
+  peakUpl.set(p.dealId, peak);
+  const GREEN_TO_RED_THRESHOLD_GBP = 2; // "meaningfully" in profit at some point — not just noise around zero
+  const reversedToRed = peak >= GREEN_TO_RED_THRESHOLD_GBP && p.upl < 0;
+  // Edge-triggered version for the throttle bypass below — reversedToRed
+  // alone would force a fresh Gemini call every single poll for as long as
+  // the position stays red after ever having been green, which could burn
+  // through the daily call cap fast on a position left to sit. Only force
+  // the bypass the first time this shows up since Gemini's last actual look
+  // (i.e. it was still green, or unreviewed, as of the last real call) —
+  // once Gemini has seen it, the ordinary £3-move / 45-min throttle governs
+  // follow-up calls same as anything else.
+  const justTurnedRed = reversedToRed && (!last || last.upl >= 0);
 
   // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
   // same pattern as the entry-confirmation flow. Lets Gemini weigh whether
   // today's news/volatility could reverse this position, not just P&L and
   // hold time alone.
-  const ticker    = EPIC_TO_ALPACA[p.epic];
-  const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
+  const ticker = EPIC_TO_ALPACA[p.epic];
 
-  // How far the instrument has moved today overall — distinct from this
-  // position's own entry-to-current P&L, since a position can be entered
-  // after most of the day's move already happened (confirmed live: Micron
-  // bought after already running ~17% that day). Best-effort — a fetch
-  // failure just means the review proceeds without this context, same as
-  // any other optional field here.
+  // Fetched every poll (not just when the throttle would otherwise allow a
+  // real call) so a sudden sharp dip against the position can be detected
+  // promptly rather than waiting on the ordinary £3-move / 45-min throttle —
+  // Alpaca/Yahoo bars are free, unlike the Gemini call itself below, which
+  // still respects the throttle (and the daily cap) as before.
   let dayChangePercent: number | undefined;
+  let sharpDipPercent:  number | undefined;
   if (ticker) {
     try {
       const bars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
@@ -166,10 +191,37 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
           const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
           const dayOpen     = todaysBars[0]?.o;
           if (dayOpen) dayChangePercent = ((currentLevel - dayOpen) / dayOpen) * 100;
+
+          // Adverse move against the position's direction within just the
+          // last few bars — distinct from dayChangePercent, since a position
+          // can look unremarkable on the day as a whole while a fast reversal
+          // is happening right now within it.
+          const RECENT_BARS = Math.min(4, bars.length);
+          const window      = bars.slice(-RECENT_BARS);
+          if (p.direction === 'BUY') {
+            const recentHigh = Math.max(...window.map(b => b.h));
+            if (recentHigh > 0) sharpDipPercent = ((recentHigh - currentLevel) / recentHigh) * 100;
+          } else {
+            const recentLow = Math.min(...window.map(b => b.l));
+            if (recentLow > 0) sharpDipPercent = ((currentLevel - recentLow) / recentLow) * 100;
+          }
         }
       }
     } catch { /* best-effort — proceed without it */ }
   }
+
+  const SHARP_DIP_THRESHOLD_PCT = 1.5;
+  const sharpDip = sharpDipPercent !== undefined && sharpDipPercent >= SHARP_DIP_THRESHOLD_PCT;
+
+  const moved = !last || Math.abs(p.upl - last.upl) >= MOVE_THRESHOLD_GBP;
+  const stale = !last || (Date.now() - last.at) >= MAX_SILENCE_MS;
+  // A sharp dip or a just-turned-red reversal always gets a fresh Gemini call
+  // this cycle even if the ordinary throttle would otherwise skip it — these
+  // are exactly the situations where sitting on stale judgment for up to
+  // another 45 minutes is the wrong tradeoff.
+  if (!moved && !stale && !sharpDip && !justTurnedRed) return;
+
+  const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
 
   const verdict = await askGeminiPositionVerdict({
     instrumentName: name,
@@ -182,6 +234,8 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     stopLevel:      p.stopLevel,
     limitLevel:     p.limitLevel,
     dayChangePercent,
+    sharpDipPercent,
+    reversedToRed,
   });
 
   addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
