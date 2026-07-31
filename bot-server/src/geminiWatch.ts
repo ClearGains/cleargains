@@ -6,7 +6,7 @@ import {
 } from './igApi';
 import { resolveCredentials, addLog, type IgMode } from './igStrategyBot';
 import { askGeminiPositionVerdict } from './gemini';
-import { EPIC_TO_ALPACA, fetchBarsWithFallback } from './yahooFetch';
+import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
 
 // ── Gemini position watch — for positions opened outside the strategy bot
@@ -162,8 +162,19 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
   // same pattern as the entry-confirmation flow. Lets Gemini weigh whether
   // today's news/volatility could reverse this position, not just P&L and
-  // hold time alone.
+  // hold time alone. Headlines specifically need a real company ticker
+  // (Finnhub's company-news endpoint) — FX/indices have no such thing, so
+  // this stays Alpaca-only regardless of what bars are available below.
   const ticker = EPIC_TO_ALPACA[p.epic];
+
+  // Bars, by contrast, are available far more broadly — EPIC_TO_YAHOO covers
+  // the full IG_EPICS universe (FX, indices, UK stocks included), not just
+  // Alpaca's US-shares-only set. Gating this on the Alpaca ticker alone was
+  // silently leaving every FX (and index/UK-stock) position out of the
+  // sharp-dip and day-change checks below even though free bar data for them
+  // was available the whole time — fetchBarsWithFallback already falls
+  // through to Yahoo internally, this just stops refusing to call it.
+  const hasBarSource = ticker !== undefined || p.epic in EPIC_TO_YAHOO;
 
   // Fetched every poll (not just when the throttle would otherwise allow a
   // real call) so a sudden sharp dip against the position can be detected
@@ -172,9 +183,31 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // still respects the throttle (and the daily cap) as before.
   let dayChangePercent: number | undefined;
   let sharpDipPercent:  number | undefined;
-  if (ticker) {
+  if (hasBarSource) {
     try {
-      const bars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
+      let bars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
+
+      // fetchBarsWithFallback only applies its known ×100 shares scaling to
+      // Alpaca-covered epics — everything else it can now reach through this
+      // wider gate (FX, indices, UK stocks, all via Yahoo) comes back raw,
+      // and there's no one common ratio to IG's own quote the way shares'
+      // confirmed ×100 works. Confirmed live: IG quotes GBP/USD at ~13425
+      // vs Yahoo's raw ~1.3425 — a ×10000 ratio, not ×100, and not
+      // necessarily uniform across every pair either (JPY crosses use a
+      // different pip convention). Rather than hardcode a guessed factor
+      // per instrument, derive it from the one already-trusted reference
+      // point available: IG's own live currentLevel against Yahoo's most
+      // recent close, taken at essentially the same moment.
+      if (bars?.length && ticker === undefined) {
+        const lastRaw = bars[bars.length - 1].c;
+        if (lastRaw > 0 && currentLevel > 0) {
+          const scale = currentLevel / lastRaw;
+          bars = bars.map(b => ({ ...b, o: b.o * scale, h: b.h * scale, l: b.l * scale, c: b.c * scale }));
+        } else {
+          bars = null; // can't safely scale — proceed without day-change/sharp-dip context rather than risk garbage numbers
+        }
+      }
+
       if (bars?.length) {
         const latestBarAgeMs = Date.now() - new Date(bars[bars.length - 1].t).getTime();
         const STALE_DATA_MS  = 6 * 60 * 60_000;
