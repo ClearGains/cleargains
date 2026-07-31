@@ -3,6 +3,7 @@ import * as path from 'path';
 import {
   authenticate, getSession, closePosition, placeMarketOrder,
   fetchMarketDetails, fetchAccountFunds, fetchFullPositions, fetchCandleHistory,
+  updatePositionLevels,
   type IGSession, type CandleBar,
 } from './igApi';
 import { createStreamManager } from './igStream';
@@ -411,12 +412,18 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     }
   }
 
-  // ── Maintenance sweep — FX-scoped severe-loss/profit-lock + weekend
-  // flatten. Deliberately NOT reusing igStrategyBot.ts's equivalents: those
-  // are scaled off that bot's own cfg.maxRiskGbp (unrelated to this
-  // module's), and its weekend guard's behavior depends on whichever
-  // strategy the stock bot happens to be running — FX needs a hard flatten
-  // before the Friday close every time, regardless. ─────────────────────────
+  // ── Maintenance sweep — FX-scoped severe-loss/profit-lock + weekend risk
+  // guard. Deliberately NOT reusing igStrategyBot.ts's equivalents: those are
+  // scaled off that bot's own cfg.maxRiskGbp (unrelated to this module's).
+  // Weekend handling used to hard-flatten every remaining position
+  // regardless of P&L — changed after live review: closing purely because
+  // "it can't be monitored" crystallizes P&L at an arbitrary moment even
+  // when there's no actual reason to exit, and Gemini Position Watch keeps
+  // reviewing gemini_opinion-owned stock positions through the weekend
+  // anyway. Now mirrors igStrategyBot.ts's weekend guard: only close for an
+  // actual reason (severe loss or a profit worth banking, both already
+  // checked below), otherwise just tighten the stop to cap the gap-risk
+  // downside and let it ride. ─────────────────────────────────────────────
   async function maintenance(): Promise<void> {
     if (!running || !session) return;
     try {
@@ -429,7 +436,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       const now = new Date();
       const isFriday = now.getUTCDay() === 5;
       const minsToClose = (22 * 60) - (now.getUTCHours() * 60 + now.getUTCMinutes());
-      const weekendFlattenWindow = isFriday && minsToClose > 0 && minsToClose <= WEEKEND_FLATTEN_BUFFER_MIN;
+      const weekendGuardWindow = isFriday && minsToClose > 0 && minsToClose <= WEEKEND_FLATTEN_BUFFER_MIN;
 
       for (const st of tracked) {
         const p = positions.find(pos => pos.dealId === st.dealId);
@@ -441,9 +448,19 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         } else if (p.upl >= profitLockFloor) {
           addLog('exit', epicName(p.epic), `🔒 Profit lock +£${p.upl.toFixed(2)} ≥ £${profitLockFloor.toFixed(2)} — locking in gain`);
           await closeAndReset(p.epic, p.dealId, p.direction, p.size);
-        } else if (weekendFlattenWindow) {
-          addLog('exit', epicName(p.epic), `Weekend flatten — closing ${minsToClose}min before Friday 22:00 UTC FX close`);
-          await closeAndReset(p.epic, p.dealId, p.direction, p.size);
+        } else if (weekendGuardWindow && p.stopLevel !== undefined) {
+          const currentDist   = Math.abs(p.level - p.stopLevel);
+          const tightenedDist = currentDist * 0.5;
+          const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
+          const wouldTighten  = p.direction === 'BUY' ? newStop > p.stopLevel : newStop < p.stopLevel;
+          if (wouldTighten) {
+            try {
+              await updatePositionLevels(session, p.dealId, newStop, p.limitLevel ?? null);
+              addLog('info', epicName(p.epic), `Weekend risk guard — tightened stop ${currentDist.toFixed(2)}→${tightenedDist.toFixed(2)} pts ahead of the gap, ${minsToClose}min to Friday close`);
+            } catch (e) {
+              addLog('error', epicName(p.epic), `Weekend stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
         }
       }
     } catch (e) {

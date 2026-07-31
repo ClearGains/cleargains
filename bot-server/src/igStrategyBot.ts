@@ -1591,20 +1591,32 @@ async function poll(mode: IgMode) {
   // Runs before the per-strategy timeframe gate below — weekly_momentum and
   // ema_crossover only pass that gate a few minutes a day/week, so placed
   // after it this would almost never fire for exactly the strategies most
-  // exposed to a weekend gap (the ones designed to hold positions through
-  // it). Intraday strategies were never meant to hold through the gap at
-  // all, so those get flattened; swing/weekly strategies get their stop
-  // pulled in to cap the worst case instead of losing the whole position.
+  // exposed to a weekend gap.
+  // Used to unconditionally close every position for "intraday" strategies
+  // regardless of P&L — changed after live review: closing purely because a
+  // position "can't be monitored" over the weekend crystallizes P&L at an
+  // arbitrary moment even when there's no real reason to exit, and Gemini
+  // Position Watch keeps reviewing gemini_opinion positions through the
+  // weekend anyway (separate mechanism, no weekend pause). Now: close only
+  // for an actual reason (a real loss or a profit worth banking), otherwise
+  // just tighten the stop to cap gap-risk downside and let it ride —
+  // uniformly for every strategy, not just swing/weekly ones.
   if (isNearWeekendClose(120) && st.weekendGuardDate !== today) {
     st.weekendGuardDate = today;
     try {
       const positions = await fetchFullPositions(st.session);
+      const severeLossCeiling = cfg.maxRiskGbp * 5;
+      const profitLockFloor   = cfg.maxRiskGbp * 1.5;
       for (const p of positions) {
         const name = epicName(p.epic);
-        if (meta.timeframe === 'intraday') {
-          addLog(mode, 'exit', name, `Weekend risk guard — closing before the gap (${cfg.strategy} isn't meant to hold through it)`);
+        if (p.upl <= -severeLossCeiling) {
+          addLog(mode, 'exit', name, `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing before the gap`);
           try { await igClosePos(st.session, p.dealId, p.direction, p.size); }
           catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
+        } else if (p.upl >= profitLockFloor) {
+          addLog(mode, 'exit', name, `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it before the gap`);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); }
+          catch (e) { addLog(mode, 'error', name, `Weekend profit-lock failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.stopLevel !== undefined) {
           const currentDist   = Math.abs(p.level - p.stopLevel);
           const tightenedDist = currentDist * 0.5;
