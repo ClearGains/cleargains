@@ -564,8 +564,9 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
 function IgSpreadBetTab() {
   const [igMode, setIgMode]         = useState<IgMode>('demo');
   const [strategy, setStrategy]     = useState<IgStrategyName>('donchian_breakout');
-  const [maxRisk, setMaxRisk]       = useState('20');
-  const [maxPos, setMaxPos]         = useState('3');
+  const [maxRisk, setMaxRisk]           = useState('20');
+  const [maxStockPos, setMaxStockPos]   = useState('3');
+  const [maxIndexPos, setMaxIndexPos]   = useState('3');
   const [allowShorts, setAllowShorts] = useState(false);
 
   const [status, setStatus]   = useState<IgBotStatus | null>(null);
@@ -705,8 +706,9 @@ function IgSpreadBetTab() {
   const handleStart = () => {
     void post('start', {
       strategy,
-      maxRiskGbp:   parseFloat(maxRisk) || 20,
-      maxPositions: parseInt(maxPos, 10) || 3,
+      maxRiskGbp:        parseFloat(maxRisk) || 20,
+      maxStockPositions: parseInt(maxStockPos, 10) || 3,
+      maxIndexPositions: parseInt(maxIndexPos, 10) || 3,
       allowShorts,
     });
   };
@@ -791,7 +793,7 @@ function IgSpreadBetTab() {
             </div>
 
             {/* Max risk & max positions */}
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <div>
                 <label className="block text-xs text-slate-400 mb-1.5">Max risk / trade (£)</label>
                 <input
@@ -806,16 +808,30 @@ function IgSpreadBetTab() {
                 <p className="text-[10px] text-slate-500 mt-1">Max £ lost if the stop is hit — stake auto-sizes to this, not a notional target</p>
               </div>
               <div>
-                <label className="block text-xs text-slate-400 mb-1.5">Max positions</label>
+                <label className="block text-xs text-slate-400 mb-1.5">Max stock positions</label>
                 <input
                   type="number"
-                  value={maxPos}
-                  onChange={e => setMaxPos(e.target.value)}
+                  value={maxStockPos}
+                  onChange={e => setMaxStockPos(e.target.value)}
                   disabled={isRunning}
-                  min="1"
+                  min="0"
                   max="10"
                   className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 disabled:opacity-50"
                 />
+                <p className="text-[10px] text-slate-500 mt-1">Separate cap — doesn't share room with indices</p>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1.5">Max index positions</label>
+                <input
+                  type="number"
+                  value={maxIndexPos}
+                  onChange={e => setMaxIndexPos(e.target.value)}
+                  disabled={isRunning}
+                  min="0"
+                  max="10"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">Separate cap — doesn't share room with stocks</p>
               </div>
             </div>
 

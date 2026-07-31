@@ -13,7 +13,7 @@ import {
   STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
-import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS } from './igStrategyScanner';
+import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic } from './igStrategyScanner';
 import { askGeminiDailyVerdict, askGeminiTradeIdea } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
@@ -39,7 +39,19 @@ function clearIgState(mode: IgMode): void {
   try { fs.unlinkSync(stateFile(mode)); } catch {}
 }
 export function loadSavedIgStrategyState(mode: IgMode): IgStrategyConfig | null {
-  try { return JSON.parse(fs.readFileSync(stateFile(mode), 'utf8')) as IgStrategyConfig; } catch { return null; }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stateFile(mode), 'utf8')) as IgStrategyConfig & { maxPositions?: number };
+    // Migrate state files saved before maxPositions was split into separate
+    // stock/index caps — without this, an auto-resume loading an old file
+    // gets undefined for both new fields, which silently disables the
+    // position-cap check entirely (openCount >= undefined is always false).
+    if (parsed.maxStockPositions === undefined || parsed.maxIndexPositions === undefined) {
+      const legacy = parsed.maxPositions ?? 3;
+      parsed.maxStockPositions ??= legacy;
+      parsed.maxIndexPositions ??= legacy;
+    }
+    return parsed;
+  } catch { return null; }
 }
 
 // Allowance-blocked epics survive a restart too — see blockedEpics on ModeState.
@@ -141,7 +153,11 @@ export type IgStrategyConfig = {
   // (works correctly for FX at ~1.3 with a 0.0001 point size, and indices at
   // ~10,000 with a 1.0 point size alike) unlike a price-based notional calc.
   maxRiskGbp:       number;
-  maxPositions:     number;
+  // Split so one category can't crowd out the other's allowance — stocks
+  // and indices are counted and capped independently, not against one
+  // shared pool.
+  maxStockPositions: number;
+  maxIndexPositions: number;
   allowShorts:      boolean;
   maxDailyLossPct?: number;    // circuit breaker: no new entries after balance drops this % from day start (default 3)
 };
@@ -1253,14 +1269,17 @@ async function executeIgSignal(
   // clearly beats the weakest holding by a real margin — a fuzzy or too-
   // eager version of this would just churn out of decent positions chasing
   // slightly shinier ones, which is worse than holding steady.
-  if (cfg.strategy === 'gemini_opinion' && positions.length >= cfg.maxPositions) {
+  const candidateIsIndex = isIndexEpic(epic);
+  const samePool          = positions.filter(p => isIndexEpic(p.epic) === candidateIsIndex);
+  const poolCap           = candidateIsIndex ? cfg.maxIndexPositions : cfg.maxStockPositions;
+  if (cfg.strategy === 'gemini_opinion' && samePool.length >= poolCap) {
     const SWAP_MARGIN = 15;
     const { getWeakestConfidence } = await import('./geminiWatch');
-    const weakest       = getWeakestConfidence(positions.map(p => p.dealId));
+    const weakest       = getWeakestConfidence(samePool.map(p => p.dealId));
     const newConfidence = signal.confidence ?? 0;
     if (!weakest || newConfidence < weakest.confidence + SWAP_MARGIN) {
       addLog(mode, 'wait', name,
-        `Skipped — no room (${positions.length}/${cfg.maxPositions})${weakest ? `, ${newConfidence}% doesn't clear the weakest held position (${weakest.confidence}%) by the ${SWAP_MARGIN}pt swap margin` : ''}`);
+        `Skipped — no room (${candidateIsIndex ? 'indices' : 'stocks'} ${samePool.length}/${poolCap})${weakest ? `, ${newConfidence}% doesn't clear the weakest held position (${weakest.confidence}%) by the ${SWAP_MARGIN}pt swap margin` : ''}`);
       return;
     }
     const weakPos = positions.find(p => p.dealId === weakest.dealId);
@@ -1779,25 +1798,30 @@ async function poll(mode: IgMode) {
   // either entry happened. Re-checking fresh after each epic closes that
   // race instead of just narrowing it.
   let livePositions = positions;
-  let openCount      = livePositions.length;
+  let stockCount     = livePositions.filter(p => !isIndexEpic(p.epic)).length;
+  let indexCount     = livePositions.filter(p => isIndexEpic(p.epic)).length;
 
   for (const epic of cfg.epics) {
     if (!st.running) break;
     const inPos = livePositions.find(p => p.epic === epic);
+    const epicIsIndex = isIndexEpic(epic);
+    const poolCount    = epicIsIndex ? indexCount : stockCount;
+    const poolCap      = epicIsIndex ? cfg.maxIndexPositions : cfg.maxStockPositions;
     // gemini_opinion still evaluates flat candidates even when full — a
     // fresh idea here is what a full slot gets compared against for a
     // possible swap (see the position-rotation check in executeIgSignal).
     // Every other strategy keeps the original behaviour: skip entirely
     // when there's no room, since there's nothing to act on and no
     // comparison logic that would use the extra call anyway.
-    if (!inPos && openCount >= cfg.maxPositions && cfg.strategy !== 'gemini_opinion') {
-      addLog(mode, 'wait', epicName(epic), `Max positions (${cfg.maxPositions}) reached`);
+    if (!inPos && poolCount >= poolCap && cfg.strategy !== 'gemini_opinion') {
+      addLog(mode, 'wait', epicName(epic), `Max ${epicIsIndex ? 'index' : 'stock'} positions (${poolCap}) reached`);
       continue;
     }
     await evaluateEpic(mode, epic, livePositions, cfg, st.session, available);
     try {
       livePositions = await fetchFullPositions(st.session);
-      openCount     = livePositions.length;
+      stockCount    = livePositions.filter(p => !isIndexEpic(p.epic)).length;
+      indexCount    = livePositions.filter(p => isIndexEpic(p.epic)).length;
     } catch { /* keep the last known count on a fetch failure */ }
   }
 
@@ -1851,7 +1875,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
 
   addLog(mode, 'info', '—', 'Scanning for best instruments…');
   try {
-    const best = await scanIgEpics(cfg.strategy, st.session, [...st.pausedEpics], cfg.maxPositions + 2, msg => addLog(mode, 'info', '—', msg));
+    const best = await scanIgEpics(cfg.strategy, st.session, [...st.pausedEpics], cfg.maxStockPositions + cfg.maxIndexPositions + 2, msg => addLog(mode, 'info', '—', msg), cfg.maxIndexPositions);
     cfg.epics = best;
   } catch (e) {
     addLog(mode, 'info', '—', `Scan failed — using default indices: ${e instanceof Error ? e.message : String(e)}`);
@@ -1863,7 +1887,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
   syncStreamSubscription(mode); // subscribe Lightstream now that cfg.epics is finalized (no-op unless strategy is donchian_hourly/gemini_opinion)
 
   addLog(mode, 'info', '—', `Bot started — ${STRATEGY_META[cfg.strategy].label} | ${mode} | ${cfg.epics.map(epicName).join(', ')}`);
-  addLog(mode, 'info', '—', `Max risk/trade: £${cfg.maxRiskGbp} | Max positions: ${cfg.maxPositions} | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
+  addLog(mode, 'info', '—', `Max risk/trade: £${cfg.maxRiskGbp} | Max positions: ${cfg.maxStockPositions} stocks + ${cfg.maxIndexPositions} indices | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
 
   // Startup just fired a burst of IG calls (auth + balance + up to
   // maxPositions+2 sequential candle fetches while scanning for instruments).

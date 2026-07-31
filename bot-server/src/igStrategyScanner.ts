@@ -99,6 +99,14 @@ export const FX_EPICS = new Set(
 // its entry-time bar fetch falls to IG's own allowance-limited REST candle
 // API (no free Alpaca/Yahoo path for a non-US-listed name at evaluation
 // time) and hit error.public-api.exceeded-account-historical-data-allowance.
+// Every index epic in IG_EPICS above uses the IX.D. prefix — used to split
+// stock vs index positions into separate max-positions pools instead of one
+// shared count (they were previously grouped together, which let one
+// category crowd out the other's allowance).
+export function isIndexEpic(epic: string): boolean {
+  return epic.startsWith('IX.D.');
+}
+
 export const MANUAL_ONLY_EPICS = new Set([
   'UD.D.SKHYUS.DAILY.IP',  // SK Hynix
   'UC.D.RIMM.DAILY.IP',    // BlackBerry
@@ -345,6 +353,7 @@ export async function scanIgEpics(
   exclude:  string[],
   count:    number,
   log:      (msg: string) => void = console.log,
+  minIndexCount: number = 0,
 ): Promise<string[]> {
   const alpacaOnly = ALPACA_ONLY_STRATEGIES.has(strategy);
   // FX excluded unconditionally — fxScalperBot.ts owns FX trading exclusively
@@ -407,6 +416,26 @@ export async function scanIgEpics(
     // Drop the lowest-scoring non-Alpaca picks to make room, keeping the list length stable.
     const trimmedNonAlpaca = nonAlpaca.sort((a, b) => b.score - a.score).slice(0, Math.max(0, count - alreadyAlpaca.length - backfilled.length));
     top = [...alreadyAlpaca, ...backfilled, ...trimmedNonAlpaca].sort((a, b) => b.score - a.score);
+  }
+
+  // Guarantee at least minIndexCount index picks make the final list — a
+  // pure top-score list (or the Alpaca-guarantee backfill just above, which
+  // discards "non-Alpaca" picks to add more Alpaca-covered stocks, and every
+  // index epic is non-Alpaca) can otherwise squeeze indices out entirely,
+  // leaving a separate index position cap with nothing to actually watch.
+  if (minIndexCount > 0) {
+    const indexInTop = top.filter(s => isIndexEpic(s.epic)).length;
+    if (indexInTop < minIndexCount) {
+      const indexCandidates = scored
+        .filter(s => isIndexEpic(s.epic) && s.score !== -1 && !top.some(t => t.epic === s.epic))
+        .sort((a, b) => b.score - a.score);
+      const need         = minIndexCount - indexInTop;
+      const backfilled    = indexCandidates.slice(0, need);
+      const alreadyIndex  = top.filter(s => isIndexEpic(s.epic));
+      const nonIndex      = top.filter(s => !isIndexEpic(s.epic)).sort((a, b) => b.score - a.score)
+        .slice(0, Math.max(0, count - alreadyIndex.length - backfilled.length));
+      top = [...alreadyIndex, ...backfilled, ...nonIndex].sort((a, b) => b.score - a.score);
+    }
   }
 
   log(`[ig-scanner] Best picks: ${top.map(s => `${s.name}(${s.score.toFixed(1)}${s.epic in EPIC_TO_ALPACA ? ', alpaca' : ''})`).join(', ') || 'none'}`);
