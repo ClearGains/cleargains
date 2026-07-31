@@ -13,10 +13,12 @@ import {
   STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
-import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy } from './igStrategyScanner';
+import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS } from './igStrategyScanner';
 import { askGeminiDailyVerdict, askGeminiTradeIdea } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
+import { createStreamManager, type StreamManager } from './igStream';
+import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
 import {
   isNYSEOpen, isInOpeningRange, isNearClose,
@@ -264,9 +266,21 @@ type ModeState = {
   botOpenedDeals:       Set<string>;
   // Deal IDs explicitly released by the user — "you can close it now".
   releasedDeals:        Set<string>;
+  // Live-updated candle buffer per epic, fed by Lightstreamer — only used
+  // for donchian_hourly/gemini_opinion on LIGHTSTREAM_ELIGIBLE_EPICS (UK
+  // stocks/indices), the only strategies on an hourly-or-finer timeframe;
+  // IG's Lightstreamer CHART subscription has no DAY/WEEK resolution at
+  // all (confirmed live), so daily/weekly strategies can't use this and
+  // stay on the Yahoo dynamic-scale fallback instead. Not persisted —
+  // rebuilt via prewarmLightstreamBuffer on demand after any restart.
+  candleBuffers:        Map<string, CandleTick[]>;
+  // One shared Lightstreamer connection per mode, re-subscribed whenever
+  // the watched epic list changes (see syncStreamSubscription) — created
+  // once here rather than per-epic, mirroring fxScalperBot.ts's pattern.
+  stream:               StreamManager;
 };
 
-function makeModeState(): ModeState {
+function makeModeState(mode: IgMode): ModeState {
   return {
     running: false, paused: false, config: null, session: null,
     log: [], pollTimer: null, nextRunMs: null, lastPollTs: null,
@@ -280,12 +294,14 @@ function makeModeState(): ModeState {
     dayKey: '', dayStartBalance: 0, lossLock: false,
     weekendGuardDate: '',
     botOpenedDeals: new Set(), releasedDeals: new Set(),
+    candleBuffers: new Map(),
+    stream: createStreamManager(`igStream:strat:${mode}`),
   };
 }
 
 const modeStates = new Map<IgMode, ModeState>([
-  ['demo', makeModeState()],
-  ['live', makeModeState()],
+  ['demo', makeModeState('demo')],
+  ['live', makeModeState('live')],
 ]);
 for (const [mode, st] of modeStates) {
   st.blockedEpics    = loadBlockedEpics(mode);
@@ -457,6 +473,89 @@ function igBarToAlpacaBar(b: CandleBar): AlpacaBar {
   };
 }
 
+// ── Lightstreamer candle buffer (donchian_hourly/gemini_opinion on
+// LIGHTSTREAM_ELIGIBLE_EPICS only) ──────────────────────────────────────────
+// Same CandleBar→CandleTick shape used by bot.ts/botAccount.ts/fxScalperBot.ts's
+// own barToTick converters, duplicated locally rather than imported to avoid
+// pulling in scalperStrategy.ts's unrelated processTick machinery here.
+function candleBarToTick(epic: string, b: CandleBar): CandleTick {
+  return {
+    epic,
+    time:         b.snapshotTime,
+    open:         b.openPrice.mid  ?? b.openPrice.bid,
+    high:         b.highPrice.mid  ?? b.highPrice.bid,
+    low:          b.lowPrice.mid   ?? b.lowPrice.bid,
+    close:        b.closePrice.mid ?? b.closePrice.bid,
+    bidClose:     b.closePrice.bid,
+    offerClose:   b.closePrice.ask,
+    candleClosed: true,
+  };
+}
+
+function tickToAlpacaBar(t: CandleTick): AlpacaBar {
+  return { t: t.time, o: t.open, h: t.high, l: t.low, c: t.close, v: 0 };
+}
+
+function handleStreamTick(mode: IgMode, tick: CandleTick): void {
+  if (!tick.candleClosed) return; // only closed candles are usable for signal computation
+  const st  = ms(mode);
+  const arr = st.candleBuffers.get(tick.epic) ?? [];
+  arr.push(tick);
+  if (arr.length > 60) arr.splice(0, arr.length - 60);
+  st.candleBuffers.set(tick.epic, arr);
+}
+
+// Re-subscribes the mode's shared Lightstreamer connection to match whatever
+// LIGHTSTREAM_ELIGIBLE_EPICS are currently in cfg.epics — only when the
+// active strategy is donchian_hourly/gemini_opinion (the only two on an
+// hourly timeframe; IG's Lightstreamer CHART item has no DAY/WEEK
+// resolution, confirmed live). Called on start, and again immediately after
+// either of the two places cfg.epics gets mutated mid-run (blockEpicTemporarily,
+// and executeIgSignal's close-position replacement) — igStream.ts's connect()
+// always tears down and rebuilds the subscription from scratch (no
+// incremental add/remove), so simply re-calling it with the current full
+// list is the only way to keep the stream in sync with the watchlist.
+function syncStreamSubscription(mode: IgMode): void {
+  const st = ms(mode);
+  if (!st.config || !st.session) { st.stream.disconnect(); return; }
+  const isHourlyStrategy = st.config.strategy === 'donchian_hourly' || st.config.strategy === 'gemini_opinion';
+  const streamEpics = isHourlyStrategy ? st.config.epics.filter(e => LIGHTSTREAM_ELIGIBLE_EPICS.has(e)) : [];
+  if (!streamEpics.length) { st.stream.disconnect(); return; }
+  st.stream.connect(st.session, streamEpics, tick => handleStreamTick(mode, tick), 'HOUR');
+}
+
+// One-time seed so a freshly-subscribed epic doesn't have to wait ~40 hours
+// accumulating live ticks from nothing before a strategy can evaluate it.
+// Sourced from a demo-credentialed session even when mode is 'live' —
+// mirrors fxScalperBot.ts's identical reasoning: this is IG's own REST
+// candle endpoint, which IS allowance-limited, so seeding it from live's
+// own account would defeat the entire point of this feature. Demo's
+// allowance is independent and has headroom; the live account's own
+// allowance is never touched by this.
+async function prewarmLightstreamBuffer(mode: IgMode, epic: string, count: number): Promise<void> {
+  const st = ms(mode);
+  try {
+    let dataSession: IGSession;
+    if (mode === 'demo') {
+      if (!st.session) return;
+      dataSession = st.session;
+    } else {
+      const existing = getSession('igstrat-data:live');
+      if (existing && Date.now() < existing.expiresAt - 2 * 60_000) {
+        dataSession = existing;
+      } else {
+        const creds = resolveCredentials('demo');
+        if (!creds.apiKey) return;
+        dataSession = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, 'igstrat-data:live');
+      }
+    }
+    const bars = await fetchCandleHistory(dataSession, epic, 'HOUR', count);
+    if (bars.length) st.candleBuffers.set(epic, bars.map(b => candleBarToTick(epic, b)));
+  } catch (e) {
+    addLog(mode, 'info', epicName(epic), `Lightstream prewarm skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 // Risk-based sizing: stake (£/point) = £risk ÷ stop-distance-in-points.
 // Deliberately never divides by price — a price-based notional calc
 // (£notional ÷ price) silently produces wildly oversized stakes on FX, where
@@ -613,6 +712,7 @@ function blockEpicTemporarily(mode: IgMode, cfg: IgStrategyConfig, session: IGSe
       const replacement = picks.find(p => !st.config!.epics.includes(p));
       if (replacement) {
         st.config!.epics[idx] = replacement;
+        syncStreamSubscription(mode); // watchlist changed — keep the Lightstream subscription in sync, not just the config array
         addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} → ${epicName(replacement)}`);
       } else {
         addLog(mode, 'info', '—', `Blocked (${reason}, retry in 6h) — ${name} dropped, no distinct replacement found this scan`);
@@ -647,13 +747,37 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
   const candidates = IG_EPICS.map(e => e.epic).filter(epic => !heldEpics.has(epic) && !st.pausedEpics.has(epic));
   if (force) addLog(mode, 'info', '—', `[Recommendation check] Scanning ${candidates.length} instrument(s)…`);
 
+  // Batch-fetch live quotes once for whichever candidates would use the
+  // Yahoo dynamic-scale path below — fetchMarketDetails is NOT allowance-
+  // limited (unlike fetchCandleHistory), and this function has no other
+  // source of a live IG price for epics outside evaluateEpic's cfg.epics
+  // (st.marketDetails is only populated for the active watchlist).
+  const yahooScaledCandidates = candidates.filter(epic => !(epic in EPIC_TO_ALPACA) && epic in EPIC_TO_YAHOO);
+  const yahooRefPrices = new Map<string, number>();
+  if (yahooScaledCandidates.length) {
+    try {
+      const details = await fetchMarketDetails(st.session, yahooScaledCandidates);
+      for (const [epic, d] of details) if (d.bid !== undefined && d.offer !== undefined) yahooRefPrices.set(epic, (d.bid + d.offer) / 2);
+    } catch {}
+  }
+
   let checked = 0, found = 0, blocked = 0;
 
   for (const epic of candidates) {
     const name         = epicName(epic);
     const usesFreeData = epic in EPIC_TO_ALPACA;
+    // Opportunistic only — this function doesn't drive prewarmLightstreamBuffer
+    // itself (that's evaluateEpic's job for the actively-watched epics); if
+    // the buffer happens to already be populated (because this epic is also
+    // in cfg.epics), reuse it for free, otherwise fall through to Yahoo/IG-REST.
+    const usesLightstream = !usesFreeData
+      && (cfg.strategy === 'donchian_hourly' || cfg.strategy === 'gemini_opinion')
+      && LIGHTSTREAM_ELIGIBLE_EPICS.has(epic)
+      && (st.candleBuffers.get(epic)?.length ?? 0) >= count;
+    const usesYahooScaled = !usesFreeData && !usesLightstream && yahooRefPrices.has(epic);
+    const usesAnyFreePath = usesFreeData || usesLightstream || usesYahooScaled;
 
-    if (!usesFreeData) {
+    if (!usesAnyFreePath) {
       const unblockAt = st.blockedEpics.get(epic);
       if (unblockAt !== undefined && !force && Date.now() < unblockAt) continue;
     }
@@ -667,13 +791,23 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
           : await fetchBarsWithFallback(epic, '6mo');
         if (!fetched?.length) continue;
         bars = fetched.slice(-count);
+      } else if (usesLightstream) {
+        bars = (st.candleBuffers.get(epic) ?? []).slice(-count).map(tickToAlpacaBar);
+      } else if (usesYahooScaled) {
+        const freeParams = FREE_DATA_PARAMS[cfg.strategy];
+        const liveLevel  = yahooRefPrices.get(epic);
+        const fetched    = freeParams
+          ? await fetchBarsWithFallback(epic, freeParams.range, { ...freeParams, liveReferenceLevel: liveLevel })
+          : await fetchBarsWithFallback(epic, '6mo', { liveReferenceLevel: liveLevel });
+        if (!fetched?.length) continue;
+        bars = fetched.slice(-count);
       } else {
         bars = (await fetchCandleHistory(st.session, epic, resolution, count)).map(igBarToAlpacaBar);
       }
       if (!bars.length) throw new Error('No bar data');
       checked++;
 
-      if (!usesFreeData && st.blockedEpics.has(epic)) {
+      if (!usesAnyFreePath && st.blockedEpics.has(epic)) {
         st.blockedEpics.delete(epic);
         saveBlockedEpics(mode, st.blockedEpics);
         addLog(mode, 'info', name, 'Allowance recovered — unblocked');
@@ -704,7 +838,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
       }
     } catch (e) {
       st.recommendations.delete(epic);
-      if (!usesFreeData) {
+      if (!usesAnyFreePath) {
         blocked++;
         st.blockedEpics.set(epic, Date.now() + BLOCK_COOLDOWN_MS);
         saveBlockedEpics(mode, st.blockedEpics);
@@ -712,7 +846,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
       }
     }
     // Only IG's own calls share the allowance — free-data ones get the scanner's lighter spacing.
-    await new Promise(r => setTimeout(r, usesFreeData ? 250 : 1200));
+    await new Promise(r => setTimeout(r, usesAnyFreePath ? 250 : 1200));
   }
 
   if (force) addLog(mode, 'info', '—', `[Recommendation check] Done — ${checked} checked, ${found} signal(s) found, ${blocked} allowance-blocked`);
@@ -786,25 +920,46 @@ async function evaluateEpic(
   // fallback chain for real price levels — those are individually verified
   // US-listed shares. Everything else (indices, UK stocks, and non-USD-
   // listing Yahoo proxies like SK Hynix's Korean-won primary listing or
-  // Nokia's Helsinki/EUR listing) keeps using IG's own data — those aren't
-  // a clean scale factor away (real currency conversion, not just points
-  // scaling), confirmed by checking their actual IG-vs-source ratios
-  // directly rather than assuming. IG quotes the Alpaca-covered shares in
-  // points = cents (×100 vs the raw Alpaca/Yahoo dollar price) — also
-  // confirmed live across all 24, not assumed — and fetchBarsWithFallback
-  // applies that conversion before returning bars for this set.
-  const meta         = STRATEGY_META[cfg.strategy];
-  const usesFreeData = epic in EPIC_TO_ALPACA;
-  const confirmSource = usesFreeData ? 'Alpaca/Yahoo (×100 scaled)' : "IG's own data";
+  // Nokia's Helsinki/EUR listing) used to always fall to IG's own allowance-
+  // limited REST candle API — confirmed live that's a real problem (Nokia
+  // hit error.public-api.exceeded-account-historical-data-allowance), so
+  // there are now two additional free paths for exactly these epics:
+  //  - usesLightstream: donchian_hourly/gemini_opinion only (the sole two
+  //    strategies on an hourly timeframe), for LIGHTSTREAM_ELIGIBLE_EPICS
+  //    (UK stocks/indices) — a live-updated candle buffer fed by IG's own
+  //    Lightstreamer feed (confirmed live: HOUR resolution works), so no
+  //    scale conversion is ever needed at all, unlike the Yahoo case below.
+  //  - usesYahooScaled: everything else Yahoo-covers but Alpaca doesn't
+  //    (same set, plus Nokia/SK Hynix, plus these same UK/index epics under
+  //    any of the four daily/weekly strategies — IG's Lightstreamer CHART
+  //    item has no DAY/WEEK resolution at all, confirmed live, so streaming
+  //    can never cover those regardless of strategy). Yahoo's raw price
+  //    isn't on the same scale as IG's own (confirmed live: indices are
+  //    ~1:1, but Nokia is ~69.74x — not a guessable constant), so this path
+  //    dynamically derives the scale from IG's own live quote each time
+  //    rather than assuming one, mirroring geminiWatch.ts's identical
+  //    technique for FX position reviews.
+  const meta              = STRATEGY_META[cfg.strategy];
+  const usesFreeData      = epic in EPIC_TO_ALPACA;
+  const usesLightstream   = !usesFreeData
+    && (cfg.strategy === 'donchian_hourly' || cfg.strategy === 'gemini_opinion')
+    && LIGHTSTREAM_ELIGIBLE_EPICS.has(epic);
+  const usesYahooScaled   = !usesFreeData && !usesLightstream && epic in EPIC_TO_YAHOO;
+  const usesAnyFreePath   = usesFreeData || usesLightstream || usesYahooScaled;
+  const confirmSource = usesFreeData      ? 'Alpaca/Yahoo (×100 scaled)'
+                       : usesLightstream  ? 'Lightstreamer (IG native, no scaling needed)'
+                       : usesYahooScaled  ? 'Yahoo (dynamically scaled to IG live quote)'
+                       : "IG's own data";
+
+  const st = ms(mode);
 
   // Already rejected by IG's historical-data allowance — persists across
   // restarts (see blockedEpics on ModeState), retried again after
   // BLOCK_COOLDOWN_MS rather than every single poll or every restart. Skip
   // silently; the slot gets a fresh scan pick from blockEpicOnAllowance
   // instead of hammering IG again in the meantime.
-  if (!usesFreeData) {
-    const st         = ms(mode);
-    const unblockAt  = st.blockedEpics.get(epic);
+  if (!usesAnyFreePath) {
+    const unblockAt = st.blockedEpics.get(epic);
     if (unblockAt !== undefined) {
       if (Date.now() < unblockAt) return;
       st.blockedEpics.delete(epic);
@@ -825,16 +980,29 @@ async function evaluateEpic(
 
   const { resolution, count } = IG_RES[cfg.strategy];
   let bars: AlpacaBar[];
-  // Free data (Alpaca/Yahoo) is used for every strategy now, not just daily/
-  // hourly ones — usesFreeData already restricts this to genuinely-mapped
-  // Alpaca shares (EPIC_TO_ALPACA), so there's no timeframe restriction left
-  // to apply on top of that.
   if (usesFreeData) {
     const freeParams   = FREE_DATA_PARAMS[cfg.strategy];
     const fallbackBars = freeParams
       ? await fetchBarsWithFallback(epic, freeParams.range, freeParams)
       : await fetchBarsWithFallback(epic, '6mo');
     if (!fallbackBars?.length) { addLog(mode, 'wait', epicName(epic), 'No bar data (Alpaca/Yahoo unavailable)'); return; }
+    bars = fallbackBars.slice(-count);
+  } else if (usesLightstream) {
+    let buffered = st.candleBuffers.get(epic) ?? [];
+    if (buffered.length < count) {
+      await prewarmLightstreamBuffer(mode, epic, count);
+      buffered = st.candleBuffers.get(epic) ?? [];
+    }
+    if (buffered.length < count) { addLog(mode, 'wait', epicName(epic), `Lightstream buffer still filling (${buffered.length}/${count})`); return; }
+    bars = buffered.slice(-count).map(tickToAlpacaBar);
+  } else if (usesYahooScaled) {
+    const live      = st.marketDetails.get(epic);
+    const liveLevel = live?.bid !== undefined && live?.offer !== undefined ? (live.bid + live.offer) / 2 : undefined;
+    const freeParams    = FREE_DATA_PARAMS[cfg.strategy];
+    const fallbackBars  = freeParams
+      ? await fetchBarsWithFallback(epic, freeParams.range, { ...freeParams, liveReferenceLevel: liveLevel })
+      : await fetchBarsWithFallback(epic, '6mo', { liveReferenceLevel: liveLevel });
+    if (!fallbackBars?.length) { addLog(mode, 'wait', epicName(epic), 'No bar data (Yahoo unavailable or unscalable — no live IG quote yet)'); return; }
     bars = fallbackBars.slice(-count);
   } else {
     try {
@@ -856,7 +1024,6 @@ async function evaluateEpic(
   // fresh, not whenever the wall clock says it should be.
   const barAgeMs = Date.now() - new Date(bars[bars.length - 1].t).getTime();
 
-  const st = ms(mode);
   let signal: StrategySignal;
 
   switch (cfg.strategy) {
@@ -975,8 +1142,13 @@ async function evaluateEpic(
   // earlier version fetched fresh per-signal, which duplicated a call IG
   // had just made moments earlier in the same poll and tripped the
   // account-wide non-trading allowance (error.public-api.exceeded-*-allowance),
-  // locking the whole account out, not just this epic.
-  if (usesFreeData && (signal.action === 'BUY' || signal.action === 'SELL')) {
+  // locking the whole account out, not just this epic. Also covers
+  // usesLightstream — its bars are already in IG's native units so there's
+  // no scale error to worry about, but the last closed hourly candle can
+  // still be up to ~an hour stale relative to true current price, so
+  // re-anchoring to the freshest live quote matters there too — and
+  // usesYahooScaled, same reasoning as the original Alpaca/Yahoo case.
+  if (usesAnyFreePath && (signal.action === 'BUY' || signal.action === 'SELL')) {
     const live = st.marketDetails.get(epic);
     if (live?.bid && live?.offer) {
       const livePrice     = (live.bid + live.offer) / 2;
@@ -1056,6 +1228,7 @@ async function executeIgSignal(
           const idx = st.config.epics.indexOf(epic);
           if (idx !== -1) st.config.epics[idx] = replacement;
           else st.config.epics.push(replacement);
+          syncStreamSubscription(mode); // watchlist changed — keep the Lightstream subscription in sync, not just the config array
           addLog(mode, 'info', '—', `Slot replacement: ${name} → ${epicName(replacement)}`);
         } catch {}
       })();
@@ -1687,6 +1860,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
 
   if (cfg.strategy === 'orb') resetOrbState(mode, cfg.epics);
   scheduleSessionRefresh(mode, st.session);
+  syncStreamSubscription(mode); // subscribe Lightstream now that cfg.epics is finalized (no-op unless strategy is donchian_hourly/gemini_opinion)
 
   addLog(mode, 'info', '—', `Bot started — ${STRATEGY_META[cfg.strategy].label} | ${mode} | ${cfg.epics.map(epicName).join(', ')}`);
   addLog(mode, 'info', '—', `Max risk/trade: £${cfg.maxRiskGbp} | Max positions: ${cfg.maxPositions} | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
@@ -1708,6 +1882,7 @@ export function stopIgStrategyBot(mode: IgMode): void {
   if (st.sessionRefreshTimer) { clearTimeout(st.sessionRefreshTimer); st.sessionRefreshTimer = null; }
   st.nextRunMs  = null;
   st.lastPollTs = null;
+  st.stream.disconnect();
   clearIgState(mode);
   addLog(mode, 'info', '—', `IG strategy bot ${mode} stopped`);
 }

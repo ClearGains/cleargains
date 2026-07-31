@@ -188,7 +188,20 @@ async function fetchYahooLastPrice(symbol: string): Promise<number | null> {
 export async function fetchBarsWithFallback(
   epic:  string,
   range: string,
-  opts?: { alpacaTimeframe?: Timeframe; yahooInterval?: '1m' | '5m' | '15m' | '1h' | '1d' | '1wk' },
+  opts?: {
+    alpacaTimeframe?: Timeframe; yahooInterval?: '1m' | '5m' | '15m' | '1h' | '1d' | '1wk';
+    // Live IG quote for this epic, e.g. (bid+offer)/2 — when supplied for an
+    // epic that falls through to the Yahoo-only branch below (no Alpaca
+    // coverage), the raw Yahoo bars get rescaled to match IG's own price
+    // level instead of being returned as-is. Confirmed live this matters:
+    // IG's price for an index is ~1:1 with Yahoo's raw number, but for
+    // Nokia it's ~69.74x — not a guessable constant (looks like a currency
+    // conversion baked into IG's points scaling), same class of mismatch
+    // already found and fixed for FX (×10000 vs ×100 depending on the pair).
+    // Derived fresh per call rather than hardcoded, mirroring geminiWatch.ts's
+    // identical technique for FX position reviews.
+    liveReferenceLevel?: number;
+  },
 ): Promise<AlpacaBar[] | null> {
   const alpacaTimeframe = opts?.alpacaTimeframe ?? '1Day';
   const yahooInterval   = opts?.yahooInterval   ?? '1d';

@@ -96,6 +96,27 @@ export const MANUAL_ONLY_EPICS = new Set([
   'EC.D.NOKIAFP.DAILY.IP', // Nokia
 ]);
 
+// UK stocks + indices — Yahoo-covered but not Alpaca-covered, so their
+// entry-time bar fetch otherwise falls to IG's own allowance-limited REST
+// candle API (same root cause as Nokia above). Two complementary fixes:
+// evaluateEpic/refreshRecommendations use Yahoo (dynamically rescaled to
+// IG's own live quote — confirmed live no fixed constant is safe, e.g.
+// indices are ~1:1 with Yahoo but Nokia is ~69.74x) for the daily/weekly
+// strategies, since IG's Lightstreamer CHART subscription has no DAY/WEEK
+// resolution at all (confirmed live: HOUR works, DAY/WEEK don't exist).
+// For donchian_hourly/gemini_opinion specifically — the only two strategies
+// on an hourly timeframe — igStrategyBot.ts instead streams these live via
+// Lightstreamer (HOUR resolution, confirmed live working), which needs no
+// scale guessing at all since the data is already in IG's own native units.
+export const LIGHTSTREAM_ELIGIBLE_EPICS = new Set([
+  // Indices
+  'IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.DAILY.IP', 'IX.D.SANDA.DAILY.IP',
+  'IX.D.FTSE.DAILY.IP', 'IX.D.EUROST.DAILY.IP', 'IX.D.DAX.DAILY.IP',
+  // UK stocks
+  'UC.D.BARC.CASH.IP', 'UC.D.BP.CASH.IP', 'UC.D.HSBA.CASH.IP',
+  'UC.D.SHEL.CASH.IP', 'UC.D.GSK.CASH.IP', 'UC.D.AZN.CASH.IP', 'UC.D.LLOY.CASH.IP',
+]);
+
 // ── IG resolution per strategy ────────────────────────────────────────────────
 
 const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: number }> = {
