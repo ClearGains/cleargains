@@ -11,6 +11,17 @@ const AVAILABLE_INSTRUMENTS = DEFAULT_WATCHLIST.filter(m => m.enabled).map(m => 
 const ALL_EPICS = AVAILABLE_INSTRUMENTS.map(m => m.epic);
 const POLL_INTERVAL = 8_000;
 
+// FX scalper — separate bot from the Lightstreamer data-only streams below:
+// this one actually places real orders (fxScalperBot.ts on the bot server).
+const FX_PAIRS = [
+  { epic: 'CS.D.GBPUSD.TODAY.IP', name: 'GBP/USD' },
+  { epic: 'CS.D.EURUSD.TODAY.IP', name: 'EUR/USD' },
+  { epic: 'CS.D.USDJPY.TODAY.IP', name: 'USD/JPY' },
+  { epic: 'CS.D.EURGBP.TODAY.IP', name: 'EUR/GBP' },
+  { epic: 'CS.D.AUDUSD.TODAY.IP', name: 'AUD/USD' },
+];
+const FX_EPICS = FX_PAIRS.map(p => p.epic);
+
 type AccountKey = 'demo' | 'live';
 
 type LogEntry = {
@@ -384,6 +395,248 @@ function MarketGrid({ serverOnline }: { serverOnline: boolean | null }) {
   );
 }
 
+// ── FX scalper panel — real order execution, separate from the data-only
+// Lightstreamer streams above ─────────────────────────────────────────────────
+
+type FxEpicStatus = {
+  state:      string;
+  direction:  'BUY' | 'SELL';
+  entryPrice: number;
+  lastPrice:  number;
+  dealId:     string;
+  pnlPct:     number | null;
+};
+
+type FxStatus = {
+  mode:             AccountKey;
+  running:          boolean;
+  paused:           boolean;
+  streamConnected:  boolean;
+  epics:            string[];
+  maxRiskGbp:       number;
+  epicStatuses:     Record<string, FxEpicStatus>;
+  log:              LogEntry[];
+  sessionOk:        boolean;
+  sessionExpiry:    string | null;
+};
+
+function FxScalperAccountPanel({ account, serverOnline }: { account: AccountKey; serverOnline: boolean | null }) {
+  const [status, setStatus]         = useState<FxStatus | null>(null);
+  const [loading, setLoading]       = useState(false);
+  const [error, setError]           = useState<string | null>(null);
+  const [selectedEpics, setSelected] = useState<string[]>(FX_EPICS);
+  const [maxRiskGbp, setMaxRiskGbp] = useState(5);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/fx-scalper?mode=${account}`);
+      if (!r.ok) { setError(`HTTP ${r.status}`); return; }
+      const d = await r.json() as FxStatus;
+      setStatus(d);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Fetch failed');
+    }
+  }, [account]);
+
+  useEffect(() => { void fetchStatus(); }, [fetchStatus]);
+
+  useEffect(() => {
+    if (status?.running) {
+      pollRef.current = setInterval(() => { void fetchStatus(); }, POLL_INTERVAL);
+    } else if (pollRef.current) {
+      clearInterval(pollRef.current); pollRef.current = null;
+    }
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [status?.running, fetchStatus]);
+
+  async function call(action: string, body?: unknown) {
+    setLoading(true); setError(null);
+    try {
+      const r = await fetch(`/api/fx-scalper?mode=${account}&action=${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      const d = await r.json() as { ok?: boolean; error?: string };
+      if (d.ok === false) setError(d.error ?? 'Failed');
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const running = status?.running ?? false;
+  const paused  = status?.paused  ?? false;
+  const isLive  = account === 'live';
+
+  return (
+    <div className={clsx(
+      'rounded-lg border p-3 space-y-2.5',
+      isLive ? 'border-orange-500/30 bg-orange-500/5' : 'border-cyan-500/30 bg-cyan-500/5'
+    )}>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold text-white uppercase tracking-wider">
+            {isLive ? '🔴 Live' : '🔵 Demo'} FX Scalper
+          </span>
+          <span className={clsx(
+            'text-[9px] px-1.5 py-0.5 rounded font-bold border',
+            running && !paused
+              ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 animate-pulse'
+              : running && paused
+              ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
+              : 'bg-gray-700 text-gray-400 border-gray-600'
+          )}>
+            {running && !paused ? 'TRADING' : running && paused ? 'PAUSED' : 'OFF'}
+          </span>
+          {status?.streamConnected === false && running && (
+            <span className="text-[9px] text-yellow-400 flex items-center gap-1">
+              <AlertTriangle className="h-2.5 w-2.5" /> Disconnected
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => void fetchStatus()} className="text-gray-600 hover:text-gray-400">
+            <RefreshCw className="h-3 w-3" />
+          </button>
+          {running && (
+            <Button size="sm" variant="ghost"
+              icon={paused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+              onClick={() => void call(paused ? 'resume' : 'pause')}
+              disabled={loading || serverOnline === false}
+            >
+              {paused ? 'Resume' : 'Pause'}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant={running ? 'danger' : isLive ? 'primary' : 'secondary'}
+            icon={running ? <Square className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+            onClick={() => void (running
+              ? call('stop')
+              : call('start', { epics: selectedEpics, maxRiskGbp })
+            )}
+            disabled={loading || serverOnline === false || serverOnline === null}
+          >
+            {loading ? '…' : running ? 'Stop' : `Start ${isLive ? 'Live' : 'Demo'}`}
+          </Button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1">{error}</div>
+      )}
+
+      {/* Pair + risk selector — only when stopped */}
+      {!running && (
+        <div className="bg-gray-900/50 border border-gray-800 rounded p-2 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider">FX pairs to trade</p>
+            <div className="flex gap-1.5">
+              <button onClick={() => setSelected(FX_EPICS)} className="text-[9px] text-gray-500 hover:text-gray-300">All</button>
+              <button onClick={() => setSelected([])} className="text-[9px] text-gray-500 hover:text-gray-300">None</button>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {FX_PAIRS.map(pair => (
+              <button
+                key={pair.epic}
+                onClick={() => setSelected(prev =>
+                  prev.includes(pair.epic) ? prev.filter(e => e !== pair.epic) : [...prev, pair.epic]
+                )}
+                className={clsx(
+                  'text-[10px] px-2 py-0.5 rounded border transition-all',
+                  selectedEpics.includes(pair.epic)
+                    ? isLive
+                      ? 'bg-orange-500/20 text-orange-400 border-orange-500/40'
+                      : 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40'
+                    : 'bg-gray-800 text-gray-500 border-gray-700 hover:border-gray-500'
+                )}
+              >
+                {pair.name}
+              </button>
+            ))}
+          </div>
+          <label className="flex items-center gap-2 text-[10px] text-gray-500">
+            Max risk £ per trade
+            <input
+              type="number" min={0.5} step={0.5} value={maxRiskGbp}
+              onChange={e => setMaxRiskGbp(Number(e.target.value))}
+              className="w-16 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-gray-200 text-[10px]"
+            />
+          </label>
+        </div>
+      )}
+
+      {/* Per-pair states + log */}
+      {status && running && Object.keys(status.epicStatuses).length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider">Pair States</p>
+            {Object.entries(status.epicStatuses).map(([epic, s]) => {
+              const name = FX_PAIRS.find(p => p.epic === epic)?.name ?? epic.split('.').slice(0, 3).join('.');
+              return (
+                <div key={epic} className="flex items-center justify-between bg-gray-900/60 rounded px-2 py-1">
+                  <span className="text-[10px] text-gray-300">{name}</span>
+                  <div className="flex items-center gap-2 text-[10px]">
+                    {s.state === 'IN_POSITION' && (
+                      <span className={s.direction === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>
+                        {s.direction}
+                      </span>
+                    )}
+                    <span className={clsx('font-medium',
+                      s.state === 'IN_POSITION' ? 'text-emerald-400' :
+                      s.state === 'COOLDOWN'    ? 'text-yellow-400' : 'text-gray-400'
+                    )}>
+                      {s.state}
+                    </span>
+                    {s.pnlPct !== null && (
+                      <span className={s.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                        {s.pnlPct >= 0 ? '+' : ''}{s.pnlPct.toFixed(3)}%
+                      </span>
+                    )}
+                    <span className="text-gray-600 font-mono">{s.lastPrice.toFixed(1)}</span>
+                  </div>
+                </div>
+              );
+            })}
+            {paused && (
+              <div className="text-[10px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1 mt-1">
+                ⏸ Paused — monitoring open positions, no new entries
+              </div>
+            )}
+            <div className="text-[10px] text-gray-600 mt-1">
+              Max risk £{status.maxRiskGbp}/trade
+              {status.sessionExpiry && ` · session ${status.sessionOk ? 'valid' : 'expired'}, renews ${new Date(status.sessionExpiry).toLocaleTimeString()}`}
+            </div>
+          </div>
+
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Trade log</p>
+            <div className="h-44 overflow-y-auto space-y-0.5 bg-gray-950/60 border border-gray-800 rounded p-2">
+              {status.log.length === 0 && (
+                <p className="text-[10px] text-gray-600 text-center mt-6">Waiting for candles…</p>
+              )}
+              {status.log.map(entry => (
+                <div key={entry.id} className="flex gap-1.5 text-[10px] font-mono">
+                  <span className="text-gray-600 shrink-0">{entry.ts}</span>
+                  <span className="text-gray-500 shrink-0">[{entry.epic.slice(0, 10)}]</span>
+                  <span className={logTypeStyle[entry.type]}>{entry.msg}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function IGServerBot() {
@@ -432,15 +685,22 @@ export function IGServerBot() {
       {/* Market intelligence grid — live RSI/MACD/ATR from Lightstreamer */}
       <MarketGrid serverOnline={serverOnline} />
 
+      {/* FX scalper — real order execution, separate bot from the streams below */}
+      <div className="space-y-2">
+        <p className="text-[10px] text-gray-500 uppercase tracking-wider">FX Scalper — places real orders</p>
+        <FxScalperAccountPanel account="demo" serverOnline={serverOnline} />
+        <FxScalperAccountPanel account="live" serverOnline={serverOnline} />
+      </div>
+
       {/* Stream controls (one per account) */}
       <div className="space-y-2">
-        <p className="text-[10px] text-gray-500 uppercase tracking-wider">Lightstreamer Data Streams</p>
+        <p className="text-[10px] text-gray-500 uppercase tracking-wider">Lightstreamer Data Streams (signal-only)</p>
         <AccountPanel account="demo" serverOnline={serverOnline} />
         <AccountPanel account="live" serverOnline={serverOnline} />
       </div>
 
       <p className="text-[9px] text-gray-600">
-        Streams real-time 1-min candles from IG Lightstreamer · computes RSI, MACD, ATR · exports live signals to IG Spread Bet tab · no order placement
+        FX Scalper places real orders via fxScalperBot.ts (own risk/loss controls, Gemini-confirmed entries). The Lightstreamer Data Streams below are signal-only — RSI/MACD/ATR computed live, exported to the IG Spread Bet tab, no order placement.
       </p>
     </Card>
   );

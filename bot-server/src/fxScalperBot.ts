@@ -444,6 +444,18 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         const st = epicStates[epic];
         if (!st) continue;
         for (const bar of bars) processTick(st, barToTick(epic, bar), currentConfig);
+        // Historical replay can itself satisfy processTick's ENTER conditions
+        // on the last bar, flipping st.state to IN_POSITION with no real
+        // order behind it (dealId/entryPrice stay 0) — that phantom state
+        // would then block real entries on this epic until a live reversal
+        // happened to self-correct it back to FLAT. Only reset the phantom
+        // case (no dealId); a persisted dealId here means a genuinely open
+        // position survived a restart and must stay IN_POSITION.
+        if (st.state === 'IN_POSITION' && !st.dealId) {
+          st.state = 'FLAT';
+          st.consecutiveReds = 0;
+          st.consecutiveGreens = 0;
+        }
         warmed++;
         addLog('info', epicName(epic), `Pre-warmed ${bars.length} candles — ${st.closedCandles.length} closed, ready: ${st.closedCandles.length >= 26}`);
       } catch (e) {
