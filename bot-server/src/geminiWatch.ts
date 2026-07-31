@@ -243,7 +243,12 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     } catch { /* best-effort — proceed without it */ }
   }
 
-  const SHARP_DIP_THRESHOLD_PCT = 1.5;
+  // FX naturally oscillates more within what's still "normal" than a stock
+  // does — a same-size move that would be a real warning sign for a stock
+  // (news-driven, directional) is often just ordinary short-term noise for
+  // a currency pair. Give FX more room before treating a move as alarming.
+  const isFx = p.epic.startsWith('CS.');
+  const SHARP_DIP_THRESHOLD_PCT = isFx ? 2.5 : 1.5;
   const sharpDip = sharpDipPercent !== undefined && sharpDipPercent >= SHARP_DIP_THRESHOLD_PCT;
 
   const moved = !last || Math.abs(p.upl - last.upl) >= MOVE_THRESHOLD_GBP;
