@@ -36,7 +36,7 @@ type TradeState = {
 const INDICES = [
   { name: 'FTSE 100',      epic: 'IX.D.FTSE.DAILY.IP',    currency: 'GBP' },
   { name: 'S&P 500',       epic: 'IX.D.SPTRD.DAILY.IP',   currency: 'USD' },
-  { name: 'NASDAQ 100',    epic: 'IX.D.NASDAQ.DAILY.IP',  currency: 'USD' },
+  { name: 'NASDAQ 100',    epic: 'IX.D.NASDAQ.CASH.IP',   currency: 'USD' },
   { name: 'Wall Street',   epic: 'IX.D.DOW.DAILY.IP',     currency: 'USD' },
   { name: 'Germany 40',    epic: 'IX.D.DAX.DAILY.IP',     currency: 'EUR' },
   { name: 'Japan 225',     epic: 'IX.D.NIKKEI.DAILY.IP',  currency: 'USD' },

@@ -6,6 +6,7 @@ type OnTickFn = (tick: CandleTick) => void;
 
 const FOREX_BATCH_SIZE = 3;
 const INDEX_BATCH_SIZE = 6;
+const SHARE_BATCH_SIZE = 6;
 
 // ── Per-instance stream factory ───────────────────────────────────────────────
 
@@ -54,6 +55,11 @@ export function createStreamManager(label = 'igStream'): StreamManager {
     const fields = ['UTM', 'BID_OPEN', 'BID_HIGH', 'BID_LOW', 'BID_CLOSE', 'OFR_OPEN', 'OFR_HIGH', 'OFR_LOW', 'OFR_CLOSE', 'CONS_END'];
     const forexEpics = epics.filter(e => e.startsWith('CS.D.'));
     const indexEpics = epics.filter(e => e.startsWith('IX.D.'));
+    // Confirmed live this was a real bug: any epic not matching CS.D./IX.D.
+    // (e.g. KA.D.* UK shares) was silently dropped from every subscription —
+    // never batched, never subscribed, no error either, ticks simply never
+    // arrived. Everything else now gets its own batch too.
+    const shareEpics = epics.filter(e => !e.startsWith('CS.D.') && !e.startsWith('IX.D.'));
 
     function subscribeBatches(batchEpics: string[], batchSize: number) {
       for (let i = 0; i < batchEpics.length; i += batchSize) {
@@ -90,11 +96,12 @@ export function createStreamManager(label = 'igStream'): StreamManager {
       }
     }
 
-    // Forex and index epics in separate subscriptions — mixing causes silent data loss
+    // Forex, index, and share epics in separate subscriptions — mixing causes silent data loss
     subscribeBatches(forexEpics, FOREX_BATCH_SIZE);
     subscribeBatches(indexEpics, INDEX_BATCH_SIZE);
+    subscribeBatches(shareEpics, SHARE_BATCH_SIZE);
 
-    console.log(`[${label}] Subscribed to ${epics.length} epic(s): ${forexEpics.length} forex in ${Math.ceil(forexEpics.length / FOREX_BATCH_SIZE)} sub(s), ${indexEpics.length} indices in ${Math.ceil(indexEpics.length / INDEX_BATCH_SIZE)} sub(s)`);
+    console.log(`[${label}] Subscribed to ${epics.length} epic(s): ${forexEpics.length} forex in ${Math.ceil(forexEpics.length / FOREX_BATCH_SIZE)} sub(s), ${indexEpics.length} indices in ${Math.ceil(indexEpics.length / INDEX_BATCH_SIZE)} sub(s), ${shareEpics.length} shares in ${Math.ceil(shareEpics.length / SHARE_BATCH_SIZE)} sub(s)`);
   }
 
   return { connect, disconnect, isConnected: () => _connected };

@@ -34,7 +34,7 @@ const MARKETS: MarketDef[] = [
   // Indices
   { name: 'FTSE 100',    yahooSymbol: '^FTSE',     igEpic: 'IX.D.FTSE.DAILY.IP',     type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 1   },
   { name: 'S&P 500',     yahooSymbol: '^GSPC',     igEpic: 'IX.D.SPTRD.DAILY.IP',    type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 0.6 },
-  { name: 'NASDAQ 100',  yahooSymbol: '^IXIC',     igEpic: 'IX.D.NASDAQ.DAILY.IP',   type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 1   },
+  { name: 'NASDAQ 100',  yahooSymbol: '^IXIC',     igEpic: 'IX.D.NASDAQ.CASH.IP',    type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 1   },
   { name: 'Germany 40',  yahooSymbol: '^GDAXI',    igEpic: 'IX.D.DAX.DAILY.IP',      type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 1   },
   { name: 'Wall Street', yahooSymbol: '^DJI',      igEpic: 'IX.D.DOW.DAILY.IP',      type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 2   },
   { name: 'Japan 225',   yahooSymbol: '^N225',     igEpic: 'IX.D.NIKKEI.DAILY.IP',   type: 'INDEX',     priceFactor: 1,     marginPct: 0.05,  spread: 6   },

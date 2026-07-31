@@ -73,10 +73,10 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'CS.D.AUDUSD.TODAY.IP': 'AUDUSD=X',
   // Indices
   'IX.D.DOW.DAILY.IP':    '^DJI',
-  'IX.D.NASDAQ.DAILY.IP': '^IXIC',
-  'IX.D.SANDA.DAILY.IP':  '^GSPC',
+  'IX.D.NASDAQ.CASH.IP':  '^IXIC',
+  'IX.D.SPTRD.DAILY.IP':  '^GSPC',
   'IX.D.FTSE.DAILY.IP':   '^FTSE',
-  'IX.D.EUROST.DAILY.IP': '^STOXX50E',
+  'IX.D.STXE.CASH.IP':    '^STOXX50E',
   'IX.D.DAX.DAILY.IP':    '^GDAXI',
   // US stocks
   'UA.D.AAPL.CASH.IP':  'AAPL',
@@ -111,13 +111,13 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   // Helsinki listing, not the US ADR (NOK) — matches IG's actual traded epic.
   'EC.D.NOKIAFP.DAILY.IP': 'NOKIA.HE',
   // UK stocks
-  'UC.D.BARC.CASH.IP': 'BARC.L',
-  'UC.D.BP.CASH.IP':   'BP.L',
-  'UC.D.HSBA.CASH.IP': 'HSBA.L',
-  'UC.D.SHEL.CASH.IP': 'SHEL.L',
-  'UC.D.GSK.CASH.IP':  'GSK.L',
-  'UC.D.AZN.CASH.IP':  'AZN.L',
-  'UC.D.LLOY.CASH.IP': 'LLOY.L',
+  'KA.D.BARC.DAILY.IP':   'BARC.L',
+  'KA.D.BP.DAILY.IP':     'BP.L',
+  'KA.D.HSBA.DAILY.IP':   'HSBA.L',
+  'KA.D.SHELLN.DAILY.IP': 'SHEL.L',
+  'KA.D.GSK.DAILY.IP':    'GSK.L',
+  'KA.D.AZN.DAILY.IP':    'AZN.L',
+  'KA.D.LLOY.DAILY.IP':   'LLOY.L',
 };
 
 // ── Epic → Alpaca ticker map ──────────────────────────────────────────────────

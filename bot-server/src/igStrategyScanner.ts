@@ -19,11 +19,17 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'CS.D.AUDUSD.TODAY.IP', name: 'AUD/USD'      },
   // US indices
   { epic: 'IX.D.DOW.DAILY.IP',    name: 'Wall St'      },
-  { epic: 'IX.D.NASDAQ.DAILY.IP', name: 'US Tech 100'  },
-  { epic: 'IX.D.SANDA.DAILY.IP',  name: 'US 500'       },
+  // Confirmed live: IX.D.NASDAQ.DAILY.IP / IX.D.SANDA.DAILY.IP / IX.D.EUROST.DAILY.IP
+  // don't resolve via IG's own fetchMarketDetails at all (undefined, not just
+  // missing a price) — stale/wrong epic codes, not a market-hours thing. The
+  // NASDAQ fix was already applied elsewhere in the codebase (lib/igStrategyEngine.ts,
+  // commit 331b1da) but never propagated to this file; SANDA/EUROST were never
+  // fixed anywhere. Corrected against a live IG market search.
+  { epic: 'IX.D.NASDAQ.CASH.IP',  name: 'US Tech 100'  },
+  { epic: 'IX.D.SPTRD.DAILY.IP',  name: 'US 500'       },
   // UK / EU indices
   { epic: 'IX.D.FTSE.DAILY.IP',   name: 'UK 100'       },
-  { epic: 'IX.D.EUROST.DAILY.IP', name: 'EU Stocks 50' },
+  { epic: 'IX.D.STXE.CASH.IP',    name: 'EU Stocks 50' },
   { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40'   },
   // Major US stocks (IG spreadbet format)
   { epic: 'UA.D.AAPL.CASH.IP',    name: 'Apple'        },
@@ -55,14 +61,17 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'SB.D.DELLUS.DAILY.IP', name: 'Dell'         },
   { epic: 'UC.D.RIMM.DAILY.IP',   name: 'BlackBerry'   },
   { epic: 'EC.D.NOKIAFP.DAILY.IP', name: 'Nokia'       },
-  // Major UK stocks
-  { epic: 'UC.D.BARC.CASH.IP',    name: 'Barclays'     },
-  { epic: 'UC.D.BP.CASH.IP',      name: 'BP'           },
-  { epic: 'UC.D.HSBA.CASH.IP',    name: 'HSBC'         },
-  { epic: 'UC.D.SHEL.CASH.IP',    name: 'Shell'        },
-  { epic: 'UC.D.GSK.CASH.IP',     name: 'GSK'          },
-  { epic: 'UC.D.AZN.CASH.IP',     name: 'AstraZeneca'  },
-  { epic: 'UC.D.LLOY.CASH.IP',    name: 'Lloyds'       },
+  // Major UK stocks — confirmed live these were ALL wrong (UC.D.*.CASH.IP
+  // doesn't exist as an epic at all, not just closed/no-quote — IG's own
+  // market search shows the real prefix is KA.D.*.DAILY.IP). These have
+  // likely never actually resolved, this session or before.
+  { epic: 'KA.D.BARC.DAILY.IP',   name: 'Barclays'     },
+  { epic: 'KA.D.BP.DAILY.IP',     name: 'BP'           },
+  { epic: 'KA.D.HSBA.DAILY.IP',   name: 'HSBC'         },
+  { epic: 'KA.D.SHELLN.DAILY.IP', name: 'Shell'        },
+  { epic: 'KA.D.GSK.DAILY.IP',    name: 'GSK'          },
+  { epic: 'KA.D.AZN.DAILY.IP',    name: 'AstraZeneca'  },
+  { epic: 'KA.D.LLOY.DAILY.IP',   name: 'Lloyds'       },
 ];
 
 // The 5 FX majors above, also owned exclusively by fxScalperBot.ts (a
@@ -110,11 +119,11 @@ export const MANUAL_ONLY_EPICS = new Set([
 // scale guessing at all since the data is already in IG's own native units.
 export const LIGHTSTREAM_ELIGIBLE_EPICS = new Set([
   // Indices
-  'IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.DAILY.IP', 'IX.D.SANDA.DAILY.IP',
-  'IX.D.FTSE.DAILY.IP', 'IX.D.EUROST.DAILY.IP', 'IX.D.DAX.DAILY.IP',
+  'IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.CASH.IP', 'IX.D.SPTRD.DAILY.IP',
+  'IX.D.FTSE.DAILY.IP', 'IX.D.STXE.CASH.IP', 'IX.D.DAX.DAILY.IP',
   // UK stocks
-  'UC.D.BARC.CASH.IP', 'UC.D.BP.CASH.IP', 'UC.D.HSBA.CASH.IP',
-  'UC.D.SHEL.CASH.IP', 'UC.D.GSK.CASH.IP', 'UC.D.AZN.CASH.IP', 'UC.D.LLOY.CASH.IP',
+  'KA.D.BARC.DAILY.IP', 'KA.D.BP.DAILY.IP', 'KA.D.HSBA.DAILY.IP',
+  'KA.D.SHELLN.DAILY.IP', 'KA.D.GSK.DAILY.IP', 'KA.D.AZN.DAILY.IP', 'KA.D.LLOY.DAILY.IP',
 ]);
 
 // ── IG resolution per strategy ────────────────────────────────────────────────

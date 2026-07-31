@@ -1855,7 +1855,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
     cfg.epics = best;
   } catch (e) {
     addLog(mode, 'info', '—', `Scan failed — using default indices: ${e instanceof Error ? e.message : String(e)}`);
-    cfg.epics = ['IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.DAILY.IP', 'IX.D.FTSE.DAILY.IP'];
+    cfg.epics = ['IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.CASH.IP', 'IX.D.FTSE.DAILY.IP'];
   }
 
   if (cfg.strategy === 'orb') resetOrbState(mode, cfg.epics);
