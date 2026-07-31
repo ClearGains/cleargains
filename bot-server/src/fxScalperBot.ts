@@ -147,7 +147,8 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   const tag    = `fx-scalper:${mode}`;
   const stream = createStreamManager(`igStream:fxScalper:${mode}`);
 
-  let session:       IGSession | null = null;
+  let session:       IGSession | null = null; // execution — live creds for the live instance, places/closes real orders
+  let dataSession:   IGSession | null = null; // data — ALWAYS demo creds, feeds Lightstreamer + prewarm's candle history
   let running        = false;
   let paused         = false;
   let currentEpics:  string[] = [];
@@ -192,15 +193,32 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     sessionRefreshTimer = setTimeout(() => { void doRefresh(); }, delay);
   }
 
+  // Data session credentials — ALWAYS demo, regardless of which mode this
+  // instance is. IG's demo account streams the same real market data as
+  // live (only the account/execution side is simulated), and demo's
+  // historical-data REST allowance is tracked completely independently from
+  // live's — sourcing candles from demo means generating a signal never
+  // touches the live account's own allowance, which (confirmed live) gets
+  // exhausted far more easily since it also carries the stock bot's poll
+  // traffic. For the demo instance itself, data and execution are already
+  // the same account, so this just reuses the execution session directly.
+  async function authDataSession(): Promise<IGSession> {
+    if (mode === 'demo') return session!;
+    const dataCreds = resolveCredentials('demo');
+    if (!dataCreds.apiKey) throw new Error('IG_DEMO_API_KEY / USERNAME / PASSWORD not set — required for live FX data feed');
+    return authenticate(dataCreds.apiKey, dataCreds.username, dataCreds.password, dataCreds.env, `fxscalper-data:${mode}`);
+  }
+
   async function doRefresh(): Promise<void> {
     const creds = resolveCredentials(mode);
     if (!creds.apiKey) return;
     try {
-      addLog('info', '—', 'Refreshing IG session...');
-      session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, `fxscalper:${mode}`);
+      addLog('info', '—', 'Refreshing IG session(s)...');
+      session     = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, `fxscalper:${mode}`);
+      dataSession = await authDataSession();
       authFailCount = 0;
-      addLog('info', '—', `Session refreshed — expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
-      if (running) stream.connect(session, currentEpics, handleTick, '5MINUTE');
+      addLog('info', '—', `Session(s) refreshed — execution expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+      if (running) stream.connect(dataSession, currentEpics, handleTick, '5MINUTE');
       scheduleRefresh(session);
     } catch (e) {
       authFailCount++;
@@ -440,6 +458,11 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     for (const epic of epics) {
       try {
         const bars = await fetchCandleHistory(sess, epic, 'MINUTE_5', 35);
+        // Spaced out, matching the throttle igStrategyScanner.ts already uses
+        // for its own IG-hitting calls — back-to-back calls with no spacing
+        // is exactly what's tripped IG's account-wide allowance before
+        // (confirmed live: a burst of rapid restarts is enough on its own).
+        await new Promise(r => setTimeout(r, 1200));
         if (!bars.length) continue;
         const st = epicStates[epic];
         if (!st) continue;
@@ -484,7 +507,9 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       currentConfig = { ...DEFAULT_CONFIG, ...(params.config ?? {}) };
 
       addLog('info', '—', `Starting FX scalper — epics: ${currentEpics.join(', ')} | £${maxRiskGbp} risk/trade`);
-      session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, `fxscalper:${mode}`);
+      session     = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, `fxscalper:${mode}`);
+      dataSession = await authDataSession();
+      if (mode === 'live') addLog('info', '—', 'Data feed: demo account (real market data, keeps live\'s own allowance untouched) · Execution: live account');
 
       // Restore any positions still open from before a restart — falls back
       // to a fresh FLAT state for any epic with no persisted record.
@@ -494,11 +519,11 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         epicStates[epic] = persisted?.[epic] ?? initEpicState(epic);
       }
 
-      await prewarmCandles(session, currentEpics);
+      await prewarmCandles(dataSession, currentEpics);
 
       running = true;
       paused  = false;
-      stream.connect(session, currentEpics, handleTick, '5MINUTE');
+      stream.connect(dataSession, currentEpics, handleTick, '5MINUTE');
       scheduleRefresh(session);
 
       if (maintenanceTimer) clearInterval(maintenanceTimer);
@@ -522,6 +547,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
     if (maintenanceTimer)    { clearInterval(maintenanceTimer);   maintenanceTimer = null; }
     session = null;
+    dataSession = null;
     clearStartState(mode);
     if (log.length) addLog('info', '—', 'FX scalper stopped');
   }
