@@ -22,6 +22,7 @@ import { getJournal } from './tradeJournal';
 import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } from './leaderboard';
 import { startGeminiWatch, getWatchedDealIds, addToWatch, removeFromWatch } from './geminiWatch';
 import { fetchFullPositions, getSession } from './igApi';
+import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -431,6 +432,45 @@ app.post('/ig-strategy/:mode/resume', auth, (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+// ── FX scalper — dedicated, Lightstreamer-driven, real execution ───────────
+app.get('/fx-scalper/:mode/status', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  res.json(getFxScalperBot(mode).status());
+});
+
+app.post('/fx-scalper/:mode/start', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const body = req.body as FxScalperStartParams;
+
+  res.json({ ok: true, message: 'FX scalper starting…' });
+  void getFxScalperBot(mode).start(body).then(r => {
+    if (!r.ok) console.error(`[fx-scalper] Start failed: ${r.error}`);
+  });
+});
+
+app.post('/fx-scalper/:mode/stop', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  getFxScalperBot(mode).stop();
+  res.json({ ok: true });
+});
+
+app.post('/fx-scalper/:mode/pause', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  getFxScalperBot(mode).pause();
+  res.json({ ok: true });
+});
+
+app.post('/fx-scalper/:mode/resume', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  getFxScalperBot(mode).resume();
+  res.json({ ok: true });
+});
+
 // ── Gemini position watch ─────────────────────────────────────────────────────
 // Lists all currently open IG positions for the account (however they were
 // opened — manually, via the strategy bot, anywhere) alongside which ones are
@@ -581,6 +621,27 @@ app.listen(PORT, '0.0.0.0', () => {
     void startIgStrategyBot(savedIg).then(r => {
       if (r.ok) console.log(`[bot-server] IG strategy ${mode} auto-resume successful`);
       else console.error(`[bot-server] IG strategy ${mode} auto-resume failed: ${r.error}`);
+    });
+  }
+
+  // Auto-resume the FX scalper (demo/live) if it was running before restart —
+  // same rationale as the other auto-resumes: without this, any position it
+  // still holds goes unmanaged (no exits, no maintenance sweep) until someone
+  // notices and restarts it by hand.
+  for (const mode of ['demo', 'live'] as const) {
+    const savedFx = loadSavedFxScalperState(mode);
+    if (!savedFx) continue;
+    const hasCreds = mode === 'live'
+      ? !!(process.env.IG_LIVE_API_KEY)
+      : !!(process.env.IG_DEMO_API_KEY ?? process.env.IG_API_KEY);
+    if (!hasCreds) {
+      console.warn(`[bot-server] Skipping FX scalper ${mode} auto-resume — credentials not set`);
+      continue;
+    }
+    console.log(`[bot-server] Auto-resuming FX scalper ${mode} bot (${savedFx.epics.length} epic(s))...`);
+    void getFxScalperBot(mode).start(savedFx).then(r => {
+      if (r.ok) console.log(`[bot-server] FX scalper ${mode} auto-resume successful`);
+      else console.error(`[bot-server] FX scalper ${mode} auto-resume failed: ${r.error}`);
     });
   }
 });

@@ -299,6 +299,25 @@ export function isDealManaged(mode: IgMode, dealId: string): boolean {
   const st = ms(mode);
   return st.botOpenedDeals.has(dealId) || st.releasedDeals.has(dealId);
 }
+
+// Read-only escape hatch for other bot modules (e.g. fxScalperBot.ts) that
+// want to respect this mode's own daily-loss circuit breaker as a shared
+// account-wide backstop, without duplicating the balance/day-start tracking
+// that computes it.
+export function isLossLocked(mode: IgMode): boolean {
+  return ms(mode).lossLock;
+}
+
+// Mirrors exactly what executeIgSignal does inline right after a successful
+// placeMarketOrder call — pulled out so other bot modules placing their own
+// orders directly (bypassing executeIgSignal entirely) can still register
+// into the same persisted set, which is what makes self-heal-of-naked-stops
+// and the daily-loss lock treat their positions the same as this bot's own.
+export function registerBotOpenedDeal(mode: IgMode, dealId: string): void {
+  const st = ms(mode);
+  st.botOpenedDeals.add(dealId);
+  saveBotOpenedDeals(mode, st.botOpenedDeals);
+}
 export function releaseDeal(mode: IgMode, dealId: string): void {
   const st = ms(mode);
   st.releasedDeals.add(dealId);

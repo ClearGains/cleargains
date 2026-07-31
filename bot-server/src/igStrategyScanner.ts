@@ -65,6 +65,18 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'UC.D.LLOY.CASH.IP',    name: 'Lloyds'       },
 ];
 
+// The 5 FX majors above, also owned exclusively by fxScalperBot.ts (a
+// dedicated, Lightstreamer-driven FX scalper with its own risk/loss-lock
+// checks) — exported so this scanner can exclude them from every stock-bot
+// strategy's own candidate pool below. Without this, several strategies
+// (ema_crossover, donchian, macd_crossover, weekly_momentum, gemini_opinion)
+// could independently decide to trade the same pair fxScalperBot.ts is
+// already watching, racing two uncoordinated bots against each other on one
+// live account with no shared awareness of one another's positions.
+export const FX_EPICS = new Set(
+  IG_EPICS.filter(e => e.epic.startsWith('CS.')).map(e => e.epic),
+);
+
 // ── IG resolution per strategy ────────────────────────────────────────────────
 
 const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: number }> = {
@@ -286,7 +298,9 @@ export async function scanIgEpics(
   log:      (msg: string) => void = console.log,
 ): Promise<string[]> {
   const alpacaOnly = ALPACA_ONLY_STRATEGIES.has(strategy);
-  const pool = IG_EPICS.filter(e => !exclude.includes(e.epic) && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
+  // FX excluded unconditionally — fxScalperBot.ts owns FX trading exclusively
+  // (dedicated Lightstreamer feed + its own risk checks), see FX_EPICS above.
+  const pool = IG_EPICS.filter(e => !exclude.includes(e.epic) && !FX_EPICS.has(e.epic) && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
   const useYahoo = YAHOO_SCAN_STRATEGIES.has(strategy);
   log(`[ig-scanner] Fetching bars for ${pool.length} epics (strategy: ${strategy}, source: ${useYahoo ? 'yahoo (free)' : 'ig'})…`);
 
