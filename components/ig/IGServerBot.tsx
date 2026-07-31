@@ -13,12 +13,19 @@ const POLL_INTERVAL = 8_000;
 
 // FX scalper — separate bot from the Lightstreamer data-only streams below:
 // this one actually places real orders (fxScalperBot.ts on the bot server).
+// Also trades 4 indices alongside the 5 FX majors (marketHours.ts already
+// has real session hours defined for these — previously only used by the
+// signal-only Lightstreamer displays, never wired into this trading bot).
 const FX_PAIRS = [
   { epic: 'CS.D.GBPUSD.TODAY.IP', name: 'GBP/USD' },
   { epic: 'CS.D.EURUSD.TODAY.IP', name: 'EUR/USD' },
   { epic: 'CS.D.USDJPY.TODAY.IP', name: 'USD/JPY' },
   { epic: 'CS.D.EURGBP.TODAY.IP', name: 'EUR/GBP' },
   { epic: 'CS.D.AUDUSD.TODAY.IP', name: 'AUD/USD' },
+  { epic: 'IX.D.FTSE.DAILY.IP',   name: 'FTSE 100' },
+  { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40' },
+  { epic: 'IX.D.DOW.DAILY.IP',    name: 'Wall Street' },
+  { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225' },
 ];
 const FX_EPICS = FX_PAIRS.map(p => p.epic);
 
@@ -536,7 +543,7 @@ function FxScalperAccountPanel({ account, serverOnline }: { account: AccountKey;
       {!running && (
         <div className="bg-gray-900/50 border border-gray-800 rounded p-2 space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-[10px] text-gray-500 uppercase tracking-wider">FX pairs to trade</p>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider">Instruments to trade</p>
             <div className="flex gap-1.5">
               <button onClick={() => setSelected(FX_EPICS)} className="text-[9px] text-gray-500 hover:text-gray-300">All</button>
               <button onClick={() => setSelected([])} className="text-[9px] text-gray-500 hover:text-gray-300">None</button>

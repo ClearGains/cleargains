@@ -14,7 +14,7 @@ import {
 import { isMarketOpen, isClosingSoon } from './marketHours';
 import { askGemini, type EntrySignal } from './gemini';
 import { resolveCredentials, isLossLocked, registerBotOpenedDeal, type IgMode } from './igStrategyBot';
-import { FX_EPICS } from './igStrategyScanner';
+import { FX_EPICS, SCALPER_INDEX_EPICS } from './igStrategyScanner';
 
 // ── Dedicated FX scalper — persistent, real execution ───────────────────────
 // Sources 5-min candles from IG's Lightstreamer feed (free, push-based — no
@@ -45,7 +45,7 @@ export type FxLogEntry = {
 };
 
 export type FxScalperStartParams = {
-  epics?:      string[];   // defaults to all 5 FX majors (FX_EPICS)
+  epics?:      string[];   // defaults to all 5 FX majors + 4 supported indices
   maxRiskGbp?: number;     // £ lost if stop hit — independent of igStrategyBot's own maxRiskGbp
   config?:     Partial<ScalperConfig>;
 };
@@ -514,8 +514,9 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       return { ok: false, error: `${varPrefix}API_KEY / USERNAME / PASSWORD env vars not set` };
     }
 
-    const requestedEpics = (params.epics?.length ? params.epics : [...FX_EPICS]).filter(e => FX_EPICS.has(e));
-    if (!requestedEpics.length) return { ok: false, error: 'No valid FX epics in request — must be one of the 5 FX majors' };
+    const requestedEpics = (params.epics?.length ? params.epics : [...FX_EPICS, ...SCALPER_INDEX_EPICS])
+      .filter(e => FX_EPICS.has(e) || SCALPER_INDEX_EPICS.has(e));
+    if (!requestedEpics.length) return { ok: false, error: 'No valid epics in request — must be one of the 5 FX majors or 4 supported indices' };
 
     try {
       authFailCount = 0;

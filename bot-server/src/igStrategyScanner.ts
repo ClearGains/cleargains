@@ -31,6 +31,8 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'IX.D.FTSE.DAILY.IP',   name: 'UK 100'       },
   { epic: 'IX.D.STXE.CASH.IP',    name: 'EU Stocks 50' },
   { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40'   },
+  // Asian index — confirmed live against IG's market search
+  { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225'    },
   // Major US stocks (IG spreadbet format)
   { epic: 'UA.D.AAPL.CASH.IP',    name: 'Apple'        },
   { epic: 'UA.D.MSFT.CASH.IP',    name: 'Microsoft'    },
@@ -85,6 +87,20 @@ export const IG_EPICS: { epic: string; name: string }[] = [
 export const FX_EPICS = new Set(
   IG_EPICS.filter(e => e.epic.startsWith('CS.')).map(e => e.epic),
 );
+
+// Indices fxScalperBot.ts is also allowed to trade, alongside the 5 FX
+// majors above — kept as a separate set (not merged into FX_EPICS) since
+// FX_EPICS is also used elsewhere to exclude currency pairs from the
+// stock/index bot's own scanning pool, and these indices should stay
+// eligible there too. marketHours.ts already has real session hours
+// defined for all 4 (was previously only used by the signal-only
+// Lightstreamer displays, never wired into the actual trading bot).
+export const SCALPER_INDEX_EPICS = new Set([
+  'IX.D.FTSE.DAILY.IP',   // UK 100
+  'IX.D.DAX.DAILY.IP',    // Germany 40
+  'IX.D.DOW.DAILY.IP',    // Wall St
+  'IX.D.NIKKEI.DAILY.IP', // Japan 225
+]);
 
 // Instruments worth surfacing as a manual heads-up but not worth the bot
 // actually auto-trading — excluded from scanIgEpics's live-trading pool
