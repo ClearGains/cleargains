@@ -85,10 +85,15 @@ export const FX_EPICS = new Set(
 // SK Hynix: no real Alpaca/US-listed ticker — its Korean primary listing is
 // a proxy, "close enough" for a free directional read but not something to
 // size or auto-enter real positions off. BlackBerry: user call, not a data
-// quality issue — flagged as not worth the bot auto-trading either.
+// quality issue — flagged as not worth the bot auto-trading either. Nokia:
+// Helsinki listing, same non-Alpaca situation as SK Hynix — confirmed live,
+// its entry-time bar fetch falls to IG's own allowance-limited REST candle
+// API (no free Alpaca/Yahoo path for a non-US-listed name at evaluation
+// time) and hit error.public-api.exceeded-account-historical-data-allowance.
 export const MANUAL_ONLY_EPICS = new Set([
-  'UD.D.SKHYUS.DAILY.IP', // SK Hynix
-  'UC.D.RIMM.DAILY.IP',   // BlackBerry
+  'UD.D.SKHYUS.DAILY.IP',  // SK Hynix
+  'UC.D.RIMM.DAILY.IP',    // BlackBerry
+  'EC.D.NOKIAFP.DAILY.IP', // Nokia
 ]);
 
 // ── IG resolution per strategy ────────────────────────────────────────────────
