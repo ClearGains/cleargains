@@ -345,7 +345,15 @@ export async function placeMarketOrder(
   if (!r.ok) throw new Error(`placeMarketOrder ${r.status}: ${d.errorCode ?? JSON.stringify(d)}`);
 
   const dealRef = d.dealReference ?? '';
-  let confirm: { dealId?: string; level?: number; dealStatus?: string; reason?: string } = {};
+  // Widened to capture whatever else IG's confirm response includes (IG's
+  // own "reason" field is frequently just the opaque literal string
+  // "UNKNOWN" with no further detail — confirmed a known, widely-reported
+  // gap in IG's own API, not something client-side to fix). Logging the
+  // full raw response on rejection at least preserves every field IG did
+  // send (affectedDeals, profit, timestamps, etc.) in case a pattern shows
+  // up across repeat occurrences, instead of discarding everything but the
+  // one unhelpful reason string.
+  let confirm: { dealId?: string; level?: number; dealStatus?: string; reason?: string } & Record<string, unknown> = {};
   for (let i = 0; i < 4; i++) {
     await new Promise(res => setTimeout(res, 1_500));
     try {
@@ -359,6 +367,7 @@ export async function placeMarketOrder(
   }
 
   if (confirm.dealStatus === 'REJECTED' || !confirm.dealId) {
+    console.error(`[igApi] placeMarketOrder REJECTED — epic=${epic} direction=${direction} size=${size} stopDist=${stopDist} profitDist=${profitDist} full confirm: ${JSON.stringify(confirm)}`);
     throw new Error(`Deal REJECTED: ${confirm.reason ?? confirm.dealStatus ?? 'unknown'}`);
   }
 
