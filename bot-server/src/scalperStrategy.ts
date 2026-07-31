@@ -171,8 +171,14 @@ export function processTick(
         };
       }
 
-      const wrongCandle = isLong ? isRed(tick) : isGreen(tick);
-      if (wrongCandle) {
+      // Two consecutive wrong-direction candles (was one — confirmed live
+      // this was cutting positions short on ordinary single-candle noise
+      // before they'd had any real chance to reach their stop or TP;
+      // requiring a second confirming candle filters that out while still
+      // cutting a genuinely reversing trade quickly, with the 3-in-a-row
+      // rule above as a hard backstop either way).
+      const consecutiveWrong = isLong ? st.consecutiveReds : st.consecutiveGreens;
+      if (consecutiveWrong >= 2) {
         const body = bodyPct(tick);
         const rsi  = calcRsi(st.closedCandles);
         // Noise filter
@@ -180,7 +186,7 @@ export function processTick(
           return { action: 'HOLD', reason: `Noise candle (${body.toFixed(2)}%) RSI ${rsi.toFixed(0)} — holding.` };
         }
         st.state = 'FLAT'; st.entryPrice = 0; st.dynamicStopPrice = 0; st.takeProfitPrice = 0;
-        return { action: 'EXIT', reason: `${isLong ? 'Red' : 'Green'} candle (${body.toFixed(2)}%). Exiting ${isLong ? 'LONG' : 'SHORT'}.`, urgency: 'on_close' };
+        return { action: 'EXIT', reason: `${consecutiveWrong} ${isLong ? 'red' : 'green'} candles (${body.toFixed(2)}%). Exiting ${isLong ? 'LONG' : 'SHORT'}.`, urgency: 'on_close' };
       }
 
       const pnl = st.entryPrice > 0
