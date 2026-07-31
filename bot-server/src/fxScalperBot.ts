@@ -314,8 +314,8 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
 
           const verdict = await askGemini(entrySignal);
           addLog('info', name, `Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
-          if (verdict.engine === 'fallback') {
-            addLog('info', name, '⚠ Gemini cap/key unavailable — trading on rules-only fallback verdict');
+          if (verdict.noCapacityReason) {
+            addLog('info', name, `⚠ Gemini ${verdict.noCapacityReason === 'cap-reached' ? 'daily cap reached' : 'API key unavailable'} — trading on rules-only fallback verdict`);
           }
 
           if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {

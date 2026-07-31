@@ -55,6 +55,12 @@ export type GeminiVerdict = {
   takeProfitPoints: number;   // points away for take profit
   betSize:          number;   // £/pt — auto-sized by Gemini based on volatility
   engine:           'gemini' | 'fallback';
+  // Only set when 'fallback' is actually due to no AI capacity (missing key
+  // or daily cap reached) — NOT set for the routine, expected case where the
+  // rules pre-filter itself said SKIP and Gemini was never even attempted.
+  // Callers should use this (not just engine === 'fallback') to decide
+  // whether something is actually wrong worth surfacing as a warning.
+  noCapacityReason?: 'missing-key' | 'cap-reached';
 };
 
 export type EntrySignal = {
@@ -111,11 +117,12 @@ export async function askGemini(signal: EntrySignal): Promise<GeminiVerdict> {
 
   // Stage 1: rules filter — always runs first
   const rules = fallbackVerdict(signal);
-  if (!apiKey || rules.direction === 'SKIP') return rules;
+  if (rules.direction === 'SKIP') return rules;
+  if (!apiKey) return { ...rules, noCapacityReason: 'missing-key' };
 
   if (!reserveGeminiCall()) {
     console.warn('[gemini] Daily call cap reached — using rules verdict');
-    return rules;
+    return { ...rules, noCapacityReason: 'cap-reached' };
   }
 
   // Stage 2: Gemini second opinion — only reached if rules say enter
