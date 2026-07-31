@@ -274,6 +274,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     dayChangePercent,
     sharpDipPercent,
     reversedToRed,
+    isFx,
   });
 
   addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);

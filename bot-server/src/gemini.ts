@@ -341,6 +341,14 @@ export type PositionReviewRequest = {
   // being down, since it means favorability actually reversed rather than
   // just never having been favorable yet.
   reversedToRed?: boolean;
+  // FX oscillates more within what's still normal short-term noise than a
+  // stock does — the same-size sharp-move/reversal signal above deserves a
+  // higher bar of evidence for FX than for a stock. Deliberately doesn't
+  // hide sharpDipPercent/reversedToRed below some cutoff when this is true
+  // (that would strip Gemini of information it might still need — e.g. a
+  // small move plus genuinely bad news is still worth closing over) —
+  // instead this only adjusts how much weight to give the signal alone.
+  isFx?: boolean;
 };
 
 export async function askGeminiPositionVerdict(req: PositionReviewRequest): Promise<PositionVerdict> {
@@ -370,10 +378,11 @@ Held for: ${req.heldHours.toFixed(1)} hours
 ${req.dayChangePercent !== undefined ? `Instrument's overall move today (independent of this position's own entry): ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
 ${req.sharpDipPercent !== undefined ? `⚠ SUDDEN MOVE: ${req.sharpDipPercent.toFixed(2)}% against this position in just the last few hours (independent of the day's overall move above). Treat a fast, sharp move against the position as a meaningful warning sign in its own right, not noise to smooth over — a real reversal often starts exactly like this, before news or the wider day's figures catch up to it.` : ''}
 ${req.reversedToRed ? `⚠ REVERSAL: this position was meaningfully in profit at an earlier point and has now swung into a loss. Even if the news below looks positive or is silent, a green-to-red reversal like this can mean a sell-off is already underway that hasn't been reported yet — weigh the reversal itself as a real reason to lean toward closing rather than assuming the fundamentals still hold just because nothing bad has been printed about it.` : ''}
+${req.isFx ? `Note: this is an FX pair. Currency pairs oscillate more within what's still ordinary short-term noise than a stock does — a move under roughly 2-3% is often just normal chop, not a genuine reversal. Apply a higher bar of evidence than you would for a stock before leaning toward closing over any sharp-move or reversal signal above: look for a clearly larger and/or sustained move, or real corroborating news, rather than the move alone.` : ''}
 ${req.stopLevel !== undefined ? `Stop-loss already attached at: ${req.stopLevel.toFixed(2)}` : 'No stop currently attached'}
 ${req.limitLevel !== undefined ? `Take-profit already attached at: ${req.limitLevel.toFixed(2)}` : 'No take-profit currently set'}
 ${headlineBlock}
-A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss. Decide only: is there a clear reason to close now — lock in a healthy gain, cut a loss before it likely gets worse, genuine news/volatility that could reverse this position's favorability, a sudden sharp move or green-to-red reversal flagged above (be extra vigilant here — lean toward CLOSE over HOLD when one of these is flagged unless there's a genuinely strong reason to think it's noise, since these are exactly the situations most likely to keep getting worse), or the instrument already being significantly extended today (e.g. a large % move already behind it, meaning limited further room and real pullback risk even if the entry thesis was sound) — or is holding for the stop/take-profit to do its job still reasonable? If no news is listed above, judge on price action alone.
+A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss. Decide only: is there a clear reason to close now — lock in a healthy gain, cut a loss before it likely gets worse, genuine news/volatility that could reverse this position's favorability, a sudden sharp move or green-to-red reversal flagged above (be extra vigilant here for a stock — lean toward CLOSE over HOLD unless there's a genuinely strong reason to think it's noise, since these are exactly the situations most likely to keep getting worse; for FX, apply the higher bar noted above first), or the instrument already being significantly extended today (e.g. a large % move already behind it, meaning limited further room and real pullback risk even if the entry thesis was sound) — or is holding for the stop/take-profit to do its job still reasonable? If no news is listed above, judge on price action alone.
 
 Respond with JSON only, no markdown:
 {"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
