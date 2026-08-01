@@ -90,6 +90,10 @@ export function IGCfdAutoTrader() {
   const [positions, setPositions]   = useState<IgPosition[]>([]);
   const [log, setLog]               = useState<LogEntry[]>([]);
   const [error, setError]           = useState<string | null>(null);
+  const [accountInfo, setAccountInfo] = useState<{
+    accountId: string; accountName: string; accountType: string;
+    balance: number; available: number; currency: string;
+  } | null>(null);
 
   const authRef    = useRef<IgAuth | null>(null);
   const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -98,6 +102,42 @@ export function IGCfdAutoTrader() {
   const addLog = useCallback((type: LogEntry['type'], symbol: string, msg: string) => {
     setLog(prev => [{ id: uid(), ts: new Date().toLocaleTimeString('en-GB', { hour12: false }), type, symbol, msg }, ...prev].slice(0, 300));
   }, []);
+
+  // ── Account identity check — explicit and repeated on purpose. IG's own
+  // "preferred" account flag doesn't reflect which account a session is
+  // actually switched to (confirmed live), so this always looks up by the
+  // exact accountId returned from the login/switch call, never a guess. Logs
+  // account number, type, and balance every time so it's obvious at a glance
+  // whether this is hitting the intended demo CFD account. ──────────────────
+  const refreshAccountInfo = useCallback(async (announce: boolean) => {
+    const auth = authRef.current;
+    if (!auth) return;
+    try {
+      const r = await fetch(`/api/ig/account?accountId=${encodeURIComponent(auth.accountId)}`, { headers: igHeaders(auth) });
+      const d = await r.json() as {
+        ok: boolean; accountId?: string; accountName?: string; accountType?: string;
+        balance?: number; available?: number; currency?: string; error?: string;
+      };
+      if (!d.ok || !d.accountId) { addLog('error', '—', `Account check failed: ${d.error ?? 'unknown'}`); return; }
+      if (d.accountId !== auth.accountId) {
+        // Should never happen given the accountId-matched lookup above, but
+        // this is exactly the kind of mismatch that must never pass silently.
+        addLog('error', '—', `🚨 Account mismatch — expected ${auth.accountId}, got ${d.accountId}. Stopping.`);
+        stop();
+        return;
+      }
+      setAccountInfo({
+        accountId: d.accountId, accountName: d.accountName ?? '', accountType: d.accountType ?? '',
+        balance: d.balance ?? 0, available: d.available ?? 0, currency: d.currency ?? 'GBP',
+      });
+      if (announce) {
+        addLog('info', '—', `Account confirmed: ${d.accountName} (${d.accountId}, ${d.accountType}, ${auth.env}) — balance ${d.currency}${d.balance?.toFixed(2)}, available ${d.currency}${d.available?.toFixed(2)}`);
+      }
+    } catch (e) {
+      addLog('error', '—', `Account check failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addLog]);
 
   // ── Positions + risk guards ──────────────────────────────────────────────
   const refreshPositionsAndGuard = useCallback(async (): Promise<IgPosition[]> => {
@@ -210,6 +250,10 @@ export function IGCfdAutoTrader() {
   const pollOnce = useCallback(async () => {
     if (!runningRef.current) return;
     try {
+      // Silent (announce=false) — updates the on-screen account card every
+      // cycle without spamming the log, but still hard-stops on a mismatch.
+      await refreshAccountInfo(false);
+      if (!runningRef.current) return; // refreshAccountInfo may have called stop()
       const pos = await refreshPositionsAndGuard();
       const openCount = pos.length;
       for (const inst of INSTRUMENTS) {
@@ -219,7 +263,7 @@ export function IGCfdAutoTrader() {
     } catch (e) {
       addLog('error', '—', `Poll cycle failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [refreshPositionsAndGuard, evaluateOne, addLog]);
+  }, [refreshAccountInfo, refreshPositionsAndGuard, evaluateOne, addLog]);
 
   const start = useCallback(async () => {
     setError(null);
@@ -244,6 +288,11 @@ export function IGCfdAutoTrader() {
       authRef.current = { cst: d.cst, securityToken: d.securityToken, apiKey, env, accountId: d.accountId ?? '' };
       setConnected(true);
 
+      // Confirm and log the exact account BEFORE marking as running — if
+      // this doesn't come back as the expected CFD account, better to know
+      // now than after the poll loop has already started acting on it.
+      await refreshAccountInfo(true);
+
       runningRef.current = true;
       setRunning(true);
       addLog('info', '—', `Started — ${strategy} on ${INSTRUMENTS.map(i => i.name).join(', ')} | £${maxRiskGbp} risk/trade | ${env} CFD account`);
@@ -253,7 +302,7 @@ export function IGCfdAutoTrader() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start');
     }
-  }, [username, password, apiKey, env, strategy, maxRiskGbp, addLog, pollOnce]);
+  }, [username, password, apiKey, env, strategy, maxRiskGbp, addLog, pollOnce, refreshAccountInfo]);
 
   const stop = useCallback(() => {
     runningRef.current = false;
@@ -279,6 +328,23 @@ export function IGCfdAutoTrader() {
         </p>
 
         {error && <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1 mb-3">{error}</div>}
+
+        {connected && accountInfo && (
+          <div className="grid grid-cols-2 gap-2 mb-3 bg-gray-900/60 border border-gray-700 rounded px-3 py-2">
+            <div>
+              <div className="text-[9px] text-gray-500 uppercase tracking-wide">Account</div>
+              <div className="text-xs text-white font-mono">{accountInfo.accountId} · {accountInfo.accountName}</div>
+              <div className={clsx('text-[10px] font-semibold', accountInfo.accountType === 'CFD' ? 'text-emerald-400' : 'text-red-400')}>
+                {accountInfo.accountType} {accountInfo.accountType !== 'CFD' && '⚠ expected CFD'}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-[9px] text-gray-500 uppercase tracking-wide">Balance / Available</div>
+              <div className="text-xs text-white font-mono">{accountInfo.currency}{accountInfo.balance.toFixed(2)}</div>
+              <div className="text-[10px] text-gray-400 font-mono">avail {accountInfo.currency}{accountInfo.available.toFixed(2)}</div>
+            </div>
+          </div>
+        )}
 
         {!running && (
           <div className="space-y-2 mb-3">

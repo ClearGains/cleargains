@@ -11,6 +11,14 @@ export async function GET(request: NextRequest) {
   const token = request.headers.get('x-ig-security-token');
   const key   = request.headers.get('x-ig-api-key');
   const env   = request.headers.get('x-ig-env') ?? 'demo';
+  // IG's own "preferred" flag on each account is a sticky per-account
+  // setting, NOT "which account this session is currently switched to" —
+  // confirmed live it stays pointed at the spread-bet account even after a
+  // successful switch to CFD. Callers that know which account they actually
+  // switched to (e.g. from /api/ig/session's own returned accountId) should
+  // pass it here so this returns the right one instead of silently falling
+  // back to whichever account IG considers "preferred".
+  const wantedAccountId = request.nextUrl.searchParams.get('accountId');
 
   if (!cst || !token || !key) {
     return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 400 });
@@ -57,23 +65,28 @@ export async function GET(request: NextRequest) {
       }[];
     };
 
-    // Return the preferred / first spread-bet account
+    // Match by the specific account ID when given (see comment above on why
+    // "preferred" can't be trusted for this); otherwise preserve the
+    // original fallback behaviour for existing callers.
     const accounts = data.accounts ?? [];
-    const preferred = accounts.find(a => a.preferred) ?? accounts[0];
+    const selected = (wantedAccountId && accounts.find(a => a.accountId === wantedAccountId))
+      ?? accounts.find(a => a.preferred)
+      ?? accounts[0];
 
-    if (!preferred) {
+    if (!selected) {
       return NextResponse.json({ ok: false, error: 'No accounts returned' }, { status: 404 });
     }
 
     return NextResponse.json({
       ok: true,
-      available:   preferred.balance?.available   ?? 0,
-      balance:     preferred.balance?.balance      ?? 0,
-      deposit:     preferred.balance?.deposit      ?? 0,
-      profitLoss:  preferred.balance?.profitLoss   ?? 0,
-      accountType: preferred.accountType,
-      currency:    preferred.currency,
-      accountId:   preferred.accountId,
+      available:   selected.balance?.available   ?? 0,
+      balance:     selected.balance?.balance      ?? 0,
+      deposit:     selected.balance?.deposit      ?? 0,
+      profitLoss:  selected.balance?.profitLoss   ?? 0,
+      accountType: selected.accountType,
+      currency:    selected.currency,
+      accountId:   selected.accountId,
+      accountName: selected.accountName,
     });
   } catch (err) {
     return NextResponse.json(
