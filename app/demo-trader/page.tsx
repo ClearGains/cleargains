@@ -1581,7 +1581,7 @@ export default function DemoTraderPage() {
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
-  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'stock-bot' | 'server-bot' | 'ibkr' | 'ig-cfd' | 't212' | 'news'>('stocks');
+  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'stock-bot' | 'server-bot' | 'ibkr' | 'ig-cfd' | 'ig-cfd-live' | 't212' | 'news'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [showExecAccountPicker, setShowExecAccountPicker] = useState(false);
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
@@ -2903,7 +2903,7 @@ export default function DemoTraderPage() {
 
       {/* Tab toggle */}
       <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
-        {(['stocks', 'forex', 'ig', 'stock-bot', 'server-bot', 'ibkr', 'ig-cfd', 't212', 'news'] as const).map(tab => (
+        {(['stocks', 'forex', 'ig', 'stock-bot', 'server-bot', 'ibkr', 'ig-cfd', 'ig-cfd-live', 't212', 'news'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setTraderTab(tab)}
@@ -2918,7 +2918,8 @@ export default function DemoTraderPage() {
              tab === 'stock-bot'? '📈 Stock Bot'    :
              tab === 'server-bot'? '🖥 Server Bot'  :
              tab === 'ibkr'      ? '💹 IBKR CFD'    :
-             tab === 'ig-cfd'    ? '📊 IG CFD'      :
+             tab === 'ig-cfd'    ? '📊 IG CFD Demo' :
+             tab === 'ig-cfd-live' ? '📊 IG CFD Live' :
              tab === 't212'     ? 'T212 Strategy'  :
              tab === 'news'     ? '📰 News Feed'   :
              tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -2926,10 +2927,26 @@ export default function DemoTraderPage() {
         ))}
       </div>
 
-      {/* IGStrategyTrader is always mounted so its timers survive tab switches */}
+      {/* IGStrategyTrader and both IGCfdAutoTrader instances are always
+          mounted (hidden via CSS, not conditional JSX) so their session
+          tokens and running poll loop survive switching to another tab and
+          back — the earlier conditional-render version fully unmounted the
+          CFD bot on every tab switch, killing its session and forcing a
+          fresh IG login every time, which risked tripping IG's login-rate
+          limits on repeated tab switches. */}
       {portfolioView !== 'compare' && (
         <div className={traderTab !== 'ig' ? 'hidden' : ''}>
           <IGTrader />
+        </div>
+      )}
+      {portfolioView !== 'compare' && (
+        <div className={traderTab !== 'ig-cfd' ? 'hidden' : ''}>
+          <IGCfdAutoTrader fixedEnv="demo" />
+        </div>
+      )}
+      {portfolioView !== 'compare' && (
+        <div className={traderTab !== 'ig-cfd-live' ? 'hidden' : ''}>
+          <IGCfdAutoTrader fixedEnv="live" />
         </div>
       )}
 
@@ -2946,7 +2963,9 @@ export default function DemoTraderPage() {
       ) : traderTab === 'ibkr' ? (
         <IBKRAutoTrader />
       ) : traderTab === 'ig-cfd' ? (
-        <IGCfdAutoTrader />
+        null
+      ) : traderTab === 'ig-cfd-live' ? (
+        null
       ) : traderTab === 't212' ? (
         <T212Trader />
       ) : traderTab === 'news' ? (

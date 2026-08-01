@@ -75,10 +75,19 @@ function igHeaders(auth: IgAuth): Record<string, string> {
   };
 }
 
-export function IGCfdAutoTrader() {
+type IGCfdAutoTraderProps = {
+  // When set, locks this instance to one account type instead of offering
+  // both in a dropdown — used to give demo and live their own separate tabs.
+  // Live still hits the same hard block in start() regardless of this prop;
+  // this only changes which account the form defaults/locks to, not whether
+  // it's actually safe to start.
+  fixedEnv?: 'demo' | 'live';
+};
+
+export function IGCfdAutoTrader({ fixedEnv }: IGCfdAutoTraderProps = {}) {
   const [running, setRunning]     = useState(false);
   const [strategy, setStrategy]   = useState<StrategyName>('donchian_breakout');
-  const [env, setEnv]             = useState<'demo' | 'live'>('demo');
+  const [env, setEnv]             = useState<'demo' | 'live'>(fixedEnv ?? 'demo');
   const [username, setUsername]   = useState('');
   const [password, setPassword]   = useState('');
   const [apiKey, setApiKey]       = useState('');
@@ -319,7 +328,9 @@ export function IGCfdAutoTrader() {
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             {connected ? <Wifi className="h-4 w-4 text-emerald-400" /> : <WifiOff className="h-4 w-4 text-gray-500" />}
-            <span className="text-sm font-semibold text-white">IG CFD Bot (browser-resident)</span>
+            <span className="text-sm font-semibold text-white">
+              IG CFD Bot (browser-resident){fixedEnv ? ` — ${fixedEnv === 'live' ? 'Live' : 'Demo'}` : ''}
+            </span>
           </div>
           <span className="text-[10px] text-gray-500">{connected ? `Connected — ${env} CFD` : 'Not connected'}</span>
         </div>
@@ -351,11 +362,20 @@ export function IGCfdAutoTrader() {
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Account</label>
-                <select value={env} onChange={e => setEnv(e.target.value as 'demo' | 'live')}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white">
-                  <option value="demo">Demo</option>
-                  <option value="live" disabled>Live (disabled — see note below)</option>
-                </select>
+                {fixedEnv ? (
+                  <div className={clsx(
+                    'w-full rounded px-2 py-1.5 text-xs font-semibold border',
+                    fixedEnv === 'live' ? 'bg-red-500/10 text-red-400 border-red-500/30' : 'bg-gray-800 text-gray-300 border-gray-700',
+                  )}>
+                    {fixedEnv === 'live' ? 'Live (locked — this tab is IG CFD Live)' : 'Demo (locked — this tab is IG CFD Demo)'}
+                  </div>
+                ) : (
+                  <select value={env} onChange={e => setEnv(e.target.value as 'demo' | 'live')}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white">
+                    <option value="demo">Demo</option>
+                    <option value="live" disabled>Live (disabled — see note below)</option>
+                  </select>
+                )}
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Strategy</label>
