@@ -18,8 +18,10 @@ export async function POST(request: NextRequest) {
       password: string;
       apiKey: string;
       env: 'demo' | 'live';
+      accountType?: 'SPREADBET' | 'CFD';
     };
     const { password, apiKey, env } = body;
+    const wantedAccountType = body.accountType ?? 'SPREADBET';
     const forceRefresh = (body as { forceRefresh?: boolean }).forceRefresh === true;
     // Sanitise — IG rejects identifiers that contain spaces or @ symbols
     const username = (body.username ?? '').trim().replace(/\s+/g, '');
@@ -32,7 +34,7 @@ export async function POST(request: NextRequest) {
       ? 'https://demo-api.ig.com/gateway/deal'
       : 'https://api.ig.com/gateway/deal';
 
-    const cacheKey = `${env}:${username}:${apiKey}`;
+    const cacheKey = `${env}:${username}:${apiKey}:${wantedAccountType}`;
     const cached = tokenCache.get(cacheKey);
     if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
       return NextResponse.json({
@@ -79,7 +81,7 @@ export async function POST(request: NextRequest) {
       }
 
       // Clear any cached token so the next attempt hits IG fresh
-      tokenCache.delete(`${env}:${username}:${apiKey}`);
+      tokenCache.delete(cacheKey);
 
       return NextResponse.json({ ok: false, error: errMsg }, { status: res.status });
     }
@@ -96,16 +98,17 @@ export async function POST(request: NextRequest) {
       clientId?: string;
     };
 
-    // ── Auto-switch to the SPREADBET account ─────────────────────────────────
+    // ── Auto-switch to the requested account type ─────────────────────────────
     // If the user has both a CFD and a Spread Bet account, IG may default to
-    // CFD on login.  Orders placed on the wrong account type are rejected with
-    // REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT (or vice-versa).  Explicitly
-    // switching before trading prevents this.
+    // either one on login. Orders placed on the wrong account type are
+    // rejected with REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT (or vice-versa).
+    // Explicitly switching to whichever type the caller asked for (default
+    // SPREADBET, preserving every existing caller's behaviour) prevents this.
     let activeAccountId = data.accountId ?? '';
     const accounts = data.accounts ?? [];
-    const spreadbetAccount = accounts.find((a: AccountEntry) => a.accountType === 'SPREADBET');
+    const targetAccount = accounts.find((a: AccountEntry) => a.accountType === wantedAccountType);
 
-    if (spreadbetAccount && spreadbetAccount.accountId !== activeAccountId) {
+    if (targetAccount && targetAccount.accountId !== activeAccountId) {
       try {
         const switchRes = await fetch(`${baseUrl}/session`, {
           method: 'PUT',
@@ -117,7 +120,7 @@ export async function POST(request: NextRequest) {
             'Accept': 'application/json; charset=UTF-8',
             'Version': '1',
           },
-          body: JSON.stringify({ accountId: spreadbetAccount.accountId, dealingEnabled: true }),
+          body: JSON.stringify({ accountId: targetAccount.accountId, dealingEnabled: true }),
         });
         if (switchRes.ok) {
           // IG issues fresh tokens after account switch
@@ -125,8 +128,8 @@ export async function POST(request: NextRequest) {
           const newSecToken = switchRes.headers.get('X-SECURITY-TOKEN');
           if (newCst)      cst           = newCst;
           if (newSecToken) securityToken = newSecToken;
-          activeAccountId = spreadbetAccount.accountId;
-          console.log(`[ig/session] Switched to SPREADBET account ${activeAccountId}`);
+          activeAccountId = targetAccount.accountId;
+          console.log(`[ig/session] Switched to ${wantedAccountType} account ${activeAccountId}`);
         } else {
           const errText = await switchRes.text().catch(() => '');
           console.warn(`[ig/session] Account switch failed (${switchRes.status}):`, errText.slice(0, 200));
@@ -134,10 +137,10 @@ export async function POST(request: NextRequest) {
       } catch (e) {
         console.warn('[ig/session] Account switch error:', e instanceof Error ? e.message : String(e));
       }
-    } else if (spreadbetAccount) {
-      console.log(`[ig/session] Already on SPREADBET account ${activeAccountId}`);
+    } else if (targetAccount) {
+      console.log(`[ig/session] Already on ${wantedAccountType} account ${activeAccountId}`);
     } else {
-      console.log(`[ig/session] No SPREADBET account found — using default account ${activeAccountId}`);
+      console.log(`[ig/session] No ${wantedAccountType} account found — using default account ${activeAccountId}`);
     }
 
     const entry = {
@@ -155,7 +158,9 @@ export async function POST(request: NextRequest) {
       securityToken,
       accountId: activeAccountId,
       accounts,
-      spreadbetAccountId: spreadbetAccount?.accountId ?? null,
+      // Kept for existing callers that read this specifically.
+      spreadbetAccountId: accounts.find((a: AccountEntry) => a.accountType === 'SPREADBET')?.accountId ?? null,
+      accountType: wantedAccountType,
     });
   } catch (err) {
     return NextResponse.json(

@@ -11,7 +11,7 @@
 //
 // Rules-only for now — no Gemini/AI call site here at all, by design (saves
 // API calls until that's explicitly asked for). Strategy decisions come
-// from lib/ibkrStrategies.ts, ported from the Alpaca bot's own strategy
+// from lib/cfdStrategies.ts, ported from the Alpaca bot's own strategy
 // functions (pure, broker-agnostic).
 //
 // NOTE: built against IBKR's documented API shapes, not yet exercised end to
@@ -32,7 +32,7 @@ import {
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, vwapSignal, donchianBreakoutSignal, macdCrossoverSignal,
   STRATEGY_META, type StrategyName, type Bar, type StrategySignal,
-} from '@/lib/ibkrStrategies';
+} from '@/lib/cfdStrategies';
 
 type LogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'wait' | 'error'; symbol: string; msg: string };
 type TrackedConid = { symbol: string; conid: string };
