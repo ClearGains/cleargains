@@ -120,6 +120,19 @@ export function clearSession(accountKey?: string): void {
   else sessions.clear();
 }
 
+// IG only tolerates one active session per login. Every place that stops
+// using a session used to just discard it locally, leaving it open on IG's
+// side until its own multi-hour token expiry — a pile of these from a busy
+// testing session can eat the account's one-session allowance for hours
+// after the fact. This actually tells IG the session is done.
+export async function logout(session: IGSession, accountKey?: string): Promise<void> {
+  const base = BASE[session.env];
+  try {
+    await fetch(`${base}/session`, { method: 'DELETE', headers: headers(session) });
+  } catch { /* best-effort — local cache is cleared regardless */ }
+  if (accountKey) sessions.delete(accountKey);
+}
+
 export async function openPosition(
   session:    IGSession,
   epic:       string,

@@ -316,11 +316,27 @@ export function IGCfdAutoTrader({ fixedEnv }: IGCfdAutoTraderProps = {}) {
   const stop = useCallback(() => {
     runningRef.current = false;
     setRunning(false);
+    setConnected(false);
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-    addLog('info', '—', 'Stopped — no further activity until restarted');
+    // IG only tolerates one active session per login — explicitly logging
+    // out (rather than just abandoning the session) frees that slot up for
+    // the other bots sharing the same demo/live login immediately, instead
+    // of leaving it occupied until its own multi-hour token expiry.
+    if (authRef.current) {
+      const auth = authRef.current;
+      void fetch('/api/ig/logout', { method: 'POST', headers: igHeaders(auth) }).catch(() => {});
+      authRef.current = null;
+    }
+    addLog('info', '—', 'Stopped — session logged out, no further activity until restarted');
   }, [addLog]);
 
-  useEffect(() => () => { runningRef.current = false; if (pollRef.current) clearInterval(pollRef.current); }, []);
+  useEffect(() => () => {
+    runningRef.current = false;
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (authRef.current) {
+      void fetch('/api/ig/logout', { method: 'POST', headers: igHeaders(authRef.current) }).catch(() => {});
+    }
+  }, []);
 
   return (
     <div className="space-y-4">
