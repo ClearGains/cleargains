@@ -210,12 +210,25 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     return authenticate(dataCreds.apiKey, dataCreds.username, dataCreds.password, dataCreds.env, `fxscalper-data:${mode}`);
   }
 
+  // Live execution session is shared with the IG strategy bot (same login,
+  // same account — 'igstrat:live' is the cache key it authenticates under).
+  // IG's account has started rejecting a second concurrent login on the same
+  // live credentials with error.security.api-key-disabled, so rather than
+  // each bot independently opening its own session, whichever bot is already
+  // holding a valid one gets reused here instead of triggering a fresh login.
+  async function authExecSession(creds: ReturnType<typeof resolveCredentials>): Promise<IGSession> {
+    const key = mode === 'live' ? 'igstrat:live' : `fxscalper:${mode}`;
+    const existing = getSession(key);
+    if (existing && Date.now() < existing.expiresAt - 2 * 60_000) return existing;
+    return authenticate(creds.apiKey, creds.username, creds.password, creds.env, key);
+  }
+
   async function doRefresh(): Promise<void> {
     const creds = resolveCredentials(mode);
     if (!creds.apiKey) return;
     try {
       addLog('info', '—', 'Refreshing IG session(s)...');
-      session     = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, `fxscalper:${mode}`);
+      session     = await authExecSession(creds);
       dataSession = await authDataSession();
       authFailCount = 0;
       addLog('info', '—', `Session(s) refreshed — execution expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
@@ -525,7 +538,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       currentConfig = { ...DEFAULT_CONFIG, ...(params.config ?? {}) };
 
       addLog('info', '—', `Starting FX scalper — epics: ${currentEpics.join(', ')} | £${maxRiskGbp} risk/trade`);
-      session     = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, `fxscalper:${mode}`);
+      session     = await authExecSession(creds);
       dataSession = await authDataSession();
       if (mode === 'live') addLog('info', '—', 'Data feed: demo account (real market data, keeps live\'s own allowance untouched) · Execution: live account');
 
