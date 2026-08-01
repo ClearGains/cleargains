@@ -21,6 +21,7 @@ import Modal from '@/components/ui/Modal';
 import { IGStrategyTrader } from '@/components/ig/IGStrategyTrader';
 import { IGServerBot } from '@/components/ig/IGServerBot';
 import { IGStockAutoTrader } from '@/components/ig/IGStockAutoTrader';
+import { IBKRAutoTrader } from '@/components/ibkr/IBKRAutoTrader';
 import { T212StrategyTrader } from '@/components/t212/T212StrategyTrader';
 import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 import { NewsFeed } from '@/components/news/NewsFeed';
@@ -1579,7 +1580,7 @@ export default function DemoTraderPage() {
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
-  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'stock-bot' | 'server-bot' | 't212' | 'news'>('stocks');
+  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'stock-bot' | 'server-bot' | 'ibkr' | 't212' | 'news'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [showExecAccountPicker, setShowExecAccountPicker] = useState(false);
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
@@ -2901,7 +2902,7 @@ export default function DemoTraderPage() {
 
       {/* Tab toggle */}
       <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
-        {(['stocks', 'forex', 'ig', 'stock-bot', 'server-bot', 't212', 'news'] as const).map(tab => (
+        {(['stocks', 'forex', 'ig', 'stock-bot', 'server-bot', 'ibkr', 't212', 'news'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setTraderTab(tab)}
@@ -2915,6 +2916,7 @@ export default function DemoTraderPage() {
             {tab === 'ig'       ? 'IG Spread Bet'  :
              tab === 'stock-bot'? '📈 Stock Bot'    :
              tab === 'server-bot'? '🖥 Server Bot'  :
+             tab === 'ibkr'      ? '💹 IBKR CFD'    :
              tab === 't212'     ? 'T212 Strategy'  :
              tab === 'news'     ? '📰 News Feed'   :
              tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -2939,6 +2941,8 @@ export default function DemoTraderPage() {
         <IGStockAutoTrader />
       ) : traderTab === 'server-bot' ? (
         <IGServerBot />
+      ) : traderTab === 'ibkr' ? (
+        <IBKRAutoTrader />
       ) : traderTab === 't212' ? (
         <T212Trader />
       ) : traderTab === 'news' ? (

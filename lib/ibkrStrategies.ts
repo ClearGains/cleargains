@@ -1,0 +1,458 @@
+// Rules-based strategy functions for the IBKR CFD bot — ported verbatim from
+// bot-server/src/alpacaStrategies.ts, which is itself already broker-agnostic
+// (pure functions of OHLCV bars, no Alpaca-specific logic). This copy exists
+// so the browser-resident IBKR bot (components/ibkr/IBKRAutoTrader.tsx) can
+// import and run these directly client-side — the strategy decision never
+// needs a round trip to any backend. options_directional is dropped (not
+// applicable to CFDs). If a strategy is fixed/tuned in the Alpaca original,
+// port the same fix here — there is currently no shared single source.
+
+export type Bar = { t: string; o: number; h: number; l: number; c: number; v: number };
+
+// ── Indicators ────────────────────────────────────────────────────────────────
+
+export function calcRsi(bars: Bar[], period = 14): number | null {
+  if (bars.length < period + 1) return null;
+  const closes = bars.map(b => b.c);
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff > 0) gains += diff; else losses -= diff;
+  }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+export function calcEma(closes: number[], period: number): number[] {
+  if (closes.length < period) return [];
+  const k = 2 / (period + 1);
+  const seed = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  const out: number[] = [seed];
+  for (let i = period; i < closes.length; i++) {
+    out.push(closes[i] * k + out[out.length - 1] * (1 - k));
+  }
+  return out;
+}
+
+export function calcSma(bars: Bar[], period: number): number | null {
+  if (bars.length < period) return null;
+  return bars.slice(-period).reduce((s, b) => s + b.c, 0) / period;
+}
+
+export function calcAtr(bars: Bar[], period = 14): number | null {
+  if (bars.length < period + 1) return null;
+  const trs: number[] = [];
+  for (let i = 1; i < bars.length; i++) {
+    const b = bars[i], prev = bars[i - 1];
+    trs.push(Math.max(b.h - b.l, Math.abs(b.h - prev.c), Math.abs(b.l - prev.c)));
+  }
+  return trs.slice(-period).reduce((s, v) => s + v, 0) / period;
+}
+
+export function calcVwap(bars: Bar[]): number | null {
+  if (!bars.length) return null;
+  let cumVol = 0, cumTPV = 0;
+  for (const b of bars) {
+    const tp = (b.h + b.l + b.c) / 3;
+    cumTPV += tp * b.v;
+    cumVol += b.v;
+  }
+  return cumVol > 0 ? cumTPV / cumVol : null;
+}
+
+// True MACD histogram: (EMA12 − EMA26) − EMA9 of that difference.
+// Returns the last two values so callers can detect the histogram turning.
+export function calcMacdHist(bars: Bar[]): { hist: number; prevHist: number } | null {
+  if (bars.length < 35) return null;
+  const closes = bars.map(b => b.c);
+  const ema12 = calcEma(closes, 12);
+  const ema26 = calcEma(closes, 26);
+  if (!ema12.length || !ema26.length) return null;
+  const n = Math.min(ema12.length, ema26.length);
+  const macdLine: number[] = [];
+  for (let i = 0; i < n; i++) {
+    macdLine.push(ema12[ema12.length - n + i] - ema26[ema26.length - n + i]);
+  }
+  const signal = calcEma(macdLine.map((v, i) => v), 9);
+  if (signal.length < 2) return null;
+  const hist     = macdLine[macdLine.length - 1] - signal[signal.length - 1];
+  const prevHist = macdLine[macdLine.length - 2] - signal[signal.length - 2];
+  return { hist, prevHist };
+}
+
+// ── Signal type ───────────────────────────────────────────────────────────────
+
+export type StrategySignal = {
+  action:           'BUY' | 'SELL' | 'CLOSE_LONG' | 'CLOSE_SHORT' | 'HOLD';
+  reason:           string;
+  stopPrice?:       number;
+  takeProfitPrice?: number;
+  trailPercent?:    number;
+  orderType?:       'market' | 'trailing_stop';
+  triggerLevel?:    number;
+};
+
+export type PositionSide = 'long' | 'short';
+
+// ── 1. RSI Mean Reversion (5-min intraday) ────────────────────────────────────
+export function rsiMeanReversionSignal(
+  bars:       Bar[],
+  inPosition: boolean,
+  side?:      PositionSide,
+): StrategySignal {
+  if (bars.length < 20) return { action: 'HOLD', reason: 'insufficient bars' };
+
+  const rsi  = calcRsi(bars);
+  const atr  = calcAtr(bars);
+  const macd = calcMacdHist(bars);
+  const last = bars[bars.length - 1].c;
+
+  if (rsi === null || atr === null) return { action: 'HOLD', reason: 'indicators not ready' };
+
+  if (inPosition) {
+    if (side === 'long'  && rsi > 60) return { action: 'CLOSE_LONG',  reason: `RSI recovered to ${rsi.toFixed(1)}` };
+    if (side === 'short' && rsi < 40) return { action: 'CLOSE_SHORT', reason: `RSI recovered to ${rsi.toFixed(1)}` };
+    return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} — in position` };
+  }
+
+  const eps = last * 1e-9;
+  const histTurningUp   = macd === null || macd.hist >= macd.prevHist - eps || macd.hist > 0;
+  const histTurningDown = macd === null || macd.hist <= macd.prevHist + eps || macd.hist < 0;
+
+  if (rsi < 30 && histTurningUp) {
+    return {
+      action:           'BUY',
+      reason:           `RSI oversold ${rsi.toFixed(1)} + MACD hist turning up — mean reversion long`,
+      stopPrice:        +(last - atr * 1.5).toFixed(2),
+      takeProfitPrice:  +(last + atr * 3).toFixed(2),
+      orderType:        'market',
+    };
+  }
+
+  if (rsi > 70 && histTurningDown) {
+    return {
+      action:           'SELL',
+      reason:           `RSI overbought ${rsi.toFixed(1)} + MACD hist turning down — mean reversion short`,
+      stopPrice:        +(last + atr * 1.5).toFixed(2),
+      takeProfitPrice:  +(last - atr * 3).toFixed(2),
+      orderType:        'market',
+    };
+  }
+
+  return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} — neutral zone` };
+}
+
+// ── 2. EMA Crossover (daily swing — hold days to weeks) ───────────────────────
+export function emaCrossoverSignal(
+  bars:       Bar[],
+  inPosition: boolean,
+  side?:      PositionSide,
+): StrategySignal {
+  if (bars.length < 25) return { action: 'HOLD', reason: 'insufficient bars' };
+
+  const closes = bars.map(b => b.c);
+  const ema9   = calcEma(closes, 9);
+  const ema21  = calcEma(closes, 21);
+
+  if (ema9.length < 2 || ema21.length < 2) return { action: 'HOLD', reason: 'EMA not ready' };
+
+  const e9curr  = ema9[ema9.length - 1];
+  const e9prev  = ema9[ema9.length - 2];
+  const e21curr = ema21[ema21.length - 1];
+  const e21prev = ema21[ema21.length - 2];
+  const last    = bars[bars.length - 1].c;
+  const atr     = calcAtr(bars) ?? last * 0.01;
+
+  const crossedAbove = e9prev <= e21prev && e9curr > e21curr;
+  const crossedBelow = e9prev >= e21prev && e9curr < e21curr;
+
+  if (inPosition) {
+    if (side === 'long'  && crossedBelow) return { action: 'CLOSE_LONG',  reason: `EMA9 crossed below EMA21 (${e9curr.toFixed(2)} < ${e21curr.toFixed(2)})` };
+    if (side === 'short' && crossedAbove) return { action: 'CLOSE_SHORT', reason: `EMA9 crossed above EMA21 (${e9curr.toFixed(2)} > ${e21curr.toFixed(2)})` };
+    return { action: 'HOLD', reason: `EMA9=${e9curr.toFixed(2)} EMA21=${e21curr.toFixed(2)}` };
+  }
+
+  if (crossedAbove) {
+    return {
+      action:           'BUY',
+      reason:           `EMA9 crossed above EMA21 (${e9curr.toFixed(2)} > ${e21curr.toFixed(2)})`,
+      stopPrice:        +(last - atr * 2).toFixed(2),
+      takeProfitPrice:  +(last + atr * 5).toFixed(2),
+      orderType:        'market',
+    };
+  }
+
+  if (crossedBelow) {
+    return {
+      action:           'SELL',
+      reason:           `EMA9 crossed below EMA21 (${e9curr.toFixed(2)} < ${e21curr.toFixed(2)})`,
+      stopPrice:        +(last + atr * 2).toFixed(2),
+      takeProfitPrice:  +(last - atr * 5).toFixed(2),
+      orderType:        'market',
+    };
+  }
+
+  return { action: 'HOLD', reason: `EMA9=${e9curr.toFixed(2)} EMA21=${e21curr.toFixed(2)} — no crossover` };
+}
+
+// ── 3. Opening Range Breakout (ORB — daily intraday) ─────────────────────────
+export function orbSignal(
+  orbHigh:      number,
+  orbLow:       number,
+  currentPrice: number,
+  inPosition:   boolean,
+  side?:        PositionSide,
+): StrategySignal {
+  if (!orbHigh || !orbLow || orbHigh <= orbLow) {
+    return { action: 'HOLD', reason: 'ORB not established' };
+  }
+
+  const range     = orbHigh - orbLow;
+  const midpoint  = orbLow + range * 0.5;
+
+  if (inPosition) {
+    if (side === 'long'  && currentPrice < midpoint)  return { action: 'CLOSE_LONG',  reason: `Price broke below ORB midpoint ${midpoint.toFixed(2)}` };
+    if (side === 'short' && currentPrice > midpoint)  return { action: 'CLOSE_SHORT', reason: `Price broke above ORB midpoint ${midpoint.toFixed(2)}` };
+    return { action: 'HOLD', reason: `ORB ${orbLow.toFixed(2)}–${orbHigh.toFixed(2)} — holding` };
+  }
+
+  if (currentPrice > orbHigh * 1.002) {
+    return {
+      action:           'BUY',
+      reason:           `Breakout above ORB high ${orbHigh.toFixed(2)} (+0.2%)`,
+      stopPrice:        +(midpoint).toFixed(2),
+      takeProfitPrice:  +(orbHigh + range * 2).toFixed(2),
+      orderType:        'market',
+    };
+  }
+
+  if (currentPrice < orbLow * 0.998) {
+    return {
+      action:           'SELL',
+      reason:           `Breakdown below ORB low ${orbLow.toFixed(2)} (-0.2%)`,
+      stopPrice:        +(midpoint).toFixed(2),
+      takeProfitPrice:  +(orbLow - range * 2).toFixed(2),
+      orderType:        'market',
+    };
+  }
+
+  return { action: 'HOLD', reason: `Price ${currentPrice.toFixed(2)} inside ORB ${orbLow.toFixed(2)}–${orbHigh.toFixed(2)}` };
+}
+
+// ── 4. VWAP Reversion (1-min intraday) ───────────────────────────────────────
+const VWAP_STOP_BAND = 0.015;
+
+export function vwapSignal(
+  todayBars:    Bar[],
+  currentPrice: number,
+  inPosition:   boolean,
+  side?:        PositionSide,
+): StrategySignal {
+  if (todayBars.length < 5) return { action: 'HOLD', reason: 'insufficient intraday bars' };
+
+  const vwap = calcVwap(todayBars);
+  const rsi  = calcRsi(todayBars, Math.min(14, todayBars.length - 1));
+  const atr  = calcAtr(todayBars, Math.min(14, todayBars.length - 1)) ?? currentPrice * 0.003;
+
+  if (!vwap) return { action: 'HOLD', reason: 'VWAP not calculated' };
+
+  const pctFromVwap = (currentPrice - vwap) / vwap * 100;
+  const stopPct = (VWAP_STOP_BAND * 100).toFixed(1);
+
+  if (inPosition) {
+    if (side === 'long') {
+      if (currentPrice >= vwap)                            return { action: 'CLOSE_LONG',  reason: `Price reverted to VWAP ${vwap.toFixed(2)} — target hit` };
+      if (currentPrice < vwap * (1 - VWAP_STOP_BAND))       return { action: 'CLOSE_LONG',  reason: `Stop: stretched >${stopPct}% below VWAP` };
+    }
+    if (side === 'short') {
+      if (currentPrice <= vwap)                             return { action: 'CLOSE_SHORT', reason: `Price reverted to VWAP ${vwap.toFixed(2)} — target hit` };
+      if (currentPrice > vwap * (1 + VWAP_STOP_BAND))        return { action: 'CLOSE_SHORT', reason: `Stop: stretched >${stopPct}% above VWAP` };
+    }
+    return { action: 'HOLD', reason: `VWAP=${vwap.toFixed(2)} price ${pctFromVwap > 0 ? '+' : ''}${pctFromVwap.toFixed(2)}%` };
+  }
+
+  if (pctFromVwap < -0.5 && (rsi === null || rsi < 45)) {
+    return {
+      action:           'BUY',
+      reason:           `Price ${Math.abs(pctFromVwap).toFixed(2)}% below VWAP (${vwap.toFixed(2)}) RSI=${rsi?.toFixed(1) ?? 'N/A'}`,
+      stopPrice:        +Math.min(currentPrice - atr * 1.2, vwap * (1 - VWAP_STOP_BAND)).toFixed(2),
+      takeProfitPrice:  +vwap.toFixed(2),
+      orderType:        'market',
+    };
+  }
+
+  if (pctFromVwap > 0.5 && (rsi === null || rsi > 55)) {
+    return {
+      action:           'SELL',
+      reason:           `Price ${pctFromVwap.toFixed(2)}% above VWAP (${vwap.toFixed(2)}) RSI=${rsi?.toFixed(1) ?? 'N/A'}`,
+      stopPrice:        +Math.max(currentPrice + atr * 1.2, vwap * (1 + VWAP_STOP_BAND)).toFixed(2),
+      takeProfitPrice:  +vwap.toFixed(2),
+      orderType:        'market',
+    };
+  }
+
+  return { action: 'HOLD', reason: `VWAP=${vwap.toFixed(2)} price ${pctFromVwap > 0 ? '+' : ''}${pctFromVwap.toFixed(2)}%` };
+}
+
+// ── 5. Weekly Momentum (weekly bars — hold weeks to months) ───────────────────
+export function weeklyMomentumSignal(
+  weeklyBars: Bar[],
+  dailyBars:  Bar[],
+  inPosition: boolean,
+  side?:      PositionSide,
+): StrategySignal {
+  if (weeklyBars.length < 13) return { action: 'HOLD', reason: 'insufficient weekly bars (need 13)' };
+
+  const sma12w    = calcSma(weeklyBars, 12);
+  const rsi       = calcRsi(weeklyBars);
+  const lastClose = weeklyBars[weeklyBars.length - 1].c;
+  const prev4wClose = weeklyBars[weeklyBars.length - 5]?.c ?? lastClose;
+  const momentum4w  = (lastClose - prev4wClose) / prev4wClose * 100;
+  const dailyAtr    = calcAtr(dailyBars) ?? lastClose * 0.015;
+
+  if (inPosition) {
+    if (side === 'long' && sma12w && lastClose < sma12w * 0.97) {
+      return { action: 'CLOSE_LONG', reason: `Price fell below 97% of 12-week SMA (${sma12w.toFixed(2)})` };
+    }
+    return { action: 'HOLD', reason: `Weekly momentum ${momentum4w.toFixed(2)}% — holding` };
+  }
+
+  const aboveSma  = sma12w !== null && lastClose > sma12w;
+  const bullMom   = momentum4w > 1.0;
+  const goodRsi   = rsi !== null && rsi >= 50 && rsi <= 70;
+
+  if (aboveSma && bullMom && goodRsi) {
+    return {
+      action:           'BUY',
+      reason:           `Weekly mom ${momentum4w.toFixed(2)}% | above 12w SMA | RSI ${rsi?.toFixed(1)}`,
+      stopPrice:        +(lastClose - dailyAtr * 4).toFixed(2),
+      takeProfitPrice:  +(lastClose + dailyAtr * 10).toFixed(2),
+      orderType:        'market',
+      trailPercent:     5,
+    };
+  }
+
+  return { action: 'HOLD', reason: `Weekly: mom=${momentum4w.toFixed(2)}% sma=${sma12w?.toFixed(2) ?? 'N/A'} rsi=${rsi?.toFixed(1) ?? 'N/A'}` };
+}
+
+// ── 6. Donchian / Turtle-style Breakout (daily bars — hold days to weeks) ─────
+export function donchianBreakoutSignal(
+  bars:        Bar[],
+  inPosition:  boolean,
+  side?:       PositionSide,
+  entryPeriod = 20,
+  exitPeriod  = 10,
+  periodUnit: 'day' | 'hour' = 'day',
+): StrategySignal {
+  if (bars.length < entryPeriod + 1) return { action: 'HOLD', reason: 'insufficient bars' };
+
+  const n = bars.length;
+  const entryWindow = bars.slice(n - 1 - entryPeriod, n - 1);
+  const exitWindow  = bars.slice(Math.max(0, n - 1 - exitPeriod), n - 1);
+  const last = bars[n - 1].c;
+  const entryHigh = Math.max(...entryWindow.map(b => b.h));
+  const entryLow  = Math.min(...entryWindow.map(b => b.l));
+  const exitHigh  = Math.max(...exitWindow.map(b => b.h));
+  const exitLow   = Math.min(...exitWindow.map(b => b.l));
+  const atr = calcAtr(bars) ?? last * 0.015;
+
+  const stopDist = Math.min(atr * 2, last * 0.03);
+
+  if (inPosition) {
+    if (side === 'long'  && last < exitLow)  return { action: 'CLOSE_LONG',  reason: `Broke below ${exitPeriod}-${periodUnit} low ${exitLow.toFixed(2)}` };
+    if (side === 'short' && last > exitHigh) return { action: 'CLOSE_SHORT', reason: `Broke above ${exitPeriod}-${periodUnit} high ${exitHigh.toFixed(2)}` };
+    return { action: 'HOLD', reason: `Inside ${exitPeriod}-${periodUnit} exit channel ${exitLow.toFixed(2)}–${exitHigh.toFixed(2)} — holding` };
+  }
+
+  if (last > entryHigh) {
+    return {
+      action:           'BUY',
+      reason:           `Breakout above ${entryPeriod}-${periodUnit} high ${entryHigh.toFixed(2)}`,
+      stopPrice:        +(last - stopDist).toFixed(2),
+      takeProfitPrice:  +(last + atr * 10).toFixed(2),
+      orderType:        'market',
+      triggerLevel:     entryHigh,
+    };
+  }
+  if (last < entryLow) {
+    return {
+      action:           'SELL',
+      reason:           `Breakdown below ${entryPeriod}-${periodUnit} low ${entryLow.toFixed(2)}`,
+      stopPrice:        +(last + stopDist).toFixed(2),
+      takeProfitPrice:  +(last - atr * 10).toFixed(2),
+      orderType:        'market',
+      triggerLevel:     entryLow,
+    };
+  }
+  return { action: 'HOLD', reason: `Price ${last.toFixed(2)} inside ${entryPeriod}-${periodUnit} range ${entryLow.toFixed(2)}–${entryHigh.toFixed(2)}` };
+}
+
+// ── 7. MACD Signal-Line Crossover (daily bars — hold days to weeks) ───────────
+export function macdCrossoverSignal(
+  bars:       Bar[],
+  inPosition: boolean,
+  side?:      PositionSide,
+): StrategySignal {
+  if (bars.length < 36) return { action: 'HOLD', reason: 'insufficient bars' };
+
+  const macd = calcMacdHist(bars);
+  const atr  = calcAtr(bars);
+  const last = bars[bars.length - 1].c;
+  if (macd === null || atr === null) return { action: 'HOLD', reason: 'indicators not ready' };
+
+  const crossedAbove = macd.prevHist <= 0 && macd.hist > 0;
+  const crossedBelow = macd.prevHist >= 0 && macd.hist < 0;
+
+  if (inPosition) {
+    if (side === 'long'  && crossedBelow) return { action: 'CLOSE_LONG',  reason: `MACD crossed below signal (hist ${macd.hist.toFixed(3)})` };
+    if (side === 'short' && crossedAbove) return { action: 'CLOSE_SHORT', reason: `MACD crossed above signal (hist ${macd.hist.toFixed(3)})` };
+    return { action: 'HOLD', reason: `MACD hist ${macd.hist.toFixed(3)} — in position` };
+  }
+
+  if (crossedAbove) {
+    return {
+      action:           'BUY',
+      reason:           `MACD crossed above signal line (hist ${macd.hist.toFixed(3)})`,
+      stopPrice:        +(last - atr * 2).toFixed(2),
+      takeProfitPrice:  +(last + atr * 5).toFixed(2),
+      orderType:        'market',
+    };
+  }
+  if (crossedBelow) {
+    return {
+      action:           'SELL',
+      reason:           `MACD crossed below signal line (hist ${macd.hist.toFixed(3)})`,
+      stopPrice:        +(last + atr * 2).toFixed(2),
+      takeProfitPrice:  +(last - atr * 5).toFixed(2),
+      orderType:        'market',
+    };
+  }
+  return { action: 'HOLD', reason: `MACD hist ${macd.hist.toFixed(3)} — no crossover` };
+}
+
+// ── Strategy metadata ─────────────────────────────────────────────────────────
+// barPeriod uses IBKR's own bar-size vocabulary (confirmed against IBKR's
+// /iserver/marketdata/history docs: "1min, 2min, 3min, 5min, ..., 1h, ...,
+// 1d, 1w, 1m"), not Alpaca's — the two brokers use different strings for the
+// same bar sizes, this is not a typo relative to the Alpaca original.
+
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
+
+export const STRATEGY_META: Record<StrategyName, {
+  label:      string;
+  timeframe:  'intraday' | 'hourly' | 'daily' | 'weekly';
+  pollMs:     number;
+  barPeriod:  '1min' | '5min' | '1h' | '1d' | '1w';
+  barsNeeded: number;
+}> = {
+  rsi_mean_reversion: { label: 'RSI Mean Reversion',        timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5min', barsNeeded: 60 },
+  ema_crossover:       { label: 'EMA Crossover',             timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1d',   barsNeeded: 60 },
+  orb:                 { label: 'Opening Range Breakout',    timeframe: 'intraday', pollMs: 60_000,      barPeriod: '1min', barsNeeded: 60 },
+  vwap:                { label: 'VWAP Reversion',            timeframe: 'intraday', pollMs: 60_000,      barPeriod: '1min', barsNeeded: 60 },
+  weekly_momentum:     { label: 'Weekly Momentum',           timeframe: 'weekly',   pollMs: 60 * 60_000, barPeriod: '1w',   barsNeeded: 20 },
+  donchian_breakout:   { label: 'Donchian Breakout',         timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1d',   barsNeeded: 60 },
+  donchian_hourly:     { label: 'Donchian Breakout (Hourly)', timeframe: 'hourly',  pollMs: 15 * 60_000, barPeriod: '1h',   barsNeeded: 40 },
+  macd_crossover:      { label: 'MACD Crossover',            timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1d',   barsNeeded: 60 },
+};
