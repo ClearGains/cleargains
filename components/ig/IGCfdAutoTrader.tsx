@@ -224,6 +224,15 @@ export function IGCfdAutoTrader() {
   const start = useCallback(async () => {
     setError(null);
     if (!username || !password || !apiKey) { setError('Username, password and API key are required'); return; }
+    // Confirmed live: logging into a CFD session invalidates any other
+    // active session on the same login (tested directly — a second login
+    // for a different account type kills the first one's session, 401 on
+    // its next call). igStrategyBot.ts and fxScalperBot.ts both hold their
+    // own persistent live spread-bet sessions on this same IG login — a
+    // live CFD login here would very likely kick them. Demo-only until a
+    // real fix (e.g. a separate API key, if IG's session limit turns out to
+    // be scoped per-key rather than per-login) is actually verified.
+    if (env === 'live') { setError('Live is disabled for now — starting a CFD session risks kicking out the other live bots’ IG sessions. Use demo.'); return; }
     try {
       const r = await fetch('/api/ig/session', {
         method: 'POST',
@@ -266,7 +275,7 @@ export function IGCfdAutoTrader() {
           <span className="text-[10px] text-gray-500">{connected ? `Connected — ${env} CFD` : 'Not connected'}</span>
         </div>
         <p className="text-[10px] text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5 mb-3">
-          Runs only while this tab is open. Closing the tab stops everything — no background trading, no server-side persistence. Verify on demo before ever touching live.
+          Runs only while this tab is open. Closing the tab stops everything — no background trading, no server-side persistence. Live is disabled for now: logging into a CFD session has been confirmed to invalidate other active sessions on the same IG login, which would risk kicking the other live bots (Gemini Opinion, FX Scalper) off their own sessions.
         </p>
 
         {error && <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1 mb-3">{error}</div>}
@@ -279,7 +288,7 @@ export function IGCfdAutoTrader() {
                 <select value={env} onChange={e => setEnv(e.target.value as 'demo' | 'live')}
                   className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white">
                   <option value="demo">Demo</option>
-                  <option value="live">Live</option>
+                  <option value="live" disabled>Live (disabled — see note below)</option>
                 </select>
               </div>
               <div>
