@@ -203,21 +203,28 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   // exhausted far more easily since it also carries the stock bot's poll
   // traffic. For the demo instance itself, data and execution are already
   // the same account, so this just reuses the execution session directly.
+  //
+  // IG only tolerates one active session per login — the demo login is
+  // shared with the IG strategy bot's own demo session ('igstrat:demo'),
+  // so this reuses whatever is already cached there instead of opening a
+  // second concurrent demo login (same fix as the live side below).
   async function authDataSession(): Promise<IGSession> {
     if (mode === 'demo') return session!;
     const dataCreds = resolveCredentials('demo');
     if (!dataCreds.apiKey) throw new Error('IG_DEMO_API_KEY / USERNAME / PASSWORD not set — required for live FX data feed');
-    return authenticate(dataCreds.apiKey, dataCreds.username, dataCreds.password, dataCreds.env, `fxscalper-data:${mode}`);
+    const existing = getSession('igstrat:demo');
+    if (existing && Date.now() < existing.expiresAt - 2 * 60_000) return existing;
+    return authenticate(dataCreds.apiKey, dataCreds.username, dataCreds.password, dataCreds.env, 'igstrat:demo');
   }
 
-  // Live execution session is shared with the IG strategy bot (same login,
-  // same account — 'igstrat:live' is the cache key it authenticates under).
-  // IG's account has started rejecting a second concurrent login on the same
-  // live credentials with error.security.api-key-disabled, so rather than
-  // each bot independently opening its own session, whichever bot is already
-  // holding a valid one gets reused here instead of triggering a fresh login.
+  // Execution session is shared with the IG strategy bot — same login, same
+  // account for both live ('igstrat:live') and demo ('igstrat:demo'). IG's
+  // account rejects a second concurrent login on the same credentials with
+  // error.security.api-key-disabled, so rather than each bot independently
+  // opening its own session, whichever bot is already holding a valid one
+  // gets reused here instead of triggering a fresh login.
   async function authExecSession(creds: ReturnType<typeof resolveCredentials>): Promise<IGSession> {
-    const key = mode === 'live' ? 'igstrat:live' : `fxscalper:${mode}`;
+    const key = mode === 'live' ? 'igstrat:live' : 'igstrat:demo';
     const existing = getSession(key);
     if (existing && Date.now() < existing.expiresAt - 2 * 60_000) return existing;
     return authenticate(creds.apiKey, creds.username, creds.password, creds.env, key);
