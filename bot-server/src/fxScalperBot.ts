@@ -178,7 +178,12 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
 
     const now = new Date();
     const day = now.getUTCDay();
-    if (day === 0 || day === 6) {
+    // Sunday stops being "weekend" the moment FX/indices reopen at 22:00
+    // UTC — without the hour check, the target below computes to *today*
+    // 22:00, which has already passed once we're past it, so sleepMs
+    // collapses to the 60s floor and this re-fires in a tight loop until
+    // UTC midnight.
+    if (day === 6 || (day === 0 && now.getUTCHours() < 22)) {
       // FX itself doesn't reopen until Sunday 22:00 UTC — no point refreshing sooner.
       const sunday22 = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
       sunday22.setUTCDate(sunday22.getUTCDate() + ((7 - day) % 7));

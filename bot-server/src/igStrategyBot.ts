@@ -616,8 +616,13 @@ function scheduleSessionRefresh(mode: IgMode, session: IGSession) {
   const st = ms(mode);
   if (st.sessionRefreshTimer) clearTimeout(st.sessionRefreshTimer);
 
-  const d = new Date().getUTCDay();
-  if (d === 0 || d === 6) {
+  const now = new Date();
+  const d = now.getUTCDay();
+  // Sunday stops being "weekend" the moment FX/indices reopen at 22:00 UTC —
+  // without the hour check, the target below computes to *today* 22:00,
+  // which has already passed once we're past it, so sleepMs collapses to
+  // the 60s floor and this re-fires in a tight loop until UTC midnight.
+  if (d === 6 || (d === 0 && now.getUTCHours() < 22)) {
     const sun = new Date();
     sun.setUTCDate(sun.getUTCDate() + ((7 - d) % 7));
     sun.setUTCHours(22, 0, 0, 0);
