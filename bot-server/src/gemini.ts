@@ -11,10 +11,14 @@ import * as path from 'path';
 // live on 2026-07-31 that with the stock bot (entry checks + position watch)
 // and the FX scalper all running concurrently, combined usage paces at
 // ~190-200/day, exhausting 150 by mid-afternoon and leaving live positions
-// on stop-loss-only for the rest of the day. Raised to 300/day — Gemini
-// Flash is cheap enough (low pence/day even at this volume) that the real
-// risk here is under-provisioning AI review on live positions, not overspend.
-const GEMINI_DAILY_CAP = 300;
+// on stop-loss-only for the rest of the day. Raised to 300/day, but
+// confirmed live on 2026-08-03 that's still not enough — 300 was exhausted
+// by 21:07 UTC (~21h into the UTC day), meaning the last ~3h ran on
+// stop-loss-only again. That pace works out to ~343 calls for a full 24h
+// day; raised to 350 for a small buffer. Gemini Flash is cheap enough (low
+// pence/day even at this volume) that the real risk here is
+// under-provisioning AI review on live positions, not overspend.
+const GEMINI_DAILY_CAP = 350;
 const CALL_COUNT_FILE  = path.join(__dirname, '..', 'gemini-daily-calls.json');
 
 function todayUtc(): string {
