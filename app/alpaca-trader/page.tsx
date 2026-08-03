@@ -632,6 +632,25 @@ function IgSpreadBetTab() {
     return () => { if (watchPollRef.current) clearInterval(watchPollRef.current); };
   }, [fetchWatch]);
 
+  const [openBusy, setOpenBusy] = useState<string | null>(null);
+  const openRecommendation = async (epic: string) => {
+    setOpenBusy(epic);
+    try {
+      const res  = await fetch(`/api/ig-strategy?mode=${igMode}&action=open-recommendation`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ epic }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok && data.error) setError(data.error);
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to open position');
+    } finally {
+      setOpenBusy(null);
+    }
+  };
+
   const toggleWatch = async (dealId: string, currentlyWatched: boolean) => {
     setWatchBusy(dealId);
     try {
@@ -1033,15 +1052,16 @@ function IgSpreadBetTab() {
             </div>
           )}
 
-          {/* Recommended (manual only) — full 38-name universe scan, not just
-              the current watch list. Covers signals the bot can't act on
-              itself for any reason: outside the current top-N watch slots,
-              skipped for sizing/ceiling reasons, or IG-allowance-blocked.
-              Surfaced here to open yourself instead of silently discarded. */}
+          {/* Recommended — full 38-name universe scan, not just the current
+              watch list, plus anything the bot itself tried to open and got
+              rejected (kept here instead of silently rotated away — see
+              executeIgSignal's catch in igStrategyBot.ts). Refreshed every
+              ~30min: limits get updated while it's still a live idea, and it
+              drops off this list on its own once it no longer is. */}
           {!!status?.running && (
             <div className="bg-slate-900/60 border border-purple-900/50 rounded-xl overflow-hidden">
               <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-300">Recommended — Manual Only</h2>
+                <h2 className="text-sm font-semibold text-slate-300">Recommended</h2>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500">{status.recommendations?.length ?? 0}</span>
                   <button
@@ -1054,30 +1074,40 @@ function IgSpreadBetTab() {
                 </div>
               </div>
               <div className="px-4 py-2 text-xs text-slate-500 border-b border-slate-800/60">
-                Scanned across the full instrument universe, not just what&apos;s currently watched — covers setups outside the bot&apos;s current scope, skipped for sizing, or allowance-blocked. Worth opening yourself if you agree.
+                Setups outside the bot&apos;s current scope, skipped for sizing, allowance-blocked, or an auto-entry that failed to place — updated every ~30min while still live, removed once it no longer is. Open Position sends it through at the limits shown, re-priced against the current market.
               </div>
               {!status.recommendations?.length ? (
                 <div className="px-4 py-6 text-center text-slate-600 text-sm">None right now</div>
               ) : (
               <div className="divide-y divide-slate-800/60">
-                {status.recommendations.map(r => (
-                  <div key={r.epic} className="px-4 py-3 flex items-center justify-between">
-                    <div className="flex items-center gap-3">
+                {status.recommendations.map(r => {
+                  const isBusy = openBusy === r.epic;
+                  return (
+                  <div key={r.epic} className="px-4 py-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
                       {r.action === 'BUY'
-                        ? <TrendingUp   className="w-4 h-4 text-green-400" />
-                        : <TrendingDown className="w-4 h-4 text-red-400"   />}
-                      <div>
+                        ? <TrendingUp   className="w-4 h-4 text-green-400 shrink-0" />
+                        : <TrendingDown className="w-4 h-4 text-red-400 shrink-0"   />}
+                      <div className="min-w-0">
                         <div className="font-medium text-white text-sm">{r.name || r.epic}</div>
-                        <div className="text-xs text-slate-500">{r.reason}</div>
+                        <div className="text-xs text-slate-500 truncate">{r.reason}</div>
                       </div>
                     </div>
-                    <div className="text-right text-xs">
+                    <div className="text-right text-xs shrink-0">
                       <div className="text-white font-medium">{r.action} @ {r.level.toFixed(2)}</div>
                       {r.stopPrice !== undefined && <div className="text-slate-500">Stop {r.stopPrice.toFixed(2)}</div>}
                       {r.takeProfitPrice !== undefined && <div className="text-slate-500">TP {r.takeProfitPrice.toFixed(2)}</div>}
                     </div>
+                    <button
+                      onClick={() => void openRecommendation(r.epic)}
+                      disabled={isBusy}
+                      className="shrink-0 text-xs px-2.5 py-1.5 rounded font-medium bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-50 transition-colors"
+                    >
+                      {isBusy ? '…' : 'Open Position'}
+                    </button>
                   </div>
-                ))}
+                  );
+                })}
               </div>
               )}
             </div>

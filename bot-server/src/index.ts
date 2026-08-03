@@ -13,7 +13,7 @@ import {
 import {
   startIgStrategyBot, stopIgStrategyBot, pauseIgStrategyBot, resumeIgStrategyBot,
   getIgStrategyBotStatus, loadSavedIgStrategyState, startRecommendationRefresh,
-  refreshRecommendations, refreshDailyPick,
+  refreshRecommendations, refreshDailyPick, openRecommendation,
   getPausedEpics, pauseEpic, resumeEpic,
   releaseDeal, holdDeal,
   type IgMode, type IgStrategyConfig,
@@ -510,6 +510,15 @@ app.post('/ig-strategy/:mode/refresh-recommendations', auth, async (req: Request
   if (!mode) return;
   await refreshRecommendations(mode, true);
   res.json({ ok: true });
+});
+
+// "Send it through" — opens a currently-listed recommendation as a real
+// order with one click, using the stop/TP it already carries.
+app.post('/ig-strategy/:mode/recommendations/:epic/open', auth, async (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const result = await openRecommendation(mode, decodeURIComponent(req.params.epic));
+  res.status(result.ok ? 200 : 400).json(result);
 });
 
 app.post('/ig-strategy/:mode/refresh-daily-pick', auth, async (req: Request, res: Response) => {

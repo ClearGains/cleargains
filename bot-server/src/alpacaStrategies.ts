@@ -464,6 +464,17 @@ export function donchianBreakoutSignal(
   // just applying it up front instead of after the fact.
   const stopDist = Math.min(atr * 2, last * 0.03);
 
+  // Take-profit distance: deliberately wide (trailing stop, not this level,
+  // is what actually locks in gains on a sustained trend — see
+  // igStrategyBot.ts's trailing-stop block for donchian_breakout), but
+  // still capped. Raw atr*10 with no ceiling produced a limit level IG
+  // rejected outright (confirmed live: Amazon's ATR was volatile enough
+  // that atr*10 worked out to ~35% of price — a limit that far out reads
+  // as unreasonable rather than "wide but real"). 15% keeps it well past
+  // where the trailing stop would ever actually let a trade run to, while
+  // staying inside what IG will accept.
+  const tpDist = Math.min(atr * 10, last * 0.15);
+
   if (inPosition) {
     if (side === 'long'  && last < exitLow)  return { action: 'CLOSE_LONG',  reason: `Broke below ${exitPeriod}-${periodUnit} low ${exitLow.toFixed(2)}` };
     if (side === 'short' && last > exitHigh) return { action: 'CLOSE_SHORT', reason: `Broke above ${exitPeriod}-${periodUnit} high ${exitHigh.toFixed(2)}` };
@@ -475,7 +486,7 @@ export function donchianBreakoutSignal(
       action:           'BUY',
       reason:           `Breakout above ${entryPeriod}-${periodUnit} high ${entryHigh.toFixed(2)}`,
       stopPrice:        +(last - stopDist).toFixed(2),
-      takeProfitPrice:  +(last + atr * 10).toFixed(2),
+      takeProfitPrice:  +(last + tpDist).toFixed(2),
       orderType:        'market',
       triggerLevel:     entryHigh,
     };
@@ -485,7 +496,7 @@ export function donchianBreakoutSignal(
       action:           'SELL',
       reason:           `Breakdown below ${entryPeriod}-${periodUnit} low ${entryLow.toFixed(2)}`,
       stopPrice:        +(last + stopDist).toFixed(2),
-      takeProfitPrice:  +(last - atr * 10).toFixed(2),
+      takeProfitPrice:  +(last - tpDist).toFixed(2),
       orderType:        'market',
       triggerLevel:     entryLow,
     };

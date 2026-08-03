@@ -760,6 +760,52 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
     return;
   }
   const cfg = st.config;
+
+  // gemini_opinion has no free technical rule to sweep the full 38-name
+  // universe with the way the strategies below do — a real Gemini call per
+  // name would burn the daily cap fast at that volume. Instead this only
+  // re-validates whatever's already flagged as a recommendation (e.g. a
+  // failed auto-entry — see executeIgSignal's catch block), which is
+  // normally a handful of epics at most, keeping call volume bounded while
+  // still delivering "still recommended, limits refreshed" or "no longer
+  // recommended, removed" every 30 minutes.
+  if (cfg.strategy === 'gemini_opinion') {
+    const tracked = [...st.recommendations.keys()];
+    for (const epic of tracked) {
+      const name = epicName(epic);
+      try {
+        const ticker = EPIC_TO_ALPACA[epic];
+        const bars = await fetchBarsWithFallback(epic, '1mo', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
+        if (!bars?.length) { st.recommendations.delete(epic); continue; }
+        const last     = bars[bars.length - 1].c;
+        const rsi      = calcRsi(bars);
+        const macd     = calcMacdHist(bars);
+        const atr      = calcAtr(bars);
+        const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
+
+        const idea = await askGeminiTradeIdea({ instrumentName: name, price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines });
+        if (idea.engine !== 'gemini' || idea.action === 'HOLD' || idea.confidence < 55) {
+          st.recommendations.delete(epic);
+          if (force) addLog(mode, 'info', name, `[Recommendation check] No longer recommended (${idea.action} ${idea.confidence}%) — removed`);
+        } else {
+          st.recommendations.set(epic, {
+            epic, name, action: idea.action as 'BUY' | 'SELL', reason: `[GEMINI] ${idea.reason}`,
+            level: last,
+            stopPrice:       idea.action === 'BUY' ? last - idea.stopPoints       : last + idea.stopPoints,
+            takeProfitPrice: idea.action === 'BUY' ? last + idea.takeProfitPoints : last - idea.takeProfitPoints,
+            computedAt: new Date().toISOString(),
+            score: idea.confidence,
+          });
+          if (force) addLog(mode, 'info', name, `[Recommendation check] Still recommended — ${idea.action} ${idea.confidence}%, limits refreshed`);
+        }
+      } catch (e) {
+        if (force) addLog(mode, 'info', name, `[Recommendation check] Refresh failed, keeping last known: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+    return;
+  }
+
   const { resolution, count } = IG_RES[cfg.strategy];
 
   let heldEpics = new Set<string>();
@@ -792,7 +838,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
     // the buffer happens to already be populated (because this epic is also
     // in cfg.epics), reuse it for free, otherwise fall through to Yahoo/IG-REST.
     const usesLightstream = !usesFreeData
-      && (cfg.strategy === 'donchian_hourly' || cfg.strategy === 'gemini_opinion')
+      && cfg.strategy === 'donchian_hourly'
       && LIGHTSTREAM_ELIGIBLE_EPICS.has(epic)
       && (st.candleBuffers.get(epic)?.length ?? 0) >= count;
     const usesYahooScaled = !usesFreeData && !usesLightstream && yahooRefPrices.has(epic);
@@ -871,6 +917,53 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
   }
 
   if (force) addLog(mode, 'info', '—', `[Recommendation check] Done — ${checked} checked, ${found} signal(s) found, ${blocked} allowance-blocked`);
+}
+
+// Manually executes a currently-listed recommendation as a real order — the
+// "just send it through" path: re-prices against the live market rather
+// than trusting the (possibly several-minutes-stale) level the recommendation
+// was computed at, but keeps the same stop/TP *distance* the recommendation
+// chose, applied relative to the fresh price. Sized off the bot's own
+// maxRiskGbp, same as every other entry this bot places.
+export async function openRecommendation(mode: IgMode, epic: string): Promise<{ ok: boolean; error?: string }> {
+  const st = ms(mode);
+  if (!st.running || !st.session || !st.config) return { ok: false, error: 'Bot not running' };
+  const rec = st.recommendations.get(epic);
+  if (!rec) return { ok: false, error: 'No current recommendation for this epic' };
+  const cfg  = st.config;
+  const name = epicName(epic);
+
+  try {
+    const livePositions = await fetchFullPositions(st.session);
+    if (livePositions.some(p => p.epic === epic)) return { ok: false, error: 'Position already open on this epic' };
+
+    const details = await fetchMarketDetails(st.session, [epic]);
+    const detail  = details.get(epic);
+    const minDeal = detail?.minDealSize ?? 0.5;
+    const minStop = detail?.minStopDist ?? 1;
+    const currentPrice = (rec.action === 'BUY' ? detail?.offer : detail?.bid) ?? rec.level;
+
+    const stopDist   = Math.max(minStop, rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : currentPrice * 0.02);
+    const profitDist = Math.max(minStop, rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : currentPrice * 0.03);
+    const stake       = Math.max(minDeal, calcStake(cfg.maxRiskGbp, stopDist, minDeal));
+
+    const { dealId, level, protectionOk, protectionError } =
+      await placeMarketOrder(st.session, epic, rec.action, stake, stopDist, profitDist);
+
+    addLog(mode, 'enter', name,
+      `↑ Manually opened from recommendation — ${rec.action} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt TP ${profitDist.toFixed(1)}pt`);
+    if (!protectionOk) addLog(mode, 'error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
+
+    registerBotOpenedDeal(mode, dealId);
+    try { const { addToWatch } = await import('./geminiWatch'); addToWatch(mode, dealId); } catch {}
+    st.recommendations.delete(epic);
+
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    addLog(mode, 'error', name, `Manual open from recommendation failed: ${msg}`);
+    return { ok: false, error: msg };
+  }
 }
 
 // Sets today's single best-scored pick the first time this runs after UTC
@@ -1582,6 +1675,20 @@ async function executeIgSignal(
     // ~2 hours, "Deal REJECTED: UNKNOWN" every time, same signal, same
     // stake, no backoff.
     blockEpicTemporarily(mode, cfg, session, epic, `order rejected: ${msg.slice(0, 60)}`);
+
+    // The idea itself may still be genuinely good even though the order
+    // mechanically failed (a transient IG-side rejection, a sizing edge
+    // case) — surface it as a standing recommendation instead of just
+    // rotating away and losing it. refreshRecommendations() keeps this
+    // current (or drops it) every 30min from here on; the user can also
+    // open it manually at any point while it's still listed.
+    st.recommendations.set(epic, {
+      epic, name, action: action as 'BUY' | 'SELL',
+      reason: `${reason} (auto-entry failed: ${msg.slice(0, 60)})`,
+      level: currentPrice, stopPrice, takeProfitPrice,
+      computedAt: new Date().toISOString(),
+      score: signal.confidence ?? 60,
+    });
   }
 }
 
