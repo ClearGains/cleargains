@@ -1787,6 +1787,73 @@ async function poll(mode: IgMode) {
     }
   }
 
+  // Market-open weakness guard — a stock/index that's opened red tends to
+  // keep weakening rather than reverse, and it's much more dangerous when a
+  // major index is *also* down since its own open — broad selling pressure,
+  // not something idiosyncratic to one name. This is a fast, rules-only
+  // check run every poll, deliberately independent of Gemini Position
+  // Watch's own periodic review (geminiWatch.ts): that review cadence isn't
+  // built to catch a position that needs to come off *now*, before a weak
+  // open compounds into a much bigger loss than a stop was sized for.
+  {
+    const WEAK_OPEN_PCT = 0.5; // % down/up from today's open before this counts as a real warning
+    let referenceIndexPct: number | null | undefined; // undefined = not fetched yet this poll, null = fetch failed
+    const getReferenceIndexPct = async (): Promise<number | null> => {
+      if (referenceIndexPct !== undefined) return referenceIndexPct;
+      try {
+        const bars = await fetchBarsWithFallback('IX.D.DOW.DAILY.IP', '1d', { yahooInterval: '15m' });
+        referenceIndexPct = (bars && bars.length >= 2 && bars[0].o > 0)
+          ? (bars[bars.length - 1].c - bars[0].o) / bars[0].o * 100
+          : null;
+      } catch { referenceIndexPct = null; }
+      return referenceIndexPct;
+    };
+
+    for (const p of positions) {
+      try {
+        const bars = await fetchBarsWithFallback(p.epic, '1d', { yahooInterval: '15m' });
+        if (!bars || bars.length < 2 || bars[0].o <= 0) continue;
+
+        const isBuy          = p.direction === 'BUY';
+        const currentPrice   = isBuy ? p.bid : p.offer; // conservative side for each direction
+        const pctFromOpen    = (currentPrice - bars[0].o) / bars[0].o * 100;
+        const weakForThisPos = isBuy ? pctFromOpen <= -WEAK_OPEN_PCT : pctFromOpen >= WEAK_OPEN_PCT;
+        if (!weakForThisPos) continue;
+
+        const name = epicName(p.epic);
+        // An index position's own weakness already *is* the broad-market
+        // signal — no separate index to corroborate against without being
+        // circular. For a single stock, only escalate to an outright close
+        // when a major index is confirming the same direction of weakness;
+        // otherwise this looks idiosyncratic to that name, so just tighten.
+        const isIndexPosition = p.epic.startsWith('IX.D.');
+        const idxPct = isIndexPosition ? null : await getReferenceIndexPct();
+        const corroborated = isIndexPosition
+          || (idxPct !== null && (isBuy ? idxPct <= -WEAK_OPEN_PCT * 0.6 : idxPct >= WEAK_OPEN_PCT * 0.6));
+
+        if (corroborated) {
+          addLog(mode, 'exit', name,
+            `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open${isIndexPosition ? '' : `, market broadly weak too (${idxPct?.toFixed(2)}%)`} — closing before it compounds`);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); }
+          catch (e) { addLog(mode, 'error', name, `Weak-open close failed: ${e instanceof Error ? e.message : String(e)}`); }
+        } else if (p.stopLevel !== undefined) {
+          const currentDist   = Math.abs(p.level - p.stopLevel);
+          const tightenedDist = currentDist * 0.4;
+          const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
+          const wouldTighten  = p.direction === 'BUY' ? newStop > p.stopLevel : newStop < p.stopLevel;
+          if (wouldTighten) {
+            try {
+              await updatePositionLevels(st.session, p.dealId, newStop, p.limitLevel ?? null);
+              addLog(mode, 'info', name, `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open — tightened stop as a precaution`);
+            } catch (e) {
+              addLog(mode, 'error', name, `Weak-open stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
+      } catch { /* best-effort — never let a data-source hiccup block the rest of the poll cycle */ }
+    }
+  }
+
   // Trailing stop (donchian_breakout only) — ratchets the stop toward price
   // at the same 3%-of-price distance used at entry, but only ever tightens,
   // never loosens. Locks in gains as a trend continues instead of capping

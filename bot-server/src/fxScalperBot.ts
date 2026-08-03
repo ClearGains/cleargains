@@ -4,35 +4,37 @@ import {
   authenticate, getSession, closePosition, placeMarketOrder,
   fetchMarketDetails, fetchAccountFunds, fetchFullPositions, fetchCandleHistory,
   updatePositionLevels,
-  type IGSession, type CandleBar,
+  type IGSession, type CandleBar, type MarketDetail,
 } from './igApi';
-import { createStreamManager } from './igStream';
+import { type CandleTick } from './scalperStrategy';
 import {
-  initEpicState, processTick, recordFill, DEFAULT_CONFIG,
-  type CandleTick, type ScalperEpicState, type ScalperConfig,
-} from './scalperStrategy';
+  initSwingEpicState, processSwingTick, recordSwingFill, DEFAULT_SWING_CONFIG, isGreen,
+  type SwingEpicState, type SwingConfig,
+} from './fxSwingStrategy';
 import { isMarketOpen, isClosingSoon } from './marketHours';
 import { askGemini, type EntrySignal } from './gemini';
 import { resolveCredentials, isLossLocked, registerBotOpenedDeal, type IgMode } from './igStrategyBot';
 import { FX_EPICS, SCALPER_INDEX_EPICS } from './igStrategyScanner';
 
-// ── Dedicated FX scalper — persistent, real execution ───────────────────────
-// Sources 5-min candles from IG's Lightstreamer feed (free, push-based — no
-// REST historical-data allowance cost, unlike igStrategyBot.ts's poll-based
-// strategies) and runs the same rules engine + Gemini second-opinion pattern
-// the legacy data-only bot (bot.ts/botAccount.ts) already computes but never
-// acts on. This module actually places and closes real orders.
+// ── Dedicated FX bot — persistent, real execution ───────────────────────────
+// Runs fxSwingStrategy.ts (hourly bars, hours-scale holds, position-condition
+// driven exits) rather than scalperStrategy.ts's 5-min mean-reversion, which
+// spent most of its "losses" to spread + noise rather than being wrong about
+// direction. scalperStrategy.ts itself is untouched and still in the repo —
+// this module just no longer runs it. Polls every 15 minutes via REST instead
+// of a continuous Lightstreamer tick stream — hourly-bar decisions don't need
+// tick-level granularity, and it's a much lighter footprint on IG's account.
 //
 // Deliberately its own factory/closure per mode (mirrors botAccount.ts's
 // createAccountBot pattern) rather than folding into igStrategyBot.ts's
 // single-config-per-mode ModeState — that state model has no way to run two
 // independent strategies concurrently on one mode, and its severe-loss/
 // profit-lock thresholds are scaled to *that* bot's own maxRiskGbp, which
-// would silently mis-calibrate FX's real protection if reused as-is. This
-// module gets its own equivalent checks (see maintenance() below) scaled to
-// its own risk setting, but still registers into igStrategyBot.ts's shared
-// botOpenedDeals set + Gemini Position Watch so self-heal-of-naked-stops and
-// position review cover FX positions too, without duplicating that logic.
+// would silently mis-calibrate this bot's real protection if reused as-is.
+// This module gets its own equivalent checks scaled to its own risk setting,
+// but still registers into igStrategyBot.ts's shared botOpenedDeals set +
+// Gemini Position Watch so self-heal-of-naked-stops and position review
+// cover these positions too, without duplicating that logic.
 
 export type FxMode = IgMode;
 
@@ -47,7 +49,7 @@ export type FxLogEntry = {
 export type FxScalperStartParams = {
   epics?:      string[];   // defaults to all 5 FX majors + 4 supported indices
   maxRiskGbp?: number;     // £ lost if stop hit — independent of igStrategyBot's own maxRiskGbp
-  config?:     Partial<ScalperConfig>;
+  config?:     Partial<SwingConfig>;
 };
 
 export type FxEpicStatus = {
@@ -63,7 +65,7 @@ export type FxScalperStatus = {
   mode:             FxMode;
   running:          boolean;
   paused:           boolean;
-  streamConnected:  boolean;
+  streamConnected:  boolean;  // poll-loop health, not a literal stream — kept for frontend compatibility
   epics:            string[];
   maxRiskGbp:        number;
   epicStatuses:      Record<string, FxEpicStatus>;
@@ -100,21 +102,21 @@ export function loadSavedFxScalperState(mode: FxMode): PersistedStartParams | nu
 // Persists dealId/size/direction/entry/stop/TP/cooldown per epic across
 // restarts — without this, a PM2 restart while IN_POSITION would silently
 // orphan a real open position (no tracked dealId to close it with, and the
-// scalper would start scoring fresh candles from FLAT as if nothing were
-// open, while the actual position sits unmanaged by this module — still
-// covered by the shared botOpenedDeals self-heal/Gemini-watch registration,
-// but this module's own exit logic wouldn't apply to it anymore).
-function saveEpicStates(mode: FxMode, states: Record<string, ScalperEpicState>): void {
+// bot would start scoring fresh candles from FLAT as if nothing were open,
+// while the actual position sits unmanaged by this module — still covered
+// by the shared botOpenedDeals self-heal/Gemini-watch registration, but
+// this module's own exit logic wouldn't apply to it anymore).
+function saveEpicStates(mode: FxMode, states: Record<string, SwingEpicState>): void {
   try { fs.writeFileSync(epicsFile(mode), JSON.stringify(states), 'utf8'); } catch {}
 }
-function loadEpicStates(mode: FxMode): Record<string, ScalperEpicState> | null {
-  try { return JSON.parse(fs.readFileSync(epicsFile(mode), 'utf8')) as Record<string, ScalperEpicState>; } catch { return null; }
+function loadEpicStates(mode: FxMode): Record<string, SwingEpicState> | null {
+  try { return JSON.parse(fs.readFileSync(epicsFile(mode), 'utf8')) as Record<string, SwingEpicState>; } catch { return null; }
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const WEEKEND_FLATTEN_BUFFER_MIN = 30;   // flatten open FX positions this many minutes before Friday 22:00 UTC close
-const MAINTENANCE_MS             = 5 * 60_000;
+const POLL_MS                    = 15 * 60_000;  // scan cadence — hourly-bar decisions don't need tighter
+const WEEKEND_FLATTEN_BUFFER_MIN = 30;   // tighten (not flatten) open positions this many minutes before Friday 22:00 UTC close
 const MAX_LOSS_CEILING_MULT      = 3;    // matches igStrategyBot.ts's realized-max-loss ceiling ratio
 
 function epicName(epic: string): string { return epic.split('.').slice(0, 3).join('.'); }
@@ -145,21 +147,22 @@ function barToTick(epic: string, bar: CandleBar): CandleTick {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 export function createFxScalperBot(mode: FxMode): FxScalperHandle {
-  const tag    = `fx-scalper:${mode}`;
-  const stream = createStreamManager(`igStream:fxScalper:${mode}`);
+  const tag = `fx-scalper:${mode}`;
 
   let session:       IGSession | null = null; // execution — live creds for the live instance, places/closes real orders
-  let dataSession:   IGSession | null = null; // data — ALWAYS demo creds, feeds Lightstreamer + prewarm's candle history
+  let dataSession:   IGSession | null = null; // data — ALWAYS demo creds, sources candle history + live snapshots
   let running        = false;
   let paused         = false;
   let currentEpics:  string[] = [];
   let maxRiskGbp     = 5;
-  let currentConfig: ScalperConfig = { ...DEFAULT_CONFIG };
-  let epicStates:    Record<string, ScalperEpicState> = {};
+  let currentConfig: SwingConfig = { ...DEFAULT_SWING_CONFIG };
+  let epicStates:    Record<string, SwingEpicState> = {};
+  const lastBarTime: Record<string, string> = {};
   const log: FxLogEntry[] = [];
 
   let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  let maintenanceTimer:    ReturnType<typeof setInterval> | null = null;
+  let pollTimer:           ReturnType<typeof setInterval> | null = null;
+  let lastPollAt = 0;
   let authFailCount = 0;
 
   function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -200,8 +203,8 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   }
 
   // Data session credentials — ALWAYS demo, regardless of which mode this
-  // instance is. IG's demo account streams the same real market data as
-  // live (only the account/execution side is simulated), and demo's
+  // instance is. IG's demo account streams/serves the same real market data
+  // as live (only the account/execution side is simulated), and demo's
   // historical-data REST allowance is tracked completely independently from
   // live's — sourcing candles from demo means generating a signal never
   // touches the live account's own allowance, which (confirmed live) gets
@@ -216,7 +219,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   async function authDataSession(): Promise<IGSession> {
     if (mode === 'demo') return session!;
     const dataCreds = resolveCredentials('demo');
-    if (!dataCreds.apiKey) throw new Error('IG_DEMO_API_KEY / USERNAME / PASSWORD not set — required for live FX data feed');
+    if (!dataCreds.apiKey) throw new Error('IG_DEMO_API_KEY / USERNAME / PASSWORD not set — required for FX data feed');
     const existing = getSession('igstrat:demo');
     if (existing && Date.now() < existing.expiresAt - 2 * 60_000) return existing;
     return authenticate(dataCreds.apiKey, dataCreds.username, dataCreds.password, dataCreds.env, 'igstrat:demo');
@@ -244,7 +247,6 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       dataSession = await authDataSession();
       authFailCount = 0;
       addLog('info', '—', `Session(s) refreshed — execution expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
-      if (running) stream.connect(dataSession, currentEpics, handleTick, '5MINUTE');
       scheduleRefresh(session);
     } catch (e) {
       authFailCount++;
@@ -259,18 +261,13 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   }
 
   // ── Close + reset helper — shared by strategy-driven EXIT and the
-  // maintenance sweep's severe-loss/profit-lock/weekend-flatten closes ──────
+  // poll cycle's severe-loss/profit-lock/weekend-guard closes ─────────────
   async function closeAndReset(epic: string, dealId: string, direction: 'BUY' | 'SELL', size: number): Promise<void> {
     if (!session) return;
     try {
       await closePosition(session, dealId, direction, size);
       const st = epicStates[epic];
       if (st) {
-        // Real cooldown, using the field scalperStrategy.ts already defines
-        // for exactly this — processTick already knows how to honor
-        // st.state === 'COOLDOWN', it just never gets set anywhere upstream
-        // of this module, which otherwise leaves nothing stopping an
-        // immediate re-entry on the very next candle after every exit.
         st.state         = 'COOLDOWN';
         st.cooldownUntil = Date.now() + currentConfig.cooldownMs;
         st.dealId = ''; st.size = 0;
@@ -282,178 +279,208 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     }
   }
 
-  // ── Tick handler ─────────────────────────────────────────────────────────
-  function handleTick(tick: CandleTick): void {
-    if (!running) return;
-    const st = epicStates[tick.epic];
+  // ── Decision handler ──────────────────────────────────────────────────────
+  async function handleDecision(epic: string, tick: CandleTick, decision: ReturnType<typeof processSwingTick>): Promise<void> {
+    const st = epicStates[epic];
     if (!st) return;
-
-    const name = epicName(tick.epic);
-
-    // Capture pre-decision fields so an ENTER we end up skipping (Gemini
-    // SKIP, or a guard below) or an EXIT whose close call fails can be
-    // reverted to their actual pre-processTick values — processTick mutates
-    // st in place before this function gets a chance to act on the result.
-    const preState  = st.state;
-    const preDeal   = st.dealId;
-    const preSize   = st.size;
-    const preEntry  = st.entryPrice;
-    const preStop   = st.dynamicStopPrice;
-    const preTp     = st.takeProfitPrice;
-
-    const decision = processTick(st, tick, currentConfig);
-
-    if ((decision.action === 'HOLD' || decision.action === 'WAIT' || decision.action === 'COOLDOWN') && !tick.candleClosed) return;
+    const name = epicName(epic);
 
     switch (decision.action) {
       case 'ENTER': {
-        void (async () => {
-          const revertToFlat = () => {
-            st.state = preState; st.dealId = preDeal; st.size = preSize;
-            st.entryPrice = preEntry; st.dynamicStopPrice = preStop; st.takeProfitPrice = preTp;
-          };
+        const revertToFlat = () => { st.state = 'FLAT'; };
 
-          if (paused) { addLog('wait', name, 'Paused — skipping entry'); revertToFlat(); return; }
+        if (paused) { addLog('wait', name, 'Paused — skipping entry'); revertToFlat(); return; }
 
-          const mkt = isMarketOpen(tick.epic);
-          if (!mkt.open) { addLog('wait', name, `Market closed — ${mkt.reason}`); revertToFlat(); return; }
-          if (isClosingSoon(tick.epic)) { addLog('wait', name, 'Closing soon — no new entries'); revertToFlat(); return; }
+        const mkt = isMarketOpen(epic);
+        if (!mkt.open) { addLog('wait', name, `Market closed — ${mkt.reason}`); revertToFlat(); return; }
+        if (isClosingSoon(epic)) { addLog('wait', name, 'Closing soon — no new entries'); revertToFlat(); return; }
 
-          if (isLossLocked(mode)) {
-            addLog('wait', name, 'Stock bot daily-loss lock active for this account — skipping new FX entry');
+        if (isLossLocked(mode)) {
+          addLog('wait', name, 'Stock bot daily-loss lock active for this account — skipping new entry');
+          revertToFlat();
+          return;
+        }
+
+        if (!session) { addLog('error', name, 'No session — cannot enter'); revertToFlat(); return; }
+
+        const greenCount = st.closedCandles.slice(-5).filter(isGreen).length;
+        const entrySignal: EntrySignal = {
+          instrumentName: name,
+          epic,
+          rsi:            decision.indicators.rsi,
+          macd:           decision.indicators.macd,
+          atr:            decision.indicators.atr,
+          greenCount,
+          suggestedDir:   decision.direction,
+          lastCandles:    st.closedCandles.slice(-5).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+        };
+
+        const verdict = await askGemini(entrySignal);
+        addLog('info', name, `Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
+        if (verdict.noCapacityReason) {
+          addLog('info', name, `⚠ Gemini ${verdict.noCapacityReason === 'cap-reached' ? 'daily cap reached' : 'API key unavailable'} — trading on rules-only fallback verdict`);
+        }
+
+        if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {
+          addLog('wait', name, `Gemini skipped entry (${verdict.direction}, ${verdict.confidence}%)`);
+          revertToFlat();
+          return;
+        }
+
+        try {
+          const details = await fetchMarketDetails(session, [epic]);
+          const detail  = details.get(epic);
+          const minDeal = detail?.minDealSize ?? 0.1;
+          const minStop = detail?.minStopDist ?? 1;
+
+          // Swing stops/targets come off hourly ATR (via decision.indicators.atr,
+          // computed on 1H bars) rather than Gemini's own points suggestion —
+          // Gemini's points calibration in gemini.ts assumes 5-min-scalp scale,
+          // so it would badly undersize a hours-scale stop. Gemini's job here
+          // is confirming direction/confidence, not sizing the trade.
+          const atr = decision.indicators.atr ?? minStop * 4;
+          const stopDist   = Math.max(atr * currentConfig.atrStopMult, minStop);
+          const profitDist = Math.max(atr * currentConfig.atrTpMult, minStop * 2);
+
+          if (detail?.bid !== undefined && detail?.offer !== undefined) {
+            const spread = detail.offer - detail.bid;
+            if (spread > stopDist * 0.25) {
+              addLog('wait', name, `Spread ${spread.toFixed(1)} too wide vs stop ${stopDist.toFixed(1)} — skipping`);
+              revertToFlat();
+              return;
+            }
+          }
+
+          const stake = calcStake(maxRiskGbp, stopDist, minDeal);
+          const actualMaxLoss = stake * stopDist;
+          if (actualMaxLoss > maxRiskGbp * MAX_LOSS_CEILING_MULT) {
+            addLog('wait', name, `Realized max loss £${actualMaxLoss.toFixed(2)} exceeds ${MAX_LOSS_CEILING_MULT}× target — skipping`);
             revertToFlat();
             return;
           }
 
-          if (!session) { addLog('error', name, 'No session — cannot enter'); revertToFlat(); return; }
-
-          const entrySignal: EntrySignal = {
-            instrumentName: name,
-            epic:           tick.epic,
-            rsi:            decision.indicators.rsi,
-            macd:           decision.indicators.macd,
-            atr:            decision.indicators.atr,
-            greenCount:     decision.indicators.greenCount,
-            suggestedDir:   decision.direction,
-            lastCandles:    st.closedCandles.slice(-5).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
-          };
-
-          const verdict = await askGemini(entrySignal);
-          addLog('info', name, `Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
-          if (verdict.noCapacityReason) {
-            addLog('info', name, `⚠ Gemini ${verdict.noCapacityReason === 'cap-reached' ? 'daily cap reached' : 'API key unavailable'} — trading on rules-only fallback verdict`);
+          const funds = await fetchAccountFunds(session);
+          if (detail?.marginFactorPct !== undefined && detail?.bid !== undefined && detail?.offer !== undefined) {
+            const midPrice = (detail.bid + detail.offer) / 2;
+            const requiredMargin = stake * midPrice * (detail.marginFactorPct / 100);
+            if (requiredMargin > funds.available) {
+              addLog('wait', name, `Required margin £${requiredMargin.toFixed(2)} exceeds available £${funds.available.toFixed(2)} — skipping`);
+              revertToFlat();
+              return;
+            }
           }
 
-          if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {
-            addLog('wait', name, `Gemini skipped entry (${verdict.direction}, ${verdict.confidence}%)`);
+          const livePositions = await fetchFullPositions(session);
+          if (livePositions.some(p => p.epic === epic)) {
+            addLog('wait', name, 'Position already open on this epic — skipping');
             revertToFlat();
             return;
           }
 
+          const { dealId, level, protectionOk, protectionError } =
+            await placeMarketOrder(session, epic, verdict.direction as 'BUY' | 'SELL', stake, stopDist, profitDist);
+
+          recordSwingFill(st, level, stopDist, profitDist);
+          st.dealId = dealId;
+          st.size   = stake;
+
+          addLog('enter', name, `↑ ${verdict.direction} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt TP ${profitDist.toFixed(1)}pt (1H ATR×${currentConfig.atrStopMult}/${currentConfig.atrTpMult}) · Gemini ${verdict.confidence}%`);
+          if (!protectionOk) addLog('error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
+
+          registerBotOpenedDeal(mode, dealId);
           try {
-            const details = await fetchMarketDetails(session, [tick.epic]);
-            const detail  = details.get(tick.epic);
-            const minDeal = detail?.minDealSize ?? 0.1;
-            const minStop = detail?.minStopDist ?? 1;
+            const { addToWatch } = await import('./geminiWatch');
+            addToWatch(mode, dealId);
+          } catch {}
 
-            const stopDist   = Math.max(verdict.stopPoints, minStop);
-            const profitDist = Math.max(verdict.takeProfitPoints, 1);
-
-            if (detail?.bid !== undefined && detail?.offer !== undefined) {
-              const spread = detail.offer - detail.bid;
-              if (spread > stopDist * 0.25) {
-                addLog('wait', name, `Spread ${spread.toFixed(1)} too wide vs stop ${stopDist.toFixed(1)} — skipping`);
-                revertToFlat();
-                return;
-              }
-            }
-
-            const stake = calcStake(maxRiskGbp, stopDist, minDeal);
-            const actualMaxLoss = stake * stopDist;
-            if (actualMaxLoss > maxRiskGbp * MAX_LOSS_CEILING_MULT) {
-              addLog('wait', name, `Realized max loss £${actualMaxLoss.toFixed(2)} exceeds ${MAX_LOSS_CEILING_MULT}× target — skipping`);
-              revertToFlat();
-              return;
-            }
-
-            const funds = await fetchAccountFunds(session);
-            if (detail?.marginFactorPct !== undefined && detail?.bid !== undefined && detail?.offer !== undefined) {
-              const midPrice = (detail.bid + detail.offer) / 2;
-              const requiredMargin = stake * midPrice * (detail.marginFactorPct / 100);
-              if (requiredMargin > funds.available) {
-                addLog('wait', name, `Required margin £${requiredMargin.toFixed(2)} exceeds available £${funds.available.toFixed(2)} — skipping`);
-                revertToFlat();
-                return;
-              }
-            }
-
-            // Final live guard immediately before ordering — catches both a
-            // stale in-memory state and (since FX epics are excluded from
-            // the stock bot's own scan universe specifically to avoid this)
-            // any residual manual/external duplicate.
-            const livePositions = await fetchFullPositions(session);
-            if (livePositions.some(p => p.epic === tick.epic)) {
-              addLog('wait', name, 'Position already open on this epic — skipping');
-              revertToFlat();
-              return;
-            }
-
-            const { dealId, level, protectionOk, protectionError } =
-              await placeMarketOrder(session, tick.epic, verdict.direction as 'BUY' | 'SELL', stake, stopDist, profitDist);
-
-            recordFill(st, level, stopDist, profitDist);
-            st.dealId = dealId;
-            st.size   = stake;
-
-            addLog('enter', name, `↑ ${verdict.direction} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt TP ${profitDist.toFixed(1)}pt · Gemini ${verdict.confidence}%`);
-            if (!protectionOk) addLog('error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
-
-            registerBotOpenedDeal(mode, dealId);
-            try {
-              const { addToWatch } = await import('./geminiWatch');
-              addToWatch(mode, dealId);
-            } catch {}
-
-            saveEpicStates(mode, epicStates);
-          } catch (e) {
-            addLog('error', name, `Order placement failed: ${e instanceof Error ? e.message : String(e)}`);
-            revertToFlat();
-          }
-        })();
+          saveEpicStates(mode, epicStates);
+        } catch (e) {
+          addLog('error', name, `Order placement failed: ${e instanceof Error ? e.message : String(e)}`);
+          revertToFlat();
+        }
         break;
       }
 
       case 'EXIT': {
-        const dealId = preDeal, size = preSize, direction = st.direction;
-        if (!dealId) { addLog('error', name, 'EXIT decided but no tracked dealId — nothing to close'); break; }
+        const dealId = st.dealId, size = st.size, direction = st.direction;
+        if (!dealId) break; // nothing was ever really open (e.g. an invalidation right after a reverted entry)
         addLog('exit', name, `↓ EXIT${decision.urgency === 'immediate' ? ' [immediate]' : ''} — ${decision.reason}`);
-        void closeAndReset(tick.epic, dealId, direction, size);
+        await closeAndReset(epic, dealId, direction, size);
         break;
       }
 
-      case 'HOLD':     if (tick.candleClosed) addLog('hold', name, decision.reason); break;
-      case 'WAIT':     if (tick.candleClosed) addLog('wait', name, decision.reason); break;
-      case 'COOLDOWN': if (tick.candleClosed) addLog('cooldown', name, decision.reason); break;
+      case 'TIGHTEN': {
+        if (!session || !st.dealId) break;
+        try {
+          const positions = await fetchFullPositions(session);
+          const p = positions.find(pos => pos.dealId === st.dealId);
+          await updatePositionLevels(session, st.dealId, decision.newStopPrice, p?.limitLevel ?? null);
+          addLog('info', name, decision.reason);
+        } catch (e) {
+          addLog('error', name, `Stop tighten failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        break;
+      }
+
+      case 'HOLD':     addLog('hold', name, decision.reason); break;
+      case 'WAIT':     addLog('wait', name, decision.reason); break;
+      case 'COOLDOWN': addLog('cooldown', name, decision.reason); break;
     }
   }
 
-  // ── Maintenance sweep — FX-scoped severe-loss/profit-lock + weekend risk
-  // guard. Deliberately NOT reusing igStrategyBot.ts's equivalents: those are
-  // scaled off that bot's own cfg.maxRiskGbp (unrelated to this module's).
-  // Weekend handling used to hard-flatten every remaining position
-  // regardless of P&L — changed after live review: closing purely because
-  // "it can't be monitored" crystallizes P&L at an arbitrary moment even
-  // when there's no actual reason to exit, and Gemini Position Watch keeps
-  // reviewing gemini_opinion-owned stock positions through the weekend
-  // anyway. Now mirrors igStrategyBot.ts's weekend guard: only close for an
-  // actual reason (severe loss or a profit worth banking, both already
-  // checked below), otherwise just tighten the stop to cap the gap-risk
-  // downside and let it ride. ─────────────────────────────────────────────
-  async function maintenance(): Promise<void> {
-    if (!running || !session) return;
+  // ── Per-epic evaluation — fresh hourly bars + a live-price check every cycle ──
+  async function evaluateEpic(epic: string, detail: MarketDetail | undefined): Promise<void> {
+    const st = epicStates[epic];
+    if (!st || !dataSession) return;
+
+    try {
+      // Small window, not a full refill — the strategy already carries its
+      // own rolling closedCandles history forward across cycles (built once
+      // at prewarm), so each poll only needs enough bars to catch a newly
+      // closed one since last time. Requesting 80 bars every 15 minutes
+      // would burn through IG's historical-data allowance for no benefit —
+      // confirmed live that allowance exhausts fast under repeated polling.
+      const bars = await fetchCandleHistory(dataSession, epic, 'HOUR', 4);
+      if (bars.length) {
+        const known   = lastBarTime[epic] ?? '';
+        const newBars = bars.filter(b => b.snapshotTime > known);
+        for (const bar of newBars) {
+          const tick = barToTick(epic, bar);
+          const decision = processSwingTick(st, tick, currentConfig);
+          await handleDecision(epic, tick, decision);
+        }
+        lastBarTime[epic] = bars[bars.length - 1].snapshotTime;
+      }
+    } catch (e) {
+      addLog('info', epicName(epic), `Bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    if (detail?.bid !== undefined) {
+      const liveTick: CandleTick = {
+        epic, time: new Date().toISOString(),
+        open: detail.bid, high: detail.bid, low: detail.bid, close: detail.bid,
+        bidClose: detail.bid, offerClose: detail.offer ?? detail.bid,
+        candleClosed: false,
+      };
+      const decision = processSwingTick(st, liveTick, currentConfig);
+      await handleDecision(epic, liveTick, decision);
+    }
+  }
+
+  // ── Poll cycle — replaces the old tick stream. Also folds in the
+  // severe-loss/profit-lock circuit breaker and the pre-weekend stop-tighten,
+  // reusing the same fetchFullPositions() call rather than a second timer
+  // hitting IG on its own schedule. Deliberately NOT reusing
+  // igStrategyBot.ts's equivalents: those are scaled off that bot's own
+  // cfg.maxRiskGbp. Weekend handling doesn't flatten — positions surviving
+  // into the weekend is now the normal, intended case for an hours-scale
+  // hold, not an exception; it just tightens the stop ahead of the gap risk. ──
+  async function pollCycle(): Promise<void> {
+    if (!running || !session || !dataSession) return;
+    lastPollAt = Date.now();
     try {
       const positions = await fetchFullPositions(session);
-      const tracked = Object.values(epicStates).filter(st => st.dealId);
+      const tracked    = Object.values(epicStates).filter(st => st.dealId);
 
       const severeLossCeiling = maxRiskGbp * 5;
       const profitLockFloor   = maxRiskGbp * 1.5;
@@ -465,7 +492,13 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
 
       for (const st of tracked) {
         const p = positions.find(pos => pos.dealId === st.dealId);
-        if (!p) continue; // closed elsewhere already (e.g. broker-side stop/TP) — epicStates will self-correct on next EXIT/ENTER cycle
+        if (!p) {
+          // Closed elsewhere already (broker-side stop/TP, or manual) — self-heal back to COOLDOWN.
+          addLog('exit', epicName(st.epic), 'Position no longer open on IG — resetting local state');
+          st.state = 'COOLDOWN'; st.cooldownUntil = Date.now() + currentConfig.cooldownMs;
+          st.dealId = ''; st.size = 0; st.entryPrice = 0; st.dynamicStopPrice = 0; st.takeProfitPrice = 0;
+          continue;
+        }
 
         if (p.upl <= -severeLossCeiling) {
           addLog('exit', epicName(p.epic), `🚨 Severe loss £${p.upl.toFixed(2)} ≤ -£${severeLossCeiling.toFixed(2)} — force-closing`);
@@ -488,41 +521,42 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           }
         }
       }
+
+      const details = await fetchMarketDetails(session, currentEpics);
+      for (const epic of currentEpics) {
+        await evaluateEpic(epic, details.get(epic));
+        await new Promise(r => setTimeout(r, 400)); // light throttle across epics — same discipline as the old pre-warmer
+      }
+
+      saveEpicStates(mode, epicStates);
     } catch (e) {
-      addLog('error', '—', `Maintenance sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+      addLog('error', '—', `Poll cycle failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
   // ── Candle pre-warmer ──────────────────────────────────────────────────────
   async function prewarmCandles(sess: IGSession, epics: string[]): Promise<void> {
-    addLog('info', '—', `Pre-warming 5-min candles for ${epics.length} epic(s)…`);
+    addLog('info', '—', `Pre-warming hourly candles for ${epics.length} epic(s)…`);
     let warmed = 0;
     for (const epic of epics) {
       try {
-        const bars = await fetchCandleHistory(sess, epic, 'MINUTE_5', 35);
-        // Spaced out, matching the throttle igStrategyScanner.ts already uses
-        // for its own IG-hitting calls — back-to-back calls with no spacing
-        // is exactly what's tripped IG's account-wide allowance before
-        // (confirmed live: a burst of rapid restarts is enough on its own).
+        const bars = await fetchCandleHistory(sess, epic, 'HOUR', 80);
         await new Promise(r => setTimeout(r, 1200));
         if (!bars.length) continue;
         const st = epicStates[epic];
         if (!st) continue;
-        for (const bar of bars) processTick(st, barToTick(epic, bar), currentConfig);
-        // Historical replay can itself satisfy processTick's ENTER conditions
-        // on the last bar, flipping st.state to IN_POSITION with no real
-        // order behind it (dealId/entryPrice stay 0) — that phantom state
-        // would then block real entries on this epic until a live reversal
-        // happened to self-correct it back to FLAT. Only reset the phantom
-        // case (no dealId); a persisted dealId here means a genuinely open
-        // position survived a restart and must stay IN_POSITION.
-        if (st.state === 'IN_POSITION' && !st.dealId) {
-          st.state = 'FLAT';
-          st.consecutiveReds = 0;
-          st.consecutiveGreens = 0;
-        }
+        for (const bar of bars) processSwingTick(st, barToTick(epic, bar), currentConfig);
+        lastBarTime[epic] = bars[bars.length - 1].snapshotTime;
+        // Historical replay can itself satisfy processSwingTick's ENTER
+        // conditions on the last bar, flipping st.state to IN_POSITION with
+        // no real order behind it (dealId/entryPrice stay 0) — that phantom
+        // state would then block real entries on this epic until a live
+        // reversal happened to self-correct it back to FLAT. Only reset the
+        // phantom case (no dealId); a persisted dealId here means a
+        // genuinely open position survived a restart and must stay IN_POSITION.
+        if (st.state === 'IN_POSITION' && !st.dealId) st.state = 'FLAT';
         warmed++;
-        addLog('info', epicName(epic), `Pre-warmed ${bars.length} candles — ${st.closedCandles.length} closed, ready: ${st.closedCandles.length >= 26}`);
+        addLog('info', epicName(epic), `Pre-warmed ${bars.length} hourly candles — ${st.closedCandles.length} closed`);
       } catch (e) {
         addLog('info', epicName(epic), `Pre-warm skipped: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -547,9 +581,9 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       authFailCount = 0;
       currentEpics  = requestedEpics;
       maxRiskGbp    = params.maxRiskGbp ?? 5;
-      currentConfig = { ...DEFAULT_CONFIG, ...(params.config ?? {}) };
+      currentConfig = { ...DEFAULT_SWING_CONFIG, ...(params.config ?? {}) };
 
-      addLog('info', '—', `Starting FX scalper — epics: ${currentEpics.join(', ')} | £${maxRiskGbp} risk/trade`);
+      addLog('info', '—', `Starting FX swing bot — epics: ${currentEpics.join(', ')} | £${maxRiskGbp} risk/trade | scanning every ${POLL_MS / 60_000}min, 1H bars`);
       session     = await authExecSession(creds);
       dataSession = await authDataSession();
       if (mode === 'live') addLog('info', '—', 'Data feed: demo account (real market data, keeps live\'s own allowance untouched) · Execution: live account');
@@ -559,21 +593,21 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       const persisted = loadEpicStates(mode);
       epicStates = {};
       for (const epic of currentEpics) {
-        epicStates[epic] = persisted?.[epic] ?? initEpicState(epic);
+        epicStates[epic] = persisted?.[epic] ?? initSwingEpicState(epic);
       }
 
       await prewarmCandles(dataSession, currentEpics);
 
       running = true;
       paused  = false;
-      stream.connect(dataSession, currentEpics, handleTick, '5MINUTE');
       scheduleRefresh(session);
 
-      if (maintenanceTimer) clearInterval(maintenanceTimer);
-      maintenanceTimer = setInterval(() => { void maintenance(); }, MAINTENANCE_MS);
+      void pollCycle();
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(() => { void pollCycle(); }, POLL_MS);
 
       saveStartState(mode, { epics: currentEpics, maxRiskGbp });
-      addLog('info', '—', `FX scalper started — session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+      addLog('info', '—', `FX swing bot started — session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
       return { ok: true };
     } catch (e) {
       running = false;
@@ -586,13 +620,12 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   function stop(): void {
     running = false;
     paused  = false;
-    stream.disconnect();
     if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
-    if (maintenanceTimer)    { clearInterval(maintenanceTimer);   maintenanceTimer = null; }
+    if (pollTimer)           { clearInterval(pollTimer);          pollTimer = null; }
     session = null;
     dataSession = null;
     clearStartState(mode);
-    if (log.length) addLog('info', '—', 'FX scalper stopped');
+    if (log.length) addLog('info', '—', 'FX swing bot stopped');
   }
 
   function pause(): void {
@@ -628,7 +661,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       mode,
       running,
       paused,
-      streamConnected: stream.isConnected(),
+      streamConnected: running && lastPollAt > 0 && (Date.now() - lastPollAt) < POLL_MS * 1.5,
       epics:           currentEpics,
       maxRiskGbp,
       epicStatuses:    statuses,
