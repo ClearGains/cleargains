@@ -1425,11 +1425,23 @@ async function executeIgSignal(
   // which mechanism pushed the stake up. Ceiling uses effectiveRiskGbp, not
   // the flat cfg value, so the margin-proportional scaling above isn't
   // immediately undone by this check.
+  // Ceiling scales with conviction — a routine 60%-confidence idea (the
+  // entry threshold for gemini_opinion) still gets the standard 3x cap, but
+  // genuine conviction, as Gemini itself reports it, earns room to size past
+  // it, tapering straight back down as confidence drops toward that same
+  // threshold. Confirmed live this blocked a genuinely good Microsoft entry
+  // purely on the ceiling math, with nothing wrong with the trade itself.
+  // Strategies with no real confidence signal (signal.confidence stays
+  // undefined) fall back to 60 here, which resolves to the unchanged 3x —
+  // this only ever gives gemini_opinion's real conviction more room, never
+  // loosens anything for a strategy that has no conviction score to earn it.
+  const confidence  = signal.confidence ?? 60;
+  const ceilingMult = 3 + Math.max(0, Math.min(confidence, 100) - 60) / 40 * 3; // 3x @60% conviction → 6x @100%
   const actualMaxLoss = stake * sizingStopDist;
-  const lossCeiling    = effectiveRiskGbp * 3;
+  const lossCeiling    = effectiveRiskGbp * ceilingMult;
   if (actualMaxLoss > lossCeiling) {
     addLog(mode, 'wait', name,
-      `Skipped — sizing works out to £${actualMaxLoss.toFixed(0)} max loss (stake £${stake}/pt × ${sizingStopDist.toFixed(0)}pt stop), above the £${lossCeiling.toFixed(0)} ceiling (3× target)`);
+      `Skipped — sizing works out to £${actualMaxLoss.toFixed(0)} max loss (stake £${stake}/pt × ${sizingStopDist.toFixed(0)}pt stop), above the £${lossCeiling.toFixed(0)} ceiling (${ceilingMult.toFixed(1)}× target${confidence > 60 ? `, scaled up for ${confidence}% conviction` : ''})`);
     return;
   }
   if (rawStake < minDeal) {
