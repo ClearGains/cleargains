@@ -43,10 +43,18 @@ async function fetchGeminiWithRetry(url: string, options: RequestInit): Promise<
 // confirmed live on 2026-08-03 that's still not enough — 300 was exhausted
 // by 21:07 UTC (~21h into the UTC day), meaning the last ~3h ran on
 // stop-loss-only again. That pace works out to ~343 calls for a full 24h
-// day; raised to 350 for a small buffer. Gemini Flash is cheap enough (low
-// pence/day even at this volume) that the real risk here is
-// under-provisioning AI review on live positions, not overspend.
-const GEMINI_DAILY_CAP = 350;
+// day, which was itself partly inflated by gemini_opinion scanning indices
+// (since removed — indices now belong exclusively to the FX swing bot) and
+// a 30-min recommendation re-check that also called Gemini (since removed
+// too), so real usage going forward should run well under that peak. Set to
+// 1000/day, not another incremental bump — checked Google's own AI Studio
+// usage dashboard directly: the actual account ceiling is 10,000
+// requests/day, and our worst day ever only hit ~380, so this is a one-time
+// generous ceiling meant to stop needing revisiting, not a number to keep
+// nudging up. Gemini Flash is cheap enough (low pence/day even at this
+// volume) that the real risk was always under-provisioning AI review on
+// live positions, not overspend.
+const GEMINI_DAILY_CAP = 1000;
 const CALL_COUNT_FILE  = path.join(__dirname, '..', 'gemini-daily-calls.json');
 
 function todayUtc(): string {
