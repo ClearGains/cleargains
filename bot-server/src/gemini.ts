@@ -186,7 +186,7 @@ Respond with JSON only, no markdown:
           // generous rather than tightly tuned.
           generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
         }),
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(20_000),
       }
     );
 
@@ -288,7 +288,7 @@ Respond with JSON only, no markdown:
           contents:         [{ parts: [{ text: prompt }] }],
           generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
         }),
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(20_000),
       }
     );
 
@@ -412,7 +412,7 @@ Respond with JSON only, no markdown:
           contents:         [{ parts: [{ text: prompt }] }],
           generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
         }),
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(20_000),
       },
     );
 
@@ -516,7 +516,7 @@ Respond with JSON only, no markdown:
           contents:         [{ parts: [{ text: prompt }] }],
           generationConfig: { temperature: 0.3, maxOutputTokens: 1500 },
         }),
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(20_000),
       },
     );
 
