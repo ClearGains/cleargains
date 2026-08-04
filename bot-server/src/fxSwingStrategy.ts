@@ -67,7 +67,7 @@ export const DEFAULT_SWING_CONFIG: SwingConfig = {
   maxHoldMs:          11 * 60 * 60_000,  // ~11h — the outer safety net, not a target
   stallCheckAfterMs:  4  * 60 * 60_000,  // don't judge "stalling" before a trade's had a few hours to work
   stallRetraceFrac:   0.5,
-  cooldownMs:         2  * 60 * 60_000,
+  cooldownMs:         25 * 60_000,
 };
 
 function ema(values: number[], period: number): number[] {
