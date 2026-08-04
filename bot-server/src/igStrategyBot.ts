@@ -1041,8 +1041,17 @@ async function evaluateEpic(
   //    technique for FX position reviews.
   const meta              = STRATEGY_META[cfg.strategy];
   const usesFreeData      = epic in EPIC_TO_ALPACA;
+  // gemini_opinion no longer uses Lightstream here — confirmed live its UK
+  // stocks (Barclays, BP, HSBC, AstraZeneca etc, all Lightstream-eligible
+  // but not Alpaca-covered) were falling through to prewarmLightstreamBuffer
+  // every single poll cycle whenever the buffer wasn't already filled,
+  // hitting fetchCandleHistory (IG's own allowance-limited REST candle API)
+  // on every attempt — actively prolonging an already-exhausted allowance
+  // rather than just failing once. Yahoo already serves these same UK
+  // stocks fine elsewhere (confirmed live, ~15min-fresh) at zero allowance
+  // cost, so gemini_opinion falls through to usesYahooScaled below instead.
   const usesLightstream   = !usesFreeData
-    && (cfg.strategy === 'donchian_hourly' || cfg.strategy === 'gemini_opinion')
+    && cfg.strategy === 'donchian_hourly'
     && LIGHTSTREAM_ELIGIBLE_EPICS.has(epic);
   const usesYahooScaled   = !usesFreeData && !usesLightstream && epic in EPIC_TO_YAHOO;
   const usesAnyFreePath   = usesFreeData || usesLightstream || usesYahooScaled;
