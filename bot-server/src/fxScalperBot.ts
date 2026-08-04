@@ -535,18 +535,39 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   }
 
   // ── Candle pre-warmer ──────────────────────────────────────────────────────
+  // Restarting used to always pay the full 80-bar-per-epic IG REST cost,
+  // regardless of whether the persisted state (loaded into epicStates just
+  // before this runs) already had a good candle history from before the
+  // restart — confirmed live this is what actually exhausted the demo
+  // account's historical-data allowance on a day with a lot of restarts,
+  // not the regular poll cycle (already a light 4-bar top-up, see
+  // evaluateEpic). Reuses persisted history when there's enough of it and
+  // only tops up genuinely new bars since, the same incremental fetch the
+  // regular poll already does, instead of re-fetching everything from
+  // scratch on every restart.
+  const MIN_PERSISTED_CANDLES = 50;
   async function prewarmCandles(sess: IGSession, epics: string[]): Promise<void> {
     addLog('info', '—', `Pre-warming hourly candles for ${epics.length} epic(s)…`);
     let warmed = 0;
     for (const epic of epics) {
       try {
-        const bars = await fetchCandleHistory(sess, epic, 'HOUR', 80);
-        await new Promise(r => setTimeout(r, 1200));
-        if (!bars.length) continue;
         const st = epicStates[epic];
         if (!st) continue;
-        for (const bar of bars) processSwingTick(st, barToTick(epic, bar), currentConfig);
+        const hasPersistedHistory = st.closedCandles.length >= MIN_PERSISTED_CANDLES;
+
+        const bars = await fetchCandleHistory(sess, epic, 'HOUR', hasPersistedHistory ? 4 : 80);
+        await new Promise(r => setTimeout(r, 1200));
+        if (!bars.length) continue;
+
+        if (hasPersistedHistory) {
+          const known   = lastBarTime[epic] ?? st.closedCandles[st.closedCandles.length - 1]?.time ?? '';
+          const newBars = bars.filter(b => b.snapshotTime > known);
+          for (const bar of newBars) processSwingTick(st, barToTick(epic, bar), currentConfig);
+        } else {
+          for (const bar of bars) processSwingTick(st, barToTick(epic, bar), currentConfig);
+        }
         lastBarTime[epic] = bars[bars.length - 1].snapshotTime;
+
         // Historical replay can itself satisfy processSwingTick's ENTER
         // conditions on the last bar, flipping st.state to IN_POSITION with
         // no real order behind it (dealId/entryPrice stay 0) — that phantom
@@ -556,7 +577,9 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         // genuinely open position survived a restart and must stay IN_POSITION.
         if (st.state === 'IN_POSITION' && !st.dealId) st.state = 'FLAT';
         warmed++;
-        addLog('info', epicName(epic), `Pre-warmed ${bars.length} hourly candles — ${st.closedCandles.length} closed`);
+        addLog('info', epicName(epic), hasPersistedHistory
+          ? `Resumed from saved history (${st.closedCandles.length} candles) — topped up ${bars.length} bar(s)`
+          : `Pre-warmed ${bars.length} hourly candles — ${st.closedCandles.length} closed`);
       } catch (e) {
         addLog('info', epicName(epic), `Pre-warm skipped: ${e instanceof Error ? e.message : String(e)}`);
       }
