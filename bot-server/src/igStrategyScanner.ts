@@ -127,6 +127,14 @@ export const MANUAL_ONLY_EPICS = new Set([
   'UD.D.SKHYUS.DAILY.IP',  // SK Hynix
   'UC.D.RIMM.DAILY.IP',    // BlackBerry
   'EC.D.NOKIAFP.DAILY.IP', // Nokia
+  // Wall St / US Tech 100 / US 500 — confirmed live these kept re-triggering
+  // near-identical "extreme overbought RSI" SELL theses from Gemini on a
+  // repeat basis (Wall St alone: 9 entries in one morning), each one a real
+  // Gemini call, for gains the user judged weren't worth that usage
+  // tradeoff. User call, not a data-quality issue.
+  'IX.D.DOW.DAILY.IP',    // Wall St
+  'IX.D.NASDAQ.CASH.IP',  // US Tech 100
+  'IX.D.SPTRD.DAILY.IP',  // US 500
 ]);
 
 // UK stocks + indices — Yahoo-covered but not Alpaca-covered, so their
