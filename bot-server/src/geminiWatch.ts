@@ -1,13 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  authenticate, getSession, fetchFullPositions, closePosition, updatePositionLevels,
-  type FullPosition, type IGSession,
+  authenticate, getSession, fetchFullPositions, closePosition, updatePositionLevels, fetchCandleHistory,
+  type FullPosition, type IGSession, type CandleBar,
 } from './igApi';
 import { resolveCredentials, addLog, type IgMode } from './igStrategyBot';
 import { askGeminiPositionVerdict } from './gemini';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
+import { isNYSEOpen, type AlpacaBar } from './alpacaApi';
 
 // ── Gemini position watch — for positions opened outside the strategy bot
 // (manually via IG's own app, the Demo Trader panel, or anywhere else) that
@@ -117,6 +118,42 @@ async function getOrAuthSession(mode: IgMode): Promise<IGSession | null> {
   }
 }
 
+function igBarToAlpacaBar(b: CandleBar): AlpacaBar {
+  return {
+    t: b.snapshotTime,
+    o: b.openPrice.mid  ?? b.openPrice.bid,
+    h: b.highPrice.mid  ?? b.highPrice.bid,
+    l: b.lowPrice.mid   ?? b.lowPrice.bid,
+    c: b.closePrice.mid ?? b.closePrice.bid,
+    v: 0,
+  };
+}
+
+// Alpaca goes quiet outside NYSE hours (no new bars once the exchange
+// closes — expected, not broken), which leaves US-stock positions with no
+// day-change/sharp-dip context for most of the day. IG prices these CFDs
+// continuously even when the underlying exchange is shut, so its own candle
+// history is genuinely fresher during that window — reused here as a
+// fallback, always via the shared demo session (same pattern as the FX
+// scalper's data feed) specifically so this never touches live's own
+// allowance, which the rest of this account's traffic already leans on.
+async function fetchIgOffHoursBars(epic: string): Promise<AlpacaBar[] | null> {
+  const key = 'igstrat:demo';
+  let session = getSession(key);
+  if (!session || Date.now() >= session.expiresAt - 2 * 60_000) {
+    const creds = resolveCredentials('demo');
+    if (!creds.apiKey) return null;
+    try { session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, key); }
+    catch { return null; }
+  }
+  try {
+    const bars = await fetchCandleHistory(session, epic, 'HOUR', 48);
+    return bars.length ? bars.map(igBarToAlpacaBar) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Promise<void> {
   const name = p.instrumentName;
 
@@ -186,6 +223,20 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   if (hasBarSource) {
     try {
       let bars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
+
+      // Alpaca-covered US stocks go quiet the moment NYSE closes — the bars
+      // above are then correctly "yesterday's close", not broken, but stale
+      // for review purposes. IG's own price for these keeps moving 24h, so
+      // its candle history is a genuinely fresher source specifically for
+      // this window — try it, and use it in place of Alpaca's frozen bars
+      // if it comes back with something newer. Never touches live's own
+      // allowance (always the shared demo session — see fetchIgOffHoursBars).
+      if (ticker !== undefined && !isNYSEOpen()) {
+        const igBars = await fetchIgOffHoursBars(p.epic);
+        const igIsNewer = igBars?.length && (!bars?.length
+          || new Date(igBars[igBars.length - 1].t).getTime() > new Date(bars[bars.length - 1].t).getTime());
+        if (igIsNewer) bars = igBars;
+      }
 
       // fetchBarsWithFallback only applies its known ×100 shares scaling to
       // Alpaca-covered epics — everything else it can now reach through this
