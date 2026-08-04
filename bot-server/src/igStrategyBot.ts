@@ -1490,6 +1490,27 @@ async function executeIgSignal(
     }
   }
 
+  // Same reasoning again, but for realized loss rather than margin —
+  // confirmed live Microsoft and Alphabet were never once clearing the
+  // ceiling below despite the conviction scaling there, because their price
+  // level and ATR-based stop mean even IG's own minimum stake produces a
+  // realized loss of £250-375, structurally higher than the ceiling could
+  // ever reach regardless of confidence. There's no smaller stake to fall
+  // back to — the margin scaling above doesn't help here since it's driven
+  // by margin required, not points-at-risk, and the two aren't the same
+  // thing. Scales the effective target up to comfortably clear the
+  // instrument's own structural floor, capped so a genuinely absurd
+  // instrument still can't balloon sizing without bound.
+  const minPossibleLoss = minDeal * sizingStopDist;
+  if (minPossibleLoss > effectiveRiskGbp) {
+    const scaledForFloor = Math.min(cfg.maxRiskGbp * 25, minPossibleLoss * 1.15);
+    if (scaledForFloor > effectiveRiskGbp) {
+      effectiveRiskGbp = scaledForFloor;
+      addLog(mode, 'info', name,
+        `Risk target scaled to £${effectiveRiskGbp.toFixed(0)} — minimum stake here produces at least £${minPossibleLoss.toFixed(0)} realized loss regardless of sizing`);
+    }
+  }
+
   // Size off actual data freshness, not the wall clock — "is it NYSE hours"
   // was only ever a rough proxy for "is the free-data feed current right
   // now", and a genuinely fresh feed at 9am UK deserves full size same as
