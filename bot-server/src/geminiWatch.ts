@@ -210,15 +210,20 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
 
       if (bars?.length) {
         const latestBarAgeMs = Date.now() - new Date(bars[bars.length - 1].t).getTime();
-        const STALE_DATA_MS  = 6 * 60 * 60_000;
-        // Confirmed live this matters badly: Alpaca's paper-account bars
-        // for INTC were stuck ~3 weeks stale despite the fetch succeeding
-        // with no error, and the old fallback here (oldest bar in the
-        // whole 5-day window when nothing matched "today") produced a
-        // nonsense "-27% today" figure that got a genuinely fine position
-        // closed for a fabricated reason. No fallback to an older bar
-        // anymore — if the feed's stale, or nothing matches today, this
-        // just stays unset. No day-change context beats a wrong one.
+        // 20h, not 6h — confirmed live 6h was tripping on completely
+        // ordinary overnight closure (NYSE closed ~17.5h, LSE ~15.5h
+        // between sessions), losing day-change/sharp-dip context for most
+        // of every day rather than catching an actually-stuck feed. This
+        // still comfortably catches the case it was built for: Alpaca's
+        // paper-account bars for INTC were once stuck ~3 *weeks* stale
+        // despite the fetch succeeding with no error, and the old fallback
+        // here (oldest bar in the whole 5-day window when nothing matched
+        // "today") produced a nonsense "-27% today" figure that got a
+        // genuinely fine position closed for a fabricated reason. No
+        // fallback to an older bar anymore — if the feed's stale, or
+        // nothing matches today, this just stays unset. No day-change
+        // context beats a wrong one.
+        const STALE_DATA_MS  = 20 * 60 * 60_000;
         if (latestBarAgeMs <= STALE_DATA_MS) {
           const todayUtc   = new Date().toISOString().slice(0, 10);
           const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);

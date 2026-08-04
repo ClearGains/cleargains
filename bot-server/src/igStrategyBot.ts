@@ -1200,7 +1200,14 @@ async function evaluateEpic(
       // Gemini's position review and got a genuinely fine position closed
       // for a fabricated reason. A successful API response is not the same
       // as fresh data — refuse to trust bars this old for anything.
-      const STALE_ENTRY_DATA_MS = 6 * 60 * 60_000;
+      //
+      // 6h was too tight for this, though — confirmed live it was tripping
+      // on completely ordinary overnight closure (NYSE closed ~17.5h,
+      // LSE ~15.5h between sessions), blocking entries most of every day on
+      // every name rather than catching an actually-stuck feed. 20h clears
+      // both markets' normal overnight gap while still catching the INTC
+      // case (which was stale for *weeks*, not hours) comfortably.
+      const STALE_ENTRY_DATA_MS = 20 * 60 * 60_000;
       if (barAgeMs > STALE_ENTRY_DATA_MS) {
         signal = { action: 'HOLD', reason: `Data too stale to trust (${(barAgeMs / 3_600_000).toFixed(1)}h old) — skipping` };
         break;
