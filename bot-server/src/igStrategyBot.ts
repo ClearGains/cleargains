@@ -197,6 +197,23 @@ export type IgRecommendation = {
   score:            number;   // same conviction score the scanner uses to rank the watch list
 };
 
+// Confirmed live this needs a hard ceiling: every failed auto-entry adds one
+// more tracked recommendation, and gemini_opinion's 30-min refresh re-asks
+// Gemini for every one of them — with nothing bounding the list, a day with
+// a lot of rejected entries just keeps growing the recurring Gemini call
+// volume with no upper limit. Caps at the best-scored MAX_RECOMMENDATIONS;
+// adding past that evicts the weakest one first.
+const MAX_RECOMMENDATIONS = 10;
+function addRecommendation(recommendations: Map<string, IgRecommendation>, rec: IgRecommendation): void {
+  if (!recommendations.has(rec.epic) && recommendations.size >= MAX_RECOMMENDATIONS) {
+    let weakest: IgRecommendation | null = null;
+    for (const r of recommendations.values()) if (!weakest || r.score < weakest.score) weakest = r;
+    if (weakest && weakest.score >= rec.score) return; // new idea isn't even better than what's already full — skip it
+    if (weakest) recommendations.delete(weakest.epic);
+  }
+  recommendations.set(rec.epic, rec);
+}
+
 export type IgStrategyBotStatus = {
   running:    boolean;
   paused:     boolean;
@@ -762,49 +779,14 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
   const cfg = st.config;
 
   // gemini_opinion has no free technical rule to sweep the full 38-name
-  // universe with the way the strategies below do — a real Gemini call per
-  // name would burn the daily cap fast at that volume. Instead this only
-  // re-validates whatever's already flagged as a recommendation (e.g. a
-  // failed auto-entry — see executeIgSignal's catch block), which is
-  // normally a handful of epics at most, keeping call volume bounded while
-  // still delivering "still recommended, limits refreshed" or "no longer
-  // recommended, removed" every 30 minutes.
-  if (cfg.strategy === 'gemini_opinion') {
-    const tracked = [...st.recommendations.keys()];
-    for (const epic of tracked) {
-      const name = epicName(epic);
-      try {
-        const ticker = EPIC_TO_ALPACA[epic];
-        const bars = await fetchBarsWithFallback(epic, '1mo', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
-        if (!bars?.length) { st.recommendations.delete(epic); continue; }
-        const last     = bars[bars.length - 1].c;
-        const rsi      = calcRsi(bars);
-        const macd     = calcMacdHist(bars);
-        const atr      = calcAtr(bars);
-        const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
-
-        const idea = await askGeminiTradeIdea({ instrumentName: name, price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines });
-        if (idea.engine !== 'gemini' || idea.action === 'HOLD' || idea.confidence < 55) {
-          st.recommendations.delete(epic);
-          if (force) addLog(mode, 'info', name, `[Recommendation check] No longer recommended (${idea.action} ${idea.confidence}%) — removed`);
-        } else {
-          st.recommendations.set(epic, {
-            epic, name, action: idea.action as 'BUY' | 'SELL', reason: `[GEMINI] ${idea.reason}`,
-            level: last,
-            stopPrice:       idea.action === 'BUY' ? last - idea.stopPoints       : last + idea.stopPoints,
-            takeProfitPrice: idea.action === 'BUY' ? last + idea.takeProfitPoints : last - idea.takeProfitPoints,
-            computedAt: new Date().toISOString(),
-            score: idea.confidence,
-          });
-          if (force) addLog(mode, 'info', name, `[Recommendation check] Still recommended — ${idea.action} ${idea.confidence}%, limits refreshed`);
-        }
-      } catch (e) {
-        if (force) addLog(mode, 'info', name, `[Recommendation check] Refresh failed, keeping last known: ${e instanceof Error ? e.message : String(e)}`);
-      }
-      await new Promise(r => setTimeout(r, 250));
-    }
-    return;
-  }
+  // universe with the way the strategies below do, and re-validating
+  // tracked recommendations with a real Gemini call every 30min turned out
+  // to meaningfully add to the daily call volume (confirmed live) on top of
+  // the entry-scan's own steady usage. Reverted to just leaving whatever's
+  // already flagged as a recommendation (a failed auto-entry — see
+  // executeIgSignal's catch block) as-is, no periodic Gemini re-check —
+  // still capped in size by addRecommendation, just no longer refreshed.
+  if (cfg.strategy === 'gemini_opinion') return;
 
   const { resolution, count } = IG_RES[cfg.strategy];
 
@@ -893,7 +875,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
 
       if (signal && (signal.action === 'BUY' || signal.action === 'SELL')) {
         found++;
-        st.recommendations.set(epic, {
+        addRecommendation(st.recommendations, {
           epic, name, action: signal.action, reason: signal.reason,
           level: bars[bars.length - 1].c,
           stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice,
@@ -1689,7 +1671,7 @@ async function executeIgSignal(
     // rotating away and losing it. refreshRecommendations() keeps this
     // current (or drops it) every 30min from here on; the user can also
     // open it manually at any point while it's still listed.
-    st.recommendations.set(epic, {
+    addRecommendation(st.recommendations, {
       epic, name, action: action as 'BUY' | 'SELL',
       reason: `${reason} (auto-entry failed: ${msg.slice(0, 60)})`,
       level: currentPrice, stopPrice, takeProfitPrice,
