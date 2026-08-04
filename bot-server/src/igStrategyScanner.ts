@@ -127,14 +127,6 @@ export const MANUAL_ONLY_EPICS = new Set([
   'UD.D.SKHYUS.DAILY.IP',  // SK Hynix
   'UC.D.RIMM.DAILY.IP',    // BlackBerry
   'EC.D.NOKIAFP.DAILY.IP', // Nokia
-  // Wall St / US Tech 100 / US 500 — confirmed live these kept re-triggering
-  // near-identical "extreme overbought RSI" SELL theses from Gemini on a
-  // repeat basis (Wall St alone: 9 entries in one morning), each one a real
-  // Gemini call, for gains the user judged weren't worth that usage
-  // tradeoff. User call, not a data-quality issue.
-  'IX.D.DOW.DAILY.IP',    // Wall St
-  'IX.D.NASDAQ.CASH.IP',  // US Tech 100
-  'IX.D.SPTRD.DAILY.IP',  // US 500
 ]);
 
 // UK stocks + indices — Yahoo-covered but not Alpaca-covered, so their
@@ -382,7 +374,18 @@ export async function scanIgEpics(
   const alpacaOnly = ALPACA_ONLY_STRATEGIES.has(strategy);
   // FX excluded unconditionally — fxScalperBot.ts owns FX trading exclusively
   // (dedicated Lightstreamer feed + its own risk checks), see FX_EPICS above.
-  const pool = IG_EPICS.filter(e => !exclude.includes(e.epic) && !FX_EPICS.has(e.epic) && !MANUAL_ONLY_EPICS.has(e.epic) && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
+  // Indices excluded for gemini_opinion specifically, same reasoning: the FX
+  // swing bot already trades a dedicated index set (SCALPER_INDEX_EPICS) as
+  // part of its own strategy — confirmed live gemini_opinion kept
+  // re-triggering near-identical "extreme overbought RSI" SELL theses on
+  // Wall St repeatedly (9 entries in one morning), each a real Gemini call,
+  // for gains judged not worth that usage. User call to keep gemini_opinion
+  // stock-only; other strategies (e.g. donchian_hourly) still trade indices.
+  const excludeIndices = strategy === 'gemini_opinion';
+  const pool = IG_EPICS.filter(e =>
+    !exclude.includes(e.epic) && !FX_EPICS.has(e.epic) && !MANUAL_ONLY_EPICS.has(e.epic)
+    && (!excludeIndices || !isIndexEpic(e.epic))
+    && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
   const useYahoo = YAHOO_SCAN_STRATEGIES.has(strategy);
   log(`[ig-scanner] Fetching bars for ${pool.length} epics (strategy: ${strategy}, source: ${useYahoo ? 'yahoo (free)' : 'ig'})…`);
 
