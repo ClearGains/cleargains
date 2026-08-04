@@ -1,6 +1,34 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+// A large API like this load-balances requests across many backend
+// instances behind the scenes — a client never sees or chooses which one it
+// lands on. Confirmed live: failures come back as a mix of our own timeout
+// and Google's own 503, with no consistent pattern by instrument, while an
+// identical call moments later often succeeds — the classic signature of
+// hitting one degraded backend instance among many healthy ones, not a
+// genuine outage or anything wrong with the request itself. One retry after
+// a short delay routes to a fresh connection, likely a different instance,
+// and often just works. Doesn't reserve a second call against the daily cap
+// — this is still one logical attempt at an answer, not two.
+async function fetchGeminiWithRetry(url: string, options: RequestInit): Promise<Response> {
+  // AbortSignal.timeout() starts counting at creation, not per fetch() call —
+  // reusing the caller's signal on a retry would mean a request that failed
+  // *because* it timed out retries with an already-expired signal, aborting
+  // instantly and defeating the retry entirely for the single most common
+  // failure case. Each attempt gets its own fresh 20s window instead.
+  const attempt = () => fetch(url, { ...options, signal: AbortSignal.timeout(20_000) });
+  try {
+    const res = await attempt();
+    if (res.ok || res.status < 500) return res; // success, or a real error (bad request, auth) — retrying won't help
+    await new Promise(r => setTimeout(r, 1_500));
+    return await attempt();
+  } catch {
+    await new Promise(r => setTimeout(r, 1_500));
+    return await attempt();
+  }
+}
+
 // ── Hard daily call cap ──────────────────────────────────────────────────────
 // Google Cloud billing budgets are alert-only by default, not an automatic
 // stop — this is the real backstop against runaway cost, enforced locally
@@ -161,7 +189,7 @@ Respond with JSON only, no markdown:
 {"direction":"BUY","confidence":72,"reason":"max 12 words","stopPoints":0.0012,"takeProfitPoints":0.0018,"betSize":0.5}`;
 
   try {
-    const res = await fetch(
+    const res = await fetchGeminiWithRetry(
       // "latest" alias, not a pinned dated model — gemini-2.0-flash was
       // retired outright (confirmed live: free-tier quota set to 0), and
       // pinning a specific version again would just repeat that failure
@@ -274,7 +302,7 @@ Respond with JSON only, no markdown:
 {"direction":"BUY","confidence":72,"reason":"max 15 words"}`;
 
   try {
-    const res = await fetch(
+    const res = await fetchGeminiWithRetry(
       // "latest" alias, not a pinned dated model — gemini-2.0-flash was
       // retired outright (confirmed live: free-tier quota set to 0), and
       // pinning a specific version again would just repeat that failure
@@ -403,7 +431,7 @@ Respond with JSON only, no markdown:
 {"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
 
   try {
-    const res = await fetch(
+    const res = await fetchGeminiWithRetry(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
       {
         method:  'POST',
@@ -507,7 +535,7 @@ Respond with JSON only, no markdown:
 {"action":"BUY","confidence":70,"reason":"max 20 words","stopPoints":150,"takeProfitPoints":300}`;
 
   try {
-    const res = await fetch(
+    const res = await fetchGeminiWithRetry(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
       {
         method:  'POST',
