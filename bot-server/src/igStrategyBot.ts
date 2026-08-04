@@ -1919,6 +1919,18 @@ async function poll(mode: IgMode) {
 
     for (const p of positions) {
       try {
+        // Indices trade continuously (24h-dealable CFDs) — there's no real
+        // "session open" the way an individual stock has one, so treating a
+        // routine intraday wobble against an arbitrary UTC-midnight
+        // reference point as "opened weak, close before it compounds" makes
+        // no sense here. Confirmed live this was closing genuine Gemini
+        // theses (Wall St/US 500 short-the-overbought-bounce entries) within
+        // 15-30min on completely ordinary ~1% moves, before they'd had any
+        // real chance to play out — indices still serve as the broad-market
+        // corroboration signal for STOCK positions below, just never get
+        // closed by this check themselves.
+        if (p.epic.startsWith('IX.D.')) continue;
+
         const bars = await fetchBarsWithFallback(p.epic, '1d', { yahooInterval: '15m' });
         if (!bars || bars.length < 2 || bars[0].o <= 0) continue;
 
@@ -1929,19 +1941,15 @@ async function poll(mode: IgMode) {
         if (!weakForThisPos) continue;
 
         const name = epicName(p.epic);
-        // An index position's own weakness already *is* the broad-market
-        // signal — no separate index to corroborate against without being
-        // circular. For a single stock, only escalate to an outright close
-        // when a major index is confirming the same direction of weakness;
-        // otherwise this looks idiosyncratic to that name, so just tighten.
-        const isIndexPosition = p.epic.startsWith('IX.D.');
-        const idxPct = isIndexPosition ? null : await getReferenceIndexPct();
-        const corroborated = isIndexPosition
-          || (idxPct !== null && (isBuy ? idxPct <= -WEAK_OPEN_PCT * 0.6 : idxPct >= WEAK_OPEN_PCT * 0.6));
+        // Only escalate to an outright close when a major index is
+        // confirming the same direction of weakness; otherwise this looks
+        // idiosyncratic to this one name, so just tighten instead.
+        const idxPct = await getReferenceIndexPct();
+        const corroborated = idxPct !== null && (isBuy ? idxPct <= -WEAK_OPEN_PCT * 0.6 : idxPct >= WEAK_OPEN_PCT * 0.6);
 
         if (corroborated) {
           addLog(mode, 'exit', name,
-            `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open${isIndexPosition ? '' : `, market broadly weak too (${idxPct?.toFixed(2)}%)`} — closing before it compounds`);
+            `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, market broadly weak too (${idxPct?.toFixed(2)}%) — closing before it compounds`);
           try { await igClosePos(st.session, p.dealId, p.direction, p.size); }
           catch (e) { addLog(mode, 'error', name, `Weak-open close failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.stopLevel !== undefined) {
