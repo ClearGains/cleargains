@@ -2037,6 +2037,15 @@ async function poll(mode: IgMode) {
       stockCount    = livePositions.filter(p => !isIndexEpic(p.epic)).length;
       indexCount    = livePositions.filter(p => isIndexEpic(p.epic)).length;
     } catch { /* keep the last known count on a fetch failure */ }
+
+    // gemini_opinion makes one real Gemini call per epic here, with nothing
+    // else between them — confirmed live this bursts back-to-back requests
+    // close enough together (a few seconds apart, ~8 epics a cycle, plus
+    // Gemini Position Watch's own calls landing in the same window) to trip
+    // rate-limit-shaped failures (503s, request timeouts) that a lone call
+    // wouldn't hit. A small gap here costs nothing against a 15min poll
+    // interval but meaningfully de-bursts the request rate.
+    if (cfg.strategy === 'gemini_opinion') await new Promise(r => setTimeout(r, 3_000));
   }
 
   schedule(mode, cfg);
