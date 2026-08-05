@@ -929,11 +929,11 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
     const profitDist = Math.max(minStop, rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : currentPrice * 0.03);
     const stake       = Math.max(minDeal, calcStake(cfg.maxRiskGbp, stopDist, minDeal));
 
-    const { dealId, level, protectionOk, protectionError } =
-      await placeMarketOrder(st.session, epic, rec.action, stake, stopDist, profitDist);
+    const { dealId, level, protectionOk, protectionError, guaranteedStop } =
+      await placeMarketOrder(st.session, epic, rec.action, stake, stopDist, profitDist, 'GBP', true);
 
     addLog(mode, 'enter', name,
-      `↑ Manually opened from recommendation — ${rec.action} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt TP ${profitDist.toFixed(1)}pt`);
+      `↑ Manually opened from recommendation — ${rec.action} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt${guaranteedStop ? ' (guaranteed)' : ''} TP ${profitDist.toFixed(1)}pt`);
     if (!protectionOk) addLog(mode, 'error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
 
     registerBotOpenedDeal(mode, dealId);
@@ -1649,8 +1649,8 @@ async function executeIgSignal(
   addLog(mode, 'info',  name, `Stake: £${stake}/pt | Price: ~${currentPrice.toFixed(2)} | max loss at stop: ~£${(stake * sizingStopDist).toFixed(0)}`);
 
   try {
-    const { dealId, level, protectionOk, protectionError } =
-      await placeMarketOrder(session, epic, effectiveDirection, stake, effectiveStopDist, profitDist);
+    const { dealId, level, protectionOk, protectionError, guaranteedStop } =
+      await placeMarketOrder(session, epic, effectiveDirection, stake, effectiveStopDist, profitDist, 'GBP', true);
     addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
     st.botOpenedDeals.add(dealId);
     saveBotOpenedDeals(mode, st.botOpenedDeals);
@@ -1681,7 +1681,7 @@ async function executeIgSignal(
     // lagging) thesis-reversal check instead of taking profit.
     if (effectiveStopDist || profitDist) {
       if (protectionOk) {
-        if (effectiveStopDist) addLog(mode, 'info', name, `Stop attached: ${effectiveStopDist.toFixed(2)} pts`);
+        if (effectiveStopDist) addLog(mode, 'info', name, `Stop attached: ${effectiveStopDist.toFixed(2)} pts${guaranteedStop ? ' (guaranteed — immune to slippage)' : ''}`);
         if (profitDist)        addLog(mode, 'info', name, `TP attached:   ${profitDist.toFixed(2)} pts`);
       } else {
         addLog(mode, 'error', name,

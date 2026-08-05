@@ -342,19 +342,51 @@ export async function placeMarketOrder(
   stopDist?:    number,
   profitDist?:  number,
   currencyCode = 'GBP',
-): Promise<{ dealId: string; level: number; protectionOk: boolean; protectionError?: string }> {
-  const base    = BASE[session.env];
-  const payload = {
+  wantGuaranteedStop = false,
+): Promise<{ dealId: string; level: number; protectionOk: boolean; protectionError?: string; guaranteedStop: boolean }> {
+  const base = BASE[session.env];
+  // Guaranteed stops can only be requested at open time, as a *distance*
+  // (IG computes the level itself once it knows the actual fill price) —
+  // unlike a normal stop, which we attach afterwards via PUT once we know
+  // that fill level. A guaranteed stop can't slip past its level even if
+  // price gaps straight through it, unlike the normal stop this bot used
+  // before — confirmed live cost of that gap: a Seagate position stopped
+  // at 4000pts (~£40 intended) actually lost £854.53 in a single thin-
+  // liquidity window before the severe-loss guard caught it.
+  const useGuaranteed = wantGuaranteedStop && !!stopDist;
+  const payload: Record<string, unknown> = {
     epic, expiry: 'DFB', direction, size,
-    orderType: 'MARKET', guaranteedStop: false, trailingStop: false,
+    orderType: 'MARKET', trailingStop: false,
     forceOpen: true, currencyCode,
   };
+  if (useGuaranteed) {
+    payload.guaranteedStop = true;
+    payload.stopDistance   = Math.round(stopDist! * 100) / 100;
+  } else {
+    payload.guaranteedStop = false;
+  }
 
-  const r = await fetch(`${base}/positions/otc`, {
+  let r = await fetch(`${base}/positions/otc`, {
     method: 'POST', headers: headers(session, '2'),
     body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000),
   });
-  const d = await r.json() as { dealReference?: string; errorCode?: string };
+  let d = await r.json() as { dealReference?: string; errorCode?: string };
+
+  // Not every instrument supports guaranteed stops (and some reject the
+  // requested distance as too tight) — fall back to a normal stop attached
+  // via the usual follow-up PUT rather than failing the entry outright.
+  let guaranteedApplied = useGuaranteed;
+  if (!r.ok && useGuaranteed) {
+    console.warn(`[igApi] Guaranteed stop rejected for ${epic} (${d.errorCode ?? r.status}) — retrying with a normal stop`);
+    guaranteedApplied = false;
+    payload.guaranteedStop = false;
+    delete payload.stopDistance;
+    r = await fetch(`${base}/positions/otc`, {
+      method: 'POST', headers: headers(session, '2'),
+      body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000),
+    });
+    d = await r.json() as { dealReference?: string; errorCode?: string };
+  }
   if (!r.ok) throw new Error(`placeMarketOrder ${r.status}: ${d.errorCode ?? JSON.stringify(d)}`);
 
   const dealRef = d.dealReference ?? '';
@@ -394,10 +426,13 @@ export async function placeMarketOrder(
   // instead of taking profit.
   let protectionOk = true;
   let protectionError: string | undefined;
-  if ((stopDist || profitDist) && level) {
+  // A guaranteed stop is already attached from the initial order — only
+  // the take-profit (if any) still needs the follow-up PUT.
+  const stopStillNeeded = stopDist && !guaranteedApplied;
+  if ((stopStillNeeded || profitDist) && level) {
     const slTp: Record<string, unknown> = { trailingStop: false };
-    if (stopDist)   slTp.stopLevel  = Math.round((direction === 'BUY' ? level - stopDist  : level + stopDist)  * 100) / 100;
-    if (profitDist) slTp.limitLevel = Math.round((direction === 'BUY' ? level + profitDist : level - profitDist) * 100) / 100;
+    if (stopStillNeeded) slTp.stopLevel  = Math.round((direction === 'BUY' ? level - stopDist!  : level + stopDist!)  * 100) / 100;
+    if (profitDist)      slTp.limitLevel = Math.round((direction === 'BUY' ? level + profitDist : level - profitDist) * 100) / 100;
 
     const attemptSlTpPut = async (): Promise<{ ok: boolean; error?: string }> => {
       try {
@@ -422,7 +457,7 @@ export async function placeMarketOrder(
     protectionError = result.error;
   }
 
-  return { dealId, level, protectionOk, protectionError };
+  return { dealId, level, protectionOk, protectionError, guaranteedStop: guaranteedApplied };
 }
 
 export async function updatePositionLevels(
