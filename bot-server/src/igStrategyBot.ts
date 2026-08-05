@@ -1204,6 +1204,10 @@ async function evaluateEpic(
         break;
       }
       const last  = bars[bars.length - 1].c;
+      if (last == null || !Number.isFinite(last)) {
+        signal = { action: 'HOLD', reason: 'Latest bar has no valid close price — skipping' };
+        break;
+      }
       const rsi   = calcRsi(bars);
       const macd  = calcMacdHist(bars);
       const atr   = calcAtr(bars);
