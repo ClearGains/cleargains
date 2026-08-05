@@ -98,13 +98,31 @@ function loadLossCooldownEpics(mode: IgMode): Map<string, number> {
   }
 }
 
+// How long a close reason stays worth mentioning to the next entry decision
+// on the same instrument — long enough to catch a same-day re-entry, short
+// enough that it doesn't keep citing a stale reason indefinitely. In-memory
+// only (not persisted) since it's advisory context, not a safety guard.
+const EXIT_CONTEXT_MS = 4 * 60 * 60_000;
+
 // Called right after any position close where the realized P&L is known —
-// only losses set a cooldown, a winning exit re-enters freely.
-export function recordLossExit(mode: IgMode, epic: string, upl: number): void {
-  if (upl >= 0) return;
+// only losses set a re-entry cooldown, but the reason itself (win or loss)
+// is always kept as short-lived context for the next entry decision on the
+// same instrument, so it doesn't ignore its own recent reasoning.
+export function recordLossExit(mode: IgMode, epic: string, upl: number, reason: string): void {
   const st = ms(mode);
+  st.lastExitReason.set(epic, { reason, at: Date.now() });
+  if (upl >= 0) return;
   st.lossCooldownEpics.set(epic, Date.now() + LOSS_COOLDOWN_MS);
   saveLossCooldownEpics(mode, st.lossCooldownEpics);
+}
+
+// Short text for the entry prompt if this epic closed recently, or '' if not.
+export function getRecentExitContext(mode: IgMode, epic: string): string {
+  const st = ms(mode);
+  const rec = st.lastExitReason.get(epic);
+  if (!rec || Date.now() - rec.at > EXIT_CONTEXT_MS) return '';
+  const minsAgo = Math.round((Date.now() - rec.at) / 60_000);
+  return `Closed ${minsAgo}min ago: ${rec.reason}`;
 }
 
 // User-paused epics — manual only, no auto-expiry, survives restarts.
@@ -304,6 +322,8 @@ type ModeState = {
   // Epics that just closed at a loss — value is the epoch ms cooldown expiry.
   // See recordLossExit/LOSS_COOLDOWN_MS.
   lossCooldownEpics:    Map<string, number>;
+  // Most recent close reason per epic, win or loss — see getRecentExitContext.
+  lastExitReason:       Map<string, { reason: string; at: number }>;
   // Full-universe manual-only suggestions — see refreshRecommendations.
   recommendations:      Map<string, IgRecommendation>;
   // Single best-scored recommendation for the day, set once (first refresh
@@ -358,6 +378,7 @@ function makeModeState(mode: IgMode): ModeState {
     marketDetails: new Map(),
     blockedEpics: new Map(),
     lossCooldownEpics: new Map(),
+    lastExitReason: new Map(),
     recommendations: new Map(),
     dailyPick: null, dailyPickDate: '',
     lastEntryTrigger: new Map(),
@@ -1261,8 +1282,10 @@ async function evaluateEpic(
       const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
       const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
       const dayChangePercent = dayOpen ? ((last - dayOpen) / dayOpen) * 100 : undefined;
+      const recentExitContext = getRecentExitContext(mode, epic);
       const idea = await askGeminiTradeIdea({
         instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
+        recentExitContext,
       });
       // Fails closed — no underlying rule to fall back to the way VWAP
       // falls back to its own technicals when Gemini's unavailable. A
@@ -1370,7 +1393,7 @@ async function executeIgSignal(
     try {
       await igClosePos(session, openPos.dealId, openPos.direction, openPos.size);
       addLog(mode, 'exit', name, `Closed deal ${openPos.dealId}`);
-      recordLossExit(mode, epic, openPos.upl);
+      recordLossExit(mode, epic, openPos.upl, reason);
 
       // Find replacement epic — same race as blockEpicTemporarily below can
       // apply here too if multiple positions close around the same time,
@@ -1433,11 +1456,11 @@ async function executeIgSignal(
     }
     const weakPos = positions.find(p => p.dealId === weakest.dealId);
     if (weakPos) {
-      addLog(mode, 'exit', epicName(weakPos.epic),
-        `💱 Rotating out — ${name}'s ${newConfidence}% idea beats this ${weakest.confidence}% held position by ${SWAP_MARGIN}+ points`);
+      const rotateReason = `Rotating out — ${name}'s ${newConfidence}% idea beats this ${weakest.confidence}% held position by ${SWAP_MARGIN}+ points`;
+      addLog(mode, 'exit', epicName(weakPos.epic), `💱 ${rotateReason}`);
       try {
         await igClosePos(session, weakPos.dealId, weakPos.direction, weakPos.size);
-        recordLossExit(mode, weakPos.epic, weakPos.upl);
+        recordLossExit(mode, weakPos.epic, weakPos.upl, rotateReason);
       } catch (e) {
         addLog(mode, 'error', epicName(weakPos.epic), `Rotation close failed: ${e instanceof Error ? e.message : String(e)}`);
         return;  // couldn't actually free the slot — don't proceed with the new entry
@@ -1803,8 +1826,9 @@ async function poll(mode: IgMode) {
       for (const p of positions) {
         const name = epicName(p.epic);
         if (p.upl <= -severeLossCeiling) {
-          addLog(mode, 'exit', name, `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing before the gap`);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl); }
+          const wkReason = `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing before the gap`;
+          addLog(mode, 'exit', name, wkReason);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, wkReason); }
           catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.upl >= profitLockFloor) {
           addLog(mode, 'exit', name, `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it before the gap`);
@@ -1945,11 +1969,11 @@ async function poll(mode: IgMode) {
   for (const p of positions) {
     if (p.upl >= -severeLossCeiling) continue;
     const name = epicName(p.epic);
-    addLog(mode, 'error', name,
-      `🚨 Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing immediately, stop may have slipped`);
+    const slReason = `Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing immediately, stop may have slipped`;
+    addLog(mode, 'error', name, `🚨 ${slReason}`);
     try {
       await igClosePos(st.session, p.dealId, p.direction, p.size);
-      recordLossExit(mode, p.epic, p.upl);
+      recordLossExit(mode, p.epic, p.upl, slReason);
     } catch (e) {
       addLog(mode, 'error', name, `🚨 Severe loss guard close FAILED: ${e instanceof Error ? e.message : String(e)}. Manual intervention needed.`);
     }
@@ -2029,9 +2053,9 @@ async function poll(mode: IgMode) {
         const corroborated = idxPct !== null && (isBuy ? idxPct <= -WEAK_OPEN_PCT * 0.6 : idxPct >= WEAK_OPEN_PCT * 0.6);
 
         if (corroborated) {
-          addLog(mode, 'exit', name,
-            `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, market broadly weak too (${idxPct?.toFixed(2)}%) — closing before it compounds`);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl); }
+          const woReason = `Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, market broadly weak too (${idxPct?.toFixed(2)}%) — closing before it compounds`;
+          addLog(mode, 'exit', name, `⚠️ ${woReason}`);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, woReason); }
           catch (e) { addLog(mode, 'error', name, `Weak-open close failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.stopLevel !== undefined) {
           const currentDist   = Math.abs(p.level - p.stopLevel);

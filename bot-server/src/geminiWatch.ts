@@ -347,7 +347,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     try {
       await closePosition(session, p.dealId, p.direction, p.size);
       addLog(mode, 'exit', name, `[Gemini watch] Closed — ${verdict.reason}`);
-      recordLossExit(mode, p.epic, p.upl);
+      recordLossExit(mode, p.epic, p.upl, verdict.reason);
       removeFromWatch(mode, p.dealId);
     } catch (e) {
       addLog(mode, 'error', name, `[Gemini watch] Close failed, still watching: ${e instanceof Error ? e.message : String(e)}`);

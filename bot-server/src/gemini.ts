@@ -501,6 +501,13 @@ export type TradeIdeaRequest = {
   // and without this the model has no way to weigh "how much room is
   // actually left" versus "how good does this look right now."
   dayChangePercent?: number;
+  // What Gemini Watch said the last time a position on this instrument got
+  // cut, if recent — confirmed live this matters: Seagate got re-entered
+  // on a bullish AI-demand thesis 8 times in one day, and 7 of 8 exits
+  // separately cited memory-sector cooling as the reason, with neither
+  // side of that ever informing the other. Without this, the entry
+  // decision has no way to know its own recent history on this exact name.
+  recentExitContext?: string;
 };
 
 export type TradeIdeaVerdict = {
@@ -534,6 +541,7 @@ RSI(14): ${req.rsi?.toFixed(1) ?? 'N/A'}
 MACD histogram: ${req.macdHist !== null ? (req.macdHist > 0 ? '+' : '') + req.macdHist.toFixed(5) : 'N/A'}
 ATR(14): ${req.atr?.toFixed(2) ?? 'N/A'} — volatility measure, use this to size a sensible stop
 ${headlineBlock}
+${req.recentExitContext ? `⚠ A position on this exact instrument was closed recently: "${req.recentExitContext}" — if that reasoning is still true right now, don't re-enter on the same thesis that already got cut; only take this trade if the catalyst behind it is genuinely different from, or has clearly resolved, whatever caused that close.\n` : ''}
 Decide BUY, SELL, or HOLD. Only pick BUY/SELL if you have genuine conviction — HOLD is the right answer most of the time when the picture is mixed or unclear. Consider both the technicals and the news together; don't recommend a direction the news directly contradicts. If the instrument has already moved significantly today, that is NOT by itself a reason to hold off — a big move already behind it is only one input, and real conviction (a strong, still-intact catalyst, technicals still confirming, news that hasn't fully played out) can absolutely justify entering after a large move. Only let the day's move count against the trade when your actual reasoning would be pure momentum-chasing — i.e. "it's up a lot so I'll follow it" with no independent thesis of its own. Don't default to HOLD just because the move is large; default to HOLD when the conviction itself is weak.
 
 Treat "overbought"/"oversold" RSI the same way, not as an automatic reversal signal. A high RSI means strong recent demand — that demand often keeps pushing price further in the short term rather than reversing immediately, especially while the catalyst behind it is still fresh and unresolved. Don't SELL (or avoid a BUY) on "RSI is overbought" alone with no other reasoning — that's betting against the trend with no real thesis for why it stops now. Only let RSI extension count against a trade when you also see the catalyst genuinely exhausted (news fully priced in, momentum actually turning on MACD, no fresh reason left to keep buying) — extension alone, in an otherwise intact setup, is not a sell signal.
