@@ -354,42 +354,62 @@ export async function placeMarketOrder(
   // at 4000pts (~£40 intended) actually lost £854.53 in a single thin-
   // liquidity window before the severe-loss guard caught it.
   const useGuaranteed = wantGuaranteedStop && !!stopDist;
-  const payload: Record<string, unknown> = {
-    epic, expiry: 'DFB', direction, size,
-    orderType: 'MARKET', trailingStop: false,
-    forceOpen: true, currencyCode,
-  };
-  if (useGuaranteed) {
-    payload.guaranteedStop = true;
-    payload.stopDistance   = Math.round(stopDist! * 100) / 100;
-  } else {
-    payload.guaranteedStop = false;
-  }
 
-  let r = await fetch(`${base}/positions/otc`, {
-    method: 'POST', headers: headers(session, '2'),
-    body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000),
-  });
-  let d = await r.json() as { dealReference?: string; errorCode?: string };
+  // IG validates a guaranteed stop's distance/eligibility asynchronously —
+  // the initial POST just accepts the request and returns a dealReference;
+  // the actual accept/reject (e.g. ATTACHED_ORDER_LEVEL_ERROR when the
+  // instrument needs a wider guaranteed-stop distance than requested) only
+  // shows up on the /confirms poll. So the guaranteed/normal choice has to
+  // be tried as a full submit-and-confirm cycle, not just checked against
+  // the POST's own response.
+  type Confirm = { dealId?: string; level?: number; dealStatus?: string; reason?: string } & Record<string, unknown>;
+  const submitAndConfirm = async (asGuaranteed: boolean): Promise<{ ok: boolean; confirm: Confirm }> => {
+    const payload: Record<string, unknown> = {
+      epic, expiry: 'DFB', direction, size,
+      orderType: 'MARKET', trailingStop: false,
+      forceOpen: true, currencyCode,
+    };
+    if (asGuaranteed) {
+      payload.guaranteedStop = true;
+      payload.stopDistance   = Math.round(stopDist! * 100) / 100;
+    } else {
+      payload.guaranteedStop = false;
+    }
 
-  // Not every instrument supports guaranteed stops (and some reject the
-  // requested distance as too tight) — fall back to a normal stop attached
-  // via the usual follow-up PUT rather than failing the entry outright.
-  let guaranteedApplied = useGuaranteed;
-  if (!r.ok && useGuaranteed) {
-    console.warn(`[igApi] Guaranteed stop rejected for ${epic} (${d.errorCode ?? r.status}) — retrying with a normal stop`);
-    guaranteedApplied = false;
-    payload.guaranteedStop = false;
-    delete payload.stopDistance;
-    r = await fetch(`${base}/positions/otc`, {
+    const r = await fetch(`${base}/positions/otc`, {
       method: 'POST', headers: headers(session, '2'),
       body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000),
     });
-    d = await r.json() as { dealReference?: string; errorCode?: string };
-  }
-  if (!r.ok) throw new Error(`placeMarketOrder ${r.status}: ${d.errorCode ?? JSON.stringify(d)}`);
+    const d = await r.json() as { dealReference?: string; errorCode?: string };
+    if (!r.ok) return { ok: false, confirm: { reason: d.errorCode } };
 
-  const dealRef = d.dealReference ?? '';
+    const dealRef = d.dealReference ?? '';
+    let confirm: Confirm = {};
+    for (let i = 0; i < 4; i++) {
+      await new Promise(res => setTimeout(res, 1_500));
+      try {
+        const cr = await fetch(`${base}/confirms/${encodeURIComponent(dealRef)}`,
+          { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });
+        if (cr.ok) {
+          confirm = await cr.json() as Confirm;
+          if (confirm.dealStatus === 'ACCEPTED' || confirm.dealStatus === 'REJECTED') break;
+        }
+      } catch { /* retry */ }
+    }
+    return { ok: confirm.dealStatus === 'ACCEPTED' && !!confirm.dealId, confirm };
+  };
+
+  let guaranteedApplied = useGuaranteed;
+  let { ok, confirm } = await submitAndConfirm(useGuaranteed);
+  // Not every instrument supports guaranteed stops (and some reject the
+  // requested distance as too tight) — fall back to a normal stop rather
+  // than failing the entry outright.
+  if (!ok && useGuaranteed) {
+    console.warn(`[igApi] Guaranteed stop rejected for ${epic} (${confirm.reason ?? 'unknown'}) — retrying with a normal stop`);
+    guaranteedApplied = false;
+    ({ ok, confirm } = await submitAndConfirm(false));
+  }
+
   // Widened to capture whatever else IG's confirm response includes (IG's
   // own "reason" field is frequently just the opaque literal string
   // "UNKNOWN" with no further detail — confirmed a known, widely-reported
@@ -398,25 +418,12 @@ export async function placeMarketOrder(
   // send (affectedDeals, profit, timestamps, etc.) in case a pattern shows
   // up across repeat occurrences, instead of discarding everything but the
   // one unhelpful reason string.
-  let confirm: { dealId?: string; level?: number; dealStatus?: string; reason?: string } & Record<string, unknown> = {};
-  for (let i = 0; i < 4; i++) {
-    await new Promise(res => setTimeout(res, 1_500));
-    try {
-      const cr = await fetch(`${base}/confirms/${encodeURIComponent(dealRef)}`,
-        { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });
-      if (cr.ok) {
-        confirm = await cr.json() as typeof confirm;
-        if (confirm.dealStatus === 'ACCEPTED' || confirm.dealStatus === 'REJECTED') break;
-      }
-    } catch { /* retry */ }
-  }
-
-  if (confirm.dealStatus === 'REJECTED' || !confirm.dealId) {
+  if (!ok) {
     console.error(`[igApi] placeMarketOrder REJECTED — epic=${epic} direction=${direction} size=${size} stopDist=${stopDist} profitDist=${profitDist} full confirm: ${JSON.stringify(confirm)}`);
     throw new Error(`Deal REJECTED: ${confirm.reason ?? confirm.dealStatus ?? 'unknown'}`);
   }
 
-  const dealId = confirm.dealId;
+  const dealId = confirm.dealId!;
   const level  = confirm.level ?? 0;
 
   // Apply SL/TP via PUT after deal accepted. One retry before giving up — a
