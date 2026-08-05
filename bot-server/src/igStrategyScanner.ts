@@ -38,7 +38,7 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'UA.D.MSFT.CASH.IP',    name: 'Microsoft'    },
   { epic: 'UA.D.NVDA.CASH.IP',    name: 'NVIDIA'       },
   { epic: 'UA.D.AMZN.CASH.IP',    name: 'Amazon'       },
-  { epic: 'UA.D.GOOGL.CASH.IP',   name: 'Alphabet'     },
+  { epic: 'UB.D.GOOGL.DAILY.IP',  name: 'Alphabet'     },
   { epic: 'UA.D.META.CASH.IP',    name: 'Meta'         },
   { epic: 'UA.D.TSLA.CASH.IP',    name: 'Tesla'        },
   { epic: 'UA.D.NFLX.CASH.IP',    name: 'Netflix'      },
