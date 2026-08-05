@@ -4,7 +4,7 @@ import {
   authenticate, getSession, fetchFullPositions, closePosition, updatePositionLevels, fetchCandleHistory,
   type FullPosition, type IGSession, type CandleBar,
 } from './igApi';
-import { resolveCredentials, addLog, type IgMode } from './igStrategyBot';
+import { resolveCredentials, addLog, recordLossExit, type IgMode } from './igStrategyBot';
 import { askGeminiPositionVerdict } from './gemini';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
@@ -347,6 +347,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     try {
       await closePosition(session, p.dealId, p.direction, p.size);
       addLog(mode, 'exit', name, `[Gemini watch] Closed — ${verdict.reason}`);
+      recordLossExit(mode, p.epic, p.upl);
       removeFromWatch(mode, p.dealId);
     } catch (e) {
       addLog(mode, 'error', name, `[Gemini watch] Close failed, still watching: ${e instanceof Error ? e.message : String(e)}`);

@@ -73,6 +73,40 @@ function loadBlockedEpics(mode: IgMode): Map<string, number> {
   }
 }
 
+// Per-epic cooldown after a losing exit — confirmed live this matters: the
+// account-wide daily-loss lock is a blunt, all-instruments circuit breaker,
+// so rapid repeated re-entry into the SAME instrument right after it just
+// lost (no cooldown existed before this) can burn through the whole day's
+// loss budget on one bad thesis, locking out genuinely different, unrelated
+// opportunities for the rest of the day. This doesn't touch the daily lock
+// itself — it just slows how fast one instrument can spend that budget.
+const LOSS_COOLDOWN_MS = 3 * 60 * 60_000;  // 3h — long enough to stop immediate flip-flopping, short enough a same-day different setup isn't locked out for good
+
+function lossCooldownFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-loss-cooldown-${mode}.json`);
+}
+function saveLossCooldownEpics(mode: IgMode, map: Map<string, number>): void {
+  try { fs.writeFileSync(lossCooldownFile(mode), JSON.stringify([...map]), 'utf8'); } catch {}
+}
+function loadLossCooldownEpics(mode: IgMode): Map<string, number> {
+  try {
+    const pairs = JSON.parse(fs.readFileSync(lossCooldownFile(mode), 'utf8')) as [string, number][];
+    const now = Date.now();
+    return new Map(pairs.filter(([, until]) => until > now));
+  } catch {
+    return new Map();
+  }
+}
+
+// Called right after any position close where the realized P&L is known —
+// only losses set a cooldown, a winning exit re-enters freely.
+export function recordLossExit(mode: IgMode, epic: string, upl: number): void {
+  if (upl >= 0) return;
+  const st = ms(mode);
+  st.lossCooldownEpics.set(epic, Date.now() + LOSS_COOLDOWN_MS);
+  saveLossCooldownEpics(mode, st.lossCooldownEpics);
+}
+
 // User-paused epics — manual only, no auto-expiry, survives restarts.
 function pausedEpicsFile(mode: IgMode): string {
   return path.join(__dirname, '..', `ig-paused-epics-${mode}.json`);
@@ -267,6 +301,9 @@ type ModeState = {
   // was happening before — SK Hynix scores highest almost every scan, so it
   // got picked and re-failed on every one of today's several restarts.
   blockedEpics:         Map<string, number>;
+  // Epics that just closed at a loss — value is the epoch ms cooldown expiry.
+  // See recordLossExit/LOSS_COOLDOWN_MS.
+  lossCooldownEpics:    Map<string, number>;
   // Full-universe manual-only suggestions — see refreshRecommendations.
   recommendations:      Map<string, IgRecommendation>;
   // Single best-scored recommendation for the day, set once (first refresh
@@ -320,6 +357,7 @@ function makeModeState(mode: IgMode): ModeState {
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
     marketDetails: new Map(),
     blockedEpics: new Map(),
+    lossCooldownEpics: new Map(),
     recommendations: new Map(),
     dailyPick: null, dailyPickDate: '',
     lastEntryTrigger: new Map(),
@@ -338,6 +376,7 @@ const modeStates = new Map<IgMode, ModeState>([
 ]);
 for (const [mode, st] of modeStates) {
   st.blockedEpics    = loadBlockedEpics(mode);
+  st.lossCooldownEpics = loadLossCooldownEpics(mode);
   st.pausedEpics     = loadPausedEpics(mode);
   st.lastEntryTrigger = loadLastEntryTrigger(mode);
   st.botOpenedDeals  = loadBotOpenedDeals(mode);
@@ -730,7 +769,7 @@ function blockEpicTemporarily(mode: IgMode, cfg: IgStrategyConfig, session: IGSe
     try {
       const current = st.config?.epics ?? [];
       const held    = (await fetchFullPositions(session)).map(p => p.epic);
-      const exclude = [...new Set([...current, ...held, ...st.blockedEpics.keys(), ...st.pausedEpics])];
+      const exclude = [...new Set([...current, ...held, ...st.blockedEpics.keys(), ...st.lossCooldownEpics.keys(), ...st.pausedEpics])];
       // Ask for several candidates, not just one — two epics blocked in the
       // same cycle can each start this scan before either has written its
       // pick back, so both score the same top name as "best available" and
@@ -1331,6 +1370,7 @@ async function executeIgSignal(
     try {
       await igClosePos(session, openPos.dealId, openPos.direction, openPos.size);
       addLog(mode, 'exit', name, `Closed deal ${openPos.dealId}`);
+      recordLossExit(mode, epic, openPos.upl);
 
       // Find replacement epic — same race as blockEpicTemporarily below can
       // apply here too if multiple positions close around the same time,
@@ -1360,6 +1400,11 @@ async function executeIgSignal(
 
   if (st.paused)                       { addLog(mode, 'wait', name, `⏸ Paused — skipping ${action}`); return; }
   if (st.lossLock)                     { addLog(mode, 'wait', name, `🛑 Daily-loss limit hit — skipping ${action} (entries resume next day)`); return; }
+  const coolUntil = st.lossCooldownEpics.get(epic);
+  if (coolUntil && coolUntil > Date.now()) {
+    addLog(mode, 'wait', name, `❄️ Lost recently — cooling down for ${((coolUntil - Date.now()) / 3_600_000).toFixed(1)}h before re-entering (skipping ${action})`);
+    return;
+  }
   if (action === 'SELL' && !cfg.allowShorts) { addLog(mode, 'wait', name, 'Shorts disabled'); return; }
   if (openPos)                          { addLog(mode, 'wait', name, `Already in position — skipping ${action}`); return; }
   // isNearClose() means "NYSE closing in <15 min" — meaningless for a
@@ -1392,6 +1437,7 @@ async function executeIgSignal(
         `💱 Rotating out — ${name}'s ${newConfidence}% idea beats this ${weakest.confidence}% held position by ${SWAP_MARGIN}+ points`);
       try {
         await igClosePos(session, weakPos.dealId, weakPos.direction, weakPos.size);
+        recordLossExit(mode, weakPos.epic, weakPos.upl);
       } catch (e) {
         addLog(mode, 'error', epicName(weakPos.epic), `Rotation close failed: ${e instanceof Error ? e.message : String(e)}`);
         return;  // couldn't actually free the slot — don't proceed with the new entry
@@ -1758,7 +1804,7 @@ async function poll(mode: IgMode) {
         const name = epicName(p.epic);
         if (p.upl <= -severeLossCeiling) {
           addLog(mode, 'exit', name, `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing before the gap`);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); }
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl); }
           catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.upl >= profitLockFloor) {
           addLog(mode, 'exit', name, `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it before the gap`);
@@ -1903,6 +1949,7 @@ async function poll(mode: IgMode) {
       `🚨 Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing immediately, stop may have slipped`);
     try {
       await igClosePos(st.session, p.dealId, p.direction, p.size);
+      recordLossExit(mode, p.epic, p.upl);
     } catch (e) {
       addLog(mode, 'error', name, `🚨 Severe loss guard close FAILED: ${e instanceof Error ? e.message : String(e)}. Manual intervention needed.`);
     }
@@ -1984,7 +2031,7 @@ async function poll(mode: IgMode) {
         if (corroborated) {
           addLog(mode, 'exit', name,
             `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, market broadly weak too (${idxPct?.toFixed(2)}%) — closing before it compounds`);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); }
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl); }
           catch (e) { addLog(mode, 'error', name, `Weak-open close failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.stopLevel !== undefined) {
           const currentDist   = Math.abs(p.level - p.stopLevel);
