@@ -303,8 +303,15 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // does — a same-size move that would be a real warning sign for a stock
   // (news-driven, directional) is often just ordinary short-term noise for
   // a currency pair. Give FX more room before treating a move as alarming.
+  // Confirmed live this was too tight for stocks: 1.5% is well within
+  // ordinary single-name intraday noise (individual stocks routinely move
+  // several percent in a day, more than a major FX pair does), yet it was
+  // firing the same "sharp move — lean toward closing" alarm as a genuine
+  // reversal, converting positions that would have gone on to hit a real
+  // take-profit into an early cut instead — seen repeatedly on names like
+  // Seagate, closed within ~15min of entry on moves this small.
   const isFx = p.epic.startsWith('CS.');
-  const SHARP_DIP_THRESHOLD_PCT = isFx ? 2.5 : 1.5;
+  const SHARP_DIP_THRESHOLD_PCT = isFx ? 2.5 : 3;
   const sharpDip = sharpDipPercent !== undefined && sharpDipPercent >= SHARP_DIP_THRESHOLD_PCT;
 
   const moved = !last || Math.abs(p.upl - last.upl) >= MOVE_THRESHOLD_GBP;
