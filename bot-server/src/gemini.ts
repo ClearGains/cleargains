@@ -509,6 +509,11 @@ export type TradeIdeaRequest = {
   // today's-move-alone can't do.
   multiDayTrendPercent?:  number;
   multiDayTrendSpanDays?: number;
+  // Gap at today's open vs yesterday's close, and relative volume vs the
+  // recent average — two distinct "something is actually happening here"
+  // signals, separate from how far price has moved intraday since open.
+  gapPercent?:          number;
+  volumeSurgeMultiple?: number;
   // What Gemini Watch said the last time a position on this instrument got
   // cut, if recent — confirmed live this matters: Seagate got re-entered
   // on a bullish AI-demand thesis 8 times in one day, and 7 of 8 exits
@@ -546,6 +551,8 @@ Instrument: ${req.instrumentName}
 Current price: ${req.price.toFixed(2)}
 ${req.dayChangePercent !== undefined ? `Move so far today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
 ${req.multiDayTrendPercent !== undefined ? `Trend over the last ${req.multiDayTrendSpanDays} days: ${req.multiDayTrendPercent >= 0 ? '+' : ''}${req.multiDayTrendPercent.toFixed(1)}% — use this to tell a genuine pullback within an intact uptrend apart from a stock still mid-selloff. A bullish "buy the dip" thesis needs the multi-day trend to actually still be up (or at least flat) — buying because today looks oversold while the multi-day trend is sharply down is catching a falling knife, not a dip, unless you have a genuinely strong, specific reason the selloff itself is over (not just "RSI is low").` : ''}
+${req.gapPercent !== undefined && req.gapPercent >= 2 ? `Gapped ${req.gapPercent.toFixed(1)}% at today's open vs yesterday's close — a real gap like this usually means genuine news/sentiment shifted overnight, not routine noise; worth weighing whether that gap has already fully played out or still has room.` : ''}
+${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation, which lends more weight to whatever the price action is currently doing (a move on genuinely elevated volume is more likely to mean something than the same move on ordinary volume).` : ''}
 RSI(14): ${req.rsi?.toFixed(1) ?? 'N/A'}
 MACD histogram: ${req.macdHist !== null ? (req.macdHist > 0 ? '+' : '') + req.macdHist.toFixed(5) : 'N/A'}
 ATR(14): ${req.atr?.toFixed(2) ?? 'N/A'} — volatility measure, use this to size a sensible stop

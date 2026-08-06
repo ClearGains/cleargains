@@ -263,6 +263,35 @@ function scoreOrb(bars: AlpacaBar[], epic: string, name: string): Scored {
   return { epic, name, score: relVol * 20 + atrPct * 5 };
 }
 
+// Own scoring function for gemini_opinion rather than reusing scoreOrb, so
+// this can weight gaps/volume surges without changing the unrelated 'orb'
+// strategy's own behavior. Same base "is there enough going on to be worth
+// asking about" logic as scoreOrb, plus explicit bonuses for a genuine
+// gap-at-open or a real volume surge (3x+, not just moderately elevated) —
+// these are exactly the kind of "something happened here" signals worth
+// prioritizing a candidate for, on top of plain volatility/relative volume.
+function scoreGeminiOpinion(bars: AlpacaBar[], epic: string, name: string): Scored {
+  if (bars.length < 10) return { epic, name, score: -1 };
+  const recent    = bars.slice(-10);
+  const avgVol    = bars.slice(0, -10).reduce((s, b) => s + b.v, 0) / Math.max(bars.length - 10, 1);
+  const recentVol = recent.reduce((s, b) => s + b.v, 0) / recent.length;
+  const relVol    = avgVol > 0 ? recentVol / avgVol : 1;
+  const atr       = calcAtr(bars);
+  const last      = bars[bars.length - 1];
+  const atrPct    = atr && last.c > 0 ? (atr / last.c) * 100 : 0;
+
+  const todayUtc    = new Date().toISOString().slice(0, 10);
+  const todayIdx    = bars.findIndex(b => b.t.slice(0, 10) === todayUtc);
+  const priorClose  = todayIdx > 0 ? bars[todayIdx - 1].c : undefined;
+  const todayOpen   = todayIdx >= 0 ? bars[todayIdx].o : undefined;
+  const gapPct      = priorClose && todayOpen ? Math.abs(todayOpen - priorClose) / priorClose * 100 : 0;
+
+  const volumeSurgeBonus = relVol >= 3 ? 25 : 0;
+  const gapBonus          = gapPct >= 3 ? 25 : 0;
+
+  return { epic, name, score: relVol * 20 + atrPct * 5 + volumeSurgeBonus + gapBonus };
+}
+
 function scoreVwap(bars: AlpacaBar[], epic: string, name: string): Scored {
   if (bars.length < 20) return { epic, name, score: -1 };
   const vwap = calcVwap(bars);
@@ -399,11 +428,12 @@ export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], ep
       case 'donchian_hourly':    return scoreDonchian(bars, epic, name).score;
       case 'macd_crossover':     return scoreMacd(bars, epic, name).score;
       // No directional thesis of its own to score by design — Gemini
-      // decides direction from scratch. Reuses scoreOrb's relative-
-      // volume/ATR% read as a neutral "is there enough going on here to be
-      // worth asking about" proxy, rather than biasing candidate selection
-      // toward a specific technical thesis before Gemini ever looks at it.
-      case 'gemini_opinion':     return scoreOrb(bars, epic, name).score;
+      // decides direction from scratch. scoreGeminiOpinion is a neutral
+      // "is there enough going on here to be worth asking about" proxy
+      // (volatility/relative-volume, plus explicit gap and volume-surge
+      // bonuses), not biased toward a specific technical thesis before
+      // Gemini ever looks at it.
+      case 'gemini_opinion':     return scoreGeminiOpinion(bars, epic, name).score;
       default:                   return -1;
     }
   })();

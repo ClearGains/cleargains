@@ -1330,10 +1330,22 @@ async function evaluateEpic(
       const spanHours = bars.length - 1;
       const multiDayTrendPercent  = spanHours >= 48 ? ((last - bars[0].c) / bars[0].c) * 100 : undefined;
       const multiDayTrendSpanDays = Math.round(spanHours / 24);
+      // Gap at today's open (distinct from dayChangePercent, which is
+      // today's open vs the CURRENT price) and a relative-volume surge read
+      // — same calc scoreGeminiOpinion uses for candidate selection, now
+      // also surfaced to the actual entry decision rather than only
+      // influencing which candidates got considered in the first place.
+      const todayIdx    = bars.findIndex(b => b.t.slice(0, 10) === todayUtc);
+      const priorClose  = todayIdx > 0 ? bars[todayIdx - 1].c : undefined;
+      const gapPercent  = priorClose && todaysBars[0] ? ((todaysBars[0].o - priorClose) / priorClose) * 100 : undefined;
+      const recent10       = bars.slice(-10);
+      const avgVolPrior    = bars.slice(0, -10).reduce((s, b) => s + b.v, 0) / Math.max(bars.length - 10, 1);
+      const recentVol      = recent10.reduce((s, b) => s + b.v, 0) / recent10.length;
+      const volumeSurgeMultiple = avgVolPrior > 0 ? recentVol / avgVolPrior : undefined;
       const recentExitContext = getRecentExitContext(mode, epic);
       const idea = await askGeminiTradeIdea({
         instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
-        multiDayTrendPercent, multiDayTrendSpanDays,
+        multiDayTrendPercent, multiDayTrendSpanDays, gapPercent, volumeSurgeMultiple,
         recentExitContext,
       });
       // Fails closed — no underlying rule to fall back to the way VWAP
