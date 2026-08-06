@@ -13,7 +13,7 @@ import {
   STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
-import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic } from './igStrategyScanner';
+import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic, SECTOR_MAP } from './igStrategyScanner';
 import { askGeminiDailyVerdict, askGeminiTradeIdea } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchCompanyHeadlines } from './newsFetch';
@@ -107,22 +107,53 @@ const EXIT_CONTEXT_MS = 4 * 60 * 60_000;
 // Called right after any position close where the realized P&L is known —
 // only losses set a re-entry cooldown, but the reason itself (win or loss)
 // is always kept as short-lived context for the next entry decision on the
-// same instrument, so it doesn't ignore its own recent reasoning.
+// same instrument, so it doesn't ignore its own recent reasoning. A win
+// resets the consecutive-loss streak; a loss increments it, so a second
+// loss in a row on the same name/direction gets flagged more emphatically
+// than a first — confirmed live this matters: Seagate lost 8 times in one
+// session on the same bullish thesis, each entry blind to the ones before it.
 export function recordLossExit(mode: IgMode, epic: string, upl: number, reason: string): void {
   const st = ms(mode);
   st.lastExitReason.set(epic, { reason, at: Date.now() });
-  if (upl >= 0) return;
+  if (upl >= 0) { st.lossStreak.set(epic, 0); return; }
+  const streak = (st.lossStreak.get(epic) ?? 0) + 1;
+  st.lossStreak.set(epic, streak);
   st.lossCooldownEpics.set(epic, Date.now() + LOSS_COOLDOWN_MS);
   saveLossCooldownEpics(mode, st.lossCooldownEpics);
 }
 
-// Short text for the entry prompt if this epic closed recently, or '' if not.
+// Short text for the entry prompt if this epic — or another name in the same
+// sector — closed recently. Sector correlation matters here: a lot of this
+// bot's stock universe clusters into a handful of sectors (memory/storage,
+// AI/semiconductors, etc.), and a sector-wide theme tends to hit correlated
+// names together, not just the one that already got cut — confirmed live
+// via Seagate's exits repeatedly citing "memory sector cooling" while
+// SanDisk/Micron/Western Digital entries carried on with no awareness of it.
 export function getRecentExitContext(mode: IgMode, epic: string): string {
   const st = ms(mode);
-  const rec = st.lastExitReason.get(epic);
-  if (!rec || Date.now() - rec.at > EXIT_CONTEXT_MS) return '';
-  const minsAgo = Math.round((Date.now() - rec.at) / 60_000);
-  return `Closed ${minsAgo}min ago: ${rec.reason}`;
+  const now = Date.now();
+  const parts: string[] = [];
+
+  const own = st.lastExitReason.get(epic);
+  if (own && now - own.at <= EXIT_CONTEXT_MS) {
+    const minsAgo = Math.round((now - own.at) / 60_000);
+    const streak  = st.lossStreak.get(epic) ?? 0;
+    const streakNote = streak >= 2 ? ` (${streak} losses in a row on this name)` : '';
+    parts.push(`This instrument closed ${minsAgo}min ago${streakNote}: ${own.reason}`);
+  }
+
+  const sector = SECTOR_MAP[epic];
+  if (sector) {
+    const sectorHits = [...st.lastExitReason.entries()]
+      .filter(([e, rec]) => e !== epic && SECTOR_MAP[e] === sector && now - rec.at <= EXIT_CONTEXT_MS)
+      .sort((a, b) => b[1].at - a[1].at);
+    if (sectorHits.length > 0) {
+      const [topEpic, topRec] = sectorHits[0];
+      parts.push(`${sectorHits.length} other ${sector} name(s) closed recently too, most recently ${epicName(topEpic)}: "${topRec.reason}"`);
+    }
+  }
+
+  return parts.join(' | ');
 }
 
 // User-paused epics — manual only, no auto-expiry, survives restarts.
@@ -324,6 +355,8 @@ type ModeState = {
   lossCooldownEpics:    Map<string, number>;
   // Most recent close reason per epic, win or loss — see getRecentExitContext.
   lastExitReason:       Map<string, { reason: string; at: number }>;
+  // Consecutive losses per epic, reset to 0 on a win — see recordLossExit.
+  lossStreak:           Map<string, number>;
   // Full-universe manual-only suggestions — see refreshRecommendations.
   recommendations:      Map<string, IgRecommendation>;
   // Single best-scored recommendation for the day, set once (first refresh
@@ -379,6 +412,7 @@ function makeModeState(mode: IgMode): ModeState {
     blockedEpics: new Map(),
     lossCooldownEpics: new Map(),
     lastExitReason: new Map(),
+    lossStreak: new Map(),
     recommendations: new Map(),
     dailyPick: null, dailyPickDate: '',
     lastEntryTrigger: new Map(),

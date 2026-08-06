@@ -76,6 +76,55 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'KA.D.LLOY.DAILY.IP',   name: 'Lloyds'       },
 ];
 
+// Rough sector grouping for the stock universe above — used to warn the
+// gemini_opinion entry decision when OTHER names in the same sector have
+// been losing recently, since a sector-wide theme (e.g. "memory sector
+// cooling") tends to hit correlated names together, not just the one that
+// already got cut. Deliberately coarse — this is advisory context for
+// Gemini's own judgment, not a hard rule, so approximate groupings are fine.
+export const SECTOR_MAP: Record<string, string> = {
+  // Memory / storage
+  'UC.D.MU.DAILY.IP':     'memory/storage',
+  'UD.D.SNDKUS.DAILY.IP': 'memory/storage',
+  'UD.D.STX.DAILY.IP':    'memory/storage',
+  'UD.D.SKHYUS.DAILY.IP': 'memory/storage',
+  'UD.D.WDC.DAILY.IP':    'memory/storage',
+  'UC.D.MRVL.DAILY.IP':   'memory/storage',
+  // AI / semiconductors
+  'SA.D.AMD.DAILY.IP':    'AI/semiconductors',
+  'UA.D.AVGO.DAILY.IP':   'AI/semiconductors',
+  'UB.D.INTC.DAILY.IP':   'AI/semiconductors',
+  'UC.D.QCOM.DAILY.IP':   'AI/semiconductors',
+  'SG.D.TSM.DAILY.IP':    'AI/semiconductors',
+  'UA.D.NVDA.CASH.IP':    'AI/semiconductors',
+  // Megacap tech
+  'UA.D.AAPL.CASH.IP':    'megacap tech',
+  'UA.D.MSFT.CASH.IP':    'megacap tech',
+  'UB.D.GOOGL.DAILY.IP':  'megacap tech',
+  'UA.D.META.CASH.IP':    'megacap tech',
+  'UA.D.AMZN.CASH.IP':    'megacap tech',
+  'UA.D.NFLX.CASH.IP':    'megacap tech',
+  'UA.D.TSLA.CASH.IP':    'megacap tech',
+  // Enterprise / legacy tech
+  'SB.D.DELLUS.DAILY.IP':  'enterprise/legacy tech',
+  'UC.D.RIMM.DAILY.IP':    'enterprise/legacy tech',
+  'EC.D.NOKIAFP.DAILY.IP': 'enterprise/legacy tech',
+  // Financials
+  'UA.D.JPM.CASH.IP':    'financials',
+  'UA.D.V.CASH.IP':      'financials',
+  'KA.D.BARC.DAILY.IP':  'financials',
+  'KA.D.HSBA.DAILY.IP':  'financials',
+  'KA.D.LLOY.DAILY.IP':  'financials',
+  // Healthcare
+  'UA.D.UNH.CASH.IP':   'healthcare',
+  'KA.D.GSK.DAILY.IP':  'healthcare',
+  'KA.D.AZN.DAILY.IP':  'healthcare',
+  // Energy
+  'UA.D.XOM.CASH.IP':     'energy',
+  'KA.D.BP.DAILY.IP':     'energy',
+  'KA.D.SHELLN.DAILY.IP': 'energy',
+};
+
 // The 5 FX majors above, also owned exclusively by fxScalperBot.ts (a
 // dedicated, Lightstreamer-driven FX scalper with its own risk/loss-lock
 // checks) — exported so this scanner can exclude them from every stock-bot
