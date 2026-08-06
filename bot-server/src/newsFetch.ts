@@ -14,7 +14,7 @@
 // Requiring the actual company name to appear in the headline text filters
 // those out — better to surface fewer, genuinely-relevant headlines than
 // hand Gemini a stack of sector noise about competitors.
-export async function fetchCompanyHeadlines(ticker: string, limit = 5, companyName?: string): Promise<string[]> {
+export async function fetchCompanyHeadlines(ticker: string, limit = 8, companyName?: string): Promise<string[]> {
   const key = process.env.FINNHUB_API_KEY;
   if (!key) return [];
 
@@ -40,11 +40,22 @@ export async function fetchCompanyHeadlines(ticker: string, limit = 5, companyNa
       return lower.includes(ticker.toLowerCase()) || (!!nameFragment && lower.includes(nameFragment));
     };
 
+    // Dated, not just a bag of recent headlines — confirmed live Gemini had
+    // no way to tell "this happened today" from "this happened 6 days ago"
+    // within the same 7-day window, so it couldn't build any real sense of
+    // how a story has developed day to day (a beat that's already 4 days
+    // old and priced in reads very differently from one that broke an hour
+    // ago).
     return raw
       .filter(a => !!a.headline && (!companyName || relevant(a.headline)))
       .sort((a, b) => (b.datetime ?? 0) - (a.datetime ?? 0))
       .slice(0, limit)
-      .map(a => a.headline!);
+      .map(a => {
+        const dateLabel = a.datetime
+          ? new Date(a.datetime * 1000).toISOString().slice(0, 10)
+          : '?';
+        return `[${dateLabel}] ${a.headline!}`;
+      });
   } catch {
     return [];
   }

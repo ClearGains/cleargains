@@ -322,7 +322,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // another 45 minutes is the wrong tradeoff.
   if (!moved && !stale && !sharpDip && !justTurnedRed) return;
 
-  const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
+  const headlines = ticker ? await fetchCompanyHeadlines(ticker, 8, name) : [];
 
   const verdict = await askGeminiPositionVerdict({
     instrumentName: name,

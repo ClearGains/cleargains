@@ -584,5 +584,12 @@ export const STRATEGY_META: Record<StrategyName, {
   // VWAP earned through this session's hardening, since this strategy has
   // no track record yet. Exits are handled entirely by Gemini Position
   // Watch, not a technical exit rule — there isn't one to have.
-  gemini_opinion:      { label: 'Gemini Opinion (Experimental)', timeframe: 'intraday', pollMs: 15 * 60_000, barPeriod: '1Hour', barsNeeded: 40 },
+  // barsNeeded widened 40->120 (5 days of hourly bars) — confirmed live the
+  // entry decision had no way to tell a dip inside an intact uptrend apart
+  // from a stock still mid-selloff (SanDisk bought on "selloff reversing"
+  // 11min before a real continuation of the same post-earnings selloff cut
+  // it) with only ~40h of price history to look back on. RSI/MACD/ATR all
+  // only read the tail of the bars array, so the extra history is free —
+  // doesn't change any existing indicator value, just adds trend context.
+  gemini_opinion:      { label: 'Gemini Opinion (Experimental)', timeframe: 'intraday', pollMs: 15 * 60_000, barPeriod: '1Hour', barsNeeded: 120 },
 };

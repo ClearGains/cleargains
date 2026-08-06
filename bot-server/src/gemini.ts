@@ -296,7 +296,7 @@ export async function askGeminiDailyVerdict(req: DailyVerdictRequest): Promise<D
   const rrRatio = req.stopPoints > 0 ? (req.tpPoints / req.stopPoints).toFixed(1) : '?';
   const pctStr  = `${req.changePercent >= 0 ? '+' : ''}${req.changePercent.toFixed(2)}%`;
   const headlineBlock = req.headlines?.length
-    ? `\nRecent news (last 7 days):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
     : '';
 
   const prompt = `You are a second-opinion filter for a spread betting strategy.
@@ -415,7 +415,7 @@ export async function askGeminiPositionVerdict(req: PositionReviewRequest): Prom
   const signedPct = req.direction === 'BUY' ? pctMove : -pctMove;  // positive = favorable regardless of side
 
   const headlineBlock = req.headlines?.length
-    ? `\nRecent news (last 7 days):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
     : '';
 
   const prompt = `You are reviewing an already-open spread bet position to decide whether to close it now or keep holding.
@@ -501,6 +501,14 @@ export type TradeIdeaRequest = {
   // and without this the model has no way to weigh "how much room is
   // actually left" versus "how good does this look right now."
   dayChangePercent?: number;
+  // Trend over a wider window than just today — confirmed live this
+  // matters: a "post-earnings selloff reversing" thesis was bought using
+  // only ~40h of price history to judge it, and the selloff was still
+  // actively continuing at the multi-day level. Distinguishes a genuine
+  // pullback-within-an-uptrend from a stock still mid-selloff, which
+  // today's-move-alone can't do.
+  multiDayTrendPercent?:  number;
+  multiDayTrendSpanDays?: number;
   // What Gemini Watch said the last time a position on this instrument got
   // cut, if recent — confirmed live this matters: Seagate got re-entered
   // on a bullish AI-demand thesis 8 times in one day, and 7 of 8 exits
@@ -529,7 +537,7 @@ export async function askGeminiTradeIdea(req: TradeIdeaRequest): Promise<TradeId
   }
 
   const headlineBlock = req.headlines.length
-    ? `\nRecent news (last 7 days):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
     : '\nNo recent company-specific news found.\n';
 
   const prompt = `You are deciding, entirely on your own judgment, whether to open a spread bet position on this instrument right now — there is no pre-existing technical signal to confirm or veto, you are the primary decision-maker.
@@ -537,6 +545,7 @@ export async function askGeminiTradeIdea(req: TradeIdeaRequest): Promise<TradeId
 Instrument: ${req.instrumentName}
 Current price: ${req.price.toFixed(2)}
 ${req.dayChangePercent !== undefined ? `Move so far today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
+${req.multiDayTrendPercent !== undefined ? `Trend over the last ${req.multiDayTrendSpanDays} days: ${req.multiDayTrendPercent >= 0 ? '+' : ''}${req.multiDayTrendPercent.toFixed(1)}% — use this to tell a genuine pullback within an intact uptrend apart from a stock still mid-selloff. A bullish "buy the dip" thesis needs the multi-day trend to actually still be up (or at least flat) — buying because today looks oversold while the multi-day trend is sharply down is catching a falling knife, not a dip, unless you have a genuinely strong, specific reason the selloff itself is over (not just "RSI is low").` : ''}
 RSI(14): ${req.rsi?.toFixed(1) ?? 'N/A'}
 MACD histogram: ${req.macdHist !== null ? (req.macdHist > 0 ? '+' : '') + req.macdHist.toFixed(5) : 'N/A'}
 ATR(14): ${req.atr?.toFixed(2) ?? 'N/A'} — volatility measure, use this to size a sensible stop

@@ -1309,7 +1309,7 @@ async function evaluateEpic(
       const macd  = calcMacdHist(bars);
       const atr   = calcAtr(bars);
       const ticker    = EPIC_TO_ALPACA[epic];
-      const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, epicName(epic)) : [];
+      const headlines = ticker ? await fetchCompanyHeadlines(ticker, 8, epicName(epic)) : [];
       // How far this has already moved today, from the bars already
       // fetched — no extra API call. Confirmed live this matters: Micron
       // got bought at 86690 after running from a 73900 prior close, i.e.
@@ -1319,9 +1319,21 @@ async function evaluateEpic(
       const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
       const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
       const dayChangePercent = dayOpen ? ((last - dayOpen) / dayOpen) * 100 : undefined;
+      // Multi-day trend, from the wider bar window (barsNeeded widened
+      // 40->120 specifically for this) — confirmed live this matters:
+      // SanDisk got bought on "post-earnings selloff reversing" using only
+      // ~40h of history to judge that, and the selloff was still actively
+      // continuing at the multi-day level, cutting the position 11min later
+      // on the exact same event the entry thesis had called finished.
+      // Report the trend over whatever span is actually available rather
+      // than assuming a fixed "3-day"/"5-day" label that may not match.
+      const spanHours = bars.length - 1;
+      const multiDayTrendPercent  = spanHours >= 48 ? ((last - bars[0].c) / bars[0].c) * 100 : undefined;
+      const multiDayTrendSpanDays = Math.round(spanHours / 24);
       const recentExitContext = getRecentExitContext(mode, epic);
       const idea = await askGeminiTradeIdea({
         instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
+        multiDayTrendPercent, multiDayTrendSpanDays,
         recentExitContext,
       });
       // Fails closed — no underlying rule to fall back to the way VWAP
