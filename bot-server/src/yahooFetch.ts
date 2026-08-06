@@ -80,7 +80,7 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'IX.D.DAX.DAILY.IP':    '^GDAXI',
   // US stocks
   'UA.D.AAPL.CASH.IP':  'AAPL',
-  'UA.D.MSFT.CASH.IP':  'MSFT',
+  'UC.D.MSFT.DAILY.IP': 'MSFT',
   'UA.D.NVDA.CASH.IP':  'NVDA',
   'UA.D.AMZN.CASH.IP':  'AMZN',
   'UB.D.GOOGL.DAILY.IP': 'GOOGL',
@@ -127,7 +127,7 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
 // Yahoo's unofficial one, so it's tried first for anything it covers.
 export const EPIC_TO_ALPACA: Record<string, string> = {
   'UA.D.AAPL.CASH.IP':    'AAPL',
-  'UA.D.MSFT.CASH.IP':    'MSFT',
+  'UC.D.MSFT.DAILY.IP':   'MSFT',
   'UA.D.NVDA.CASH.IP':    'NVDA',
   'UA.D.AMZN.CASH.IP':    'AMZN',
   'UB.D.GOOGL.DAILY.IP':  'GOOGL',

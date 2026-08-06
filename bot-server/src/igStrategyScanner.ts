@@ -35,7 +35,7 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225'    },
   // Major US stocks (IG spreadbet format)
   { epic: 'UA.D.AAPL.CASH.IP',    name: 'Apple'        },
-  { epic: 'UA.D.MSFT.CASH.IP',    name: 'Microsoft'    },
+  { epic: 'UC.D.MSFT.DAILY.IP',   name: 'Microsoft'    },
   { epic: 'UA.D.NVDA.CASH.IP',    name: 'NVIDIA'       },
   { epic: 'UA.D.AMZN.CASH.IP',    name: 'Amazon'       },
   { epic: 'UB.D.GOOGL.DAILY.IP',  name: 'Alphabet'     },
@@ -99,7 +99,7 @@ export const SECTOR_MAP: Record<string, string> = {
   'UA.D.NVDA.CASH.IP':    'AI/semiconductors',
   // Megacap tech
   'UA.D.AAPL.CASH.IP':    'megacap tech',
-  'UA.D.MSFT.CASH.IP':    'megacap tech',
+  'UC.D.MSFT.DAILY.IP':   'megacap tech',
   'UB.D.GOOGL.DAILY.IP':  'megacap tech',
   'UA.D.META.CASH.IP':    'megacap tech',
   'UA.D.AMZN.CASH.IP':    'megacap tech',
