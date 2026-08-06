@@ -337,6 +337,9 @@ type ModeState = {
   session:              IGSession | null;
   log:                  IgLogEntry[];
   pollTimer:            ReturnType<typeof setTimeout> | null;
+  // Fast-interval severe-loss check, independent of the main poll cycle —
+  // see runSevereLossGuard.
+  severeLossTimer:      ReturnType<typeof setInterval> | null;
   nextRunMs:            number | null;
   lastPollTs:           string | null;
   orbState:             Record<string, OrbState>;
@@ -406,7 +409,7 @@ type ModeState = {
 function makeModeState(mode: IgMode): ModeState {
   return {
     running: false, paused: false, config: null, session: null,
-    log: [], pollTimer: null, nextRunMs: null, lastPollTs: null,
+    log: [], pollTimer: null, severeLossTimer: null, nextRunMs: null, lastPollTs: null,
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
     marketDetails: new Map(),
     blockedEpics: new Map(),
@@ -1818,6 +1821,36 @@ async function executeIgSignal(
   }
 }
 
+// ── Severe-loss circuit breaker ──────────────────────────────────────────────
+// Runs on its own fast interval (see severeLossTimer, started/stopped
+// alongside the bot) instead of once per 15min poll — a synthetic substitute
+// for a broker-side guaranteed stop, since IG rejects guaranteed stops on
+// every real attempt for this account's instruments. Independent of the
+// strategy's own exit logic and of which stop mechanism was supposed to
+// protect the position: if a position's actual realized loss has blown past
+// 5x the per-trade risk target regardless of why, close it immediately
+// rather than trust whatever was meant to have already stopped it out.
+async function runSevereLossGuard(mode: IgMode): Promise<void> {
+  const st = ms(mode);
+  if (!st.running || !st.session || !st.config) return;
+  try {
+    const positions = await fetchFullPositions(st.session);
+    const severeLossCeiling = st.config.maxRiskGbp * 5;
+    for (const p of positions) {
+      if (p.upl >= -severeLossCeiling) continue;
+      const name = epicName(p.epic);
+      const slReason = `Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing immediately, stop may have slipped`;
+      addLog(mode, 'error', name, `🚨 ${slReason}`);
+      try {
+        await igClosePos(st.session, p.dealId, p.direction, p.size);
+        recordLossExit(mode, p.epic, p.upl, slReason);
+      } catch (e) {
+        addLog(mode, 'error', name, `🚨 Severe loss guard close FAILED: ${e instanceof Error ? e.message : String(e)}. Manual intervention needed.`);
+      }
+    }
+  } catch { /* transient fetch failure — next tick retries */ }
+}
+
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 
 async function poll(mode: IgMode) {
@@ -1990,28 +2023,14 @@ async function poll(mode: IgMode) {
     }
   }
 
-  // Severe-loss circuit breaker — every stop this bot sets is non-guaranteed
-  // (guaranteedStop: false throughout igApi.ts), so it CAN slip past its set
-  // level on a fast gap rather than fill exactly there. These share CFDs are
-  // 24-hour instruments with no market-hours gate protecting them, so that
-  // risk exists around the clock, not just during a session. Independent of
-  // the strategy's own exit logic and of which stop mechanism was supposed
-  // to protect it: if a position's actual realized loss has blown past 5x
-  // the per-trade risk target regardless of why, close it immediately rather
-  // than trust whatever was meant to have already stopped it out.
-  const severeLossCeiling = cfg.maxRiskGbp * 5;
-  for (const p of positions) {
-    if (p.upl >= -severeLossCeiling) continue;
-    const name = epicName(p.epic);
-    const slReason = `Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing immediately, stop may have slipped`;
-    addLog(mode, 'error', name, `🚨 ${slReason}`);
-    try {
-      await igClosePos(st.session, p.dealId, p.direction, p.size);
-      recordLossExit(mode, p.epic, p.upl, slReason);
-    } catch (e) {
-      addLog(mode, 'error', name, `🚨 Severe loss guard close FAILED: ${e instanceof Error ? e.message : String(e)}. Manual intervention needed.`);
-    }
-  }
+  // Severe-loss circuit breaker now runs on its own fast interval (see
+  // runSevereLossGuard/severeLossTimer) instead of once per 15min poll —
+  // guaranteed stops turned out to be rejected on every real attempt for
+  // this account's instruments (confirmed live: 100% ATTACHED_ORDER_LEVEL_ERROR
+  // across many different names), so a normal stop slipping is the real,
+  // unmitigated risk. A once-per-poll check gave a slip up to 15 minutes to
+  // run — confirmed live this is exactly how a £40-stop Seagate position
+  // reached an £854.53 loss before anything caught it.
 
   // Profit-lock circuit breaker — banks a healthy win outright once it's
   // reached, rather than trusting the trailing stop / channel-exit to
@@ -2247,6 +2266,9 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
   // market-details calls was intermittently getting a 403 — give it a few
   // seconds to clear before the first real poll.
   st.pollTimer = setTimeout(() => { void poll(mode); }, 10_000);
+  // Independent of the above — see runSevereLossGuard for why this needs
+  // its own much tighter cadence than the main 15min poll.
+  st.severeLossTimer = setInterval(() => { void runSevereLossGuard(mode); }, 30_000);
   return { ok: true };
 }
 
@@ -2255,6 +2277,7 @@ export function stopIgStrategyBot(mode: IgMode): void {
   st.running = false;
   st.paused  = false;
   if (st.pollTimer)           { clearTimeout(st.pollTimer);           st.pollTimer           = null; }
+  if (st.severeLossTimer)     { clearInterval(st.severeLossTimer);    st.severeLossTimer     = null; }
   if (st.sessionRefreshTimer) { clearTimeout(st.sessionRefreshTimer); st.sessionRefreshTimer = null; }
   st.nextRunMs  = null;
   st.lastPollTs = null;
