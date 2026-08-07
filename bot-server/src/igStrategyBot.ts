@@ -9,7 +9,7 @@ import {
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal,
-  calcRsi, calcMacdHist, calcAtr,
+  calcRsi, calcMacdHist, calcAtr, calcEfficiencyRatio,
   STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
@@ -81,6 +81,22 @@ function loadBlockedEpics(mode: IgMode): Map<string, number> {
 // opportunities for the rest of the day. This doesn't touch the daily lock
 // itself — it just slows how fast one instrument can spend that budget.
 const LOSS_COOLDOWN_MS = 3 * 60 * 60_000;  // 3h — long enough to stop immediate flip-flopping, short enough a same-day different setup isn't locked out for good
+
+// Minimum gap between any two gemini_opinion entries, account-wide — not
+// per-epic. Confirmed live this matters: 15 entries in one session across
+// many different names is far more churn than a "daily conviction"
+// strategy should produce; this doesn't fix the underlying judgment, just
+// stops it from rapid-firing through the whole candidate list in one bad
+// stretch the way it did on 2026-08-06.
+const GEMINI_ENTRY_SPACING_MS = 20 * 60_000;
+
+// Below this, an instrument's recent price action nets out to roughly
+// nowhere despite looking active — the efficiency-ratio equivalent of
+// "moved a lot, went nowhere." Modest on purpose: this should filter out
+// only the clearest chop, not require a strong trend — a bar this low
+// still lets most real candidates through, per the concern that too
+// strict a filter would starve the strategy of any trades at all.
+const MIN_EFFICIENCY_RATIO = 0.22;
 
 function lossCooldownFile(mode: IgMode): string {
   return path.join(__dirname, '..', `ig-loss-cooldown-${mode}.json`);
@@ -154,6 +170,24 @@ export function getRecentExitContext(mode: IgMode, epic: string): string {
   }
 
   return parts.join(' | ');
+}
+
+// Hard block, not advisory — confirmed live the advisory sector context
+// alone didn't stop it: Seagate/Marvell/Micron/Western Digital all got
+// bought through an active, already-flagged memory-sector selloff anyway,
+// each treated as an independent decision. Reuses lossCooldownEpics (only
+// ever set on an actual loss, see recordLossExit) rather than re-deriving
+// from lastExitReason, which also includes wins.
+function sectorCooldownBlock(mode: IgMode, epic: string): string | null {
+  const st = ms(mode);
+  const sector = SECTOR_MAP[epic];
+  if (!sector) return null;
+  const now = Date.now();
+  const sectorLosses = [...st.lossCooldownEpics.entries()]
+    .filter(([e, until]) => e !== epic && SECTOR_MAP[e] === sector && until > now);
+  if (sectorLosses.length < 2) return null;
+  const names = sectorLosses.map(([e]) => epicName(e)).join(', ');
+  return `${sectorLosses.length} other ${sector} names lost recently and are still cooling (${names}) — sector-wide weakness, skipping new entries here too`;
 }
 
 // User-paused epics — manual only, no auto-expiry, survives restarts.
@@ -360,6 +394,11 @@ type ModeState = {
   lastExitReason:       Map<string, { reason: string; at: number }>;
   // Consecutive losses per epic, reset to 0 on a win — see recordLossExit.
   lossStreak:           Map<string, number>;
+  // Epoch ms of the last gemini_opinion entry, account-wide (not per-epic) —
+  // see GEMINI_ENTRY_SPACING_MS. Confirmed live this matters: 15 entries in
+  // one session, several different names within the same hour, is far more
+  // churn than a "daily conviction" strategy should produce.
+  lastGeminiEntryAt:    number;
   // Full-universe manual-only suggestions — see refreshRecommendations.
   recommendations:      Map<string, IgRecommendation>;
   // Single best-scored recommendation for the day, set once (first refresh
@@ -416,6 +455,7 @@ function makeModeState(mode: IgMode): ModeState {
     lossCooldownEpics: new Map(),
     lastExitReason: new Map(),
     lossStreak: new Map(),
+    lastGeminiEntryAt: 0,
     recommendations: new Map(),
     dailyPick: null, dailyPickDate: '',
     lastEntryTrigger: new Map(),
@@ -1305,6 +1345,23 @@ async function evaluateEpic(
         signal = { action: 'HOLD', reason: 'Latest bar has no valid close price — skipping' };
         break;
       }
+      // Checked before spending a Gemini call — all three are cheap,
+      // mechanical disqualifiers that don't need the AI's opinion first.
+      const efficiencyRatio = calcEfficiencyRatio(bars);
+      if (efficiencyRatio !== null && efficiencyRatio < MIN_EFFICIENCY_RATIO) {
+        signal = { action: 'HOLD', reason: `Too choppy to trade — efficiency ratio ${efficiencyRatio.toFixed(2)} < ${MIN_EFFICIENCY_RATIO} (moved a lot, went nowhere)` };
+        break;
+      }
+      const sectorBlock = sectorCooldownBlock(mode, epic);
+      if (sectorBlock) {
+        signal = { action: 'HOLD', reason: sectorBlock };
+        break;
+      }
+      const msSinceLastEntry = Date.now() - st.lastGeminiEntryAt;
+      if (msSinceLastEntry < GEMINI_ENTRY_SPACING_MS) {
+        signal = { action: 'HOLD', reason: `Pacing — last entry ${(msSinceLastEntry / 60_000).toFixed(0)}min ago, waiting ${(GEMINI_ENTRY_SPACING_MS / 60_000).toFixed(0)}min between entries` };
+        break;
+      }
       const rsi   = calcRsi(bars);
       const macd  = calcMacdHist(bars);
       const atr   = calcAtr(bars);
@@ -1353,10 +1410,34 @@ async function evaluateEpic(
       // passthrough result (no key, cap reached, API error) means no
       // signal at all here, and a low-confidence real verdict is treated
       // the same as HOLD — this strategy only trades on real conviction.
-      if (idea.engine !== 'gemini' || idea.action === 'HOLD' || idea.confidence < 60) {
+      // Threshold raised 60->70 — confirmed live 60% calls were wrong far
+      // more often than right; not a fix by itself, but no reason to keep
+      // trading on the lower bar while everything else here is being
+      // tightened.
+      if (idea.engine !== 'gemini' || idea.action === 'HOLD' || idea.confidence < 70) {
         signal = { action: 'HOLD', reason: `[GEMINI] ${idea.action} ${idea.confidence}% — ${idea.reason} (${idea.engine})` };
         break;
       }
+      // Price-confirmation gate for reversal/dip-buy theses specifically —
+      // the exact failure mode seen live all day: "RSI oversold, buying
+      // the bounce" while the last bar was still actively making a new
+      // low. RSI can stay oversold through an entire selloff; requiring
+      // the most recent bar to have already turned in the proposed
+      // direction is a real, mechanical check Gemini can't reason past
+      // with a good enough story, unlike the same guidance as a prompt
+      // instruction (already tried — didn't hold up).
+      const prevClose = bars[bars.length - 2]?.c;
+      if (prevClose !== undefined && rsi !== null) {
+        const isReversalBuy  = idea.action === 'BUY'  && rsi < 35;
+        const isReversalSell = idea.action === 'SELL' && rsi > 65;
+        const lastBarConfirmsUp   = last > prevClose;
+        const lastBarConfirmsDown = last < prevClose;
+        if ((isReversalBuy && !lastBarConfirmsUp) || (isReversalSell && !lastBarConfirmsDown)) {
+          signal = { action: 'HOLD', reason: `[GEMINI] ${idea.action} ${idea.confidence}% called but RSI ${rsi.toFixed(0)} reversal isn't confirmed by the last bar yet (still moving the wrong way) — waiting for actual confirmation, not just the story` };
+          break;
+        }
+      }
+      st.lastGeminiEntryAt = Date.now();
       signal = {
         action:           idea.action,
         reason:           `[GEMINI] ${idea.reason}`,

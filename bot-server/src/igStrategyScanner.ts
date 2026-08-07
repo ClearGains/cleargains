@@ -1,5 +1,5 @@
 import { fetchCandleHistory, type IGSession, type CandleBar } from './igApi';
-import { calcRsi, calcEma, calcAtr, calcVwap, calcSma, calcMacdHist } from './alpacaStrategies';
+import { calcRsi, calcEma, calcAtr, calcVwap, calcSma, calcMacdHist, calcEfficiencyRatio } from './alpacaStrategies';
 import type { AlpacaBar } from './alpacaApi';
 import type { IgStrategyName } from './igStrategyBot';
 import { fetchBarsWithFallback, EPIC_TO_ALPACA } from './yahooFetch';
@@ -288,8 +288,15 @@ function scoreGeminiOpinion(bars: AlpacaBar[], epic: string, name: string): Scor
 
   const volumeSurgeBonus = relVol >= 3 ? 25 : 0;
   const gapBonus          = gapPct >= 3 ? 25 : 0;
+  // Confirmed live this matters: relVol/atrPct alone reward pure noise just
+  // as much as a real move — a stock chopping violently back and forth
+  // scores the same as one quietly grinding in one clear direction. This
+  // biases candidate selection toward names actually going somewhere,
+  // without excluding choppy ones outright (that hard filter lives at
+  // entry time, in evaluateEpic — this is just a ranking nudge).
+  const efficiencyBonus = (calcEfficiencyRatio(bars) ?? 0) * 30;
 
-  return { epic, name, score: relVol * 20 + atrPct * 5 + volumeSurgeBonus + gapBonus };
+  return { epic, name, score: relVol * 20 + atrPct * 5 + volumeSurgeBonus + gapBonus + efficiencyBonus };
 }
 
 function scoreVwap(bars: AlpacaBar[], epic: string, name: string): Scored {

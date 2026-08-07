@@ -32,6 +32,24 @@ export function calcSma(bars: AlpacaBar[], period: number): number | null {
   return bars.slice(-period).reduce((s, b) => s + b.c, 0) / period;
 }
 
+// Kaufman's Efficiency Ratio — net directional progress over a window,
+// divided by the total distance price actually travelled to get there.
+// 1.0 = moved in a straight line (real trend); near 0 = oscillated back and
+// forth and ended up roughly where it started (pure noise/chop), even if
+// each individual swing looked dramatic. Confirmed live this matters:
+// SanDisk was bought long twice and shorted once in a single day, losing
+// on every leg — a textbook whipsaw the RSI/MACD/day-move signals never
+// caught, because each individual reading looked reasonable in isolation;
+// what they missed was that the instrument wasn't actually going anywhere.
+export function calcEfficiencyRatio(bars: AlpacaBar[], period = 20): number | null {
+  if (bars.length < period + 1) return null;
+  const window = bars.slice(-(period + 1));
+  const netChange = Math.abs(window[window.length - 1].c - window[0].c);
+  let pathLength = 0;
+  for (let i = 1; i < window.length; i++) pathLength += Math.abs(window[i].c - window[i - 1].c);
+  return pathLength > 0 ? netChange / pathLength : 0;
+}
+
 export function calcAtr(bars: AlpacaBar[], period = 14): number | null {
   if (bars.length < period + 1) return null;
   const trs: number[] = [];
