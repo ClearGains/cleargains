@@ -5,7 +5,7 @@ import {
   RefreshCw, X, AlertCircle,
   BarChart3, Clock, Wifi, ExternalLink, Download, Plus,
   ChevronDown, ChevronUp, Bell, Edit2, CheckCircle2, History,
-  Layers, Zap, FlaskConical, PlayCircle,
+  Layers, Zap, FlaskConical, PlayCircle, ArrowRightLeft, Search,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Card } from '@/components/ui/Card';
@@ -324,6 +324,25 @@ export default function PositionsPage() {
   // Diagnostic
   const [diagLoading, setDiagLoading]           = useState(false);
   const [diagResult, setDiagResult]             = useState<string | null>(null);
+
+  // T212 Position Review — on-demand, longer-horizon keep/swap recommendation.
+  // Not real-time monitoring: only runs when the button is clicked.
+  type PositionReview = {
+    ticker: string; symbol: string; sector: string | null;
+    quantity: number; averagePrice: number; currentPrice: number | null;
+    unrealizedPnl: number | null;
+    trend4w: number | null; trend12w: number | null;
+    newsSentiment: number; recentHeadline: string | null;
+    verdict: 'KEEP' | 'CONSIDER_SWAPPING';
+    reason: string;
+    alternative?: { symbol: string; name: string; t212: string; trend12w: number | null };
+    accountKey: AccountKey;
+    env: string;
+  };
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError]     = useState<string | null>(null);
+  const [reviews, setReviews]             = useState<PositionReview[]>([]);
+  const [swappingTicker, setSwappingTicker] = useState<string | null>(null);
 
   // Per-epic client-side cooldown: tracks last time each epic was checked (avoids
   // hammering IG price API when multiple positions share the same epic, or when
@@ -822,6 +841,85 @@ export default function PositionsPage() {
     void run();
   }, [positions]);
 
+  // ── T212 Position Review — on-demand keep/swap recommendation ─────────────
+  // Not real-time: only runs when the button is clicked. Multi-week trend +
+  // 30-day news, not intraday signals — T212 positions are held far longer
+  // than the IG bots this app also runs, so the short-term demo-trader scan
+  // logic would be the wrong lens here.
+  async function runPositionReview() {
+    setReviewLoading(true);
+    setReviewError(null);
+    setReviews([]);
+    try {
+      const accounts: { key: string; secret: string; accountKey: AccountKey; env: string }[] = [];
+      if (t212Connected)    accounts.push({ key: t212ApiKey,    secret: t212ApiSecret,    accountKey: 'T212_INVEST', env: 'live' });
+      if (t212IsaConnected) accounts.push({ key: t212IsaApiKey, secret: t212IsaApiSecret, accountKey: 'T212_ISA',    env: 'live' });
+
+      if (accounts.length === 0) {
+        setReviewError('No T212 Invest/ISA account connected — connect one in Settings → Accounts.');
+        return;
+      }
+
+      const all: PositionReview[] = [];
+      for (const acc of accounts) {
+        const encoded = btoa(acc.key + ':' + acc.secret);
+        const res = await fetch('/api/t212/position-review', {
+          method: 'POST',
+          headers: { 'x-t212-auth': encoded, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ env: acc.env }),
+        });
+        const data = await res.json() as { ok: boolean; error?: string; reviews?: Omit<PositionReview, 'accountKey' | 'env'>[] };
+        if (!data.ok) {
+          setReviewError(prev => prev ? `${prev} · ${acc.accountKey}: ${data.error}` : `${acc.accountKey}: ${data.error}`);
+          continue;
+        }
+        (data.reviews ?? []).forEach(r => all.push({ ...r, accountKey: acc.accountKey, env: acc.env }));
+      }
+      setReviews(all);
+    } catch (e) {
+      setReviewError(e instanceof Error ? e.message : 'Review failed');
+    } finally {
+      setReviewLoading(false);
+    }
+  }
+
+  // Manual action, not automatic — closes the flagged position and opens the
+  // suggested alternative with the same capital. User must click to confirm.
+  async function executeSwap(review: PositionReview) {
+    if (!review.alternative || !review.currentPrice) return;
+    setSwappingTicker(review.ticker);
+    try {
+      const key    = review.accountKey === 'T212_ISA' ? t212IsaApiKey    : t212ApiKey;
+      const secret = review.accountKey === 'T212_ISA' ? t212IsaApiSecret : t212ApiSecret;
+      const encoded = btoa(key + ':' + secret);
+
+      const sellRes = await fetch('/api/t212/sell', {
+        method: 'POST',
+        headers: { 'x-t212-auth': encoded, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker: review.ticker, quantity: review.quantity, env: review.env }),
+      });
+      const sellData = await sellRes.json() as { ok: boolean; error?: string };
+      if (!sellData.ok) throw new Error(sellData.error ?? 'Sell failed');
+
+      // Same capital value into the alternative, at its current price.
+      const capitalValue = review.quantity * review.currentPrice;
+      const buyRes = await fetch('/api/t212/live-order', {
+        method: 'POST',
+        headers: { 'x-t212-auth': encoded, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker: review.alternative.symbol, quantity: capitalValue, env: review.env }),
+      });
+      const buyData = await buyRes.json() as { ok: boolean; error?: string };
+      if (!buyData.ok) throw new Error(`Sold ${review.symbol} but buying ${review.alternative.symbol} failed: ${buyData.error}`);
+
+      setReviews(prev => prev.filter(r => r.ticker !== review.ticker));
+      await fetchAll();
+    } catch (e) {
+      setReviewError(e instanceof Error ? e.message : 'Swap failed');
+    } finally {
+      setSwappingTicker(null);
+    }
+  }
+
   // ── Signal Monitor — AI-driven reversal close ─────────────────────────────
   async function runSignalMonitor() {
     if (signalMonitorRunning.current) return;
@@ -1285,6 +1383,86 @@ export default function PositionsPage() {
               <span className={`font-semibold tabular-nums ${f.color}`}>£{f.available.toFixed(2)}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* T212 Position Review — on-demand, longer-horizon keep/swap check */}
+      {(t212Connected || t212IsaConnected) && (
+        <div className="bg-gray-900/70 border border-blue-500/25 rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <Search className="h-4 w-4 text-blue-400" />
+              <span className="text-sm font-semibold text-white">T212 Position Review</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20 font-bold">ON-DEMAND</span>
+            </div>
+            <button
+              onClick={() => void runPositionReview()}
+              disabled={reviewLoading}
+              className="flex items-center gap-1.5 text-xs font-medium bg-blue-500/15 text-blue-400 border border-blue-500/30 hover:bg-blue-500/25 rounded px-3 py-1.5 transition-all disabled:opacity-50"
+            >
+              {reviewLoading ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
+              {reviewLoading ? 'Reviewing…' : 'Review Positions'}
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-500">
+            Scans your current T212 holdings on click — multi-week/month trend and 30-day news, not intraday
+            signals. Defaults to &quot;keep holding&quot;; only suggests a swap when both the trend and the news are
+            genuinely negative over a real timeframe. Nothing runs automatically or in the background.
+          </p>
+
+          {reviewError && (
+            <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded px-3 py-2">{reviewError}</div>
+          )}
+
+          {reviews.length > 0 && (
+            <div className="space-y-2">
+              {reviews.map(r => (
+                <div
+                  key={`${r.accountKey}_${r.ticker}`}
+                  className={clsx(
+                    'rounded-lg border p-3 space-y-1.5',
+                    r.verdict === 'CONSIDER_SWAPPING' ? 'border-amber-500/30 bg-amber-500/5' : 'border-gray-800 bg-gray-950/40',
+                  )}
+                >
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-white">{r.symbol}</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">{ACCOUNT_LABELS[r.accountKey]}</span>
+                      <span className={clsx(
+                        'text-[9px] px-1.5 py-0.5 rounded border font-bold',
+                        r.verdict === 'CONSIDER_SWAPPING'
+                          ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                          : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+                      )}>
+                        {r.verdict === 'CONSIDER_SWAPPING' ? 'CONSIDER SWAPPING' : 'KEEP HOLDING'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px] text-gray-400 tabular-nums">
+                      {r.trend12w !== null && <span>12wk: {fmt(r.trend12w)}%</span>}
+                      {r.unrealizedPnl !== null && <span className={r.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{fmtP(r.unrealizedPnl)}</span>}
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-400">{r.reason}</p>
+                  {r.verdict === 'CONSIDER_SWAPPING' && r.alternative && (
+                    <div className="flex items-center justify-between flex-wrap gap-2 pt-1.5 border-t border-gray-800/60 mt-1.5">
+                      <span className="text-[10px] text-gray-500">
+                        Suggested alternative: <span className="text-white font-medium">{r.alternative.symbol}</span> ({r.alternative.name})
+                        {r.alternative.trend12w !== null && <> — 12wk trend {fmt(r.alternative.trend12w)}%</>}
+                      </span>
+                      <button
+                        onClick={() => void executeSwap(r)}
+                        disabled={swappingTicker === r.ticker}
+                        className="flex items-center gap-1 text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 rounded px-2 py-1 transition-all disabled:opacity-50"
+                      >
+                        <ArrowRightLeft className="h-3 w-3" />
+                        {swappingTicker === r.ticker ? 'Swapping…' : `Swap for ${r.alternative.symbol}`}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
