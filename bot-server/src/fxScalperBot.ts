@@ -158,6 +158,16 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   let currentConfig: SwingConfig = { ...DEFAULT_SWING_CONFIG };
   let epicStates:    Record<string, SwingEpicState> = {};
   const lastBarTime: Record<string, string> = {};
+  // Wall-clock time of the last successful (non-allowance-blocked) candle
+  // fetch per epic — used to gate entry evaluation. Confirmed live this
+  // matters: when IG's historical-data allowance is exhausted, the
+  // live-quote tick path below still runs independently and can still
+  // reach a Gemini call using indicators computed off stale closedCandles
+  // that haven't actually updated — burning a Gemini call on a decision
+  // that was never going to be trustworthy, since the data pipeline
+  // feeding it is known broken for this cycle.
+  const lastSuccessfulFetchAt: Record<string, number> = {};
+  const DATA_FRESHNESS_MS = 90 * 60_000;  // ~90min — tolerates a couple of missed 15min polls without false-flagging
   const log: FxLogEntry[] = [];
 
   let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -302,6 +312,20 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         }
 
         if (!session) { addLog('error', name, 'No session — cannot enter'); revertToFlat(); return; }
+
+        // The live-tick path that reaches here doesn't require a bar fetch
+        // to have just succeeded — it runs off a separate, allowance-free
+        // quote. But the indicators behind this decision come from
+        // closedCandles, which only updates on a successful bar fetch. If
+        // that's stale (allowance exhausted, etc.), this decision is stale
+        // too — no point spending a Gemini call confirming a signal built
+        // on data we already know hasn't refreshed.
+        const dataAge = lastSuccessfulFetchAt[epic] ? Date.now() - lastSuccessfulFetchAt[epic] : Infinity;
+        if (dataAge > DATA_FRESHNESS_MS) {
+          addLog('wait', name, `Data stale (${lastSuccessfulFetchAt[epic] ? (dataAge / 60_000).toFixed(0) + 'min' : 'never fetched'} since last bar fetch) — skipping entry rather than spending a Gemini call on it`);
+          revertToFlat();
+          return;
+        }
 
         const greenCount = st.closedCandles.slice(-5).filter(isGreen).length;
         const entrySignal: EntrySignal = {
@@ -455,6 +479,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           await handleDecision(epic, tick, decision);
         }
         lastBarTime[epic] = bars[bars.length - 1].snapshotTime;
+        lastSuccessfulFetchAt[epic] = Date.now();
       }
     } catch (e) {
       addLog('info', epicName(epic), `Bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -572,6 +597,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           for (const bar of bars) processSwingTick(st, barToTick(epic, bar), currentConfig);
         }
         lastBarTime[epic] = bars[bars.length - 1].snapshotTime;
+        lastSuccessfulFetchAt[epic] = Date.now();
 
         // Historical replay can itself satisfy processSwingTick's ENTER
         // conditions on the last bar, flipping st.state to IN_POSITION with
