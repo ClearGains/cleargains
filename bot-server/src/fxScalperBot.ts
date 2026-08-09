@@ -377,14 +377,19 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
             return;
           }
 
-          const { dealId, level, protectionOk, protectionError } =
-            await placeMarketOrder(session, epic, verdict.direction as 'BUY' | 'SELL', stake, stopDist, profitDist);
+          // Same protective gap found and fixed on the stock side applies
+          // here too — a normal stop can slip past its level on a fast
+          // move, and FX is exactly where fast, news-driven moves happen.
+          // Falls back to a normal stop automatically if IG rejects
+          // guaranteed on a given instrument (same pattern as igStrategyBot.ts).
+          const { dealId, level, protectionOk, protectionError, guaranteedStop } =
+            await placeMarketOrder(session, epic, verdict.direction as 'BUY' | 'SELL', stake, stopDist, profitDist, 'GBP', true);
 
           recordSwingFill(st, level, stopDist, profitDist);
           st.dealId = dealId;
           st.size   = stake;
 
-          addLog('enter', name, `↑ ${verdict.direction} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt TP ${profitDist.toFixed(1)}pt (1H ATR×${currentConfig.atrStopMult}/${currentConfig.atrTpMult}) · Gemini ${verdict.confidence}%`);
+          addLog('enter', name, `↑ ${verdict.direction} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt${guaranteedStop ? ' (guaranteed)' : ''} TP ${profitDist.toFixed(1)}pt (1H ATR×${currentConfig.atrStopMult}/${currentConfig.atrTpMult}) · Gemini ${verdict.confidence}%`);
           if (!protectionOk) addLog('error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
 
           registerBotOpenedDeal(mode, dealId);
