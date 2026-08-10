@@ -593,7 +593,7 @@ export const STRATEGY_META: Record<StrategyName, {
   // ~1-2 days instead of days-to-weeks. Uses the exact same donchianBreakoutSignal
   // function (it's bar-resolution-agnostic), just fed hourly candles with
   // shorter entry/exit windows sized in hours instead of days.
-  donchian_hourly:     { label: 'Donchian Breakout (Hourly)', timeframe: 'hourly', pollMs: 30 * 60_000, barPeriod: '1Hour', barsNeeded: 40 },
+  donchian_hourly:     { label: 'Donchian Breakout (Hourly)', timeframe: 'hourly', pollMs: 15 * 60_000, barPeriod: '1Hour', barsNeeded: 40 },
   macd_crossover:      { label: 'MACD Crossover',          timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
   // No technical entry rule at all — Gemini decides BUY/SELL/HOLD from
   // scratch each cycle off price/RSI/MACD context plus real news, and also
