@@ -1039,7 +1039,9 @@ function IgSpreadBetTab() {
                     <div>
                       <div className="font-semibold text-white text-sm">{status.dailyPick.name}</div>
                       <div className="text-xs text-slate-400">{status.dailyPick.reason}</div>
-                      <div className="text-xs text-slate-600">score {status.dailyPick.score.toFixed(1)}</div>
+                      <div className="text-xs text-slate-600">
+                        score {status.dailyPick.score.toFixed(1)} · decided {new Date(status.dailyPick.computedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </div>
                     </div>
                   </div>
                   <div className="text-right text-xs">
@@ -1091,6 +1093,7 @@ function IgSpreadBetTab() {
                       <div className="min-w-0">
                         <div className="font-medium text-white text-sm">{r.name || r.epic}</div>
                         <div className="text-xs text-slate-500 truncate">{r.reason}</div>
+                        <div className="text-xs text-slate-600">decided {new Date(r.computedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                       </div>
                     </div>
                     <div className="text-right text-xs shrink-0">
