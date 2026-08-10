@@ -535,10 +535,14 @@ export async function fetchMarketDetails(
       for (const m of d.marketDetails ?? []) {
         const epic       = m.instrument?.epic;
         if (!epic) continue;
-        const minDeal    = m.dealingRules?.minDealSize?.value ?? 1;
+        // `||` not `??` — a genuine 0 here isn't realistic (IG always has
+        // some positive minimum), so treat it the same as missing rather
+        // than let a stray 0 silently disable every downstream stake/stop
+        // clamp that trusts this value.
+        const minDeal    = m.dealingRules?.minDealSize?.value || 1;
         const minStop    = m.dealingRules?.minNormalStopOrLimitDistance?.value
-                        ?? m.dealingRules?.minControlledRiskStopDistance?.value
-                        ?? 1;
+                        || m.dealingRules?.minControlledRiskStopDistance?.value
+                        || 1;
         result.set(epic, {
           epic, minDealSize: minDeal, minStopDist: minStop,
           bid: m.snapshot?.bid, offer: m.snapshot?.offer, marketStatus: m.snapshot?.marketStatus,

@@ -1058,8 +1058,13 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
 
     const details = await fetchMarketDetails(st.session, [epic]);
     const detail  = details.get(epic);
-    const minDeal = detail?.minDealSize ?? 0.5;
-    const minStop = detail?.minStopDist ?? 1;
+    // `||` not `??` — confirmed live a stake of 0.05 got through despite
+    // this clamp existing, on an instrument (Amazon) whose real minDealSize
+    // is 0.24. IG never legitimately returns 0 for these, so if it ever
+    // does, `??` treats that as a real value and skips the fallback,
+    // silently turning the clamp into a no-op.
+    const minDeal = detail?.minDealSize || 0.5;
+    const minStop = detail?.minStopDist || 1;
     const currentPrice = (rec.action === 'BUY' ? detail?.offer : detail?.bid) ?? rec.level;
 
     const stopDist   = Math.max(minStop, rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : currentPrice * 0.02);
@@ -1650,8 +1655,9 @@ async function executeIgSignal(
   // a smaller-than-intended stop. Falls back to conservative defaults when
   // fetchMarketDetails couldn't reach IG for this epic.
   const detail  = st.marketDetails.get(epic);
-  const minDeal = detail?.minDealSize ?? 0.5;
-  const minStop = detail?.minStopDist ?? 1;
+  // `||` not `??` — see openRecommendation's identical fix for why.
+  const minDeal = detail?.minDealSize || 0.5;
+  const minStop = detail?.minStopDist || 1;
 
   const stopDist   = stopPrice        ? Math.abs(currentPrice - stopPrice)        : undefined;
   const profitDistRaw = takeProfitPrice ? Math.abs(currentPrice - takeProfitPrice) : undefined;
@@ -2116,7 +2122,7 @@ async function poll(mode: IgMode) {
   for (const p of positions) {
     if (p.stopLevel !== undefined && p.limitLevel !== undefined) continue;
     const detail    = st.marketDetails.get(p.epic);
-    const minStop   = detail?.minStopDist ?? 1;
+    const minStop   = detail?.minStopDist || 1;
     const fallbackStopDist   = Math.max(minStop, p.level * 0.015);
     const fallbackProfitDist = Math.max(minStop, p.level * 0.03);
     const fallbackStop  = p.direction === 'BUY' ? p.level - fallbackStopDist   : p.level + fallbackStopDist;
