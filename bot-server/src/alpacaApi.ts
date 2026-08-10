@@ -472,7 +472,28 @@ export function isScannerQuietWeekend(): boolean {
   return false;
 }
 
-// Returns ms until Monday 13:00 UTC (30 min before NYSE open)
+// Returns ms until Sunday 22:00 UTC — same boundary as isScannerQuietWeekend(),
+// for strategies whose universe isn't NYSE-only. Confirmed live this matters:
+// donchian_hourly trades UK 100/Germany 40 (open Monday ~7am UTC, hours before
+// NYSE) alongside IG's "24 Hours" share CFDs (near-continuously quoted, not
+// NYSE-cash-hours-gated) — sleeping until Monday 13:00 UTC (msUntilMondayOpen,
+// correct for NYSE-only Alpaca strategies) needlessly missed the entire
+// Sunday-evening-through-Monday-morning window for those instruments.
+export function msUntilWeekendReopen(): number {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun, 6=Sat
+  if (day === 0 && now.getUTCHours() >= 22) return 60_000; // already past reopen
+  const daysUntilSunday = day === 0 ? 0 : 7 - day;
+  const target = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilSunday,
+    22, 0, 0, 0,
+  ));
+  return Math.max(target.getTime() - now.getTime(), 60_000);
+}
+
+// Returns ms until Monday 13:00 UTC (30 min before NYSE open) — for NYSE-only
+// strategies (Alpaca-based bots). See msUntilWeekendReopen() for strategies
+// that also trade indices/24h-quoted instruments.
 export function msUntilMondayOpen(): number {
   const now = new Date();
   const day = now.getUTCDay(); // 0=Sun, 1=Mon … 6=Sat

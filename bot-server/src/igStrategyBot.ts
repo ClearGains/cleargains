@@ -22,7 +22,7 @@ import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
 import {
   isNYSEOpen, isInOpeningRange, isNearClose,
-  isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen, isScannerQuietWeekend,
+  isDailyCheckTime, isWeeklyCheckTime, msUntilWeekendReopen, isScannerQuietWeekend,
 } from './alpacaApi';
 
 // ── State persistence ─────────────────────────────────────────────────────────
@@ -1967,9 +1967,14 @@ async function poll(mode: IgMode) {
   const today = new Date().toISOString().slice(0, 10);
   st.lastPollTs = new Date().toISOString();
 
-  if (isWeekend()) {
-    const sleepMs = msUntilMondayOpen();
-    addLog(mode, 'wait', '—', `Weekend — sleeping until Monday (~${Math.round(sleepMs / 3_600_000)}h)`);
+  // Sunday 22:00 UTC reopen, not Monday NYSE open — this bot's universe
+  // includes indices (UK 100/Germany 40 open Monday ~7am UTC, hours before
+  // NYSE) and IG's "24 Hours" share CFDs (near-continuously quoted, not
+  // NYSE-cash-hours-gated). Sleeping until NYSE open needlessly missed the
+  // entire Sunday-evening-through-Monday-morning window for those.
+  if (isScannerQuietWeekend()) {
+    const sleepMs = msUntilWeekendReopen();
+    addLog(mode, 'wait', '—', `Weekend — sleeping until reopen (~${Math.round(sleepMs / 3_600_000)}h)`);
     st.nextRunMs = Date.now() + sleepMs;
     st.pollTimer = setTimeout(() => { void poll(mode); }, sleepMs);
     return;
