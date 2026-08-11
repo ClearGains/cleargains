@@ -200,7 +200,7 @@ export async function closeAllPositions(mode: AccountMode): Promise<void> {
 
 // ── Market data ───────────────────────────────────────────────────────────────
 
-export type Timeframe = '1Min' | '5Min' | '15Min' | '1Hour' | '1Day' | '1Week';
+export type Timeframe = '1Min' | '5Min' | '15Min' | '30Min' | '1Hour' | '1Day' | '1Week';
 
 // Without an explicit `start`, Alpaca's bars endpoint defaults to a very
 // narrow recent window (empirically: as little as a single bar for daily
@@ -214,6 +214,7 @@ function startDateFor(timeframe: Timeframe, limit: number): string {
     case '1Min':  daysBack = Math.max(5,  Math.ceil(limit / 390) * 3 + 3); break;
     case '5Min':  daysBack = Math.max(5,  Math.ceil(limit / 78)  * 3 + 3); break;
     case '15Min': daysBack = Math.max(5,  Math.ceil(limit / 26)  * 3 + 3); break;
+    case '30Min': daysBack = Math.max(7,  Math.ceil(limit / 13)  * 3 + 3); break;
     case '1Hour': daysBack = Math.max(10, Math.ceil(limit / 7)   * 3 + 3); break;
     case '1Day':  daysBack = Math.ceil(limit * 1.6) + 15; break;
     case '1Week': daysBack = limit * 8 + 20; break;

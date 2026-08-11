@@ -71,21 +71,25 @@ export function calcVwap(bars: AlpacaBar[]): number | null {
   return cumVol > 0 ? cumTPV / cumVol : null;
 }
 
-// True MACD histogram: (EMA12 − EMA26) − EMA9 of that difference.
-// Returns the last two values so callers can detect the histogram turning.
-export function calcMacdHist(bars: AlpacaBar[]): { hist: number; prevHist: number } | null {
-  if (bars.length < 35) return null;
+// True MACD histogram: (EMA_fast − EMA_slow) − EMA_signal of that
+// difference. Returns the last two values so callers can detect the
+// histogram turning. Periods default to the standard 12/26/9 (bar-count
+// based, not time based) — a caller feeding finer-than-usual bars (e.g.
+// gemini_opinion's 30-min bars) can double them to preserve the same
+// wall-clock window the defaults represent on hourly bars.
+export function calcMacdHist(bars: AlpacaBar[], fastPeriod = 12, slowPeriod = 26, signalPeriod = 9): { hist: number; prevHist: number } | null {
+  if (bars.length < slowPeriod + signalPeriod) return null;
   const closes = bars.map(b => b.c);
-  const ema12 = calcEma(closes, 12);
-  const ema26 = calcEma(closes, 26);
-  if (!ema12.length || !ema26.length) return null;
+  const emaFast = calcEma(closes, fastPeriod);
+  const emaSlow = calcEma(closes, slowPeriod);
+  if (!emaFast.length || !emaSlow.length) return null;
   // Align tails: both series end at the last close
-  const n = Math.min(ema12.length, ema26.length);
+  const n = Math.min(emaFast.length, emaSlow.length);
   const macdLine: number[] = [];
   for (let i = 0; i < n; i++) {
-    macdLine.push(ema12[ema12.length - n + i] - ema26[ema26.length - n + i]);
+    macdLine.push(emaFast[emaFast.length - n + i] - emaSlow[emaSlow.length - n + i]);
   }
-  const signal = calcEma(macdLine.map((v, i) => v), 9);
+  const signal = calcEma(macdLine.map((v, i) => v), signalPeriod);
   if (signal.length < 2) return null;
   const hist     = macdLine[macdLine.length - 1] - signal[signal.length - 1];
   const prevHist = macdLine[macdLine.length - 2] - signal[signal.length - 2];
@@ -579,7 +583,7 @@ export const STRATEGY_META: Record<StrategyName, {
   label:     string;
   timeframe: 'intraday' | 'hourly' | 'daily' | 'weekly';
   pollMs:    number;   // how often to poll for signals
-  barPeriod: '5Min' | '1Min' | '1Hour' | '1Day' | '1Week';
+  barPeriod: '5Min' | '1Min' | '30Min' | '1Hour' | '1Day' | '1Week';
   barsNeeded: number;
 }> = {
   rsi_mean_reversion:  { label: 'RSI Mean Reversion',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5Min',  barsNeeded: 60  },
@@ -602,12 +606,20 @@ export const STRATEGY_META: Record<StrategyName, {
   // VWAP earned through this session's hardening, since this strategy has
   // no track record yet. Exits are handled entirely by Gemini Position
   // Watch, not a technical exit rule — there isn't one to have.
-  // barsNeeded widened 40->120 (5 days of hourly bars) — confirmed live the
-  // entry decision had no way to tell a dip inside an intact uptrend apart
-  // from a stock still mid-selloff (SanDisk bought on "selloff reversing"
-  // 11min before a real continuation of the same post-earnings selloff cut
-  // it) with only ~40h of price history to look back on. RSI/MACD/ATR all
-  // only read the tail of the bars array, so the extra history is free —
-  // doesn't change any existing indicator value, just adds trend context.
-  gemini_opinion:      { label: 'Gemini Opinion (Experimental)', timeframe: 'intraday', pollMs: 15 * 60_000, barPeriod: '1Hour', barsNeeded: 120 },
+  // barsNeeded 240 (5 days of 30-min bars) — confirmed live the entry
+  // decision had no way to tell a dip inside an intact uptrend apart from a
+  // stock still mid-selloff (SanDisk bought on "selloff reversing" 11min
+  // before a real continuation of the same post-earnings selloff cut it)
+  // with only ~40h of price history to look back on. RSI/MACD/ATR all only
+  // read the tail of the bars array, so the extra history is free — doesn't
+  // change any existing indicator value, just adds trend context.
+  // barPeriod switched 1Hour->30Min: this is leveraged spread betting, not
+  // a buy-and-hold — Gemini needs to see actual recent price *shape* at
+  // finer-than-hourly resolution (see the candle block added to its prompt
+  // in gemini.ts), not just a single hourly-bar-derived RSI/MACD snapshot.
+  // RSI/MACD/ATR/efficiency-ratio periods are doubled at every call site
+  // that feeds this strategy specifically (igStrategyBot.ts's evaluateEpic,
+  // igStrategyScanner.ts's scoreGeminiOpinion) so each indicator still
+  // covers the same wall-clock window as before, not half of it.
+  gemini_opinion:      { label: 'Gemini Opinion (Experimental)', timeframe: 'intraday', pollMs: 15 * 60_000, barPeriod: '30Min', barsNeeded: 240 },
 };

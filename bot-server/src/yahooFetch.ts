@@ -25,7 +25,7 @@ type YahooChartRaw = {
 
 export async function fetchYahooBars(
   symbol:   string,
-  interval: '1m' | '5m' | '15m' | '1h' | '1d' | '1wk',
+  interval: '1m' | '5m' | '15m' | '30m' | '1h' | '1d' | '1wk',
   range:    string,
 ): Promise<AlpacaBar[] | null> {
   const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
@@ -189,7 +189,7 @@ export async function fetchBarsWithFallback(
   epic:  string,
   range: string,
   opts?: {
-    alpacaTimeframe?: Timeframe; yahooInterval?: '1m' | '5m' | '15m' | '1h' | '1d' | '1wk';
+    alpacaTimeframe?: Timeframe; yahooInterval?: '1m' | '5m' | '15m' | '30m' | '1h' | '1d' | '1wk';
     // Live IG quote for this epic, e.g. (bid+offer)/2 — when supplied for an
     // epic that falls through to the Yahoo-only branch below (no Alpaca
     // coverage), the raw Yahoo bars get rescaled to match IG's own price
@@ -211,7 +211,12 @@ export async function fetchBarsWithFallback(
   if (alpacaSym) {
     try {
       const { getBars } = await import('./alpacaApi');
-      const result = await getBars([alpacaSym], alpacaTimeframe, 130, 'paper');
+      // 250 not 130 — gemini_opinion now asks for 240 30-min bars (5 days'
+      // worth) to give its multi-day trend context a real lookback; every
+      // other caller's own count still trims this down via .slice(-count)
+      // below, so raising the ceiling here is free for them (Alpaca's paper
+      // market-data endpoint isn't allowance-limited the way IG's is).
+      const result = await getBars([alpacaSym], alpacaTimeframe, 250, 'paper');
       const bars = result[alpacaSym];
       if (bars?.length) {
         // Cross-check against Yahoo (both compared in Alpaca's raw,

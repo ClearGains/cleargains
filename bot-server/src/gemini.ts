@@ -521,6 +521,12 @@ export type TradeIdeaRequest = {
   // side of that ever informing the other. Without this, the entry
   // decision has no way to know its own recent history on this exact name.
   recentExitContext?: string;
+  // Last several 30-min bars, oldest first — actual recent price *shape*,
+  // not just a single RSI/MACD/ATR snapshot derived from the tail of a much
+  // longer window. This is a leveraged spread bet, not a buy-and-hold: how
+  // price has actually been moving over the last several hours matters as
+  // much as where it ended up.
+  recentCandles?: Array<{ open: number; high: number; low: number; close: number }>;
 };
 
 export type TradeIdeaVerdict = {
@@ -542,10 +548,18 @@ export async function askGeminiTradeIdea(req: TradeIdeaRequest): Promise<TradeId
   }
 
   const headlineBlock = req.headlines.length
-    ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists; weigh today's/yesterday's headlines far more heavily than one from 5-6 days ago, which is likely already priced in):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
     : '\nNo recent company-specific news found.\n';
 
+  const candleBlock = req.recentCandles?.length
+    ? `\nLast ${req.recentCandles.length} closed 30-min candles (oldest first, so you can see the actual recent shape of the move, not just where it ended up):\n${req.recentCandles.map((c, i) =>
+        `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
+      ).join('\n')}\n`
+    : '';
+
   const prompt = `You are deciding, entirely on your own judgment, whether to open a spread bet position on this instrument right now — there is no pre-existing technical signal to confirm or veto, you are the primary decision-maker.
+
+This is leveraged spread betting, not a long-term investment — positions here are opened and typically resolved within the same day or so, not held for weeks. That means two things should weigh heavily on your decision: (1) genuinely fresh, near-daily news — a headline from today or yesterday matters far more than one from most of a week ago, which the market has likely already absorbed — and (2) the instrument's actual recent movement at a fine (30-minute) resolution, not just a single indicator snapshot summarizing a much longer window. Use the candle sequence below to judge whether the move is accelerating, stalling, or reversing right now, not only whether an indicator crossed some threshold.
 
 Instrument: ${req.instrumentName}
 Current price: ${req.price.toFixed(2)}
@@ -553,12 +567,12 @@ ${req.dayChangePercent !== undefined ? `Move so far today: ${req.dayChangePercen
 ${req.multiDayTrendPercent !== undefined ? `Trend over the last ${req.multiDayTrendSpanDays} days: ${req.multiDayTrendPercent >= 0 ? '+' : ''}${req.multiDayTrendPercent.toFixed(1)}% — use this to tell a genuine pullback within an intact uptrend apart from a stock still mid-selloff. A bullish "buy the dip" thesis needs the multi-day trend to actually still be up (or at least flat) — buying because today looks oversold while the multi-day trend is sharply down is catching a falling knife, not a dip, unless you have a genuinely strong, specific reason the selloff itself is over (not just "RSI is low").` : ''}
 ${req.gapPercent !== undefined && req.gapPercent >= 2 ? `Gapped ${req.gapPercent.toFixed(1)}% at today's open vs yesterday's close — a real gap like this usually means genuine news/sentiment shifted overnight, not routine noise; worth weighing whether that gap has already fully played out or still has room.` : ''}
 ${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation, which lends more weight to whatever the price action is currently doing (a move on genuinely elevated volume is more likely to mean something than the same move on ordinary volume).` : ''}
-RSI(14): ${req.rsi?.toFixed(1) ?? 'N/A'}
-MACD histogram: ${req.macdHist !== null ? (req.macdHist > 0 ? '+' : '') + req.macdHist.toFixed(5) : 'N/A'}
-ATR(14): ${req.atr?.toFixed(2) ?? 'N/A'} — volatility measure, use this to size a sensible stop
-${headlineBlock}
+RSI (14h lookback): ${req.rsi?.toFixed(1) ?? 'N/A'}
+MACD histogram (12h/26h/9h): ${req.macdHist !== null ? (req.macdHist > 0 ? '+' : '') + req.macdHist.toFixed(5) : 'N/A'}
+ATR (14h lookback): ${req.atr?.toFixed(2) ?? 'N/A'} — volatility measure, use this to size a sensible stop
+${candleBlock}${headlineBlock}
 ${req.recentExitContext ? `⚠ Recent history on this instrument/sector: ${req.recentExitContext} — weigh this seriously. If that reasoning still holds right now, don't just repeat the same thesis that already got cut hoping for a different result; either HOLD until the picture is genuinely clearer, or if the evidence actually points the other way (the same weakness that closed the last position, or is hitting this sector, would logically make the OPPOSITE direction the better trade), take that instead. Only take the same direction again if the catalyst has clearly changed or resolved since then.\n` : ''}
-These are effectively daily-timeframe trades — opened and typically resolved within the same day or so, not held for weeks. So what matters most isn't just what already happened, it's your own expectation of where this goes from here: given the setup, the news, and the trend context above, do you actually expect this instrument to keep moving in your chosen direction for the rest of today (and into the next day or so if held), or is the move already largely played out? Your confidence score should reflect how strongly you believe that expected forward move will actually happen — not a mechanical pass/fail on the indicators. A technically clean setup you have no real view on what happens next should score low confidence or HOLD; a setup with a clear, specific reason to expect continued movement deserves genuine conviction even if one indicator looks mixed.
+So what matters most isn't just what already happened, it's your own expectation of where this goes from here: given the setup, the recent candle-by-candle shape, the news, and the trend context above, do you actually expect this instrument to keep moving in your chosen direction for the rest of today (and into the next day or so if held), or is the move already largely played out? Your confidence score should reflect how strongly you believe that expected forward move will actually happen — not a mechanical pass/fail on the indicators. A technically clean setup you have no real view on what happens next should score low confidence or HOLD; a setup with a clear, specific reason to expect continued movement deserves genuine conviction even if one indicator looks mixed.
 
 Decide BUY, SELL, or HOLD. Only pick BUY/SELL if you have genuine conviction — HOLD is the right answer most of the time when the picture is mixed or unclear. Consider both the technicals and the news together; don't recommend a direction the news directly contradicts. If the instrument has already moved significantly today, that is NOT by itself a reason to hold off — a big move already behind it is only one input, and real conviction (a strong, still-intact catalyst, technicals still confirming, news that hasn't fully played out) can absolutely justify entering after a large move. Only let the day's move count against the trade when your actual reasoning would be pure momentum-chasing — i.e. "it's up a lot so I'll follow it" with no independent thesis of its own. Don't default to HOLD just because the move is large; default to HOLD when the conviction itself is weak.
 

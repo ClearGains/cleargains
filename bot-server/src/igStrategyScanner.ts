@@ -210,7 +210,11 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
   donchian_hourly:    { resolution: 'HOUR',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
-  gemini_opinion:     { resolution: 'HOUR',       count: 40 },
+  // Not actually used at runtime — gemini_opinion is in YAHOO_SCAN_STRATEGIES
+  // below, so scanning always goes through SCAN_FREE_PARAMS instead. Kept
+  // accurate anyway (30-min bars, matching igStrategyBot.ts's IG_RES) so
+  // this doesn't read as stale/wrong if that ever changes.
+  gemini_opinion:     { resolution: 'MINUTE_30',  count: 240 },
 };
 
 // ── Bar conversion ────────────────────────────────────────────────────────────
@@ -271,12 +275,14 @@ function scoreOrb(bars: AlpacaBar[], epic: string, name: string): Scored {
 // these are exactly the kind of "something happened here" signals worth
 // prioritizing a candidate for, on top of plain volatility/relative volume.
 function scoreGeminiOpinion(bars: AlpacaBar[], epic: string, name: string): Scored {
-  if (bars.length < 10) return { epic, name, score: -1 };
-  const recent    = bars.slice(-10);
-  const avgVol    = bars.slice(0, -10).reduce((s, b) => s + b.v, 0) / Math.max(bars.length - 10, 1);
+  if (bars.length < 20) return { epic, name, score: -1 };
+  // Windows doubled (10->20, ATR/efficiency periods below) — bars are
+  // 30-min now, not hourly, so this preserves the same wall-clock windows.
+  const recent    = bars.slice(-20);
+  const avgVol    = bars.slice(0, -20).reduce((s, b) => s + b.v, 0) / Math.max(bars.length - 20, 1);
   const recentVol = recent.reduce((s, b) => s + b.v, 0) / recent.length;
   const relVol    = avgVol > 0 ? recentVol / avgVol : 1;
-  const atr       = calcAtr(bars);
+  const atr       = calcAtr(bars, 28);
   const last      = bars[bars.length - 1];
   const atrPct    = atr && last.c > 0 ? (atr / last.c) * 100 : 0;
 
@@ -294,7 +300,7 @@ function scoreGeminiOpinion(bars: AlpacaBar[], epic: string, name: string): Scor
   // biases candidate selection toward names actually going somewhere,
   // without excluding choppy ones outright (that hard filter lives at
   // entry time, in evaluateEpic — this is just a ranking nudge).
-  const efficiencyBonus = (calcEfficiencyRatio(bars) ?? 0) * 30;
+  const efficiencyBonus = (calcEfficiencyRatio(bars, 40) ?? 0) * 30;
 
   return { epic, name, score: relVol * 20 + atrPct * 5 + volumeSurgeBonus + gapBonus + efficiencyBonus };
 }
@@ -381,13 +387,15 @@ const ALPACA_ONLY_STRATEGIES = new Set<IgStrategyName>(['vwap', 'orb', 'rsi_mean
 // Mirrors igStrategyBot.ts's FREE_DATA_PARAMS — duplicated rather than
 // imported to avoid a circular import (igStrategyBot.ts already imports
 // scanIgEpics from this file).
-const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: '1Min' | '5Min' | '1Hour' | '1Week'; yahooInterval: '1m' | '5m' | '1h' | '1wk' }>> = {
+const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: '1Min' | '5Min' | '30Min' | '1Hour' | '1Week'; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1wk' }>> = {
   rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
   orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },
   donchian_hourly:    { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
-  gemini_opinion:     { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
+  // 30-min bars, not hourly — see STRATEGY_META.gemini_opinion in
+  // alpacaStrategies.ts for why.
+  gemini_opinion:     { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m' },
 };
 
 // Volatility-matched routing — a fast (hourly) strategy wants instruments

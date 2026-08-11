@@ -547,7 +547,14 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
   donchian_hourly:    { resolution: 'HOUR',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
-  gemini_opinion:     { resolution: 'HOUR',       count: 40 },
+  // MINUTE_30 (IG's documented resolution enum) + count 240 = 5 days of
+  // 30-min bars — see STRATEGY_META.gemini_opinion in alpacaStrategies.ts
+  // for why this strategy specifically needs finer-than-hourly bars and a
+  // wider lookback. In practice this raw-IG-REST path is a rare fallback:
+  // gemini_opinion's real universe is almost entirely Alpaca/Yahoo-covered
+  // (see FREE_DATA_PARAMS/usesFreeData/usesYahooScaled below), so this
+  // barely touches IG's own allowance-limited candle API.
+  gemini_opinion:     { resolution: 'MINUTE_30',  count: 240 },
 };
 
 // Free-data params for strategies that need something other than the daily
@@ -558,13 +565,16 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
 // what makes them the most likely to burn through it (confirmed live:
 // daily-timeframe polling alone was already tripping the allowance before
 // this existed at all).
-const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '1h' | '1wk' }>> = {
+const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1wk' }>> = {
   rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
   orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },
   donchian_hourly:    { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
-  gemini_opinion:     { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
+  // 30-min bars, not hourly — see STRATEGY_META.gemini_opinion for why.
+  // Yahoo's 30m interval is only available for ~60 days back, well within
+  // this 1-month range request.
+  gemini_opinion:     { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m' },
 };
 
 // Daily-timeframe strategies poll far more often here than STRATEGY_META's
@@ -1352,7 +1362,9 @@ async function evaluateEpic(
       }
       // Checked before spending a Gemini call — all three are cheap,
       // mechanical disqualifiers that don't need the AI's opinion first.
-      const efficiencyRatio = calcEfficiencyRatio(bars);
+      // Period doubled (20->40) — bars are now 30-min not hourly, so this
+      // keeps the same ~20h window the 0.22 threshold was tuned against.
+      const efficiencyRatio = calcEfficiencyRatio(bars, 40);
       if (efficiencyRatio !== null && efficiencyRatio < MIN_EFFICIENCY_RATIO) {
         signal = { action: 'HOLD', reason: `Too choppy to trade — efficiency ratio ${efficiencyRatio.toFixed(2)} < ${MIN_EFFICIENCY_RATIO} (moved a lot, went nowhere)` };
         break;
@@ -1367,9 +1379,12 @@ async function evaluateEpic(
         signal = { action: 'HOLD', reason: `Pacing — last entry ${(msSinceLastEntry / 60_000).toFixed(0)}min ago, waiting ${(GEMINI_ENTRY_SPACING_MS / 60_000).toFixed(0)}min between entries` };
         break;
       }
-      const rsi   = calcRsi(bars);
-      const macd  = calcMacdHist(bars);
-      const atr   = calcAtr(bars);
+      // Periods doubled from the defaults (14/12-26-9/14) — bars are now
+      // 30-min not hourly, so this preserves the same wall-clock windows
+      // (RSI/ATR: 14h, MACD: 12h/26h/9h) rather than quietly halving them.
+      const rsi   = calcRsi(bars, 28);
+      const macd  = calcMacdHist(bars, 24, 52, 18);
+      const atr   = calcAtr(bars, 28);
       const ticker    = EPIC_TO_ALPACA[epic];
       const headlines = ticker ? await fetchCompanyHeadlines(ticker, 8, epicName(epic)) : [];
       // How far this has already moved today, from the bars already
@@ -1381,15 +1396,16 @@ async function evaluateEpic(
       const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
       const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
       const dayChangePercent = dayOpen ? ((last - dayOpen) / dayOpen) * 100 : undefined;
-      // Multi-day trend, from the wider bar window (barsNeeded widened
-      // 40->120 specifically for this) — confirmed live this matters:
-      // SanDisk got bought on "post-earnings selloff reversing" using only
-      // ~40h of history to judge that, and the selloff was still actively
-      // continuing at the multi-day level, cutting the position 11min later
-      // on the exact same event the entry thesis had called finished.
+      // Multi-day trend, from the wider bar window (240 30-min bars = 5
+      // days) — confirmed live this matters: SanDisk got bought on
+      // "post-earnings selloff reversing" using only ~40h of history to
+      // judge that, and the selloff was still actively continuing at the
+      // multi-day level, cutting the position 11min later on the exact
+      // same event the entry thesis had called finished.
       // Report the trend over whatever span is actually available rather
       // than assuming a fixed "3-day"/"5-day" label that may not match.
-      const spanHours = bars.length - 1;
+      // Bars are 30-min, not 1h — each one is half an hour, not an hour.
+      const spanHours = (bars.length - 1) * 0.5;
       const multiDayTrendPercent  = spanHours >= 48 ? ((last - bars[0].c) / bars[0].c) * 100 : undefined;
       const multiDayTrendSpanDays = Math.round(spanHours / 24);
       // Gap at today's open (distinct from dayChangePercent, which is
@@ -1400,15 +1416,22 @@ async function evaluateEpic(
       const todayIdx    = bars.findIndex(b => b.t.slice(0, 10) === todayUtc);
       const priorClose  = todayIdx > 0 ? bars[todayIdx - 1].c : undefined;
       const gapPercent  = priorClose && todaysBars[0] ? ((todaysBars[0].o - priorClose) / priorClose) * 100 : undefined;
-      const recent10       = bars.slice(-10);
-      const avgVolPrior    = bars.slice(0, -10).reduce((s, b) => s + b.v, 0) / Math.max(bars.length - 10, 1);
-      const recentVol      = recent10.reduce((s, b) => s + b.v, 0) / recent10.length;
+      // Window doubled (10->20 bars) — 30-min bars now, so this is still a
+      // ~10h "recent" volume window, same as before.
+      const recent20       = bars.slice(-20);
+      const avgVolPrior    = bars.slice(0, -20).reduce((s, b) => s + b.v, 0) / Math.max(bars.length - 20, 1);
+      const recentVol      = recent20.reduce((s, b) => s + b.v, 0) / recent20.length;
       const volumeSurgeMultiple = avgVolPrior > 0 ? recentVol / avgVolPrior : undefined;
       const recentExitContext = getRecentExitContext(mode, epic);
+      // Actual recent candle-by-candle shape, not just a single RSI/MACD/ATR
+      // snapshot — this is a leveraged spread bet, not a buy-and-hold, so
+      // Gemini needs to see how price has actually been moving over the
+      // last several hours at 30-min resolution, not just where it ended up.
+      const recentCandles = bars.slice(-8).map(b => ({ open: b.o, high: b.h, low: b.l, close: b.c }));
       const idea = await askGeminiTradeIdea({
         instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
         multiDayTrendPercent, multiDayTrendSpanDays, gapPercent, volumeSurgeMultiple,
-        recentExitContext,
+        recentExitContext, recentCandles,
       });
       // Fails closed — no underlying rule to fall back to the way VWAP
       // falls back to its own technicals when Gemini's unavailable. A
