@@ -85,6 +85,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (action === 'refresh-recommendations') return proxyTo(`/ig-strategy/${mode}/refresh-recommendations`, 'POST');
   if (action === 'refresh-daily-pick')      return proxyTo(`/ig-strategy/${mode}/refresh-daily-pick`,      'POST');
 
+  if (action === 'max-daily-loss') {
+    const body = await req.json() as { maxDailyLossPct?: number };
+    return proxyTo(`/ig-strategy/${mode}/max-daily-loss`, 'POST', body);
+  }
+
   if (action === 'pause-epic') {
     const { epic } = await req.json() as { epic?: string };
     if (!epic) return NextResponse.json({ ok: false, error: 'epic required' }, { status: 400 });

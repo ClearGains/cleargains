@@ -351,6 +351,8 @@ export type IgStrategyBotStatus = {
   orbState:   Record<string, OrbState>;
   sessionOk:  boolean;
   lossLock:   boolean;   // daily-loss circuit breaker engaged
+  maxDailyLossPct: number;   // current effective limit (config override, or the default 3)
+  dayStartBalance: number;   // account balance at today's UTC-day boundary — 0 until the first poll of the day
   recommendations: IgRecommendation[];
   dailyPick:  IgRecommendation | null;
   pausedEpics: string[];
@@ -1132,6 +1134,35 @@ async function ensureDailyPick(mode: IgMode, force = false): Promise<void> {
 // fresh read given how the day's traded so far.
 export async function refreshDailyPick(mode: IgMode): Promise<void> {
   await ensureDailyPick(mode, true);
+}
+
+// Live override for the daily-loss circuit breaker — takes effect on the
+// very next poll cycle (evaluateEpic/poll both read st.config directly each
+// time, not a snapshot taken at start), no restart needed. Persisted so it
+// survives a PM2 restart/auto-resume rather than silently reverting to the
+// default.
+// Clamped 0.5-20%: below 0.5 the breaker would trip on completely ordinary
+// day-to-day noise; above 20 it's not really acting as a circuit breaker
+// any more. An explicit update while currently locked is treated as a
+// deliberate "let it keep trading today" decision and clears the lock right
+// away, without re-fetching the live balance to double-check first — this
+// is safe either way, since the very next poll re-runs the same ddPct >=
+// maxLossPct check regardless and will just re-trip the lock immediately if
+// the new limit still doesn't actually cover today's drawdown.
+export function updateMaxDailyLossPct(mode: IgMode, pct: number): { ok: boolean; error?: string } {
+  const st = ms(mode);
+  if (!st.config) return { ok: false, error: 'Bot not running — start it first' };
+  if (!Number.isFinite(pct)) return { ok: false, error: 'Invalid percentage' };
+  const clamped = Math.min(20, Math.max(0.5, pct));
+  st.config.maxDailyLossPct = clamped;
+  saveIgState(mode, st.config);
+  if (st.lossLock) {
+    st.lossLock = false;
+    addLog(mode, 'info', '—', `Daily loss limit changed to ${clamped}% — unlocking new entries for the rest of today`);
+  } else {
+    addLog(mode, 'info', '—', `Daily loss limit changed to ${clamped}%`);
+  }
+  return { ok: true };
 }
 
 const RECOMMENDATION_REFRESH_MS = 30 * 60_000;  // full-universe sweep every 30min — cheap for free-data names, cooldown-gated for IG-only ones
@@ -2483,6 +2514,8 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     orbState:   { ...st.orbState },
     sessionOk:  !!st.session && Date.now() < st.session.expiresAt,
     lossLock:   st.lossLock,
+    maxDailyLossPct: st.config?.maxDailyLossPct ?? 3,
+    dayStartBalance: st.dayStartBalance,
     recommendations: [...st.recommendations.values()],
     dailyPick:  st.dailyPick,
     pausedEpics: [...st.pausedEpics],

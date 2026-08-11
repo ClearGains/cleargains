@@ -15,7 +15,7 @@ import {
   getIgStrategyBotStatus, loadSavedIgStrategyState, startRecommendationRefresh,
   refreshRecommendations, refreshDailyPick, openRecommendation,
   getPausedEpics, pauseEpic, resumeEpic,
-  releaseDeal, holdDeal,
+  releaseDeal, holdDeal, updateMaxDailyLossPct,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
@@ -404,6 +404,7 @@ app.post('/ig-strategy/:mode/start', auth, (req: Request, res: Response) => {
     maxStockPositions: body.maxStockPositions ?? 3,
     maxIndexPositions: body.maxIndexPositions ?? 3,
     allowShorts:       body.allowShorts       ?? false,
+    maxDailyLossPct:   body.maxDailyLossPct   ?? 3,
   };
 
   res.json({ ok: true, message: 'IG bot starting…' });
@@ -417,6 +418,17 @@ app.post('/ig-strategy/:mode/stop', auth, (req: Request, res: Response) => {
   if (!mode) return;
   stopIgStrategyBot(mode);
   res.json({ ok: true });
+});
+
+// Live override for the daily-loss circuit breaker — takes effect on the
+// bot's next poll cycle without a restart, and clears an active lock right
+// away (see updateMaxDailyLossPct's own comment for why that's safe).
+app.post('/ig-strategy/:mode/max-daily-loss', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const pct = Number((req.body as { maxDailyLossPct?: unknown }).maxDailyLossPct);
+  const r = updateMaxDailyLossPct(mode, pct);
+  res.json(r);
 });
 
 app.post('/ig-strategy/:mode/pause', auth, (req: Request, res: Response) => {

@@ -495,6 +495,9 @@ type IgBotStatus = {
   nextRunMs:  number | null;
   lastPollTs: string | null;
   sessionOk:  boolean;
+  lossLock?:  boolean;   // daily-loss circuit breaker engaged (no new entries today)
+  maxDailyLossPct?: number;   // current effective limit
+  dayStartBalance?: number;   // account balance at today's UTC-day boundary
   recommendations?: IgRecommendation[];
   dailyPick?: IgRecommendation | null;
   pausedEpics?: string[];
@@ -568,6 +571,8 @@ function IgSpreadBetTab() {
   const [maxStockPos, setMaxStockPos]   = useState('3');
   const [maxIndexPos, setMaxIndexPos]   = useState('3');
   const [allowShorts, setAllowShorts] = useState(false);
+  const [maxDailyLoss, setMaxDailyLoss] = useState('3');
+  const lossPctInitialized = useRef(false);
 
   const [status, setStatus]   = useState<IgBotStatus | null>(null);
   const [loading, setLoading] = useState(false);
@@ -611,6 +616,18 @@ function IgSpreadBetTab() {
   }, [startPolling, stopPolling]);
 
   useEffect(() => { startPolling(); }, [igMode, startPolling]);
+
+  // Seed the daily-loss input from the server's actual current value once
+  // status first loads for this mode, then leave it alone — otherwise the
+  // 5s status poll would clobber whatever the user is mid-typing. Reset on
+  // mode switch so demo/live don't bleed each other's value into the input.
+  useEffect(() => { lossPctInitialized.current = false; }, [igMode]);
+  useEffect(() => {
+    if (status && !lossPctInitialized.current) {
+      setMaxDailyLoss(String(status.maxDailyLossPct ?? 3));
+      lossPctInitialized.current = true;
+    }
+  }, [status]);
 
   // Gemini watch panel — separate, slower poll (positions + which are
   // watched don't change nearly as often as the strategy bot's own status).
@@ -729,7 +746,12 @@ function IgSpreadBetTab() {
       maxStockPositions: parseInt(maxStockPos, 10) || 3,
       maxIndexPositions: parseInt(maxIndexPos, 10) || 3,
       allowShorts,
+      maxDailyLossPct:   parseFloat(maxDailyLoss) || 3,
     });
+  };
+
+  const handleUpdateMaxDailyLoss = () => {
+    void post('max-daily-loss', { maxDailyLossPct: parseFloat(maxDailyLoss) || 3 });
   };
 
   const isRunning = status?.running ?? false;
@@ -854,6 +876,36 @@ function IgSpreadBetTab() {
               </div>
             </div>
 
+            {/* Daily loss limit */}
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5">Daily loss limit (%)</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  value={maxDailyLoss}
+                  onChange={e => setMaxDailyLoss(e.target.value)}
+                  min="0.5"
+                  max="20"
+                  step="0.5"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                />
+                {isRunning && (
+                  <button
+                    onClick={handleUpdateMaxDailyLoss}
+                    disabled={loading}
+                    className="shrink-0 px-3 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    Update
+                  </button>
+                )}
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                {isRunning
+                  ? 'Takes effect on the next poll — no restart needed. Also clears an active lock right away.'
+                  : '% drop from the day\'s starting balance that blocks new entries until the next trading day'}
+              </p>
+            </div>
+
             {/* Allow shorts */}
             <label className="flex items-center gap-2 cursor-pointer select-none">
               <div
@@ -943,6 +995,14 @@ function IgSpreadBetTab() {
             )}
             {status?.strategy && (
               <span className="text-slate-600">{IG_STRATEGY_LABEL[status.strategy]}</span>
+            )}
+            {status?.lossLock && (
+              <span
+                className="flex items-center gap-1 px-2 py-0.5 rounded-full font-medium bg-rose-500/20 text-rose-400"
+                title="Daily loss limit reached — no new entries until the next trading day; exits are still managed"
+              >
+                🛑 Loss limit ({status.maxDailyLossPct ?? 3}%)
+              </span>
             )}
           </div>
 
