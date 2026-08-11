@@ -484,6 +484,13 @@ app.post('/fx-scalper/:mode/resume', auth, (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+app.post('/fx-scalper/:mode/max-risk', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const riskGbp = Number((req.body as { maxRiskGbp?: unknown }).maxRiskGbp);
+  res.json(getFxScalperBot(mode).setMaxRisk(riskGbp));
+});
+
 // ── Gemini position watch ─────────────────────────────────────────────────────
 // Lists all currently open IG positions for the account (however they were
 // opened — manually, via the strategy bot, anywhere) alongside which ones are

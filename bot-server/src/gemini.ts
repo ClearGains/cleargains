@@ -261,6 +261,110 @@ Respond with JSON only, no markdown:
   }
 }
 
+// ── FX/index swing second opinion ────────────────────────────────────────────
+// fxScalperBot.ts used to route its hourly-bar swing entries through
+// askGemini() above — a prompt that explicitly tells the model it's
+// reviewing "a 1-minute spread betting scalper", leftover from before this
+// bot was rewritten from 5-min scalping to hourly-bar, hours-scale swing
+// holds. Same confirm/override/skip role as askGemini, but framed for what
+// this actually is: a trend-continuation swing trade expected to run for
+// hours, not minutes, with real hourly candle shape instead of five
+// scalp-scale ones. Doesn't size the trade (stopPoints/takeProfitPoints) —
+// the caller already derives those from 1H ATR, this only confirms
+// direction/confidence, same division of labor askGemini already had.
+
+export type FxSwingEntrySignal = {
+  instrumentName: string;
+  trend:          'UP' | 'DOWN';
+  rsi:            number | null;
+  macd:           number | null;
+  atr:            number | null;
+  suggestedDir:   'BUY' | 'SELL';
+  // Last several closed 1-hour candles, oldest first — real recent shape,
+  // not just a derived RSI/MACD number.
+  lastCandles:    Array<{ open: number; high: number; low: number; close: number }>;
+};
+
+export type FxSwingVerdict = {
+  direction:  'BUY' | 'SELL' | 'SKIP';
+  confidence: number;
+  reason:     string;
+  engine:     'gemini' | 'passthrough';
+};
+
+export async function askGeminiFxSwing(signal: FxSwingEntrySignal): Promise<FxSwingVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  // No key, cap reached, or any API failure below — passthrough on the
+  // technical signal rather than SKIP, same as askGeminiDailyVerdict.
+  // fxSwingStrategy.ts's own EMA/RSI/MACD agreement already qualified this
+  // setup before Gemini was ever asked; losing Gemini shouldn't mean losing
+  // every entry. 65% clears the default 60% minConfidence threshold with a
+  // little headroom, without claiming a confidence this function can't
+  // actually back up.
+  const passthrough = (reason: string): FxSwingVerdict =>
+    ({ direction: signal.suggestedDir, confidence: 65, reason, engine: 'passthrough' });
+
+  if (!apiKey) return passthrough('No Gemini key configured — trading on the technical signal alone');
+  if (!reserveGeminiCall()) return passthrough('Daily Gemini call cap reached — trading on the technical signal alone');
+
+  const candleStr = signal.lastCandles.map((c, i) =>
+    `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
+  ).join('\n');
+
+  const prompt = `You are a second-opinion filter for an hourly-bar FX/index swing trade — NOT a scalp. Positions here are typically held for several hours (up to ~11h) while a trend plays out, and are managed by their own stop/take-profit and a stall-detection exit, not closed on the next tick.
+
+A trend-following rules engine already qualified a ${signal.suggestedDir} setup here: price is trading with the ${signal.trend === 'UP' ? 'uptrend (EMA20>EMA50), above EMA20' : 'downtrend (EMA20<EMA50), below EMA20'}, with RSI and MACD both already confirming that direction. Your job is not to re-derive the setup — it's to judge whether this trend genuinely has enough room left to keep running for the next several hours, or whether it's already largely played out.
+
+Instrument: ${signal.instrumentName}
+
+Last ${signal.lastCandles.length} closed 1-hour candles (oldest first — use this to judge the actual shape of the move: still accelerating, or already stalling?):
+${candleStr}
+RSI(14): ${signal.rsi?.toFixed(1) ?? 'N/A'}
+MACD histogram: ${signal.macd !== null ? (signal.macd > 0 ? '+' : '') + signal.macd.toFixed(5) : 'N/A'} (positive=bullish)
+ATR(14): ${signal.atr?.toFixed(2) ?? 'N/A'} pts — hourly volatility measure
+
+Confirm, override to the other direction, or SKIP if this trend looks exhausted rather than continuing. Treat "RSI overbought/oversold" the same way you would any other momentum reading in an intact trend — strong recent demand often keeps pushing price further in the near term rather than reversing immediately; only let it count against the trade if the candle shape above is already showing real stalling (small bodies, failed pushes, reversal wicks), not just an extended reading in an otherwise clean trend.
+
+Respond with JSON only, no markdown:
+{"direction":"BUY","confidence":72,"reason":"max 15 words"}`;
+
+  try {
+    const res = await fetchGeminiWithRetry(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
+        }),
+        signal: AbortSignal.timeout(20_000),
+      }
+    );
+
+    if (!res.ok) return passthrough(`Gemini ${res.status} — trading on the technical signal alone`);
+
+    const data = await res.json() as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+
+    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
+
+    const dir = (['BUY', 'SELL', 'SKIP'].includes(parsed.direction)) ? parsed.direction as FxSwingVerdict['direction'] : 'SKIP';
+
+    return {
+      direction:  dir,
+      confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
+      reason:     parsed.reason ?? '',
+      engine:     'gemini',
+    };
+  } catch (e) {
+    return passthrough(`Gemini failed — trading on the technical signal alone (${e instanceof Error ? e.message : String(e)})`);
+  }
+}
+
 // ── Daily-timeframe second opinion ───────────────────────────────────────────
 // Same role as the Demo Trader tab's /api/gemini/verdict route (confirm/override/
 // skip a signal already produced by a daily-timeframe strategy), ported here so

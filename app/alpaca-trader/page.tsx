@@ -11,7 +11,7 @@ import { clsx } from 'clsx';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type PageTab     = 'alpaca' | 'ig';
+type PageTab     = 'alpaca' | 'ig' | 'fx';
 type AccountMode = 'paper' | 'live';
 type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional';
 
@@ -1329,6 +1329,357 @@ function IgSpreadBetTab() {
   );
 }
 
+// ── FX Swing Bot ──────────────────────────────────────────────────────────────
+// Hourly-bar FX/index swing trading — previously had zero frontend surface at
+// all (no page, no way to see it was running, no way to see or change its
+// risk setting). Started once via a manual API call and left running.
+
+type FxMode = 'demo' | 'live';
+
+type FxEpicStatus = {
+  state:      string;
+  direction:  'BUY' | 'SELL';
+  entryPrice: number;
+  lastPrice:  number;
+  dealId:     string;
+  pnlPct:     number | null;
+  uplGbp:     number | null;
+  stopPrice:  number | null;
+  tpPrice:    number | null;
+};
+
+type FxLogEntry = {
+  id:   string;
+  ts:   string;
+  type: 'info' | 'enter' | 'exit' | 'hold' | 'wait' | 'error' | 'cooldown';
+  epic: string;
+  msg:  string;
+};
+
+type FxScalperStatus = {
+  mode:            FxMode;
+  running:         boolean;
+  paused:          boolean;
+  streamConnected: boolean;
+  epics:           string[];
+  maxRiskGbp:      number;
+  epicStatuses:    Record<string, FxEpicStatus>;
+  log:             FxLogEntry[];
+  sessionOk:       boolean;
+  sessionExpiry:   string | null;
+  balance:         number;
+  available:       number;
+};
+
+function fxEpicName(epic: string): string { return epic.split('.').slice(0, 3).join('.'); }
+
+function fxLogColor(type: FxLogEntry['type']): string {
+  switch (type) {
+    case 'enter':    return 'text-green-400';
+    case 'exit':     return 'text-red-400';
+    case 'error':    return 'text-rose-400';
+    case 'wait':     return 'text-slate-500';
+    case 'cooldown': return 'text-sky-500';
+    case 'hold':     return 'text-slate-400';
+    default:         return 'text-slate-300';
+  }
+}
+function fxLogIcon(type: FxLogEntry['type']): string {
+  switch (type) {
+    case 'enter':    return '↑';
+    case 'exit':     return '↓';
+    case 'error':    return '✗';
+    case 'wait':     return '…';
+    case 'cooldown': return '❄';
+    case 'hold':     return '▬';
+    default:         return '·';
+  }
+}
+
+function FxSwingBotTab() {
+  const [fxMode, setFxMode]   = useState<FxMode>('demo');
+  const [maxRisk, setMaxRisk] = useState('5');
+  const riskInitialized       = useRef(false);
+
+  const [status, setStatus]   = useState<FxScalperStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState<string | null>(null);
+  const [polling, setPolling] = useState(false);
+
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const res  = await fetch(`/api/fx-scalper?mode=${fxMode}`);
+      const data = await res.json() as FxScalperStatus & { error?: string };
+      if (data.error) { setError(data.error); return; }
+      setStatus(data);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to reach bot server');
+    }
+  }, [fxMode]);
+
+  const startPolling = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    setPolling(true);
+    void fetchStatus();
+    pollRef.current = setInterval(() => { void fetchStatus(); }, 5_000);
+  }, [fetchStatus]);
+
+  useEffect(() => {
+    startPolling();
+    return () => { if (pollRef.current) clearInterval(pollRef.current); setPolling(false); };
+  }, [startPolling]);
+
+  // Seed the risk input from the server's actual current value once, per
+  // mode — then leave it alone so the 5s poll doesn't clobber mid-typing.
+  useEffect(() => { riskInitialized.current = false; }, [fxMode]);
+  useEffect(() => {
+    if (status && !riskInitialized.current) {
+      setMaxRisk(String(status.maxRiskGbp ?? 5));
+      riskInitialized.current = true;
+    }
+  }, [status]);
+
+  const post = async (action: string, body?: object) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res  = await fetch(`/api/fx-scalper?mode=${fxMode}&action=${action}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok && data.error) setError(data.error);
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Request failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const isRunning = status?.running ?? false;
+  const isPaused  = status?.paused  ?? false;
+
+  const epicEntries = Object.entries(status?.epicStatuses ?? {});
+  const inPosition  = epicEntries.filter(([, s]) => s.state === 'IN_POSITION');
+
+  return (
+    <div className="space-y-5">
+      {error && (
+        <div className="bg-rose-500/10 border border-rose-500/30 rounded-lg p-3 text-sm text-rose-400 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {fxMode === 'live' && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 text-xs text-amber-400 flex items-start gap-2">
+          <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+          <span><strong>Live mode active</strong> — real money spread bets on hourly-bar FX/index trend swings, held hours at a time.</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+
+        {/* Config panel */}
+        <div className="lg:col-span-1 space-y-4">
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-4">
+            <h2 className="text-sm font-semibold text-slate-300">Configuration</h2>
+
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5">Account</label>
+              <div className="flex rounded-lg overflow-hidden border border-slate-700 text-xs">
+                {(['demo', 'live'] as FxMode[]).map(m => (
+                  <button
+                    key={m}
+                    onClick={() => { if (!loading) setFxMode(m); }}
+                    disabled={loading}
+                    className={clsx(
+                      'flex-1 py-2 font-medium transition-colors capitalize',
+                      fxMode === m
+                        ? m === 'live' ? 'bg-rose-600 text-white' : 'bg-sky-700 text-white'
+                        : 'bg-slate-800 text-slate-400 hover:bg-slate-700',
+                      loading && 'opacity-50 cursor-not-allowed',
+                    )}
+                  >
+                    {m === 'live' ? '🔴 Live' : '📄 Demo'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5">Risk / trade (£)</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  value={maxRisk}
+                  onChange={e => setMaxRisk(e.target.value)}
+                  min="0.5"
+                  max="100"
+                  step="0.5"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-500"
+                />
+                {isRunning && (
+                  <button
+                    onClick={() => void post('max-risk', { maxRiskGbp: parseFloat(maxRisk) || 5 })}
+                    disabled={loading}
+                    className="shrink-0 px-3 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    Update
+                  </button>
+                )}
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                {isRunning
+                  ? 'Takes effect on the next entry — no restart needed.'
+                  : '£ lost if the stop is hit — stake auto-sizes to this against 1H-ATR-based stops'}
+              </p>
+            </div>
+
+            <div className="space-y-2 pt-1">
+              {!isRunning ? (
+                <button
+                  onClick={() => void post('start', { maxRiskGbp: parseFloat(maxRisk) || 5 })}
+                  disabled={loading}
+                  className="w-full flex items-center justify-center gap-2 bg-sky-700 hover:bg-sky-600 text-white rounded-lg py-2.5 text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  <Power className="w-4 h-4" />
+                  Start FX Bot
+                </button>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => void post(isPaused ? 'resume' : 'pause')}
+                    disabled={loading}
+                    className="flex items-center justify-center gap-1.5 bg-yellow-600/20 hover:bg-yellow-600/30 border border-yellow-600/40 text-yellow-300 rounded-lg py-2 text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    {isPaused ? <><Play className="w-3.5 h-3.5" />Resume</> : <><Pause className="w-3.5 h-3.5" />Pause</>}
+                  </button>
+                  <button
+                    onClick={() => void post('stop')}
+                    disabled={loading}
+                    className="flex items-center justify-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg py-2 text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    <Square className="w-3.5 h-3.5" />Stop
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-3 text-xs text-slate-500 space-y-1">
+            <p className="text-slate-400 font-medium">Strategy</p>
+            <p>Hourly bars: EMA20/50 trend + RSI/MACD confirmation. Stops/targets sized off 1H ATR (×2.5 / ×4). Exits on trend reversal, stop, take-profit, a stall-protection tighten, or an ~11h backstop.</p>
+            <p className="pt-1 text-slate-600">Blocks opening a second same-currency FX bet while one's already open (e.g. won't add EUR/USD short while GBP/USD short is open — both are really the same USD bet).</p>
+          </div>
+        </div>
+
+        {/* Status / positions / log */}
+        <div className="lg:col-span-2 space-y-4">
+
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: 'Balance',   value: status ? `£${status.balance.toFixed(2)}`   : '—', icon: <DollarSign className="w-4 h-4" /> },
+              { label: 'Available', value: status ? `£${status.available.toFixed(2)}` : '—', icon: <DollarSign className="w-4 h-4" /> },
+              { label: 'Open',      value: status ? String(inPosition.length)          : '—', icon: <BarChart2  className="w-4 h-4" /> },
+            ].map(c => (
+              <div key={c.label} className="bg-slate-900/60 border border-slate-800 rounded-xl p-3">
+                <div className="flex items-center gap-1.5 text-slate-500 text-xs mb-1">{c.icon}{c.label}</div>
+                <div className="text-lg font-semibold text-white">{c.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-3 text-xs text-slate-500 flex-wrap">
+            <span className={clsx('flex items-center gap-1', status?.sessionOk ? 'text-green-400' : 'text-slate-500')}>
+              <span className={clsx('w-1.5 h-1.5 rounded-full inline-block', status?.sessionOk ? 'bg-green-400' : 'bg-slate-600')} />
+              {status?.sessionOk ? 'IG session active' : 'No session'}
+            </span>
+            <span className={clsx('flex items-center gap-1', isRunning && !isPaused ? 'text-green-400' : isPaused ? 'text-yellow-400' : 'text-slate-500')}>
+              {isRunning && !isPaused ? '● Running' : isPaused ? '⏸ Paused' : '○ Stopped'}
+            </span>
+          </div>
+
+          {/* Watchlist */}
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-800">
+              <h2 className="text-sm font-semibold text-slate-300">Watchlist ({epicEntries.length})</h2>
+            </div>
+            {!epicEntries.length ? (
+              <div className="px-4 py-6 text-center text-slate-600 text-sm">Not running</div>
+            ) : (
+              <div className="divide-y divide-slate-800/60">
+                {epicEntries.map(([epic, s]) => (
+                  <div key={epic} className="px-4 py-3 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-medium text-white text-sm flex items-center gap-2">
+                        {fxEpicName(epic)}
+                        <span className={clsx(
+                          'text-[10px] px-1.5 py-0.5 rounded-full font-medium',
+                          s.state === 'IN_POSITION' ? 'bg-emerald-500/20 text-emerald-300'
+                            : s.state === 'COOLDOWN'  ? 'bg-sky-500/20 text-sky-300'
+                            : 'bg-slate-800 text-slate-500',
+                        )}>
+                          {s.state}
+                        </span>
+                      </div>
+                      {s.state === 'IN_POSITION' && (
+                        <div className="text-xs text-slate-500 mt-0.5">
+                          {s.direction} @ {s.entryPrice.toFixed(2)} → {s.lastPrice.toFixed(2)}
+                          {s.stopPrice !== null && <> · stop {s.stopPrice.toFixed(2)}</>}
+                          {s.tpPrice   !== null && <> · TP {s.tpPrice.toFixed(2)}</>}
+                        </div>
+                      )}
+                    </div>
+                    {s.state === 'IN_POSITION' && (
+                      <div className="text-right text-sm shrink-0">
+                        <div className={clsx('font-semibold', (s.uplGbp ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
+                          {s.uplGbp !== null ? `${s.uplGbp >= 0 ? '+' : ''}£${s.uplGbp.toFixed(2)}` : '—'}
+                        </div>
+                        {s.pnlPct !== null && (
+                          <div className="text-xs text-slate-500">{s.pnlPct >= 0 ? '+' : ''}{s.pnlPct.toFixed(2)}%</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Activity log */}
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-slate-300">Activity Log</h2>
+              <span className={clsx('text-xs px-1.5 py-0.5 rounded', polling ? 'text-green-400 bg-green-500/10' : 'text-slate-500')}>
+                {polling ? '● live' : '○ paused'}
+              </span>
+            </div>
+            <div className="font-mono text-xs overflow-y-auto max-h-80 p-3 space-y-0.5">
+              {!status?.log.length ? (
+                <div className="text-slate-600 py-4 text-center">No activity yet — start the bot to see logs</div>
+              ) : status.log.map(entry => (
+                <div key={entry.id} className="flex gap-2">
+                  <span className="text-slate-600 shrink-0 w-16">{entry.ts}</span>
+                  <span className={clsx('shrink-0', fxLogColor(entry.type))}>{fxLogIcon(entry.type)}</span>
+                  <span className="text-sky-400 shrink-0 w-16 truncate">{fxEpicName(entry.epic)}</span>
+                  <span className={fxLogColor(entry.type)}>{entry.msg}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AlpacaTraderPage() {
@@ -1507,9 +1858,20 @@ export default function AlpacaTraderPage() {
             <TrendingUp className="w-4 h-4" />
             IG Spread Bet
           </button>
+          <button
+            onClick={() => setTab('fx')}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+              tab === 'fx' ? 'bg-sky-700 text-white' : 'text-slate-400 hover:text-slate-200',
+            )}
+          >
+            <Clock className="w-4 h-4" />
+            FX Swing Bot
+          </button>
         </div>
 
         {tab === 'ig' && <IgSpreadBetTab />}
+        {tab === 'fx' && <FxSwingBotTab />}
 
         {tab === 'alpaca' && <>
 

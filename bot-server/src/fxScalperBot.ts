@@ -8,11 +8,11 @@ import {
 } from './igApi';
 import { type CandleTick } from './scalperStrategy';
 import {
-  initSwingEpicState, processSwingTick, recordSwingFill, DEFAULT_SWING_CONFIG, isGreen,
+  initSwingEpicState, processSwingTick, recordSwingFill, DEFAULT_SWING_CONFIG,
   type SwingEpicState, type SwingConfig,
 } from './fxSwingStrategy';
 import { isMarketOpen, isClosingSoon } from './marketHours';
-import { askGemini, type EntrySignal } from './gemini';
+import { askGeminiFxSwing, type FxSwingEntrySignal } from './gemini';
 import { resolveCredentials, isLossLocked, registerBotOpenedDeal, type IgMode } from './igStrategyBot';
 import { FX_EPICS, SCALPER_INDEX_EPICS } from './igStrategyScanner';
 
@@ -59,6 +59,9 @@ export type FxEpicStatus = {
   lastPrice:  number;
   dealId:     string;
   pnlPct:     number | null;
+  uplGbp:     number | null;   // real £ P&L from IG's own position data — cached from the last poll cycle, so up to POLL_MS stale
+  stopPrice:  number | null;
+  tpPrice:    number | null;
 };
 
 export type FxScalperStatus = {
@@ -72,6 +75,8 @@ export type FxScalperStatus = {
   log:               FxLogEntry[];
   sessionOk:         boolean;
   sessionExpiry:     string | null;
+  balance:           number;   // cached from the last poll cycle
+  available:         number;   // cached from the last poll cycle
 };
 
 export type FxScalperHandle = {
@@ -80,6 +85,12 @@ export type FxScalperHandle = {
   pause:  () => void;
   resume: () => void;
   status: () => FxScalperStatus;
+  // Live override — takes effect on the next entry decision, no restart
+  // needed. Persisted so it survives a PM2 restart. Confirmed live this was
+  // needed: risk was stuck at a hand-set £2/trade with no way to see or
+  // change it — on FX's naturally wide ATR-based stops, that sizes down to
+  // a £/pt stake so small individual trades barely register either way.
+  setMaxRisk: (riskGbp: number) => { ok: boolean; error?: string };
 };
 
 // ── Persistence ──────────────────────────────────────────────────────────────
@@ -120,6 +131,21 @@ const WEEKEND_FLATTEN_BUFFER_MIN = 30;   // tighten (not flatten) open positions
 const MAX_LOSS_CEILING_MULT      = 3;    // matches igStrategyBot.ts's realized-max-loss ceiling ratio
 
 function epicName(epic: string): string { return epic.split('.').slice(0, 3).join('.'); }
+
+// Currency exposure for a directional FX position, e.g. BUY CS.D.GBPUSD.TODAY.IP
+// = long GBP, short USD. Used to block opening two positions that are really
+// the same USD bet twice — confirmed live this happened: GBP/USD, EUR/USD, and
+// AUD/USD all opened within 16 seconds of each other, each one short USD, which
+// is one correlated bet three times over rather than diversification. Returns
+// null for a non-FX epic (indices have no currency-pair code to parse).
+const FX_PAIR_RE = /CS\.D\.([A-Z]{3})([A-Z]{3})\.TODAY\.IP/;
+function fxCurrencyExposure(epic: string, direction: 'BUY' | 'SELL'): Array<{ ccy: string; sign: 1 | -1 }> | null {
+  const m = FX_PAIR_RE.exec(epic);
+  if (!m) return null;
+  const [, base, quote] = m;
+  const baseSign: 1 | -1 = direction === 'BUY' ? 1 : -1;
+  return [{ ccy: base, sign: baseSign }, { ccy: quote, sign: (-baseSign) as 1 | -1 }];
+}
 
 // Mirrors igStrategyBot.ts's module-private calcStake formula exactly —
 // duplicated rather than exported cross-module since this module always
@@ -169,6 +195,12 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   const lastSuccessfulFetchAt: Record<string, number> = {};
   const DATA_FRESHNESS_MS = 90 * 60_000;  // ~90min — tolerates a couple of missed 15min polls without false-flagging
   const log: FxLogEntry[] = [];
+  // Cached from the last poll cycle — status() stays synchronous/cheap
+  // rather than hitting IG on every 5s frontend poll. Up to POLL_MS stale,
+  // which is fine for a status display.
+  let lastKnownPositions: Awaited<ReturnType<typeof fetchFullPositions>> = [];
+  let lastKnownBalance   = 0;
+  let lastKnownAvailable = 0;
 
   let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pollTimer:           ReturnType<typeof setInterval> | null = null;
@@ -327,23 +359,37 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           return;
         }
 
-        const greenCount = st.closedCandles.slice(-5).filter(isGreen).length;
-        const entrySignal: EntrySignal = {
+        // Same-currency correlation guard — checked before the Gemini call
+        // (cheap, no reason to spend one on an entry this would block anyway).
+        // Blocks a new entry that's really the same currency bet an already-
+        // open position has, not a diversified one.
+        const candidateExposure = fxCurrencyExposure(epic, decision.direction);
+        if (candidateExposure) {
+          for (const other of Object.values(epicStates)) {
+            if (other.epic === epic || !other.dealId) continue;
+            const otherExposure = fxCurrencyExposure(other.epic, other.direction);
+            if (!otherExposure) continue;
+            const overlap = candidateExposure.find(c => otherExposure.some(o => o.ccy === c.ccy && o.sign === c.sign));
+            if (overlap) {
+              addLog('wait', name, `Same-currency bet already open — ${epicName(other.epic)} is already ${overlap.sign > 0 ? 'long' : 'short'} ${overlap.ccy}, skipping to avoid doubling up`);
+              revertToFlat();
+              return;
+            }
+          }
+        }
+
+        const entrySignal: FxSwingEntrySignal = {
           instrumentName: name,
-          epic,
+          trend:          decision.direction === 'BUY' ? 'UP' : 'DOWN',
           rsi:            decision.indicators.rsi,
           macd:           decision.indicators.macd,
           atr:            decision.indicators.atr,
-          greenCount,
           suggestedDir:   decision.direction,
-          lastCandles:    st.closedCandles.slice(-5).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+          lastCandles:    st.closedCandles.slice(-8).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
         };
 
-        const verdict = await askGemini(entrySignal);
+        const verdict = await askGeminiFxSwing(entrySignal);
         addLog('info', name, `Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
-        if (verdict.noCapacityReason) {
-          addLog('info', name, `⚠ Gemini ${verdict.noCapacityReason === 'cap-reached' ? 'daily cap reached' : 'API key unavailable'} — trading on rules-only fallback verdict`);
-        }
 
         if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {
           addLog('wait', name, `Gemini skipped entry (${verdict.direction}, ${verdict.confidence}%)`);
@@ -510,6 +556,12 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     lastPollAt = Date.now();
     try {
       const positions = await fetchFullPositions(session);
+      lastKnownPositions = positions;
+      try {
+        const funds = await fetchAccountFunds(session);
+        lastKnownBalance   = funds.balance;
+        lastKnownAvailable = funds.available;
+      } catch { /* keep last known values rather than blanking the display */ }
       const tracked    = Object.values(epicStates).filter(st => st.dealId);
 
       const severeLossCeiling = maxRiskGbp * 5;
@@ -694,10 +746,21 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     addLog('info', '—', '▶ Resumed — will enter on next qualifying signal');
   }
 
+  function setMaxRisk(riskGbp: number): { ok: boolean; error?: string } {
+    if (!running) return { ok: false, error: 'Bot not running — start it first' };
+    if (!Number.isFinite(riskGbp)) return { ok: false, error: 'Invalid amount' };
+    const clamped = Math.min(100, Math.max(0.5, riskGbp));
+    maxRiskGbp = clamped;
+    saveStartState(mode, { epics: currentEpics, maxRiskGbp });
+    addLog('info', '—', `Risk per trade changed to £${clamped} — takes effect on the next entry`);
+    return { ok: true };
+  }
+
   function status(): FxScalperStatus {
     const statuses: Record<string, FxEpicStatus> = {};
     for (const [epic, st] of Object.entries(epicStates)) {
       const tick = st.formingCandle;
+      const livePos = st.dealId ? lastKnownPositions.find(p => p.dealId === st.dealId) : undefined;
       statuses[epic] = {
         state:      st.state,
         direction:  st.direction,
@@ -709,6 +772,9 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
               ? (tick!.bidClose - st.entryPrice) / st.entryPrice * 100
               : (st.entryPrice - tick!.bidClose) / st.entryPrice * 100)
           : null,
+        uplGbp:    livePos?.upl ?? null,
+        stopPrice: st.dynamicStopPrice > 0 ? st.dynamicStopPrice : null,
+        tpPrice:   st.takeProfitPrice   > 0 ? st.takeProfitPrice   : null,
       };
     }
     return {
@@ -722,10 +788,12 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       log:             log.slice(0, 100),
       sessionOk:       !!session && Date.now() < session.expiresAt,
       sessionExpiry:   session ? new Date(session.expiresAt).toISOString() : null,
+      balance:         lastKnownBalance,
+      available:       lastKnownAvailable,
     };
   }
 
-  return { start, stop, pause, resume, status };
+  return { start, stop, pause, resume, status, setMaxRisk };
 }
 
 // ── Singleton instances ───────────────────────────────────────────────────────

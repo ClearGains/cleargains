@@ -44,6 +44,7 @@ export type SwingEpicState = {
   entryTrend:              Trend;          // the trend that justified entry — invalidation reference
   peakFavorableExcursion:  number;         // best price seen in the position's favor, for stall detection
   lastTightenedAtMs:       number;         // throttle — don't re-tighten every single poll once triggered
+  originalStopPoints:      number;         // stop distance at entry, in points — stall detection's yardstick for "has this moved meaningfully"
 };
 
 export type SwingConfig = {
@@ -55,6 +56,22 @@ export type SwingConfig = {
   maxHoldMs:          number;  // hard backstop — last resort, not the primary exit
   stallCheckAfterMs:  number;  // start watching for stall once a position is at least this old
   stallRetraceFrac:   number;  // fraction of peak favorable move given back before treating it as "stalling"
+  // A trade that only ever wiggled a few points in profit before flattening
+  // out hasn't "stalled" — it never really moved. Confirmed live this
+  // mattered: EUR/USD and AUD/USD both got tightened to breakeven ~4.2h in
+  // and stopped out for a near-nothing loss 15min later, on completely
+  // ordinary pullbacks, well before either trade's real take-profit (2-3×
+  // the stop distance away) ever got a fair chance. Stall detection now
+  // only engages once the peak favorable move has reached at least this
+  // fraction of the original stop distance — a real move worth protecting,
+  // not noise.
+  stallMinFavorableFrac: number;
+  // Tightening to *dead* breakeven is, once spread is priced in, a
+  // guaranteed small loss on exit — worse than doing nothing on a trade
+  // that hasn't actually reversed. Lock in this fraction of the peak
+  // favorable move instead (still meaningfully protective, but a real edge
+  // rather than a coin-flip-to-small-loss).
+  stallLockInFrac:    number;
   cooldownMs:         number;
 };
 
@@ -65,8 +82,13 @@ export const DEFAULT_SWING_CONFIG: SwingConfig = {
   atrTpMult:         4,
   minConfidence:     60,
   maxHoldMs:          11 * 60 * 60_000,  // ~11h — the outer safety net, not a target
-  stallCheckAfterMs:  4  * 60 * 60_000,  // don't judge "stalling" before a trade's had a few hours to work
-  stallRetraceFrac:   0.5,
+  // Pushed 4h->5h — 4h was less than half the 11h max hold, second-guessing
+  // a trade before it's had a real chance to work.
+  stallCheckAfterMs:  5  * 60 * 60_000,
+  // Raised 0.5->0.65 — require giving back more of the move before reacting.
+  stallRetraceFrac:   0.65,
+  stallMinFavorableFrac: 0.4,
+  stallLockInFrac:    0.3,
   cooldownMs:         25 * 60_000,
 };
 
@@ -97,6 +119,7 @@ export function initSwingEpicState(epic: string): SwingEpicState {
     closedCandles: [], formingCandle: null,
     cooldownUntil: 0, dynamicStopPrice: 0, takeProfitPrice: 0,
     entryTrend: 'FLAT', peakFavorableExcursion: 0, lastTightenedAtMs: 0,
+    originalStopPoints: 0,
   };
 }
 
@@ -204,20 +227,30 @@ export function processSwingTick(
     const ageMs = now - st.entryTimeMs;
 
     // Stall detection — only once the trade's had real time to work, and only
-    // acts if it's genuinely given back a meaningful chunk of its best move,
-    // not just idle chop near entry with nothing to give back.
+    // acts if (a) it actually made a meaningful move worth protecting in the
+    // first place, not just idle chop near entry with nothing to give back,
+    // and (b) it's genuinely given back a large chunk of that move. Confirmed
+    // live the old version (any peak favorable move, 50% giveback, tighten to
+    // dead breakeven) reacted to completely ordinary pullbacks and converted
+    // promising trades into near-guaranteed small losses once spread was
+    // priced in, well before their real take-profit ever got a fair chance.
     if (ageMs >= cfg.stallCheckAfterMs && now - st.lastTightenedAtMs > 30 * 60_000) {
       const peakFavorablePts = isLong ? st.peakFavorableExcursion - st.entryPrice : st.entryPrice - st.peakFavorableExcursion;
       const currentPts       = isLong ? price - st.entryPrice : st.entryPrice - price;
-      if (peakFavorablePts > 0 && currentPts < peakFavorablePts * (1 - cfg.stallRetraceFrac)) {
-        const newStop = st.entryPrice; // tighten to breakeven — protect what's already been risked, let it keep running
+      const madeARealMove    = st.originalStopPoints > 0 && peakFavorablePts >= st.originalStopPoints * cfg.stallMinFavorableFrac;
+      if (madeARealMove && currentPts < peakFavorablePts * (1 - cfg.stallRetraceFrac)) {
+        // Lock in a fraction of the peak favorable move rather than flat
+        // breakeven — still meaningfully protective, but a real edge instead
+        // of a coin-flip-to-small-loss once spread is accounted for.
+        const lockInPts = peakFavorablePts * cfg.stallLockInFrac;
+        const newStop   = isLong ? st.entryPrice + lockInPts : st.entryPrice - lockInPts;
         const wouldTighten = isLong ? newStop > st.dynamicStopPrice : newStop < st.dynamicStopPrice;
         if (wouldTighten) {
           st.dynamicStopPrice = newStop;
           st.lastTightenedAtMs = now;
           return {
             action: 'TIGHTEN', newStopPrice: newStop,
-            reason: `Stalling after ${(ageMs / 3_600_000).toFixed(1)}h — gave back ${(cfg.stallRetraceFrac * 100).toFixed(0)}%+ of its best move, tightened to breakeven`,
+            reason: `Stalling after ${(ageMs / 3_600_000).toFixed(1)}h — gave back ${(cfg.stallRetraceFrac * 100).toFixed(0)}%+ of its ${peakFavorablePts.toFixed(1)}pt best move, locked in ${lockInPts.toFixed(1)}pt`,
           };
         }
       }
@@ -248,6 +281,7 @@ export function recordSwingFill(
   st.entryTimeMs            = Date.now();
   st.peakFavorableExcursion = fillPrice;
   st.lastTightenedAtMs      = 0;
+  st.originalStopPoints     = stopPoints;
   if (st.direction === 'BUY') {
     st.dynamicStopPrice = stopPoints > 0 ? fillPrice - stopPoints : 0;
     st.takeProfitPrice  = tpPoints   > 0 ? fillPrice + tpPoints   : 0;
