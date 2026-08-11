@@ -2259,6 +2259,18 @@ async function poll(mode: IgMode) {
         // closed by this check themselves.
         if (p.epic.startsWith('IX.D.')) continue;
 
+        // FX pairs (CS.D.*) are already exclusively managed by the FX swing
+        // bot's own exit logic (fxSwingStrategy.ts) — this check was built
+        // for stocks and was never meant to also reach into positions a
+        // different bot owns. It was silently doing exactly that, and badly:
+        // confirmed live this compared IG's own scaled FX price (e.g.
+        // ~13498 for GBP/USD) directly against Yahoo's raw, unscaled FX
+        // quote (~1.27 for the same pair) with no conversion between the
+        // two, producing nonsense readings like "+999865.77% vs today's
+        // open" every ~15min and needlessly tightening a stop this bot
+        // doesn't actually own the exit thesis for.
+        if (p.epic.startsWith('CS.')) continue;
+
         const bars = await fetchBarsWithFallback(p.epic, '1d', { yahooInterval: '15m' });
         if (!bars || bars.length < 2 || bars[0].o <= 0) continue;
 
