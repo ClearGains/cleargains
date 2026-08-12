@@ -376,6 +376,17 @@ type ModeState = {
   // Fast-interval severe-loss check, independent of the main poll cycle —
   // see runSevereLossGuard.
   severeLossTimer:      ReturnType<typeof setInterval> | null;
+  // Periodic re-scan of the actively-TRADED candidate list, independent of
+  // the main poll cycle — see refreshWatchlist. Without this, cfg.epics is
+  // a one-time snapshot taken only at bot start and never changes again
+  // until the next restart, however long that is. Confirmed live this cost
+  // a real opportunity: Micron scored high enough to make the watchlist at
+  // 08-11 14:18, dropped off during several unrelated restarts that
+  // evening, and then sat completely unwatched through the entire next
+  // morning's NYSE session (16.5h with zero re-scans) — by the time an
+  // unrelated restart happened to bring it back at 08-12 14:47, its gap-up
+  // had already mostly played out.
+  watchlistRefreshTimer: ReturnType<typeof setInterval> | null;
   nextRunMs:            number | null;
   lastPollTs:           string | null;
   orbState:             Record<string, OrbState>;
@@ -450,7 +461,7 @@ type ModeState = {
 function makeModeState(mode: IgMode): ModeState {
   return {
     running: false, paused: false, config: null, session: null,
-    log: [], pollTimer: null, severeLossTimer: null, nextRunMs: null, lastPollTs: null,
+    log: [], pollTimer: null, severeLossTimer: null, watchlistRefreshTimer: null, nextRunMs: null, lastPollTs: null,
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
     marketDetails: new Map(),
     blockedEpics: new Map(),
@@ -2404,6 +2415,64 @@ function schedule(mode: IgMode, cfg: IgStrategyConfig) {
   st.pollTimer = setTimeout(() => { void poll(mode); }, delay);
 }
 
+// ── Watchlist refresh ─────────────────────────────────────────────────────────
+// Periodically re-scans the universe and updates the actively-TRADED
+// candidate list (cfg.epics) — distinct from refreshRecommendations' own
+//30-min cadence, which only feeds the manual-click "Recommended" panel and
+// never changes what this bot actually trades on its own. Without this,
+// cfg.epics only ever changes on a restart, however long that is between —
+// confirmed live this let a new setup (Micron, scored 28.7 the moment it
+// first qualified) sit completely unwatched for 16.5h spanning an entire
+// NYSE session, only picked back up by luck when an unrelated restart
+// happened to re-scan. Runs on the same cadence as the manual list so a
+// genuine gap-up/volume-surge mover gets caught within one cycle of it
+// happening, not by chance.
+const WATCHLIST_REFRESH_MS = 30 * 60_000;
+
+async function refreshWatchlist(mode: IgMode): Promise<void> {
+  const st = ms(mode);
+  if (!st.running || !st.config || !st.session) return;
+  const cfg = st.config;
+
+  // Currently-open positions must stay watched regardless of how they now
+  // score — dropping one would strand a strategy with real rule-based exit
+  // logic (donchian/ema/macd all live inside evaluateEpic, which only runs
+  // for epics still in cfg.epics) with no way to ever exit it again. If we
+  // can't even confirm what's open right now, skip this cycle rather than
+  // risk dropping something live.
+  let openEpics: string[];
+  try {
+    openEpics = (await fetchFullPositions(st.session)).map(p => p.epic);
+  } catch {
+    return;
+  }
+
+  let fresh: string[];
+  try {
+    fresh = await scanIgEpics(
+      cfg.strategy, st.session, [...st.pausedEpics],
+      cfg.maxStockPositions + cfg.maxIndexPositions + 2,
+      () => {}, // this scan's own progress lines aren't worth logging every 30min — only the resulting diff is
+      cfg.maxIndexPositions,
+    );
+  } catch (e) {
+    addLog(mode, 'info', '—', `Watchlist refresh scan failed, keeping current list: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+
+  const merged  = [...new Set([...openEpics, ...fresh])];
+  const added   = merged.filter(e => !cfg.epics.includes(e));
+  const dropped = cfg.epics.filter(e => !merged.includes(e));
+  if (!added.length && !dropped.length) return; // nothing changed — skip the noisy log/persist/re-subscribe
+
+  cfg.epics = merged;
+  saveIgState(mode, cfg);
+  syncStreamSubscription(mode);
+
+  const label = (list: string[]) => list.length ? list.map(epicName).join(', ') : 'none';
+  addLog(mode, 'info', '—', `Watchlist refreshed — added: ${label(added)} · dropped: ${label(dropped)}`);
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: boolean; error?: string }> {
@@ -2466,6 +2535,11 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
   // Independent of the above — see runSevereLossGuard for why this needs
   // its own much tighter cadence than the main 15min poll.
   st.severeLossTimer = setInterval(() => { void runSevereLossGuard(mode); }, 30_000);
+  // Independent of the above — see refreshWatchlist for why cfg.epics needs
+  // its own periodic re-scan rather than staying fixed for the bot's whole
+  // run. First refresh deliberately not immediate — the scan just run above
+  // is already fresh.
+  st.watchlistRefreshTimer = setInterval(() => { void refreshWatchlist(mode); }, WATCHLIST_REFRESH_MS);
   return { ok: true };
 }
 
@@ -2473,9 +2547,10 @@ export function stopIgStrategyBot(mode: IgMode): void {
   const st = ms(mode);
   st.running = false;
   st.paused  = false;
-  if (st.pollTimer)           { clearTimeout(st.pollTimer);           st.pollTimer           = null; }
-  if (st.severeLossTimer)     { clearInterval(st.severeLossTimer);    st.severeLossTimer     = null; }
-  if (st.sessionRefreshTimer) { clearTimeout(st.sessionRefreshTimer); st.sessionRefreshTimer = null; }
+  if (st.pollTimer)             { clearTimeout(st.pollTimer);             st.pollTimer             = null; }
+  if (st.severeLossTimer)       { clearInterval(st.severeLossTimer);      st.severeLossTimer       = null; }
+  if (st.watchlistRefreshTimer) { clearInterval(st.watchlistRefreshTimer);st.watchlistRefreshTimer = null; }
+  if (st.sessionRefreshTimer)   { clearTimeout(st.sessionRefreshTimer);   st.sessionRefreshTimer   = null; }
   st.nextRunMs  = null;
   st.lastPollTs = null;
   st.stream.disconnect();
