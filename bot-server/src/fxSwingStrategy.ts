@@ -100,7 +100,7 @@ function ema(values: number[], period: number): number[] {
   }, []);
 }
 
-function getIndicators(candles: CandleTick[], cfg: SwingConfig): SwingIndicatorSnapshot {
+export function getIndicators(candles: CandleTick[], cfg: SwingConfig): SwingIndicatorSnapshot {
   const closes   = candles.map(c => c.close);
   const emaFastV = closes.length >= cfg.emaFastPeriod ? ema(closes, cfg.emaFastPeriod) : null;
   const emaSlowV = closes.length >= cfg.emaSlowPeriod ? ema(closes, cfg.emaSlowPeriod) : null;

@@ -283,6 +283,21 @@ export type FxSwingEntrySignal = {
   // Last several closed 1-hour candles, oldest first — real recent shape,
   // not just a derived RSI/MACD number.
   lastCandles:    Array<{ open: number; high: number; low: number; close: number }>;
+  // Every other USD-involving pair this bot also trades, each pair's own
+  // current hourly trend translated into what it implies for USD
+  // specifically (a pair trending "UP" means USD strengthening if USD is
+  // the base currency, e.g. USD/JPY, but USD weakening if USD is the
+  // quote, e.g. GBP/USD) — lets Gemini tell a genuine broad-dollar move
+  // apart from something isolated to just this one pair. Confirmed this
+  // was previously completely invisible: the bot traded each FX pair off
+  // only its own chart, with zero awareness of what the dollar was doing
+  // anywhere else.
+  usdContext?: Array<{ pair: string; usdTrend: 'UP' | 'DOWN' | 'FLAT' }>;
+  // Broader US equity risk sentiment (Dow, hourly trend) — informational
+  // only, not a rule: equities and the dollar don't move in lockstep, so
+  // this is one more input for Gemini to weigh, not something that should
+  // mechanically block or force a direction.
+  equityTrend?: 'UP' | 'DOWN' | 'FLAT';
 };
 
 export type FxSwingVerdict = {
@@ -311,6 +326,14 @@ export async function askGeminiFxSwing(signal: FxSwingEntrySignal): Promise<FxSw
     `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
   ).join('\n');
 
+  const usdLabel = (t: 'UP' | 'DOWN' | 'FLAT') => t === 'UP' ? 'strengthening' : t === 'DOWN' ? 'weakening' : 'flat';
+  const usdContextBlock = signal.usdContext?.length
+    ? `\nWhat the dollar is doing elsewhere right now, per this bot's other watched USD pairs (use this to tell a genuine broad-dollar move apart from something isolated to just this one pair — if every USD pair agrees, that's a real macro move; if they disagree, this pair's move may be idiosyncratic to it alone):\n${signal.usdContext.map(c => `- ${c.pair}: implies USD ${usdLabel(c.usdTrend)}`).join('\n')}\n`
+    : '';
+  const equityContextBlock = signal.equityTrend
+    ? `\nBroader US equity risk sentiment (Dow, current hourly trend): ${signal.equityTrend}. Equities and the dollar don't always move together — treat this as one more input on risk appetite, not a rule that should mechanically decide the trade.\n`
+    : '';
+
   const prompt = `You are a second-opinion filter for an hourly-bar FX/index swing trade — NOT a scalp. Positions here are typically held for several hours (up to ~11h) while a trend plays out, and are managed by their own stop/take-profit and a stall-detection exit, not closed on the next tick.
 
 A trend-following rules engine already qualified a ${signal.suggestedDir} setup here: price is trading with the ${signal.trend === 'UP' ? 'uptrend (EMA20>EMA50), above EMA20' : 'downtrend (EMA20<EMA50), below EMA20'}, with RSI and MACD both already confirming that direction. Your job is not to re-derive the setup — it's to judge whether this trend genuinely has enough room left to keep running for the next several hours, or whether it's already largely played out.
@@ -322,7 +345,7 @@ ${candleStr}
 RSI(14): ${signal.rsi?.toFixed(1) ?? 'N/A'}
 MACD histogram: ${signal.macd !== null ? (signal.macd > 0 ? '+' : '') + signal.macd.toFixed(5) : 'N/A'} (positive=bullish)
 ATR(14): ${signal.atr?.toFixed(2) ?? 'N/A'} pts — hourly volatility measure
-
+${usdContextBlock}${equityContextBlock}
 Confirm, override to the other direction, or SKIP if this trend looks exhausted rather than continuing. Treat "RSI overbought/oversold" the same way you would any other momentum reading in an intact trend — strong recent demand often keeps pushing price further in the near term rather than reversing immediately; only let it count against the trade if the candle shape above is already showing real stalling (small bodies, failed pushes, reversal wicks), not just an extended reading in an otherwise clean trend.
 
 Respond with JSON only, no markdown:

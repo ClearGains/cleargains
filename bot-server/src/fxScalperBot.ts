@@ -8,8 +8,8 @@ import {
 } from './igApi';
 import { type CandleTick } from './scalperStrategy';
 import {
-  initSwingEpicState, processSwingTick, recordSwingFill, DEFAULT_SWING_CONFIG,
-  type SwingEpicState, type SwingConfig,
+  initSwingEpicState, processSwingTick, recordSwingFill, getIndicators, DEFAULT_SWING_CONFIG,
+  type SwingEpicState, type SwingConfig, type Trend,
 } from './fxSwingStrategy';
 import { isMarketOpen, isClosingSoon } from './marketHours';
 import { askGeminiFxSwing, type FxSwingEntrySignal } from './gemini';
@@ -145,6 +145,23 @@ function fxCurrencyExposure(epic: string, direction: 'BUY' | 'SELL'): Array<{ cc
   const [, base, quote] = m;
   const baseSign: 1 | -1 = direction === 'BUY' ? 1 : -1;
   return [{ ccy: base, sign: baseSign }, { ccy: quote, sign: (-baseSign) as 1 | -1 }];
+}
+
+// Translates a pair's own raw hourly trend into what it implies for USD
+// specifically — needed because USD is the QUOTE currency for GBP/USD,
+// EUR/USD, AUD/USD (pair trending up = USD weakening) but the BASE
+// currency for USD/JPY (pair trending up = USD strengthening directly), so
+// the same raw "UP" reading means opposite things for the dollar depending
+// on which side of the pair it's on. Returns null for a pair that doesn't
+// involve USD at all (e.g. EUR/GBP) — nothing meaningful to say about the
+// dollar from that one.
+function usdImpliedTrend(epic: string, rawTrend: Trend): Trend | null {
+  const m = FX_PAIR_RE.exec(epic);
+  if (!m) return null;
+  const [, base, quote] = m;
+  if (quote === 'USD') return rawTrend === 'UP' ? 'DOWN' : rawTrend === 'DOWN' ? 'UP' : 'FLAT';
+  if (base === 'USD')  return rawTrend;
+  return null;
 }
 
 // Mirrors igStrategyBot.ts's module-private calcStake formula exactly —
@@ -378,6 +395,24 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           }
         }
 
+        // Cross-market context — what the dollar is doing on every other
+        // USD pair this bot watches, plus the Dow's own current trend as a
+        // general risk-sentiment proxy. Neither blocks or forces anything
+        // here; both just ride along in the Gemini prompt as real context
+        // it previously had zero access to (each pair was judged entirely
+        // off its own chart, with no awareness of the dollar or equities
+        // anywhere else).
+        const usdContext = Object.values(epicStates)
+          .filter(other => other.epic !== epic)
+          .map(other => {
+            const trend = getIndicators(other.closedCandles, currentConfig).trend;
+            const usdTrend = usdImpliedTrend(other.epic, trend);
+            return usdTrend ? { pair: epicName(other.epic), usdTrend } : null;
+          })
+          .filter((c): c is { pair: string; usdTrend: Trend } => c !== null);
+        const dowSt = epicStates['IX.D.DOW.DAILY.IP'];
+        const equityTrend = dowSt ? getIndicators(dowSt.closedCandles, currentConfig).trend : undefined;
+
         const entrySignal: FxSwingEntrySignal = {
           instrumentName: name,
           trend:          decision.direction === 'BUY' ? 'UP' : 'DOWN',
@@ -386,6 +421,8 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           atr:            decision.indicators.atr,
           suggestedDir:   decision.direction,
           lastCandles:    st.closedCandles.slice(-8).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+          usdContext,
+          equityTrend,
         };
 
         const verdict = await askGeminiFxSwing(entrySignal);
