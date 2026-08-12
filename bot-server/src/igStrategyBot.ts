@@ -2271,12 +2271,27 @@ async function poll(mode: IgMode) {
         // doesn't actually own the exit thesis for.
         if (p.epic.startsWith('CS.')) continue;
 
+        // No alpacaTimeframe passed here, so fetchBarsWithFallback's Alpaca
+        // branch (used for every Alpaca-covered share — most of this bot's
+        // stock universe) defaults to 250 DAILY bars, not today's intraday
+        // ones. bars[0] is therefore ~a year of trading days back, not
+        // "today's open" — confirmed live this is exactly what produced
+        // readings like "Alphabet +69.55% vs today's open": that was
+        // Alphabet's real ~69% gain over the past year, mislabeled as an
+        // intraday move and used to tighten (or, when "corroborated",
+        // outright close) a position on completely wrong reasoning. Filter
+        // for today's own bar explicitly instead of trusting array
+        // position — same pattern evaluateEpic's dayChangePercent already
+        // uses elsewhere in this file.
         const bars = await fetchBarsWithFallback(p.epic, '1d', { yahooInterval: '15m' });
-        if (!bars || bars.length < 2 || bars[0].o <= 0) continue;
+        if (!bars || bars.length < 2) continue;
+        const todayUtc = new Date().toISOString().slice(0, 10);
+        const dayOpen  = bars.find(b => b.t.slice(0, 10) === todayUtc)?.o;
+        if (!dayOpen || dayOpen <= 0) continue;
 
         const isBuy          = p.direction === 'BUY';
         const currentPrice   = isBuy ? p.bid : p.offer; // conservative side for each direction
-        const pctFromOpen    = (currentPrice - bars[0].o) / bars[0].o * 100;
+        const pctFromOpen    = (currentPrice - dayOpen) / dayOpen * 100;
         const weakForThisPos = isBuy ? pctFromOpen <= -WEAK_OPEN_PCT : pctFromOpen >= WEAK_OPEN_PCT;
         if (!weakForThisPos) continue;
 
