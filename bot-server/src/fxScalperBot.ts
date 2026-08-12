@@ -13,6 +13,7 @@ import {
 } from './fxSwingStrategy';
 import { isMarketOpen, isClosingSoon } from './marketHours';
 import { askGeminiFxSwing, type FxSwingEntrySignal } from './gemini';
+import { fetchMacroEvents } from './macroCalendar';
 import { resolveCredentials, isLossLocked, registerBotOpenedDeal, type IgMode } from './igStrategyBot';
 import { FX_EPICS, SCALPER_INDEX_EPICS } from './igStrategyScanner';
 
@@ -146,6 +147,21 @@ function fxCurrencyExposure(epic: string, direction: 'BUY' | 'SELL'): Array<{ cc
   const baseSign: 1 | -1 = direction === 'BUY' ? 1 : -1;
   return [{ ccy: base, sign: baseSign }, { ccy: quote, sign: (-baseSign) as 1 | -1 }];
 }
+
+// Best available index proxy per currency, from this bot's own traded
+// index set (SCALPER_INDEX_EPICS) — used to show a pair's equity-market
+// context for BOTH sides of the trade, not a single fixed reference
+// (Dow) regardless of which pair is being decided. GBP/USD cares about
+// the UK's own index at least as much as the US's; EUR/USD has no direct
+// eurozone-wide index in this account's universe, so Germany 40 stands in
+// as the closest available eurozone proxy. AUD has no proxy in this set —
+// simply omitted rather than guessing at an unrelated one.
+const CURRENCY_INDEX_PROXY: Record<string, { epic: string; label: string }> = {
+  USD: { epic: 'IX.D.DOW.DAILY.IP',    label: 'Wall St (Dow)' },
+  GBP: { epic: 'IX.D.FTSE.DAILY.IP',   label: 'UK 100' },
+  EUR: { epic: 'IX.D.DAX.DAILY.IP',    label: 'Germany 40 (eurozone proxy)' },
+  JPY: { epic: 'IX.D.NIKKEI.DAILY.IP', label: 'Japan 225' },
+};
 
 // Translates a pair's own raw hourly trend into what it implies for USD
 // specifically — needed because USD is the QUOTE currency for GBP/USD,
@@ -396,12 +412,15 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         }
 
         // Cross-market context — what the dollar is doing on every other
-        // USD pair this bot watches, plus the Dow's own current trend as a
-        // general risk-sentiment proxy. Neither blocks or forces anything
-        // here; both just ride along in the Gemini prompt as real context
-        // it previously had zero access to (each pair was judged entirely
-        // off its own chart, with no awareness of the dollar or equities
-        // anywhere else).
+        // USD pair this bot watches, plus each currency actually in THIS
+        // pair's own equity-index proxy (both sides, not just Dow every
+        // time — GBP/USD gets UK 100 as well as Wall St, EUR/USD gets
+        // Germany 40 as well as Wall St, and a non-USD pair like EUR/GBP
+        // gets both its own proxies instead of an irrelevant Dow read).
+        // Neither blocks or forces anything here; both just ride along in
+        // the Gemini prompt as real context it previously had zero access
+        // to (each pair was judged entirely off its own chart, with no
+        // awareness of the dollar or equities anywhere else).
         const usdContext = Object.values(epicStates)
           .filter(other => other.epic !== epic)
           .map(other => {
@@ -410,8 +429,23 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
             return usdTrend ? { pair: epicName(other.epic), usdTrend } : null;
           })
           .filter((c): c is { pair: string; usdTrend: Trend } => c !== null);
-        const dowSt = epicStates['IX.D.DOW.DAILY.IP'];
-        const equityTrend = dowSt ? getIndicators(dowSt.closedCandles, currentConfig).trend : undefined;
+
+        const pairMatch = FX_PAIR_RE.exec(epic);
+        const pairCurrencies = pairMatch ? [pairMatch[1], pairMatch[2]] : [];
+        const equityContext = [...new Set(pairCurrencies)]
+          .map(ccy => {
+            const proxy = CURRENCY_INDEX_PROXY[ccy];
+            const proxySt = proxy ? epicStates[proxy.epic] : undefined;
+            if (!proxy || !proxySt) return null;
+            return { currency: ccy, indexLabel: proxy.label, trend: getIndicators(proxySt.closedCandles, currentConfig).trend };
+          })
+          .filter((c): c is { currency: string; indexLabel: string; trend: Trend } => c !== null);
+
+        // Real recent/upcoming rate decisions, CPI, employment, GDP for the
+        // currencies actually in this pair — the closest available
+        // approximation to "inflation rates etc" without inventing a
+        // numeric model this bot has no real basis to compute itself.
+        const macroEvents = pairCurrencies.length ? await fetchMacroEvents(pairCurrencies) : [];
 
         const entrySignal: FxSwingEntrySignal = {
           instrumentName: name,
@@ -422,7 +456,8 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           suggestedDir:   decision.direction,
           lastCandles:    st.closedCandles.slice(-8).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
           usdContext,
-          equityTrend,
+          equityContext,
+          macroEvents,
         };
 
         const verdict = await askGeminiFxSwing(entrySignal);

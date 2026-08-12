@@ -293,11 +293,21 @@ export type FxSwingEntrySignal = {
   // only its own chart, with zero awareness of what the dollar was doing
   // anywhere else.
   usdContext?: Array<{ pair: string; usdTrend: 'UP' | 'DOWN' | 'FLAT' }>;
-  // Broader US equity risk sentiment (Dow, hourly trend) — informational
-  // only, not a rule: equities and the dollar don't move in lockstep, so
-  // this is one more input for Gemini to weigh, not something that should
-  // mechanically block or force a direction.
-  equityTrend?: 'UP' | 'DOWN' | 'FLAT';
+  // Each currency actually in THIS pair's own equity-index proxy (both
+  // sides where one exists, not a single fixed reference regardless of
+  // the pair — GBP/USD gets UK 100 as well as Wall St, EUR/USD gets
+  // Germany 40 as the closest available eurozone proxy as well as Wall
+  // St). Informational only, not a rule: equities and a currency don't
+  // move in lockstep, so this is one more input to weigh, not something
+  // that should mechanically block or force a direction.
+  equityContext?: Array<{ currency: string; indexLabel: string; trend: 'UP' | 'DOWN' | 'FLAT' }>;
+  // Real recent/upcoming high-impact macro events (rate decisions, CPI,
+  // employment, GDP) for whichever currencies are actually in this pair —
+  // see macroCalendar.ts. This is what actually drives FX medium-term, far
+  // more than an hourly chart — a technically clean setup running straight
+  // into a rate decision or inflation print is a materially different bet
+  // than the same setup with no major catalyst nearby.
+  macroEvents?: string[];
 };
 
 export type FxSwingVerdict = {
@@ -330,8 +340,11 @@ export async function askGeminiFxSwing(signal: FxSwingEntrySignal): Promise<FxSw
   const usdContextBlock = signal.usdContext?.length
     ? `\nWhat the dollar is doing elsewhere right now, per this bot's other watched USD pairs (use this to tell a genuine broad-dollar move apart from something isolated to just this one pair — if every USD pair agrees, that's a real macro move; if they disagree, this pair's move may be idiosyncratic to it alone):\n${signal.usdContext.map(c => `- ${c.pair}: implies USD ${usdLabel(c.usdTrend)}`).join('\n')}\n`
     : '';
-  const equityContextBlock = signal.equityTrend
-    ? `\nBroader US equity risk sentiment (Dow, current hourly trend): ${signal.equityTrend}. Equities and the dollar don't always move together — treat this as one more input on risk appetite, not a rule that should mechanically decide the trade.\n`
+  const equityContextBlock = signal.equityContext?.length
+    ? `\nEquity-market context for the currencies actually in this pair (current hourly trend of each currency's own index proxy — equities and a currency don't always move together, so treat this as one more input on risk appetite, not a rule that should mechanically decide the trade):\n${signal.equityContext.map(c => `- ${c.currency} (${c.indexLabel}): ${c.trend}`).join('\n')}\n`
+    : '';
+  const macroBlock = signal.macroEvents?.length
+    ? `\nReal macro/rate events for the currencies in this pair — "past" already happened and may already explain recent price action; "upcoming" hasn't happened yet and is a real risk to any position still open when it lands (this is what actually drives FX medium-term, more than the chart alone):\n${signal.macroEvents.map(e => `- ${e}`).join('\n')}\n`
     : '';
 
   const prompt = `You are a second-opinion filter for an hourly-bar FX/index swing trade — NOT a scalp. Positions here are typically held for several hours (up to ~11h) while a trend plays out, and are managed by their own stop/take-profit and a stall-detection exit, not closed on the next tick.
@@ -345,8 +358,8 @@ ${candleStr}
 RSI(14): ${signal.rsi?.toFixed(1) ?? 'N/A'}
 MACD histogram: ${signal.macd !== null ? (signal.macd > 0 ? '+' : '') + signal.macd.toFixed(5) : 'N/A'} (positive=bullish)
 ATR(14): ${signal.atr?.toFixed(2) ?? 'N/A'} pts — hourly volatility measure
-${usdContextBlock}${equityContextBlock}
-Confirm, override to the other direction, or SKIP if this trend looks exhausted rather than continuing. Treat "RSI overbought/oversold" the same way you would any other momentum reading in an intact trend — strong recent demand often keeps pushing price further in the near term rather than reversing immediately; only let it count against the trade if the candle shape above is already showing real stalling (small bodies, failed pushes, reversal wicks), not just an extended reading in an otherwise clean trend.
+${usdContextBlock}${equityContextBlock}${macroBlock}
+Confirm, override to the other direction, or SKIP if this trend looks exhausted rather than continuing. Treat "RSI overbought/oversold" the same way you would any other momentum reading in an intact trend — strong recent demand often keeps pushing price further in the near term rather than reversing immediately; only let it count against the trade if the candle shape above is already showing real stalling (small bodies, failed pushes, reversal wicks), not just an extended reading in an otherwise clean trend. If a genuinely major event (rate decision, CPI) is listed as "upcoming" and could land while this position is still open, weigh that as real event risk — lower confidence or SKIP rather than ignoring it, even if the technical setup itself looks clean.
 
 Respond with JSON only, no markdown:
 {"direction":"BUY","confidence":72,"reason":"max 15 words"}`;
