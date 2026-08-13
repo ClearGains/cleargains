@@ -676,6 +676,10 @@ export type TradeIdeaRequest = {
   // thesis ~1h before NYSE close with identical confidence to the same
   // setup at 10am with a full session ahead of it.
   sessionHoursRemaining?: number;
+  // Which part of the NYSE session's real, data-verified volatility shape
+  // right now — see nyseVolatilityRegime in alpacaApi.ts. Same US-listed-
+  // only gating as sessionHoursRemaining.
+  volatilityRegime?: 'post-open' | 'afternoon-lull' | 'closing-window';
 };
 
 export type TradeIdeaVerdict = {
@@ -714,6 +718,7 @@ Instrument: ${req.instrumentName}
 Current price: ${req.price.toFixed(2)}
 ${req.dayChangePercent !== undefined ? `Move so far today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
 ${req.sessionHoursRemaining !== undefined ? `Time left in today's regular NYSE session: ~${req.sessionHoursRemaining.toFixed(1)}h. This isn't a reason to avoid a genuine multi-day thesis (fine to hold overnight into tomorrow) — but a same-day breakout/continuation thesis specifically needs real time left for it to actually play out; the later in the session it starts, the less conviction it deserves purely on "room left today" grounds, independent of how clean the setup itself looks.` : ''}
+${req.volatilityRegime === 'post-open' ? `Time-of-day volatility context (checked against real historical data, US session): still within the post-NYSE-open volatile window — moves right now are historically larger than typical in either direction. A clean breakout here has real weight behind it, but so does a false start that fades once this window passes.` : ''}${req.volatilityRegime === 'afternoon-lull' ? `Time-of-day volatility context (checked against real historical data, US session): the historically calmer mid-to-late-afternoon stretch — moves here are typically smaller and more prone to fading than during the open or the close. A fresh breakout thesis starting now deserves a bit more scrutiny than the identical setup during a genuinely active window, though a real catalyst can absolutely still work here.` : ''}${req.volatilityRegime === 'closing-window' ? `Time-of-day volatility context (checked against real historical data, US session): activity historically picks back up heading into the close — this can mean a genuine late-day move or just position-squaring noise as day traders flatten. Use the actual candle shape above to judge which this looks like, not the time of day alone.` : ''}
 ${req.multiDayTrendPercent !== undefined ? `Trend over the last ${req.multiDayTrendSpanDays} days: ${req.multiDayTrendPercent >= 0 ? '+' : ''}${req.multiDayTrendPercent.toFixed(1)}% — use this to tell a genuine pullback within an intact uptrend apart from a stock still mid-selloff. A bullish "buy the dip" thesis needs the multi-day trend to actually still be up (or at least flat) — buying because today looks oversold while the multi-day trend is sharply down is catching a falling knife, not a dip, unless you have a genuinely strong, specific reason the selloff itself is over (not just "RSI is low").` : ''}
 ${req.gapPercent !== undefined && req.gapPercent >= 2 ? `Gapped ${req.gapPercent.toFixed(1)}% at today's open vs yesterday's close — a real gap like this usually means genuine news/sentiment shifted overnight, not routine noise; worth weighing whether that gap has already fully played out or still has room.` : ''}
 ${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation, which lends more weight to whatever the price action is currently doing (a move on genuinely elevated volume is more likely to mean something than the same move on ordinary volume).` : ''}

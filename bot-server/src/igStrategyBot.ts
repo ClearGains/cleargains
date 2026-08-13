@@ -21,7 +21,7 @@ import { createStreamManager, type StreamManager } from './igStream';
 import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
 import {
-  isNYSEOpen, isInOpeningRange, isNearClose, hoursUntilNYSEClose,
+  isNYSEOpen, isInOpeningRange, isNearClose, hoursUntilNYSEClose, nyseVolatilityRegime,
   isDailyCheckTime, isWeeklyCheckTime, msUntilWeekendReopen, isScannerQuietWeekend,
 } from './alpacaApi';
 
@@ -1487,10 +1487,13 @@ async function evaluateEpic(
       // breakout thesis ~1h before NYSE close with no signal at all that
       // there was barely any real session time left for it to play out in.
       const sessionHoursRemaining = ticker ? hoursUntilNYSEClose() ?? undefined : undefined;
+      // Real, data-verified NYSE intraday volatility shape (see
+      // nyseVolatilityRegime's own comment) — same US-listed-only gating.
+      const volatilityRegime = ticker ? nyseVolatilityRegime() ?? undefined : undefined;
       const idea = await askGeminiTradeIdea({
         instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
         multiDayTrendPercent, multiDayTrendSpanDays, gapPercent, volumeSurgeMultiple,
-        recentExitContext, recentCandles, sessionHoursRemaining,
+        recentExitContext, recentCandles, sessionHoursRemaining, volatilityRegime,
       });
       // Fails closed — no underlying rule to fall back to the way VWAP
       // falls back to its own technicals when Gemini's unavailable. A
