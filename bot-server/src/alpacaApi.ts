@@ -428,6 +428,24 @@ export function isNearClose(bufferMins = 15): boolean {
   return utcMins >= 21 * 60 - bufferMins && utcMins < 21 * 60;
 }
 
+// Hours remaining in today's NYSE session, using the same conservative
+// 13:30–21:00 UTC window as isNYSEOpen. null outside that window (weekend,
+// before/after hours) — callers should treat null as "not currently a
+// meaningful same-day-session question" rather than 0. Confirmed live this
+// was missing entirely from the gemini_opinion entry prompt: a fresh
+// breakout thesis entered ~1h before close got the exact same confidence
+// treatment as the same setup at 10am with a full session ahead of it,
+// even though the underlying NYSE session — the market actually driving
+// the stock's real price discovery, independent of whether IG's own CFD
+// quote for it keeps ticking after hours — was about to end.
+export function hoursUntilNYSEClose(): number | null {
+  const now = new Date();
+  if (now.getUTCDay() === 0 || now.getUTCDay() === 6) return null;
+  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  if (utcMins < 13 * 60 + 30 || utcMins >= 21 * 60) return null;
+  return (21 * 60 - utcMins) / 60;
+}
+
 export function isMarketJustOpened(): boolean {
   // Between 9:30–9:35 ET — good time to read opening range
   const now = new Date();

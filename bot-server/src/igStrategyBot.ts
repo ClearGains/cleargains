@@ -21,7 +21,7 @@ import { createStreamManager, type StreamManager } from './igStream';
 import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
 import {
-  isNYSEOpen, isInOpeningRange, isNearClose,
+  isNYSEOpen, isInOpeningRange, isNearClose, hoursUntilNYSEClose,
   isDailyCheckTime, isWeeklyCheckTime, msUntilWeekendReopen, isScannerQuietWeekend,
 } from './alpacaApi';
 
@@ -1481,10 +1481,16 @@ async function evaluateEpic(
       // Gemini needs to see how price has actually been moving over the
       // last several hours at 30-min resolution, not just where it ended up.
       const recentCandles = bars.slice(-8).map(b => ({ open: b.o, high: b.h, low: b.l, close: b.c }));
+      // Only meaningful for a US-listed share (ticker set) — NYSE hours
+      // have nothing to do with a UK/other-listed name's own real session.
+      // Confirmed live this was missing: Intel got bought on a fresh
+      // breakout thesis ~1h before NYSE close with no signal at all that
+      // there was barely any real session time left for it to play out in.
+      const sessionHoursRemaining = ticker ? hoursUntilNYSEClose() ?? undefined : undefined;
       const idea = await askGeminiTradeIdea({
         instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
         multiDayTrendPercent, multiDayTrendSpanDays, gapPercent, volumeSurgeMultiple,
-        recentExitContext, recentCandles,
+        recentExitContext, recentCandles, sessionHoursRemaining,
       });
       // Fails closed — no underlying rule to fall back to the way VWAP
       // falls back to its own technicals when Gemini's unavailable. A

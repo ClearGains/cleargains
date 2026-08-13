@@ -667,6 +667,15 @@ export type TradeIdeaRequest = {
   // price has actually been moving over the last several hours matters as
   // much as where it ended up.
   recentCandles?: Array<{ open: number; high: number; low: number; close: number }>;
+  // Hours left in today's regular NYSE session, only set for a US-listed
+  // share (NYSE hours are meaningless for a UK/other-listed one). Not a
+  // rule to block entries — a genuine multi-day thesis is fine holding
+  // overnight — but a same-day breakout thesis deserves less confidence
+  // the less real session time is left for it to actually prove out.
+  // Confirmed live this was missing: Intel got bought on a fresh breakout
+  // thesis ~1h before NYSE close with identical confidence to the same
+  // setup at 10am with a full session ahead of it.
+  sessionHoursRemaining?: number;
 };
 
 export type TradeIdeaVerdict = {
@@ -704,6 +713,7 @@ This is leveraged spread betting, not a long-term investment — positions here 
 Instrument: ${req.instrumentName}
 Current price: ${req.price.toFixed(2)}
 ${req.dayChangePercent !== undefined ? `Move so far today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
+${req.sessionHoursRemaining !== undefined ? `Time left in today's regular NYSE session: ~${req.sessionHoursRemaining.toFixed(1)}h. This isn't a reason to avoid a genuine multi-day thesis (fine to hold overnight into tomorrow) — but a same-day breakout/continuation thesis specifically needs real time left for it to actually play out; the later in the session it starts, the less conviction it deserves purely on "room left today" grounds, independent of how clean the setup itself looks.` : ''}
 ${req.multiDayTrendPercent !== undefined ? `Trend over the last ${req.multiDayTrendSpanDays} days: ${req.multiDayTrendPercent >= 0 ? '+' : ''}${req.multiDayTrendPercent.toFixed(1)}% — use this to tell a genuine pullback within an intact uptrend apart from a stock still mid-selloff. A bullish "buy the dip" thesis needs the multi-day trend to actually still be up (or at least flat) — buying because today looks oversold while the multi-day trend is sharply down is catching a falling knife, not a dip, unless you have a genuinely strong, specific reason the selloff itself is over (not just "RSI is low").` : ''}
 ${req.gapPercent !== undefined && req.gapPercent >= 2 ? `Gapped ${req.gapPercent.toFixed(1)}% at today's open vs yesterday's close — a real gap like this usually means genuine news/sentiment shifted overnight, not routine noise; worth weighing whether that gap has already fully played out or still has room.` : ''}
 ${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation, which lends more weight to whatever the price action is currently doing (a move on genuinely elevated volume is more likely to mean something than the same move on ordinary volume).` : ''}
