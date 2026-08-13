@@ -130,8 +130,9 @@ const EXIT_CONTEXT_MS = 4 * 60 * 60_000;
 // session on the same bullish thesis, each entry blind to the ones before it.
 export function recordLossExit(mode: IgMode, epic: string, upl: number, reason: string): void {
   const st = ms(mode);
-  st.lastExitReason.set(epic, { reason, at: Date.now() });
-  if (upl >= 0) { st.lossStreak.set(epic, 0); return; }
+  const wasWin = upl >= 0;
+  st.lastExitReason.set(epic, { reason, at: Date.now(), wasWin });
+  if (wasWin) { st.lossStreak.set(epic, 0); return; }
   const streak = (st.lossStreak.get(epic) ?? 0) + 1;
   st.lossStreak.set(epic, streak);
   st.lossCooldownEpics.set(epic, Date.now() + LOSS_COOLDOWN_MS);
@@ -153,9 +154,19 @@ export function getRecentExitContext(mode: IgMode, epic: string): string {
   const own = st.lastExitReason.get(epic);
   if (own && now - own.at <= EXIT_CONTEXT_MS) {
     const minsAgo = Math.round((now - own.at) / 60_000);
-    const streak  = st.lossStreak.get(epic) ?? 0;
-    const streakNote = streak >= 2 ? ` (${streak} losses in a row on this name)` : '';
-    parts.push(`This instrument closed ${minsAgo}min ago${streakNote}: ${own.reason}`);
+    if (own.wasWin) {
+      // Confirmed live this matters: Dell banked a profit-lock win at
+      // 49410, then — with no memory of that win at all (this branch
+      // didn't exist yet; a win was never recorded here) — got bought
+      // again ~1.7% higher a few hours later on the same "AI server
+      // momentum" thesis, chasing the tail of the same move already
+      // captured rather than catching a fresh one.
+      parts.push(`This instrument banked a win ${minsAgo}min ago: ${own.reason} — if reconsidering entry now, treat this as needing a clearly NEW reason. Re-entering shortly after a winning exit often means buying after the easy part of the move is already captured, not catching it fresh.`);
+    } else {
+      const streak = st.lossStreak.get(epic) ?? 0;
+      const streakNote = streak >= 2 ? ` (${streak} losses in a row on this name)` : '';
+      parts.push(`This instrument closed ${minsAgo}min ago${streakNote}: ${own.reason} — weigh this seriously. If that reasoning still holds, don't just repeat the same thesis hoping for a different result; either hold off until the picture is genuinely clearer, or if the evidence now points the other way, that direction may be the better trade instead. Only take the same direction again if the catalyst has clearly changed or resolved since then.`);
+    }
   }
 
   const sector = SECTOR_MAP[epic];
@@ -404,7 +415,7 @@ type ModeState = {
   // See recordLossExit/LOSS_COOLDOWN_MS.
   lossCooldownEpics:    Map<string, number>;
   // Most recent close reason per epic, win or loss — see getRecentExitContext.
-  lastExitReason:       Map<string, { reason: string; at: number }>;
+  lastExitReason:       Map<string, { reason: string; at: number; wasWin: boolean }>;
   // Consecutive losses per epic, reset to 0 on a win — see recordLossExit.
   lossStreak:           Map<string, number>;
   // Epoch ms of the last gemini_opinion entry, account-wide (not per-epic) —
@@ -2225,10 +2236,17 @@ async function poll(mode: IgMode) {
   for (const p of positions) {
     if (p.upl < profitLockFloor) continue;
     const name = epicName(p.epic);
-    addLog(mode, 'exit', name,
-      `💰 Profit lock — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it`);
+    const plReason = `💰 Profit lock — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it`;
+    addLog(mode, 'exit', name, plReason);
     try {
       await igClosePos(st.session, p.dealId, p.direction, p.size);
+      // Confirmed live this gap mattered: with no record of a win here,
+      // the very next fresh evaluation of the same instrument had zero
+      // memory that it had already delivered a gain — Dell got bought
+      // again ~1.7% higher a few hours after banking a profit-lock win,
+      // chasing the tail of the same move rather than a fresh setup. See
+      // getRecentExitContext's win branch for the entry-side guardrail.
+      recordLossExit(mode, p.epic, p.upl, plReason);
     } catch (e) {
       addLog(mode, 'error', name, `Profit lock close failed: ${e instanceof Error ? e.message : String(e)}. Will retry next poll.`);
     }
