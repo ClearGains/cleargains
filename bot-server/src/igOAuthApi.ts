@@ -191,8 +191,14 @@ export type MarketDetail = {
   epic: string;
   minDealSize: number;
   minStopDist: number;
-  bid?: number;
-  offer?: number;
+  // `| null`, not just optional — IG returns bid/offer as JSON null (not a
+  // missing field) whenever there's no live quote, and null !== undefined
+  // in JS. A `typeof x === 'number'` check catches both; a `!== undefined`
+  // check silently passes null through and let `(null + null) / 2`
+  // evaluate to 0 — confirmed live, blew a CFD stop distance out to
+  // roughly the full price level for a real GSK entry.
+  bid?: number | null;
+  offer?: number | null;
   marketStatus?: string;
   marginFactorPct?: number;
   currencyCode?: string;
@@ -210,7 +216,7 @@ export async function fetchMarketDetails(session: IGOAuthSession, epics: string[
       marketDetails?: Array<{
         instrument?: { epic?: string; marginFactor?: number; currencies?: Array<{ code?: string; isDefault?: boolean }> };
         dealingRules?: { minDealSize?: { value?: number }; minControlledRiskStopDistance?: { value?: number }; minNormalStopOrLimitDistance?: { value?: number } };
-        snapshot?: { bid?: number; offer?: number; marketStatus?: string };
+        snapshot?: { bid?: number | null; offer?: number | null; marketStatus?: string };
       }>;
     };
     for (const m of d.marketDetails ?? []) {

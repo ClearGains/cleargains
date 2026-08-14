@@ -304,7 +304,16 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
       try {
         const details = await fetchMarketDetails(session, [inst.epic]);
         const d = details.get(inst.epic);
-        if (d?.bid !== undefined && d?.offer !== undefined) livePrice = (d.bid + d.offer) / 2;
+        // `!== undefined` isn't enough — IG returns bid/offer as null (not
+        // missing) when the market has no live quote right now, and
+        // `null !== undefined` is true in JS. That let `(null + null) / 2`
+        // silently evaluate to 0, wiping livePrice out entirely and making
+        // every stop distance blow out to roughly the full price level
+        // (|0 - signal.stopPrice| = signal.stopPrice) — confirmed live on
+        // a real GSK entry: stop logged as 1870.48pt on an ~£1817 entry.
+        // Same null-vs-undefined class of bug as the P&L fix earlier
+        // tonight, just in the entry-sizing path instead of the display.
+        if (typeof d?.bid === 'number' && typeof d?.offer === 'number') livePrice = (d.bid + d.offer) / 2;
         if (d) { minDeal = d.minDealSize; minStop = d.minStopDist; marginFactorPct = d.marginFactorPct; }
         if (d?.currencyCode) currencyCode = d.currencyCode;
         if (d?.marketStatus && d.marketStatus !== 'TRADEABLE') { addLog('wait', name, `Market not tradeable (${d.marketStatus})`); return; }

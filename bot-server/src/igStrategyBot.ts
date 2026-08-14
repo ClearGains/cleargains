@@ -983,7 +983,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
   if (yahooScaledCandidates.length) {
     try {
       const details = await fetchMarketDetails(st.session, yahooScaledCandidates);
-      for (const [epic, d] of details) if (d.bid !== undefined && d.offer !== undefined) yahooRefPrices.set(epic, (d.bid + d.offer) / 2);
+      for (const [epic, d] of details) if (typeof d.bid === 'number' && typeof d.offer === 'number') yahooRefPrices.set(epic, (d.bid + d.offer) / 2);
     } catch {}
   }
 
@@ -1318,7 +1318,7 @@ async function evaluateEpic(
     bars = buffered.slice(-count).map(tickToAlpacaBar);
   } else if (usesYahooScaled) {
     const live      = st.marketDetails.get(epic);
-    const liveLevel = live?.bid !== undefined && live?.offer !== undefined ? (live.bid + live.offer) / 2 : undefined;
+    const liveLevel = typeof live?.bid === 'number' && typeof live?.offer === 'number' ? (live.bid + live.offer) / 2 : undefined;
     const freeParams    = FREE_DATA_PARAMS[cfg.strategy];
     const fallbackBars  = freeParams
       ? await fetchBarsWithFallback(epic, freeParams.range, { ...freeParams, liveReferenceLevel: liveLevel })
@@ -1775,7 +1775,7 @@ async function executeIgSignal(
   // than the signal price. Checked for every strategy (never blocks anything
   // that was already fine during normal hours), but this is the actual risk
   // the 24h VWAP window introduces, so it matters most there.
-  if (detail?.bid !== undefined && detail?.offer !== undefined) {
+  if (typeof detail?.bid === 'number' && typeof detail?.offer === 'number') {
     const spread = detail.offer - detail.bid;
     if (spread > sizingStopDist * 0.25) {
       addLog(mode, 'wait', name,

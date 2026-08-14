@@ -484,7 +484,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           const stopDist   = Math.max(atr * currentConfig.atrStopMult, minStop);
           const profitDist = Math.max(atr * currentConfig.atrTpMult, minStop * 2);
 
-          if (detail?.bid !== undefined && detail?.offer !== undefined) {
+          if (typeof detail?.bid === 'number' && typeof detail?.offer === 'number') {
             const spread = detail.offer - detail.bid;
             if (spread > stopDist * 0.25) {
               addLog('wait', name, `Spread ${spread.toFixed(1)} too wide vs stop ${stopDist.toFixed(1)} — skipping`);
@@ -502,7 +502,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           }
 
           const funds = await fetchAccountFunds(session);
-          if (detail?.marginFactorPct !== undefined && detail?.bid !== undefined && detail?.offer !== undefined) {
+          if (typeof detail?.marginFactorPct === 'number' && typeof detail?.bid === 'number' && typeof detail?.offer === 'number') {
             const midPrice = (detail.bid + detail.offer) / 2;
             const requiredMargin = stake * midPrice * (detail.marginFactorPct / 100);
             if (requiredMargin > funds.available) {
@@ -603,7 +603,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       addLog('info', epicName(epic), `Bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    if (detail?.bid !== undefined) {
+    if (typeof detail?.bid === 'number') {
       const liveTick: CandleTick = {
         epic, time: new Date().toISOString(),
         open: detail.bid, high: detail.bid, low: detail.bid, close: detail.bid,
