@@ -23,6 +23,7 @@ import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } fr
 import { startGeminiWatch, getWatchedDealIds, addToWatch, removeFromWatch } from './geminiWatch';
 import { fetchFullPositions, getSession } from './igApi';
 import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
+import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -491,6 +492,45 @@ app.post('/fx-scalper/:mode/max-risk', auth, (req: Request, res: Response) => {
   res.json(getFxScalperBot(mode).setMaxRisk(riskGbp));
 });
 
+// ── IG CFD bot — persistent server-side, OAuth session (see igCfdBot.ts) ────
+app.get('/ig-cfd/:mode/status', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  res.json(getIgCfdBot(mode).status());
+});
+
+app.post('/ig-cfd/:mode/start', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const body = req.body as CfdStartParams;
+
+  res.json({ ok: true, message: 'IG CFD bot starting…' });
+  void getIgCfdBot(mode).start(body).then(r => {
+    if (!r.ok) console.error(`[ig-cfd] Start failed: ${r.error}`);
+  });
+});
+
+app.post('/ig-cfd/:mode/stop', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  getIgCfdBot(mode).stop();
+  res.json({ ok: true });
+});
+
+app.post('/ig-cfd/:mode/pause', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  getIgCfdBot(mode).pause();
+  res.json({ ok: true });
+});
+
+app.post('/ig-cfd/:mode/resume', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  getIgCfdBot(mode).resume();
+  res.json({ ok: true });
+});
+
 // ── Gemini position watch ─────────────────────────────────────────────────────
 // Lists all currently open IG positions for the account (however they were
 // opened — manually, via the strategy bot, anywhere) alongside which ones are
@@ -671,6 +711,25 @@ app.listen(PORT, '0.0.0.0', () => {
     void getFxScalperBot(mode).start(savedFx).then(r => {
       if (r.ok) console.log(`[bot-server] FX scalper ${mode} auto-resume successful`);
       else console.error(`[bot-server] FX scalper ${mode} auto-resume failed: ${r.error}`);
+    });
+  }
+
+  // Auto-resume the IG CFD bot (demo/live) if it was running before restart —
+  // same rationale as every other auto-resume above.
+  for (const mode of ['demo', 'live'] as const) {
+    const savedCfd = loadSavedCfdState(mode);
+    if (!savedCfd) continue;
+    const hasCreds = mode === 'live'
+      ? !!(process.env.IG_LIVE_API_KEY)
+      : !!(process.env.IG_DEMO_API_KEY ?? process.env.IG_API_KEY);
+    if (!hasCreds) {
+      console.warn(`[bot-server] Skipping IG CFD ${mode} auto-resume — credentials not set`);
+      continue;
+    }
+    console.log(`[bot-server] Auto-resuming IG CFD ${mode} bot (${savedCfd.strategy})...`);
+    void getIgCfdBot(mode).start(savedCfd).then(r => {
+      if (r.ok) console.log(`[bot-server] IG CFD ${mode} auto-resume successful`);
+      else console.error(`[bot-server] IG CFD ${mode} auto-resume failed: ${r.error}`);
     });
   }
 });

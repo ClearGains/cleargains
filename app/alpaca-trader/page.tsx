@@ -11,7 +11,7 @@ import { clsx } from 'clsx';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type PageTab     = 'alpaca' | 'ig' | 'fx';
+type PageTab     = 'alpaca' | 'ig' | 'fx' | 'cfd';
 type AccountMode = 'paper' | 'live';
 type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional';
 
@@ -1680,6 +1680,334 @@ function FxSwingBotTab() {
   );
 }
 
+// ── IG CFD Bot (persistent, server-side) ────────────────────────────────────
+// Distinct from the browser-resident CFD bot (components/ig/IGCfdAutoTrader.tsx,
+// rendered on /demo-trader) — that one deliberately stops when its tab
+// closes; this one runs on the VM via PM2 like every other bot on this
+// page, 24/7 regardless of any browser being open. Uses IG's CFD account
+// specifically (not spread betting), authenticated via a separate OAuth
+// session so it can run concurrently with the spread-bet bots without
+// colliding — see bot-server/src/igOAuthApi.ts.
+
+type CfdMode = 'demo' | 'live';
+type CfdStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'vwap' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
+
+const CFD_STRATEGIES: { value: CfdStrategyName; label: string; timeframe: string }[] = [
+  { value: 'donchian_breakout',  label: 'Donchian Breakout',          timeframe: 'Swing (Daily)' },
+  { value: 'donchian_hourly',    label: 'Donchian Breakout (Hourly)', timeframe: 'Hours–2 days' },
+  { value: 'ema_crossover',      label: 'EMA Crossover',              timeframe: 'Swing (Daily)' },
+  { value: 'macd_crossover',     label: 'MACD Crossover',             timeframe: 'Swing (Daily)' },
+  { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion',         timeframe: 'Intraday (5-min)' },
+  { value: 'vwap',               label: 'VWAP Reversion',             timeframe: 'Intraday (1-min)' },
+];
+
+type CfdPositionStatus = { dealId: string; epic: string; instrumentName: string; direction: 'BUY' | 'SELL'; size: number; level: number; upl: number };
+type CfdLogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'hold' | 'wait' | 'error'; epic: string; msg: string };
+
+type CfdStatus = {
+  mode: CfdMode; running: boolean; paused: boolean;
+  strategy: CfdStrategyName; maxRiskGbp: number; maxPositions: number; allowShorts: boolean;
+  balance: number; available: number; positions: CfdPositionStatus[];
+  log: CfdLogEntry[]; sessionOk: boolean; nextRunMs: number | null; lastPollTs: string | null;
+};
+
+function cfdEpicName(epic: string): string { return epic.split('.').slice(0, 3).join('.'); }
+
+function cfdLogColor(type: CfdLogEntry['type']): string {
+  switch (type) {
+    case 'enter': return 'text-green-400';
+    case 'exit':  return 'text-red-400';
+    case 'error': return 'text-rose-400';
+    case 'wait':  return 'text-slate-500';
+    case 'hold':  return 'text-slate-400';
+    default:      return 'text-slate-300';
+  }
+}
+function cfdLogIcon(type: CfdLogEntry['type']): string {
+  switch (type) {
+    case 'enter': return '↑';
+    case 'exit':  return '↓';
+    case 'error': return '✗';
+    case 'wait':  return '…';
+    case 'hold':  return '▬';
+    default:      return '·';
+  }
+}
+
+function IgCfdBotTab() {
+  const [cfdMode, setCfdMode] = useState<CfdMode>('demo');
+  const [strategy, setStrategy] = useState<CfdStrategyName>('donchian_breakout');
+  const [maxRisk, setMaxRisk]         = useState('10');
+  const [maxPositions, setMaxPositions] = useState('3');
+  const [allowShorts, setAllowShorts] = useState(true);
+
+  const [status, setStatus]   = useState<CfdStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState<string | null>(null);
+  const [polling, setPolling] = useState(false);
+
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const res  = await fetch(`/api/ig-cfd?mode=${cfdMode}`);
+      const data = await res.json() as CfdStatus & { error?: string };
+      if (data.error) { setError(data.error); return; }
+      setStatus(data);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to reach bot server');
+    }
+  }, [cfdMode]);
+
+  const startPolling = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    setPolling(true);
+    void fetchStatus();
+    pollRef.current = setInterval(() => { void fetchStatus(); }, 5_000);
+  }, [fetchStatus]);
+
+  useEffect(() => {
+    startPolling();
+    return () => { if (pollRef.current) clearInterval(pollRef.current); setPolling(false); };
+  }, [startPolling]);
+
+  const post = async (action: string, body?: object) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res  = await fetch(`/api/ig-cfd?mode=${cfdMode}&action=${action}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok && data.error) setError(data.error);
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Request failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const isRunning = status?.running ?? false;
+  const isPaused  = status?.paused  ?? false;
+
+  return (
+    <div className="space-y-5">
+      {error && (
+        <div className="bg-rose-500/10 border border-rose-500/30 rounded-lg p-3 text-sm text-rose-400 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {cfdMode === 'live' && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 text-xs text-amber-400 flex items-start gap-2">
+          <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+          <span><strong>Live mode active</strong> — real leveraged CFD positions on your IG CFD account (separate from spread betting), runs persistently on the server.</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+
+        {/* Config panel */}
+        <div className="lg:col-span-1 space-y-4">
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-4">
+            <h2 className="text-sm font-semibold text-slate-300">Configuration</h2>
+
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5">Account</label>
+              <div className="flex rounded-lg overflow-hidden border border-slate-700 text-xs">
+                {(['demo', 'live'] as CfdMode[]).map(m => (
+                  <button
+                    key={m}
+                    onClick={() => { if (!loading && !isRunning) setCfdMode(m); }}
+                    disabled={loading || isRunning}
+                    className={clsx(
+                      'flex-1 py-2 font-medium transition-colors capitalize',
+                      cfdMode === m
+                        ? m === 'live' ? 'bg-rose-600 text-white' : 'bg-emerald-700 text-white'
+                        : 'bg-slate-800 text-slate-400 hover:bg-slate-700',
+                      (loading || isRunning) && 'opacity-50 cursor-not-allowed',
+                    )}
+                  >
+                    {m === 'live' ? '🔴 Live' : '📄 Demo'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5">Strategy</label>
+              <div className="space-y-1.5">
+                {CFD_STRATEGIES.map(s => (
+                  <button
+                    key={s.value}
+                    onClick={() => { if (!isRunning) setStrategy(s.value); }}
+                    disabled={isRunning}
+                    className={clsx(
+                      'w-full text-left p-2 rounded-lg border text-xs transition-all',
+                      strategy === s.value
+                        ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300'
+                        : 'border-slate-700/50 bg-slate-800/40 text-slate-400 hover:border-slate-600',
+                      isRunning && 'opacity-60 cursor-not-allowed',
+                    )}
+                  >
+                    <div className="font-medium">{s.label}</div>
+                    <div className="text-slate-500 mt-0.5">{s.timeframe}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1.5">Max risk / trade (£)</label>
+                <input
+                  type="number" value={maxRisk} onChange={e => setMaxRisk(e.target.value)}
+                  disabled={isRunning} min="1" step="1"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">Scales up automatically on leveraged names where the minimum stake ties up more margin than this — up to 5×.</p>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1.5">Max positions</label>
+                <input
+                  type="number" value={maxPositions} onChange={e => setMaxPositions(e.target.value)}
+                  disabled={isRunning} min="1" max="20"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                />
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <div
+                onClick={() => { if (!isRunning) setAllowShorts(v => !v); }}
+                className={clsx('w-9 h-5 rounded-full relative transition-colors', allowShorts ? 'bg-emerald-600' : 'bg-slate-700', isRunning && 'opacity-50 cursor-not-allowed')}
+              >
+                <div className={clsx('absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform', allowShorts ? 'left-4' : 'left-0.5')} />
+              </div>
+              <span className="text-xs text-slate-400">Allow short selling</span>
+            </label>
+
+            <div className="space-y-2 pt-1">
+              {!isRunning ? (
+                <button
+                  onClick={() => void post('start', { strategy, maxRiskGbp: parseFloat(maxRisk) || 10, maxPositions: parseInt(maxPositions, 10) || 3, allowShorts })}
+                  disabled={loading}
+                  className="w-full flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg py-2.5 text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  <Power className="w-4 h-4" />
+                  Start CFD Bot
+                </button>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => void post(isPaused ? 'resume' : 'pause')}
+                    disabled={loading}
+                    className="flex items-center justify-center gap-1.5 bg-yellow-600/20 hover:bg-yellow-600/30 border border-yellow-600/40 text-yellow-300 rounded-lg py-2 text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    {isPaused ? <><Play className="w-3.5 h-3.5" />Resume</> : <><Pause className="w-3.5 h-3.5" />Pause</>}
+                  </button>
+                  <button
+                    onClick={() => void post('stop')}
+                    disabled={loading}
+                    className="flex items-center justify-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg py-2 text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    <Square className="w-3.5 h-3.5" />Stop
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-3 text-xs text-slate-500 space-y-1">
+            <p className="text-slate-400 font-medium">Universe</p>
+            <p>~33 stocks (Apple, Microsoft, NVIDIA, Amazon, semiconductors, UK banks/energy, etc.), FTSE 100, and GBP/USD — all confirmed live against the CFD account before this bot was built.</p>
+            <p className="pt-1 text-slate-600">Runs 24/7 on the server, independent of this browser tab.</p>
+          </div>
+        </div>
+
+        {/* Status / positions / log */}
+        <div className="lg:col-span-2 space-y-4">
+
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: 'Balance',   value: status ? `£${status.balance.toFixed(2)}`   : '—', icon: <DollarSign className="w-4 h-4" /> },
+              { label: 'Available', value: status ? `£${status.available.toFixed(2)}` : '—', icon: <DollarSign className="w-4 h-4" /> },
+              { label: 'Positions', value: status ? String(status.positions.length)   : '—', icon: <BarChart2  className="w-4 h-4" /> },
+            ].map(c => (
+              <div key={c.label} className="bg-slate-900/60 border border-slate-800 rounded-xl p-3">
+                <div className="flex items-center gap-1.5 text-slate-500 text-xs mb-1">{c.icon}{c.label}</div>
+                <div className="text-lg font-semibold text-white">{c.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-3 text-xs text-slate-500 flex-wrap">
+            <span className={clsx('flex items-center gap-1', status?.sessionOk ? 'text-green-400' : 'text-slate-500')}>
+              <span className={clsx('w-1.5 h-1.5 rounded-full inline-block', status?.sessionOk ? 'bg-green-400' : 'bg-slate-600')} />
+              {status?.sessionOk ? 'IG session active' : 'No session'}
+            </span>
+            <span className={clsx('flex items-center gap-1', isRunning && !isPaused ? 'text-green-400' : isPaused ? 'text-yellow-400' : 'text-slate-500')}>
+              {isRunning && !isPaused ? '● Running' : isPaused ? '⏸ Paused' : '○ Stopped'}
+            </span>
+          </div>
+
+          {/* Open positions */}
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-800">
+              <h2 className="text-sm font-semibold text-slate-300">Open Positions ({status?.positions.length ?? 0})</h2>
+            </div>
+            {!status?.positions.length ? (
+              <div className="px-4 py-6 text-center text-slate-600 text-sm">{isRunning ? 'No open positions' : 'Not running'}</div>
+            ) : (
+              <div className="divide-y divide-slate-800/60">
+                {status.positions.map(p => (
+                  <div key={p.dealId} className="px-4 py-3 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-medium text-white text-sm">{p.instrumentName || cfdEpicName(p.epic)}</div>
+                      <div className="text-xs text-slate-500">{p.direction} {p.size} @ {p.level.toFixed(2)}</div>
+                    </div>
+                    <div className={clsx('text-sm font-semibold shrink-0', p.upl >= 0 ? 'text-green-400' : 'text-red-400')}>
+                      {p.upl >= 0 ? '+' : ''}£{p.upl.toFixed(2)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Activity log */}
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-slate-300">Activity Log</h2>
+              <span className={clsx('text-xs px-1.5 py-0.5 rounded', polling ? 'text-green-400 bg-green-500/10' : 'text-slate-500')}>
+                {polling ? '● live' : '○ paused'}
+              </span>
+            </div>
+            <div className="font-mono text-xs overflow-y-auto max-h-80 p-3 space-y-0.5">
+              {!status?.log.length ? (
+                <div className="text-slate-600 py-4 text-center">No activity yet — start the bot to see logs</div>
+              ) : status.log.map(entry => (
+                <div key={entry.id} className="flex gap-2">
+                  <span className="text-slate-600 shrink-0 w-16">{entry.ts}</span>
+                  <span className={clsx('shrink-0', cfdLogColor(entry.type))}>{cfdLogIcon(entry.type)}</span>
+                  <span className="text-emerald-400 shrink-0 w-20 truncate">{cfdEpicName(entry.epic)}</span>
+                  <span className={cfdLogColor(entry.type)}>{entry.msg}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AlpacaTraderPage() {
@@ -1868,10 +2196,21 @@ export default function AlpacaTraderPage() {
             <Clock className="w-4 h-4" />
             FX Swing Bot
           </button>
+          <button
+            onClick={() => setTab('cfd')}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+              tab === 'cfd' ? 'bg-purple-700 text-white' : 'text-slate-400 hover:text-slate-200',
+            )}
+          >
+            <BarChart2 className="w-4 h-4" />
+            CFD Bot
+          </button>
         </div>
 
         {tab === 'ig' && <IgSpreadBetTab />}
         {tab === 'fx' && <FxSwingBotTab />}
+        {tab === 'cfd' && <IgCfdBotTab />}
 
         {tab === 'alpaca' && <>
 

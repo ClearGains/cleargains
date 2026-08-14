@@ -78,6 +78,16 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'IX.D.FTSE.DAILY.IP':   '^FTSE',
   'IX.D.STXE.CASH.IP':    '^STOXX50E',
   'IX.D.DAX.DAILY.IP':    '^GDAXI',
+  // CFD-account epics — different codes from the spread-bet ones above for
+  // the same underlying instrument, confirmed live (IX.D.FTSE.CFD.IP vs
+  // IX.D.FTSE.DAILY.IP, CS.D.GBPUSD.CFD.IP vs CS.D.GBPUSD.TODAY.IP). Also
+  // confirmed live: unlike spread-bet FX (~×10000 scaled), CFD FX/index
+  // prices are raw/unscaled — matches Yahoo's own value 1:1 (checked
+  // directly: IG CFD FTSE ~10792 vs Yahoo ^FTSE ~10773, GBP/USD CFD
+  // ~1.3495 vs Yahoo GBPUSD=X ~1.3497) — so these route through the same
+  // unscaled pure-Yahoo path everything else here does, no special-casing.
+  'IX.D.FTSE.CFD.IP':     '^FTSE',
+  'CS.D.GBPUSD.CFD.IP':   'GBPUSD=X',
   // US stocks
   'UA.D.AAPL.CASH.IP':  'AAPL',
   'UC.D.MSFT.DAILY.IP': 'MSFT',
