@@ -15,7 +15,7 @@ import {
   getIgStrategyBotStatus, loadSavedIgStrategyState, startRecommendationRefresh,
   refreshRecommendations, refreshDailyPick, openRecommendation,
   getPausedEpics, pauseEpic, resumeEpic,
-  releaseDeal, holdDeal, updateMaxDailyLossPct,
+  releaseDeal, holdDeal, updateMaxDailyLossPct, updateDailyProfitTargetGbp,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
@@ -429,6 +429,15 @@ app.post('/ig-strategy/:mode/max-daily-loss', auth, (req: Request, res: Response
   if (!mode) return;
   const pct = Number((req.body as { maxDailyLossPct?: unknown }).maxDailyLossPct);
   const r = updateMaxDailyLossPct(mode, pct);
+  res.json(r);
+});
+
+// Live override for the daily-profit lock — same shape as max-daily-loss above.
+app.post('/ig-strategy/:mode/daily-profit-target', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const gbp = Number((req.body as { dailyProfitTargetGbp?: unknown }).dailyProfitTargetGbp);
+  const r = updateDailyProfitTargetGbp(mode, gbp);
   res.json(r);
 });
 

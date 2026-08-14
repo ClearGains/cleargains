@@ -288,6 +288,13 @@ export type IgStrategyConfig = {
   maxIndexPositions: number;
   allowShorts:      boolean;
   maxDailyLossPct?: number;    // circuit breaker: no new entries after balance drops this % from day start (default 3)
+  // Mirror of maxDailyLossPct on the upside — once today's banked gain
+  // reaches this, stop opening new positions for the rest of the day
+  // (existing positions/exits still managed as normal). User call
+  // (2026-08-14): too many days were giving back a good early win by
+  // continuing to trade afterward — wants one clean profitable day, not
+  // several small wins ground down by later losers. Default £40.
+  dailyProfitTargetGbp?: number;
 };
 
 export type IgLogEntry = {
@@ -362,7 +369,9 @@ export type IgStrategyBotStatus = {
   orbState:   Record<string, OrbState>;
   sessionOk:  boolean;
   lossLock:   boolean;   // daily-loss circuit breaker engaged
+  profitLock: boolean;   // daily-profit target already banked — no new entries today
   maxDailyLossPct: number;   // current effective limit (config override, or the default 3)
+  dailyProfitTargetGbp: number;   // current effective target (config override, or the default 40)
   dayStartBalance: number;   // account balance at today's UTC-day boundary — 0 until the first poll of the day
   recommendations: IgRecommendation[];
   dailyPick:  IgRecommendation | null;
@@ -447,6 +456,7 @@ type ModeState = {
   dayKey:               string;   // UTC date the balance baseline belongs to
   dayStartBalance:      number;
   lossLock:             boolean;  // true = no new entries until the next trading day
+  profitLock:           boolean;  // true = today's profit target already banked — no new entries until the next trading day
   // Weekend risk-window guard
   weekendGuardDate:     string;   // UTC date the guard last fired — one-shot per Friday
   // Deal IDs the bot itself opened (see botOpenedDealsFile above) — only
@@ -484,7 +494,7 @@ function makeModeState(mode: IgMode): ModeState {
     dailyPick: null, dailyPickDate: '',
     lastEntryTrigger: new Map(),
     pausedEpics: new Set(),
-    dayKey: '', dayStartBalance: 0, lossLock: false,
+    dayKey: '', dayStartBalance: 0, lossLock: false, profitLock: false,
     weekendGuardDate: '',
     botOpenedDeals: new Set(), releasedDeals: new Set(),
     candleBuffers: new Map(),
@@ -1194,6 +1204,27 @@ export function updateMaxDailyLossPct(mode: IgMode, pct: number): { ok: boolean;
   return { ok: true };
 }
 
+// Live override for the daily-profit lock — same shape as
+// updateMaxDailyLossPct above, takes effect on the very next poll cycle.
+// Clamped to a sane £5-£1000 band; an explicit update while currently
+// locked is treated as a deliberate "let it keep trading today" decision
+// and clears the lock immediately, same reasoning as the loss-limit setter.
+export function updateDailyProfitTargetGbp(mode: IgMode, gbp: number): { ok: boolean; error?: string } {
+  const st = ms(mode);
+  if (!st.config) return { ok: false, error: 'Bot not running — start it first' };
+  if (!Number.isFinite(gbp)) return { ok: false, error: 'Invalid amount' };
+  const clamped = Math.min(1000, Math.max(5, gbp));
+  st.config.dailyProfitTargetGbp = clamped;
+  saveIgState(mode, st.config);
+  if (st.profitLock) {
+    st.profitLock = false;
+    addLog(mode, 'info', '—', `Daily profit target changed to £${clamped} — unlocking new entries for the rest of today`);
+  } else {
+    addLog(mode, 'info', '—', `Daily profit target changed to £${clamped}`);
+  }
+  return { ok: true };
+}
+
 const RECOMMENDATION_REFRESH_MS = 30 * 60_000;  // full-universe sweep every 30min — cheap for free-data names, cooldown-gated for IG-only ones
 let recommendationTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -1666,6 +1697,7 @@ async function executeIgSignal(
 
   if (st.paused)                       { addLog(mode, 'wait', name, `⏸ Paused — skipping ${action}`); return; }
   if (st.lossLock)                     { addLog(mode, 'wait', name, `🛑 Daily-loss limit hit — skipping ${action} (entries resume next day)`); return; }
+  if (st.profitLock)                   { addLog(mode, 'wait', name, `✅ Today's profit target already banked — skipping ${action} (entries resume next day; close positions manually if you want to keep this one going)`); return; }
   const coolUntil = st.lossCooldownEpics.get(epic);
   if (coolUntil && coolUntil > Date.now()) {
     addLog(mode, 'wait', name, `❄️ Lost recently — cooling down for ${((coolUntil - Date.now()) / 3_600_000).toFixed(1)}h before re-entering (skipping ${action})`);
@@ -2196,8 +2228,10 @@ async function poll(mode: IgMode) {
   if (st.dayKey !== today) {
     st.dayKey = today;
     st.dayStartBalance = balance;
-    if (st.lossLock) addLog(mode, 'info', '—', 'New trading day — daily-loss lock reset');
+    if (st.lossLock)   addLog(mode, 'info', '—', 'New trading day — daily-loss lock reset');
+    if (st.profitLock) addLog(mode, 'info', '—', 'New trading day — daily-profit lock reset');
     st.lossLock = false;
+    st.profitLock = false;
   }
   const maxLossPct = cfg.maxDailyLossPct ?? 3;
   if (!st.lossLock && st.dayStartBalance > 0 && balance > 0) {
@@ -2206,6 +2240,24 @@ async function poll(mode: IgMode) {
       st.lossLock = true;
       addLog(mode, 'error', '—',
         `🛑 Daily loss ${ddPct.toFixed(2)}% ≥ ${maxLossPct}% limit — no new entries today (exits/self-heal still managed)`);
+    }
+  }
+
+  // ── Daily-profit lock ─────────────────────────────────────────────────────
+  // Mirrors the loss circuit breaker above, on the upside: once today's
+  // banked gain clears the target, stop opening new positions for the rest
+  // of the day rather than letting a good win get ground back down by
+  // whatever the bot trades next. Doesn't cap or force-close a still-running
+  // winner — only blocks new entries (see the st.profitLock check in
+  // executeIgSignal) — so a position that's genuinely still working past the
+  // target is left to its own exit logic, not chopped off at exactly £40.
+  const profitTargetGbp = cfg.dailyProfitTargetGbp ?? 40;
+  if (!st.profitLock && st.dayStartBalance > 0 && balance > 0) {
+    const gainGbp = balance - st.dayStartBalance;
+    if (gainGbp >= profitTargetGbp) {
+      st.profitLock = true;
+      addLog(mode, 'info', '—',
+        `✅ Daily profit target hit — £${gainGbp.toFixed(2)} banked (≥ £${profitTargetGbp} target) — no new entries today, current position(s) left to run`);
     }
   }
 
@@ -2654,7 +2706,9 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     orbState:   { ...st.orbState },
     sessionOk:  !!st.session && Date.now() < st.session.expiresAt,
     lossLock:   st.lossLock,
+    profitLock: st.profitLock,
     maxDailyLossPct: st.config?.maxDailyLossPct ?? 3,
+    dailyProfitTargetGbp: st.config?.dailyProfitTargetGbp ?? 40,
     dayStartBalance: st.dayStartBalance,
     recommendations: [...st.recommendations.values()],
     dailyPick:  st.dailyPick,

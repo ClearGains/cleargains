@@ -90,6 +90,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return proxyTo(`/ig-strategy/${mode}/max-daily-loss`, 'POST', body);
   }
 
+  if (action === 'daily-profit-target') {
+    const body = await req.json() as { dailyProfitTargetGbp?: number };
+    return proxyTo(`/ig-strategy/${mode}/daily-profit-target`, 'POST', body);
+  }
+
   if (action === 'pause-epic') {
     const { epic } = await req.json() as { epic?: string };
     if (!epic) return NextResponse.json({ ok: false, error: 'epic required' }, { status: 400 });

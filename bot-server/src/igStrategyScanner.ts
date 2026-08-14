@@ -458,6 +458,13 @@ export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], ep
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+// User asked for standing extra focus on Japan 225 specifically (2026-08-14)
+// — sees real opportunity there and wants it watched every cycle regardless
+// of how it happens to score, on top of gemini_opinion's usual stock-only
+// exclusion above (that exclusion was about avoiding repetitive index churn
+// in general, not a verdict on this specific instrument).
+const PRIORITY_EPIC = 'IX.D.NIKKEI.DAILY.IP';
+
 export async function scanIgEpics(
   strategy: IgStrategyName,
   session:  IGSession,
@@ -479,7 +486,7 @@ export async function scanIgEpics(
   const excludeIndices = strategy === 'gemini_opinion';
   const pool = IG_EPICS.filter(e =>
     !exclude.includes(e.epic) && !FX_EPICS.has(e.epic) && !MANUAL_ONLY_EPICS.has(e.epic)
-    && (!excludeIndices || !isIndexEpic(e.epic))
+    && (!excludeIndices || !isIndexEpic(e.epic) || e.epic === PRIORITY_EPIC)
     && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
   const useYahoo = YAHOO_SCAN_STRATEGIES.has(strategy);
   log(`[ig-scanner] Fetching bars for ${pool.length} epics (strategy: ${strategy}, source: ${useYahoo ? 'yahoo (free)' : 'ig'})…`);
@@ -558,6 +565,16 @@ export async function scanIgEpics(
         .slice(0, Math.max(0, count - alreadyIndex.length - backfilled.length));
       top = [...alreadyIndex, ...backfilled, ...nonIndex].sort((a, b) => b.score - a.score);
     }
+  }
+
+  // Pinned by explicit user request — always keep Japan 225 on the watch
+  // list regardless of how it happens to score this cycle, so Gemini's own
+  // per-poll opinion always gets a real look at it (same "never drop it"
+  // treatment an open position already gets above). Added on top of, not
+  // instead of, the normal top-N picks.
+  if (!top.some(s => s.epic === PRIORITY_EPIC)) {
+    const nikkei = scored.find(s => s.epic === PRIORITY_EPIC);
+    if (nikkei) top = [...top, nikkei];
   }
 
   log(`[ig-scanner] Best picks: ${top.map(s => `${s.name}(${s.score.toFixed(1)}${s.epic in EPIC_TO_ALPACA ? ', alpaca' : ''})`).join(', ') || 'none'}`);
