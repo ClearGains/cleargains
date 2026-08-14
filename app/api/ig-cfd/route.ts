@@ -41,13 +41,13 @@ export async function POST(req: NextRequest) {
   const mode   = req.nextUrl.searchParams.get('mode');
   const action = req.nextUrl.searchParams.get('action') ?? 'start';
   if (!validMode(mode)) return NextResponse.json({ ok: false, error: 'mode must be "demo" or "live"' }, { status: 400 });
-  if (!['start', 'stop', 'pause', 'resume'].includes(action)) {
+  if (!['start', 'stop', 'pause', 'resume', 'close'].includes(action)) {
     return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
   }
 
-  if (action === 'start') {
+  if (action === 'start' || action === 'close') {
     const body = await req.json() as unknown;
-    return proxyTo(`/ig-cfd/${mode}/start`, 'POST', body);
+    return proxyTo(`/ig-cfd/${mode}/${action}`, 'POST', body);
   }
   return proxyTo(`/ig-cfd/${mode}/${action}`, 'POST');
 }

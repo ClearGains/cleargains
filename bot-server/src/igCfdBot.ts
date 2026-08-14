@@ -168,11 +168,12 @@ export type CfdStatus = {
 };
 
 export type CfdHandle = {
-  start:  (params: CfdStartParams) => Promise<{ ok: boolean; error?: string }>;
-  stop:   () => void;
-  pause:  () => void;
-  resume: () => void;
-  status: () => CfdStatus;
+  start:         (params: CfdStartParams) => Promise<{ ok: boolean; error?: string }>;
+  stop:          () => void;
+  pause:         () => void;
+  resume:        () => void;
+  status:        () => CfdStatus;
+  closePosition: (dealId: string) => Promise<{ ok: boolean; error?: string }>;
 };
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -488,7 +489,31 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
     };
   }
 
-  return { start, stop, pause, resume, status };
+  async function closePositionByDealId(dealId: string): Promise<{ ok: boolean; error?: string }> {
+    if (!session) return { ok: false, error: 'No active session — start the bot first' };
+    // lastKnownPositions can be up to a poll cycle stale (e.g. an hour for
+    // Donchian) — refetch live rather than trust it for a user-triggered
+    // close, same discipline as everywhere else tonight.
+    let held: CfdPositionStatus | undefined;
+    try {
+      const live = await fetchFullPositions(session);
+      held = live.find(p => p.dealId === dealId);
+    } catch (e) {
+      return { ok: false, error: `Couldn't confirm current positions: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    if (!held) return { ok: false, error: 'Position not found — it may already be closed' };
+    try {
+      await closePosition(session, dealId, held.direction, held.size);
+      addLog('exit', epicName(held.epic), `Manually closed by user — ${held.direction} ${held.size} @ ${held.level}`);
+      return { ok: true };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      addLog('error', epicName(held.epic), `Manual close failed: ${msg}`);
+      return { ok: false, error: msg };
+    }
+  }
+
+  return { start, stop, pause, resume, status, closePosition: closePositionByDealId };
 }
 
 // ── Singleton instances ───────────────────────────────────────────────────────

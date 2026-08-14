@@ -1974,11 +1974,23 @@ function IgCfdBotTab() {
                       <div className="font-medium text-white text-sm">{p.instrumentName || cfdEpicName(p.epic)}</div>
                       <div className="text-xs text-slate-500">{p.direction} {p.size} @ {p.level.toFixed(2)}</div>
                     </div>
-                    <div className="text-right shrink-0">
-                      <div className={clsx('text-sm font-semibold', p.upl >= 0 ? 'text-green-400' : 'text-red-400')}>
-                        {p.estimated ? '~' : ''}{p.upl >= 0 ? '+' : ''}£{p.upl.toFixed(2)}
+                    <div className="flex items-center gap-3 shrink-0">
+                      <div className="text-right">
+                        <div className={clsx('text-sm font-semibold', p.upl >= 0 ? 'text-green-400' : 'text-red-400')}>
+                          {p.estimated ? '~' : ''}{p.upl >= 0 ? '+' : ''}£{p.upl.toFixed(2)}
+                        </div>
+                        {p.estimated && <div className="text-[10px] text-slate-500" title="Market closed — no live IG quote. Estimated from Yahoo/Alpaca's last price instead.">est.</div>}
                       </div>
-                      {p.estimated && <div className="text-[10px] text-slate-500" title="Market closed — no live IG quote. Estimated from Yahoo/Alpaca's last price instead.">est.</div>}
+                      <button
+                        onClick={() => {
+                          if (!window.confirm(`Close ${p.instrumentName || cfdEpicName(p.epic)} — ${p.direction} ${p.size} @ ${p.level.toFixed(2)}?`)) return;
+                          void post('close', { dealId: p.dealId });
+                        }}
+                        disabled={loading}
+                        className="text-xs px-2 py-1 rounded border border-slate-700 text-slate-400 hover:text-red-400 hover:border-red-400/50 transition-colors disabled:opacity-50"
+                      >
+                        Close
+                      </button>
                     </div>
                   </div>
                 ))}

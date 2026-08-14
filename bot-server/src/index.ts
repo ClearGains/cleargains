@@ -531,6 +531,15 @@ app.post('/ig-cfd/:mode/resume', auth, (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+app.post('/ig-cfd/:mode/close', auth, async (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const { dealId } = req.body as { dealId?: string };
+  if (!dealId) { res.status(400).json({ ok: false, error: 'dealId required' }); return; }
+  const result = await getIgCfdBot(mode).closePosition(dealId);
+  res.json(result);
+});
+
 // ── Gemini position watch ─────────────────────────────────────────────────────
 // Lists all currently open IG positions for the account (however they were
 // opened — manually, via the strategy bot, anywhere) alongside which ones are
