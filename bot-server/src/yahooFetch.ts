@@ -322,5 +322,20 @@ export async function fetchBarsWithFallback(
   }
   if (!yahooSym) return null;
   const yahooBars = await fetchYahooBars(yahooSym, yahooInterval, range);
-  return yahooBars && isShare ? scaleBars(yahooBars, IG_SHARE_POINTS_PER_UNIT) : yahooBars;
+  if (!yahooBars?.length) return yahooBars;
+  if (isShare) return scaleBars(yahooBars, IG_SHARE_POINTS_PER_UNIT);
+  // liveReferenceLevel was documented above (and has been since this file's
+  // FX-rescaling comment cited Nokia's ~69.74x mismatch as the reason it
+  // exists) but was never actually consumed here — every caller passing it
+  // silently got raw, unscaled Yahoo bars back regardless. Confirmed live
+  // tonight: SK Hynix's IG CFD is a USD-priced ADR ("SK hynix Inc - ADR"),
+  // but its only free-data fallback (000660.KS) is the KRW-priced Korea
+  // Exchange primary listing — ~1,593,000 vs a USD ADR price, not even the
+  // same currency, let alone scale. Rescale to the real IG level whenever
+  // one's supplied, same technique geminiWatch.ts already uses for FX.
+  if (opts?.liveReferenceLevel !== undefined && opts.liveReferenceLevel > 0) {
+    const lastClose = yahooBars[yahooBars.length - 1].c;
+    if (lastClose > 0) return scaleBars(yahooBars, opts.liveReferenceLevel / lastClose);
+  }
+  return yahooBars;
 }

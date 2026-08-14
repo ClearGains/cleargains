@@ -86,7 +86,6 @@ const CFD_STOCK_EPIC_OVERRIDES: Record<string, string> = {
   'UD.D.SNDKUS.DAILY.IP': 'UD.D.SNDKUS.CASH.IP',
   'UD.D.STX.DAILY.IP':    'UD.D.STX.CASH.IP',
   'UC.D.MRVL.DAILY.IP':   'UC.D.MRVL.CASH.IP',
-  'UD.D.SKHYUS.DAILY.IP': 'UD.D.SKHYUS.CASH.IP',
   'UD.D.WDC.DAILY.IP':    'UD.D.WDC.CASH.IP',
   'UC.D.RIMM.DAILY.IP':   'UC.D.RIMM.CASH.IP',
   'EC.D.NOKIAFP.DAILY.IP': 'EC.D.NOKIAFP.CASH.IP',
@@ -107,6 +106,18 @@ const CFD_UNAVAILABLE_EPICS = new Set([
   'SH.D.XOM.DAILY.IP',    // ExxonMobil
   'SG.D.TSM.DAILY.IP',    // TSMC
   'SB.D.DELLUS.DAILY.IP', // Dell
+  // Not "unavailable" on IG's side — the real product (SK hynix Inc - ADR,
+  // USD) is fine. Excluded because this bot's free-data fallback for it
+  // (000660.KS, the KRW-priced Korea Exchange primary listing — no Alpaca
+  // coverage, no USD ADR ticker on Yahoo either) is a genuinely different
+  // instrument in a different currency, not just a different scale.
+  // igStrategyBot.ts can safely use the same Yahoo data because it always
+  // fetches IG's live price first and passes it as a rescale reference;
+  // this bot fetches bars before it ever touches IG's live price, so it
+  // has no reference level to rescale against. Fixing that would mean an
+  // extra IG API call every poll cycle for every instrument just to cover
+  // this one name — not worth it for a single stock. Simpler to exclude.
+  'UD.D.SKHYUS.DAILY.IP', // SK Hynix
 ]);
 
 type CfdInstrument = { name: string; epic: string };
