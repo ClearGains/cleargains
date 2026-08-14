@@ -355,7 +355,19 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
         }
       }
 
-      const size = Math.max(minDeal, Math.round((effectiveRiskGbp / stopDist) * 100) / 100);
+      // Share CFDs (unlike FX/index CFDs) reject fractional deal sizes
+      // outright — confirmed live tonight: every fractional-sized share
+      // order (NVDA 73.96/59.17/40.68, Seagate 9.3-9.6, GSK 5.0-9.2, Netflix
+      // 117-213) got REJECTED with the generic UNKNOWN, while every
+      // whole-number size on the exact same instruments (size 1, and a
+      // manual test ramping 1 through 70) succeeded. GBP/USD's fractional
+      // 68.75 got a real, specific INSUFFICIENT_FUNDS instead — IG actually
+      // validated that one, so FX/index CFDs genuinely do allow fractional
+      // sizing; shares just don't, and round to whole numbers before
+      // sending rather than silently producing an invalid order.
+      const isShare = !FX_EPICS.has(inst.epic) && !isIndexEpic(inst.epic);
+      const rawSize = Math.max(minDeal, effectiveRiskGbp / stopDist);
+      const size = isShare ? Math.max(1, Math.round(rawSize)) : Math.round(rawSize * 100) / 100;
 
       addLog('enter', name, `${signal.action} — ${signal.reason} (size ${size}, stop ${stopDist.toFixed(2)}pt)`);
       try {
