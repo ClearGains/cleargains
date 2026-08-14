@@ -129,6 +129,7 @@ export type FullPosition = {
   level:          number;
   instrumentName: string;
   upl:            number;
+  hasLiveQuote:   boolean;  // false when IG's own bid/offer are null (market closed) — upl is 0/unset, not a real number. Caller can fall back to another price source rather than just show 0.
   bid:            number;
   offer:          number;
   stopLevel?:     number;
@@ -169,6 +170,7 @@ export async function fetchFullPositions(session: IGOAuthSession): Promise<FullP
       dealId: p.position.dealId, epic: p.market.epic, direction, size: p.position.size, level: p.position.level,
       instrumentName: p.market.instrumentName,
       upl: typeof p.position.upl === 'number' ? p.position.upl : computedUpl,
+      hasLiveQuote,
       bid: p.market.bid ?? p.position.level, offer: p.market.offer ?? p.position.level,
       stopLevel: p.position.stopLevel ?? undefined, limitLevel: p.position.limitLevel ?? undefined,
       openedAt: p.position.createdDateUTC ? `${p.position.createdDateUTC}Z` : undefined,

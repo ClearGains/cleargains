@@ -1704,7 +1704,7 @@ const CFD_STRATEGIES: { value: CfdStrategyName; label: string; timeframe: string
   { value: 'vwap',               label: 'VWAP Reversion',             timeframe: 'Intraday (1-min)' },
 ];
 
-type CfdPositionStatus = { dealId: string; epic: string; instrumentName: string; direction: 'BUY' | 'SELL'; size: number; level: number; upl: number };
+type CfdPositionStatus = { dealId: string; epic: string; instrumentName: string; direction: 'BUY' | 'SELL'; size: number; level: number; upl: number; estimated?: boolean };
 type CfdLogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'hold' | 'wait' | 'error'; epic: string; msg: string };
 
 type CfdStatus = {
@@ -1974,8 +1974,11 @@ function IgCfdBotTab() {
                       <div className="font-medium text-white text-sm">{p.instrumentName || cfdEpicName(p.epic)}</div>
                       <div className="text-xs text-slate-500">{p.direction} {p.size} @ {p.level.toFixed(2)}</div>
                     </div>
-                    <div className={clsx('text-sm font-semibold shrink-0', p.upl >= 0 ? 'text-green-400' : 'text-red-400')}>
-                      {p.upl >= 0 ? '+' : ''}£{p.upl.toFixed(2)}
+                    <div className="text-right shrink-0">
+                      <div className={clsx('text-sm font-semibold', p.upl >= 0 ? 'text-green-400' : 'text-red-400')}>
+                        {p.estimated ? '~' : ''}{p.upl >= 0 ? '+' : ''}£{p.upl.toFixed(2)}
+                      </div>
+                      {p.estimated && <div className="text-[10px] text-slate-500" title="Market closed — no live IG quote. Estimated from Yahoo/Alpaca's last price instead.">est.</div>}
                     </div>
                   </div>
                 ))}

@@ -147,6 +147,7 @@ export type CfdStartParams = {
 export type CfdPositionStatus = {
   dealId: string; epic: string; instrumentName: string;
   direction: 'BUY' | 'SELL'; size: number; level: number; upl: number;
+  estimated?: boolean;  // upl computed from free Yahoo/Alpaca data, not IG's own live quote — IG had no bid/offer (market closed) when this was fetched
 };
 
 export type CfdStatus = {
@@ -352,9 +353,28 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
     lastPollTs = new Date().toISOString();
     try {
       const rawPositions = await fetchFullPositions(session);
-      const positions: CfdPositionStatus[] = rawPositions.map(p => ({
-        dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName,
-        direction: p.direction, size: p.size, level: p.level, upl: p.upl,
+      // IG reports no bid/offer (upl=0) whenever a market is currently
+      // closed — true for every "24 Hours" CFD stock outside its real
+      // exchange hours, which is most of the day for this bot's universe.
+      // Rather than show a flat £0.00 that reads as "flat" when we simply
+      // don't know, fall back to the same free Yahoo/Alpaca price this bot
+      // already pulls for signal generation — same raw-dollar scale as IG's
+      // own CFD share pricing (confirmed live, no ×100 conversion needed
+      // here unlike the spread-bet bot). Marked `estimated: true` so the
+      // UI can show it's not IG's own live tick.
+      const positions: CfdPositionStatus[] = await Promise.all(rawPositions.map(async p => {
+        if (p.hasLiveQuote) {
+          return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: p.upl };
+        }
+        try {
+          const fallbackBars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Day', yahooInterval: '1d' });
+          const lastClose = fallbackBars?.length ? fallbackBars[fallbackBars.length - 1].c : undefined;
+          if (lastClose === undefined) throw new Error('no fallback price');
+          const estimatedUpl = (p.direction === 'BUY' ? lastClose - p.level : p.level - lastClose) * p.size;
+          return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: estimatedUpl, estimated: true };
+        } catch {
+          return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: 0 };
+        }
       }));
       lastKnownPositions = positions;
       try {
@@ -366,6 +386,11 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
       const severeLossCeiling = maxRiskGbp * SEVERE_LOSS_MULT;
       const profitLockFloor   = maxRiskGbp * PROFIT_LOCK_MULT;
       for (const p of positions) {
+        // Estimated (Yahoo/Alpaca-derived) P&L is for display only — never
+        // auto-close off a number that isn't IG's own live quote. This is
+        // deliberately conservative after tonight's exact failure mode: a
+        // wrong/stale inferred P&L silently triggering these same guards.
+        if (p.estimated) continue;
         if (p.upl <= -severeLossCeiling || p.upl >= profitLockFloor) {
           const reason = p.upl <= -severeLossCeiling ? `🚨 Severe loss £${p.upl.toFixed(2)}` : `💰 Profit lock £${p.upl.toFixed(2)}`;
           addLog('exit', epicName(p.epic), `${reason} — closing`);
