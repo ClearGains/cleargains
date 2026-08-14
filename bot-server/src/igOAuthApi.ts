@@ -186,6 +186,7 @@ export type MarketDetail = {
   offer?: number;
   marketStatus?: string;
   marginFactorPct?: number;
+  currencyCode?: string;
 };
 
 export async function fetchMarketDetails(session: IGOAuthSession, epics: string[]): Promise<Map<string, MarketDetail>> {
@@ -198,7 +199,7 @@ export async function fetchMarketDetails(session: IGOAuthSession, epics: string[
     if (!r.ok) return result;
     const d = await r.json() as {
       marketDetails?: Array<{
-        instrument?: { epic?: string; marginFactor?: number };
+        instrument?: { epic?: string; marginFactor?: number; currencies?: Array<{ code?: string; isDefault?: boolean }> };
         dealingRules?: { minDealSize?: { value?: number }; minControlledRiskStopDistance?: { value?: number }; minNormalStopOrLimitDistance?: { value?: number } };
         snapshot?: { bid?: number; offer?: number; marketStatus?: string };
       }>;
@@ -211,10 +212,20 @@ export async function fetchMarketDetails(session: IGOAuthSession, epics: string[
       // stray 0 silently disable the stake/stop clamp that trusts this.
       const minDeal = m.dealingRules?.minDealSize?.value || 1;
       const minStop = m.dealingRules?.minNormalStopOrLimitDistance?.value || m.dealingRules?.minControlledRiskStopDistance?.value || 1;
+      // CFDs settle in the instrument's own currency (e.g. USD for US
+      // shares), unlike spread bets which are always £/point regardless
+      // of instrument — sending an unsupported currencyCode gets a
+      // generic REJECTED/UNKNOWN from IG with no useful detail. Prefer
+      // the currency IG flags isDefault, else just take the first (only)
+      // one listed — verified live that e.g. TSLA/AMD/AVGO only support
+      // USD on the CFD account, not GBP.
+      const currencies = m.instrument?.currencies ?? [];
+      const currencyCode = currencies.find(c => c.isDefault)?.code ?? currencies[0]?.code;
       result.set(epic, {
         epic, minDealSize: minDeal, minStopDist: minStop,
         bid: m.snapshot?.bid, offer: m.snapshot?.offer, marketStatus: m.snapshot?.marketStatus,
         marginFactorPct: m.instrument?.marginFactor,
+        currencyCode,
       });
     }
   } catch (e) {

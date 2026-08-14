@@ -167,6 +167,11 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
   let lastKnownBalance = 0, lastKnownAvailable = 0;
   let lastKnownPositions: CfdPositionStatus[] = [];
   const log: CfdLogEntry[] = [];
+  // Some names in the shared spread-bet epic list aren't entitled for CFD
+  // dealing on this account (IG returns 403 insufficient view permissions)
+  // — that's a permanent per-account condition, not a transient error, so
+  // skip them for the rest of this run instead of re-erroring every cycle.
+  const permissionBlockedEpics = new Set<string>();
 
   let pollTimer:    ReturnType<typeof setInterval> | null = null;
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -230,14 +235,16 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
     if ((signal.action === 'BUY' || signal.action === 'SELL') && !inPosition) {
       if (paused) { addLog('wait', name, '⏸ Paused — skipping entry'); return; }
       if (signal.action === 'SELL' && !allowShorts) { addLog('wait', name, 'Shorts disabled'); return; }
+      if (permissionBlockedEpics.has(inst.epic)) { addLog('wait', name, 'Not entitled for CFD dealing on this account — skipping'); return; }
 
       let livePrice = last.c;
-      let minDeal = 0.1, minStop = 1, marginFactorPct: number | undefined;
+      let minDeal = 0.1, minStop = 1, marginFactorPct: number | undefined, currencyCode = 'GBP';
       try {
         const details = await fetchMarketDetails(session, [inst.epic]);
         const d = details.get(inst.epic);
         if (d?.bid !== undefined && d?.offer !== undefined) livePrice = (d.bid + d.offer) / 2;
         if (d) { minDeal = d.minDealSize; minStop = d.minStopDist; marginFactorPct = d.marginFactorPct; }
+        if (d?.currencyCode) currencyCode = d.currencyCode;
         if (d?.marketStatus && d.marketStatus !== 'TRADEABLE') { addLog('wait', name, `Market not tradeable (${d.marketStatus})`); return; }
       } catch { /* fall back to last bar close + defaults */ }
 
@@ -269,9 +276,13 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
 
       addLog('enter', name, `${signal.action} — ${signal.reason} (size ${size}, stop ${stopDist.toFixed(2)}pt)`);
       try {
-        const result = await placeMarketOrder(session, inst.epic, signal.action, size, stopDist, profitDist);
+        const result = await placeMarketOrder(session, inst.epic, signal.action, size, stopDist, profitDist, currencyCode);
         addLog('info', name, `Deal confirmed @ ${result.level.toFixed(2)}${result.protectionOk ? '' : ' — ⚠ SL/TP attach failed: ' + (result.protectionError ?? 'unknown')}`);
-      } catch (e) { addLog('error', name, `Entry failed: ${e instanceof Error ? e.message : String(e)}`); }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes('insufficient view permissions') || msg.includes('403')) permissionBlockedEpics.add(inst.epic);
+        addLog('error', name, `Entry failed: ${msg}`);
+      }
     }
   }
 
