@@ -153,16 +153,23 @@ export async function fetchFullPositions(session: IGOAuthSession): Promise<FullP
   // Same "IG's own /positions response doesn't actually include `upl`"
   // gap confirmed live for the legacy session earlier this session —
   // compute from level vs bid/offer rather than trust an absent field.
+  // IG returns bid/offer as null when the market is currently closed
+  // (confirmed live: every "24 Hours" CFD stock outside its real exchange
+  // hours) — a plain `null - level` silently coerces to `0 - level` in JS,
+  // which looked exactly like a real (and wrong) P&L equal to ±the entry
+  // price. Guard explicitly: no live quote means no P&L to report, not 0
+  // minus the entry price.
   return (d.positions ?? []).map(p => {
     const direction = p.position.direction as 'BUY' | 'SELL';
-    const computedUpl = direction === 'BUY'
-      ? (p.market.bid   - p.position.level) * p.position.size
-      : (p.position.level - p.market.offer) * p.position.size;
+    const hasLiveQuote = typeof p.market.bid === 'number' && typeof p.market.offer === 'number';
+    const computedUpl = hasLiveQuote
+      ? (direction === 'BUY' ? p.market.bid - p.position.level : p.position.level - p.market.offer) * p.position.size
+      : 0;
     return {
       dealId: p.position.dealId, epic: p.market.epic, direction, size: p.position.size, level: p.position.level,
       instrumentName: p.market.instrumentName,
       upl: typeof p.position.upl === 'number' ? p.position.upl : computedUpl,
-      bid: p.market.bid, offer: p.market.offer,
+      bid: p.market.bid ?? p.position.level, offer: p.market.offer ?? p.position.level,
       stopLevel: p.position.stopLevel ?? undefined, limitLevel: p.position.limitLevel ?? undefined,
       openedAt: p.position.createdDateUTC ? `${p.position.createdDateUTC}Z` : undefined,
     };
