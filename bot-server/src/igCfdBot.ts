@@ -264,7 +264,7 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
     }
 
     const freeParams = FREE_DATA_PARAMS[strategy] ?? { range: '6mo', alpacaTimeframe: '1Day' as Timeframe, yahooInterval: '1d' as const };
-    const bars = await fetchBarsWithFallback(inst.epic, freeParams.range, freeParams);
+    const bars = await fetchBarsWithFallback(inst.epic, freeParams.range, { ...freeParams, rawShares: true });
     if (!bars?.length || bars.length < 20) { addLog('wait', name, 'Not enough bar data yet'); return; }
     const last = bars[bars.length - 1];
 
@@ -367,7 +367,7 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
           return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: p.upl };
         }
         try {
-          const fallbackBars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Day', yahooInterval: '1d' });
+          const fallbackBars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Day', yahooInterval: '1d', rawShares: true });
           const lastClose = fallbackBars?.length ? fallbackBars[fallbackBars.length - 1].c : undefined;
           if (lastClose === undefined) throw new Error('no fallback price');
           const estimatedUpl = (p.direction === 'BUY' ? lastClose - p.level : p.level - lastClose) * p.size;

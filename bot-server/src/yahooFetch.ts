@@ -266,11 +266,20 @@ export async function fetchBarsWithFallback(
     // Derived fresh per call rather than hardcoded, mirroring geminiWatch.ts's
     // identical technique for FX position reviews.
     liveReferenceLevel?: number;
+    // Skip the ×100 IG_SHARE_POINTS_PER_UNIT scaling below even for a
+    // share epic. That scaling is the spread-bet account's own convention
+    // (IG quotes spread-bet shares in points = cents) — confirmed live
+    // repeatedly that CFD share prices are raw/unscaled instead, matching
+    // Yahoo/Alpaca's own dollar values 1:1. Every CFD-bot caller must set
+    // this — the bug this comment replaces had every CFD stop/take-profit
+    // distance computed ~100x too wide (real price vs a still-scaled
+    // signal price), meaning positions had essentially no working stop.
+    rawShares?: boolean;
   },
 ): Promise<AlpacaBar[] | null> {
   const alpacaTimeframe = opts?.alpacaTimeframe ?? '1Day';
   const yahooInterval   = opts?.yahooInterval   ?? '1d';
-  const isShare  = epic in EPIC_TO_ALPACA;
+  const isShare  = epic in EPIC_TO_ALPACA && !opts?.rawShares;
   const alpacaSym = EPIC_TO_ALPACA[epic];
   const yahooSym  = EPIC_TO_YAHOO[epic];
   if (alpacaSym) {
