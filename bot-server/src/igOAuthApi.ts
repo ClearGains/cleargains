@@ -326,11 +326,39 @@ export async function closePosition(session: IGOAuthSession, dealId: string, dir
   const r = await fetch(`${base}/positions/otc`, {
     method: 'POST', headers: { ...headers(session, '1'), '_method': 'DELETE' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(10_000),
   });
-  if (r.ok) return;
-  const d = await r.json().catch(() => ({} as { errorCode?: string })) as { errorCode?: string };
-  const code = d.errorCode ?? '';
-  if (code.includes('notional.details.null') || code.includes('position.notfound') || code.includes('POSITION_NOT_FOUND')) return; // already closed — no-op
-  throw new Error(`closePosition failed ${r.status}: ${code}`);
+  const d = await r.json().catch(() => ({} as { dealReference?: string; errorCode?: string })) as { dealReference?: string; errorCode?: string };
+  if (!r.ok) {
+    const code = d.errorCode ?? '';
+    if (code.includes('notional.details.null') || code.includes('position.notfound') || code.includes('POSITION_NOT_FOUND')) return; // already closed — no-op
+    throw new Error(`closePosition failed ${r.status}: ${code}`);
+  }
+  // r.ok only means IG accepted the close *request* — same gap
+  // placeMarketOrder above already guards against for opens (see its own
+  // comment), just never applied to closes. Confirmed live this actually
+  // matters: the live spread-bet bot's equivalent close path (igApi.ts)
+  // logged a close attempt against a real open position with no exception
+  // raised, yet the position was still open hours later. Poll the same way
+  // placeMarketOrder does before trusting a close actually happened.
+  if (!d.dealReference) return; // nothing to confirm against — treat as closed
+  let confirm: { dealStatus?: string; reason?: string; errorCode?: string } = {};
+  for (let i = 0; i < 4; i++) {
+    await new Promise(res => setTimeout(res, 1_500));
+    try {
+      const cr = await fetch(`${base}/confirms/${encodeURIComponent(d.dealReference)}`, { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });
+      if (cr.ok) {
+        confirm = await cr.json() as typeof confirm;
+        if (confirm.dealStatus === 'ACCEPTED' || confirm.dealStatus === 'REJECTED') break;
+      }
+    } catch { /* retry */ }
+  }
+  if (confirm.dealStatus === 'ACCEPTED') return;
+  if (confirm.dealStatus === 'REJECTED') throw new Error(`closePosition confirm REJECTED: ${confirm.reason ?? confirm.errorCode ?? 'unknown'}`);
+  // Confirm never resolved either way — don't silently assume success;
+  // check IG's own position list before deciding, same idempotency
+  // fallback igApi.ts's closePosition uses.
+  const stillOpen = await fetchFullPositions(session).then(ps => ps.some(p => p.dealId === dealId)).catch(() => true);
+  if (!stillOpen) return;
+  throw new Error(`closePosition: could not confirm close for dealId=${dealId}`);
 }
 
 export async function updatePositionLevels(session: IGOAuthSession, dealId: string, stopLevel: number | null, limitLevel: number | null): Promise<void> {

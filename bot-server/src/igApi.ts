@@ -205,6 +205,33 @@ export async function closePosition(
     { url: `${base}/positions/otc`, method: 'POST', payload: overridePayload, version: '1', override: true },
   ] as const;
 
+  // A 200 here only means IG accepted the close *request* for processing —
+  // same gap as placeMarketOrder's own submit step, which is why that
+  // function always polls /confirms afterwards and this one didn't.
+  // Confirmed live tonight this actually matters: the severe-loss guard
+  // logged "closing immediately" against a real open position, got no
+  // exception back, and moved on — but the position was still open 6+
+  // hours later. r.ok alone can't tell a genuinely-closed position apart
+  // from one IG silently rejected on confirmation (e.g. market closed),
+  // so poll the same way every other order-placement path in this
+  // codebase already does before trusting a close actually happened.
+  type Confirm = { dealId?: string; dealStatus?: string; reason?: string; errorCode?: string };
+  const confirmClose = async (dealRef: string): Promise<Confirm> => {
+    let confirm: Confirm = {};
+    for (let i = 0; i < 4; i++) {
+      await new Promise(res => setTimeout(res, 1_500));
+      try {
+        const cr = await fetch(`${base}/confirms/${encodeURIComponent(dealRef)}`,
+          { headers: headers(session, '1'), signal: AbortSignal.timeout(8_000) });
+        if (cr.ok) {
+          confirm = await cr.json() as Confirm;
+          if (confirm.dealStatus === 'ACCEPTED' || confirm.dealStatus === 'REJECTED') break;
+        }
+      } catch { /* retry */ }
+    }
+    return confirm;
+  };
+
   for (const attempt of attempts) {
     const hdrs: Record<string, string> = headers(session, attempt.version);
     if ('override' in attempt && attempt.override) hdrs['_method'] = 'DELETE';
@@ -215,24 +242,38 @@ export async function closePosition(
       body:    JSON.stringify(attempt.payload),
       signal:  AbortSignal.timeout(10_000),
     });
-    const d = await r.json().catch(() => ({} as { errorCode?: string })) as { errorCode?: string };
-    if (r.ok) return;
+    const d = await r.json().catch(() => ({} as { dealReference?: string; errorCode?: string })) as { dealReference?: string; errorCode?: string };
+    if (r.ok) {
+      if (!d.dealReference) return; // some IG endpoint variants close synchronously with no dealReference to confirm — nothing further to check
+      const confirm = await confirmClose(d.dealReference);
+      if (confirm.dealStatus === 'ACCEPTED') return;
+      if (confirm.dealStatus === 'REJECTED') {
+        throw new Error(`closePosition confirm REJECTED: ${confirm.reason ?? confirm.errorCode ?? 'unknown'}`);
+      }
+      // Confirm never resolved either way (timed out) — don't silently
+      // treat this as success; fall through and let the idempotency check
+      // below settle it.
+      break;
+    }
     // 404 = endpoint doesn't exist, 405 = method not allowed — try next
     if (r.status !== 404 && r.status !== 405) throw new Error(`closePosition failed ${r.status}: ${d.errorCode ?? attempt.url}`);
     // otherwise fall through to next attempt
   }
-  // Every endpoint variant 404'd — this is the same code that closes
-  // positions successfully constantly elsewhere, so a genuinely broken
-  // endpoint is unlikely. Far more likely: the position is already gone
-  // (IG's own broker-side stop/limit closed it before this software-side
-  // attempt reached IG). Confirming that here makes close idempotent —
-  // "close an already-closed position" succeeds as a no-op instead of
-  // throwing a misleading error for something that isn't actually broken.
+  // Either every endpoint variant 404'd, or a close request was accepted
+  // but its confirm never came back definitive — this is the same code
+  // that closes positions successfully constantly elsewhere, so a
+  // genuinely broken endpoint is unlikely. Far more likely: the position
+  // is already gone (IG's own broker-side stop/limit closed it before this
+  // software-side attempt reached IG), or really did just get closed by
+  // this attempt and the confirm poll missed it. Confirming that here
+  // makes close idempotent — "close an already-closed position" succeeds
+  // as a no-op instead of throwing a misleading error for something that
+  // isn't actually broken.
   try {
     const stillOpen = (await fetchFullPositions(session)).some(p => p.dealId === dealId);
     if (!stillOpen) return;
   } catch { /* fall through to the throw below if we can't even check */ }
-  throw new Error(`closePosition: all endpoints returned 404 for dealId=${dealId}`);
+  throw new Error(`closePosition: could not confirm close for dealId=${dealId}`);
 }
 
 export type CandleBar = {
