@@ -49,24 +49,70 @@ export type CfdLogEntry = {
   msg:  string;
 };
 
-// CFD trading here is primarily about stocks — reuses the same, already
-// live-verified share universe igStrategyScanner.ts's IG_EPICS maintains
-// for the spread-bet bots (confirmed live: share epics are NOT
-// account-type exclusive, the same UA.D./UC.D./etc. code works identically
-// on a CFD account) rather than re-verifying ~30 stock epics from scratch.
-// FX/indices are excluded from that reused list (they DO need a different,
-// CFD-specific epic suffix — confirmed live IX.D.FTSE.CFD.IP /
-// CS.D.GBPUSD.CFD.IP are real, distinct codes from the spread-bet ones,
-// verified separately below alongside their own price-scale check).
-// Applied Materials (UA.D.AMAT.CASH.IP) verified live and added
-// specifically — same "UA.D.*.CASH.IP" pattern that turned out stale for
-// several other names earlier this session, so checked individually
-// (TRADEABLE, real dealing rules) rather than assumed safe from the pattern
-// alone.
+// CFD trading here is primarily about stocks. IG_EPICS (igStrategyScanner.ts,
+// shared with the spread-bet bots) was originally reused as-is on the
+// assumption share epics aren't account-type exclusive — that assumption
+// was WRONG for most names and was caught live via a real demo stress test:
+// every order on a ".DAILY.IP" epic (IG_EPICS' convention for most stocks,
+// correct for spread betting) came back "Deal REJECTED: UNKNOWN" from the
+// CFD account, even though /markets/{epic} deceptively reports that same
+// epic as TRADEABLE with valid dealing rules under the CFD account. IG
+// actually runs a separate, genuinely CFD-dealable ".CASH.IP" product for
+// most of these names — confirmed live with a real order+close on every
+// entry below (only Apple/Amazon/Applied Materials already used .CASH.IP
+// in IG_EPICS and needed no change). A handful of names (JPMorgan, Visa,
+// UnitedHealth, ExxonMobil, TSMC, Dell) have no CFD-dealable share product
+// on this account at all — searched IG directly, nothing but leveraged
+// ETPs/options came back — so they're excluded here entirely rather than
+// silently failing every cycle; they still trade fine on the spread-bet bot.
+// UK names (Barclays/BP/HSBC/Shell/GSK/AstraZeneca/Lloyds, BlackBerry,
+// Nokia) got a clean MARKET_CLOSED_WITH_EDITS/MARKET_OFFLINE rejection
+// during the verification pass (run outside their home exchange's hours) —
+// that's a legitimate, informative rejection reason, unlike the generic
+// UNKNOWN from a wrong epic, so treat these as verified-correct even though
+// the live test itself couldn't get to ACCEPTED at that hour.
+const CFD_STOCK_EPIC_OVERRIDES: Record<string, string> = {
+  'UC.D.MSFT.DAILY.IP':   'UC.D.MSFT.CASH.IP',
+  'UC.D.NVDA.DAILY.IP':   'UC.D.NVDA.CASH.IP',
+  'UB.D.GOOGL.DAILY.IP':  'UB.D.GOOGL.CASH.IP',
+  'UB.D.FB.DAILY.IP':     'UB.D.FB.CASH.IP',
+  'UD.D.TSLA.DAILY.IP':   'UD.D.TSLA.CASH.IP',
+  'UC.D.NFLX.DAILY.IP':   'UC.D.NFLX.CASH.IP',
+  'SA.D.AMD.DAILY.IP':    'SA.D.AMD.CASH.IP',
+  'UA.D.AVGO.DAILY.IP':   'UA.D.AVGO.CASH.IP',
+  'UB.D.INTC.DAILY.IP':   'UB.D.INTC.CASH.IP',
+  'UC.D.QCOM.DAILY.IP':   'UC.D.QCOM.CASH.IP',
+  'UC.D.MU.DAILY.IP':     'UC.D.MU.CASH.IP',
+  'UD.D.SNDKUS.DAILY.IP': 'UD.D.SNDKUS.CASH.IP',
+  'UD.D.STX.DAILY.IP':    'UD.D.STX.CASH.IP',
+  'UC.D.MRVL.DAILY.IP':   'UC.D.MRVL.CASH.IP',
+  'UD.D.SKHYUS.DAILY.IP': 'UD.D.SKHYUS.CASH.IP',
+  'UD.D.WDC.DAILY.IP':    'UD.D.WDC.CASH.IP',
+  'UC.D.RIMM.DAILY.IP':   'UC.D.RIMM.CASH.IP',
+  'EC.D.NOKIAFP.DAILY.IP': 'EC.D.NOKIAFP.CASH.IP',
+  'KA.D.BARC.DAILY.IP':   'KA.D.BARC.CASH.IP',
+  'KA.D.BP.DAILY.IP':     'KA.D.BP.CASH.IP',
+  'KA.D.HSBA.DAILY.IP':   'KA.D.HSBA.CASH.IP',
+  'KA.D.SHELLN.DAILY.IP': 'KA.D.SHELLN.CASH.IP',
+  'KA.D.GSK.DAILY.IP':    'KA.D.GSK.CASH.IP',
+  'KA.D.AZN.DAILY.IP':    'KA.D.AZN.CASH.IP',
+  'KA.D.LLOY.DAILY.IP':   'KA.D.LLOY.CASH.IP',
+};
+// No CFD-dealable share product exists for these on this account (verified
+// via a live IG market search — only leveraged ETPs/options came back).
+const CFD_UNAVAILABLE_EPICS = new Set([
+  'SD.D.JPM.DAILY.IP',    // JPMorgan
+  'SH.D.VUS.DAILY.IP',    // Visa
+  'SH.D.UNH.DAILY.IP',    // UnitedHealth
+  'SH.D.XOM.DAILY.IP',    // ExxonMobil
+  'SG.D.TSM.DAILY.IP',    // TSMC
+  'SB.D.DELLUS.DAILY.IP', // Dell
+]);
+
 type CfdInstrument = { name: string; epic: string };
 const STOCK_INSTRUMENTS: CfdInstrument[] = IG_EPICS
-  .filter(e => !FX_EPICS.has(e.epic) && !isIndexEpic(e.epic))
-  .map(e => ({ name: e.name, epic: e.epic }));
+  .filter(e => !FX_EPICS.has(e.epic) && !isIndexEpic(e.epic) && !CFD_UNAVAILABLE_EPICS.has(e.epic))
+  .map(e => ({ name: e.name, epic: CFD_STOCK_EPIC_OVERRIDES[e.epic] ?? e.epic }));
 
 const INSTRUMENTS: CfdInstrument[] = [
   { name: 'FTSE 100', epic: 'IX.D.FTSE.CFD.IP' },

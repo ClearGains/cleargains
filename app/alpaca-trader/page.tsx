@@ -1925,7 +1925,7 @@ function IgCfdBotTab() {
 
           <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-3 text-xs text-slate-500 space-y-1">
             <p className="text-slate-400 font-medium">Universe</p>
-            <p>~33 stocks (Apple, Microsoft, NVIDIA, Amazon, semiconductors, UK banks/energy, etc.), FTSE 100, and GBP/USD — all confirmed live against the CFD account before this bot was built.</p>
+            <p>~28 stocks (Apple, Microsoft, NVIDIA, Amazon, semiconductors, UK banks/energy, etc.), FTSE 100, and GBP/USD — each individually confirmed with a real order+close against the CFD account, using CFD-specific epics where they differ from the spread-bet ones. JPMorgan, Visa, UnitedHealth, ExxonMobil, TSMC, and Dell have no CFD-dealable share product on this account and are excluded (still tradeable on the spread-bet bot).</p>
             <p className="pt-1 text-slate-600">Runs 24/7 on the server, independent of this browser tab.</p>
           </div>
         </div>
