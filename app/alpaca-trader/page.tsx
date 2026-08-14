@@ -456,7 +456,7 @@ function RecommendationPanel({
 
 // ── IG Spread Bet tab ─────────────────────────────────────────────────────────
 
-type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'gemini_opinion';
+type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion';
 type IgMode         = 'demo' | 'live';
 
 type IgOpenPosition = {
@@ -545,6 +545,7 @@ const IG_STRATEGIES: { value: IgStrategyName; label: string; timeframe: string; 
   { value: 'donchian_hourly',    label: 'Donchian Breakout (Hourly)', timeframe: 'Hours–2 days',  description: 'Same Donchian logic on hourly bars — 24-hour breakout entry, 12-hour opposite breakout exit. Holds hours to ~2 days instead of days-to-weeks. Untested — new strategy, no backtest history yet.' },
   { value: 'ema_crossover',      label: '✅ EMA Crossover',         timeframe: 'Swing (Daily)',    description: 'Backtested: +7.2% avg return after financing, PF 1.26. Enter on EMA9 × EMA21 crossover. Hold days to weeks. Stop: 2× ATR.' },
   { value: 'macd_crossover',     label: '✅ MACD Crossover',        timeframe: 'Swing (Daily)',    description: 'Backtested: +6.1% avg return after financing, PF 1.17. Enter on MACD signal-line crossover. Stop: 2× ATR, target: 5× ATR.' },
+  { value: 'pivot_points',       label: 'Daily Pivot Points',    timeframe: 'Intraday (S1/R1 bounce)', description: 'Classic floor-trader pivots from the prior day\'s H/L/C. Buys a bounce off S1, sells a bounce off R1, targets the pivot. Untested — new strategy, no backtest history yet.' },
   { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion',    timeframe: 'Intraday (5-min)', description: 'Buy RSI < 30, sell RSI > 70. Spread bets on liquid large-caps & indices. Stop: 1.5× ATR. Backtested negative after costs.' },
   { value: 'orb',                label: 'Opening Range Breakout', timeframe: 'Intraday (Daily)', description: 'Trade breakouts above/below the first 30-min range. Exit at EOD or midpoint stop. Backtested negative after costs.' },
   { value: 'vwap',               label: 'VWAP Reversion',         timeframe: 'Intraday (1-min)', description: 'Bet on price returning to VWAP when it dips 0.5% below and RSI < 45. Backtested negative after costs.' },
@@ -561,6 +562,7 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
   donchian_breakout:  'Donchian Breakout',
   donchian_hourly:    'Donchian Breakout (Hourly)',
   macd_crossover:     'MACD Crossover',
+  pivot_points:       'Daily Pivot Points',
   gemini_opinion:     'Gemini Opinion (Experimental)',
 };
 
@@ -1690,13 +1692,14 @@ function FxSwingBotTab() {
 // colliding — see bot-server/src/igOAuthApi.ts.
 
 type CfdMode = 'demo' | 'live';
-type CfdStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'vwap' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover';
+type CfdStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'vwap' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points';
 
 const CFD_STRATEGIES: { value: CfdStrategyName; label: string; timeframe: string }[] = [
   { value: 'donchian_breakout',  label: 'Donchian Breakout',          timeframe: 'Swing (Daily)' },
   { value: 'donchian_hourly',    label: 'Donchian Breakout (Hourly)', timeframe: 'Hours–2 days' },
   { value: 'ema_crossover',      label: 'EMA Crossover',              timeframe: 'Swing (Daily)' },
   { value: 'macd_crossover',     label: 'MACD Crossover',             timeframe: 'Swing (Daily)' },
+  { value: 'pivot_points',       label: 'Daily Pivot Points',         timeframe: 'Intraday (S1/R1 bounce)' },
   { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion',         timeframe: 'Intraday (5-min)' },
   { value: 'vwap',               label: 'VWAP Reversion',             timeframe: 'Intraday (1-min)' },
 ];

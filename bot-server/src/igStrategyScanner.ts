@@ -210,6 +210,7 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
   donchian_hourly:    { resolution: 'HOUR',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
+  pivot_points:       { resolution: 'DAY',       count: 30 },
   // Not actually used at runtime — gemini_opinion is in YAHOO_SCAN_STRATEGIES
   // below, so scanning always goes through SCAN_FREE_PARAMS instead. Kept
   // accurate anyway (30-min bars, matching igStrategyBot.ts's IG_RES) so

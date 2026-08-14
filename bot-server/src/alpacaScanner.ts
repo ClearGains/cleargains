@@ -241,6 +241,7 @@ const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit
   donchian_breakout:   { tf: '1Day',  limit: 30 },
   donchian_hourly:     { tf: '1Hour', limit: 40 },
   macd_crossover:      { tf: '1Day',  limit: 40 },
+  pivot_points:        { tf: '1Day',  limit: 30 },
   gemini_opinion:      { tf: '1Hour', limit: 40 },
 };
 

@@ -8,7 +8,7 @@ import {
 } from './igApi';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
-  vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal,
+  vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal, pivotPointsSignal,
   calcRsi, calcMacdHist, calcAtr, calcEfficiencyRatio,
   STRATEGY_META,
   type StrategySignal,
@@ -269,7 +269,7 @@ function loadReleasedDeals(mode: IgMode): Set<string> {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'gemini_opinion';
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion';
 export type IgMode         = 'demo' | 'live';
 
 export type IgStrategyConfig = {
@@ -571,6 +571,7 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   donchian_breakout:  { resolution: 'DAY',       count: 40 },
   donchian_hourly:    { resolution: 'HOUR',       count: 40 },
   macd_crossover:     { resolution: 'DAY',       count: 50 },
+  pivot_points:       { resolution: 'DAY',       count: 30 },
   // MINUTE_30 (IG's documented resolution enum) + count 240 = 5 days of
   // 30-min bars — see STRATEGY_META.gemini_opinion in alpacaStrategies.ts
   // for why this strategy specifically needs finer-than-hourly bars and a
@@ -595,6 +596,10 @@ const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },
   donchian_hourly:    { range: '1mo', alpacaTimeframe: '1Hour', yahooInterval: '1h' },
+  // No entry needed here — like ema_crossover/donchian_breakout/macd_crossover,
+  // this daily-timeframe strategy falls through to fetchBarsWithFallback's
+  // own '6mo'/1Day default when absent from this map (see the `freeParams
+  // ? ... : fetchBarsWithFallback(epic, '6mo')` fallback at each call site).
   // 30-min bars, not hourly — see STRATEGY_META.gemini_opinion for why.
   // Yahoo's 30m interval is only available for ~60 days back, well within
   // this 1-month range request.
@@ -639,6 +644,7 @@ async function yahooPreCheckAction(
     case 'ema_crossover':      return emaCrossoverSignal(bars, inPosition, side).action;
     case 'donchian_breakout':  return donchianBreakoutSignal(bars, inPosition, side).action;
     case 'macd_crossover':     return macdCrossoverSignal(bars, inPosition, side).action;
+    case 'pivot_points':       return pivotPointsSignal(bars, inPosition, side).action;
     default:                   return null;
   }
 }
@@ -1041,6 +1047,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
         case 'donchian_breakout':  signal = donchianBreakoutSignal(bars, false); break;
         case 'donchian_hourly':    signal = donchianBreakoutSignal(bars, false, undefined, 24, 12, 'hour'); break;
         case 'macd_crossover':     signal = macdCrossoverSignal(bars, false); break;
+        case 'pivot_points':       signal = pivotPointsSignal(bars, false); break;
         default: break;  // orb/weekly_momentum need extra state this scan doesn't track
       }
 
@@ -1380,6 +1387,10 @@ async function evaluateEpic(
 
     case 'macd_crossover':
       signal = macdCrossoverSignal(bars, inPosition, side);
+      break;
+
+    case 'pivot_points':
+      signal = pivotPointsSignal(bars, inPosition, side);
       break;
 
     // No technical rule at all — Gemini decides from scratch. No exit logic

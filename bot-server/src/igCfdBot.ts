@@ -7,7 +7,7 @@ import {
   type IGOAuthSession,
 } from './igOAuthApi';
 import {
-  rsiMeanReversionSignal, emaCrossoverSignal, vwapSignal, donchianBreakoutSignal, macdCrossoverSignal,
+  rsiMeanReversionSignal, emaCrossoverSignal, vwapSignal, donchianBreakoutSignal, macdCrossoverSignal, pivotPointsSignal,
   STRATEGY_META, type StrategyName, type StrategySignal,
 } from './alpacaStrategies';
 import { fetchBarsWithFallback } from './yahooFetch';
@@ -134,6 +134,7 @@ const FREE_DATA_PARAMS: Partial<Record<StrategyName, { range: string; alpacaTime
   ema_crossover:       { range: '6mo', alpacaTimeframe: '1Day', yahooInterval: '1d' },
   donchian_breakout:   { range: '6mo', alpacaTimeframe: '1Day', yahooInterval: '1d' },
   macd_crossover:      { range: '6mo', alpacaTimeframe: '1Day', yahooInterval: '1d' },
+  pivot_points:        { range: '6mo', alpacaTimeframe: '1Day', yahooInterval: '1d' },
 };
 
 export type CfdStartParams = {
@@ -178,6 +179,15 @@ export type CfdHandle = {
 const SEVERE_LOSS_MULT = 5;
 const PROFIT_LOCK_MULT = 1.5;
 const TOKEN_REFRESH_MS = 20 * 60_000; // access tokens last 30min (confirmed live) — refresh with headroom
+// The per-trade severe-loss ceiling only limits a single position's own
+// loss — it says nothing about how much of the account's total margin is
+// still free. A run of several leveraged positions can each individually
+// stay under that ceiling while collectively leaving the account one bad
+// print away from a margin call. Block new entries once available margin
+// drops below this fraction of balance, regardless of any single
+// position's own P&L — this is the actual leverage-blowup guard, not the
+// per-trade loss cap.
+const MARGIN_BUFFER_MIN_PCT = 0.15;
 
 function uid(): string { return Math.random().toString(36).slice(2, 9); }
 function ts(): string { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
@@ -265,6 +275,7 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
       case 'donchian_breakout':  signal = donchianBreakoutSignal(bars, inPosition, side); break;
       case 'donchian_hourly':    signal = donchianBreakoutSignal(bars, inPosition, side, 24, 12, 'hour'); break;
       case 'macd_crossover':     signal = macdCrossoverSignal(bars, inPosition, side); break;
+      case 'pivot_points':       signal = pivotPointsSignal(bars, inPosition, side); break;
       default: signal = { action: 'HOLD', reason: 'unsupported strategy' };
     }
 
@@ -282,6 +293,10 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
       if (paused) { addLog('wait', name, '⏸ Paused — skipping entry'); return; }
       if (signal.action === 'SELL' && !allowShorts) { addLog('wait', name, 'Shorts disabled'); return; }
       if (permissionBlockedEpics.has(inst.epic)) { addLog('wait', name, 'Not entitled for CFD dealing on this account — skipping'); return; }
+      if (lastKnownBalance > 0 && lastKnownAvailable / lastKnownBalance < MARGIN_BUFFER_MIN_PCT) {
+        addLog('wait', name, `⚠ Margin buffer low (${(lastKnownAvailable / lastKnownBalance * 100).toFixed(0)}% available) — skipping new entries until it recovers`);
+        return;
+      }
 
       let livePrice = last.c;
       let minDeal = 0.1, minStop = 1, marginFactorPct: number | undefined, currencyCode = 'GBP';
