@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveIgAuth, igRequestHeaders } from '@/lib/igAuthHeaders';
 
 type RawPositionEntry = {
   position?: {
@@ -47,14 +48,12 @@ function normalisePositions(data: RawPositionsData) {
 export async function GET(request: NextRequest) {
   const steps: string[] = [];
   try {
-    const cst = request.headers.get('x-ig-cst') ?? '';
-    const securityToken = request.headers.get('x-ig-security-token') ?? '';
-    const apiKey = request.headers.get('x-ig-api-key') ?? '';
     const env = (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live';
+    const auth = resolveIgAuth(request);
 
-    steps.push(`[1] env=${env}, apiKey=${apiKey.slice(0, 8)}…, CST=${cst ? cst.slice(0, 10) + '…' : 'MISSING'}, SecurityToken=${securityToken ? securityToken.slice(0, 10) + '…' : 'MISSING'}`);
+    steps.push(`[1] env=${env}, auth=${auth?.style ?? 'MISSING'}`);
 
-    if (!cst || !securityToken || !apiKey) {
+    if (!auth) {
       steps.push('[1] ✗ Missing auth headers — aborting');
       return NextResponse.json({ ok: false, error: 'Missing IG auth headers', steps }, { status: 401 });
     }
@@ -74,15 +73,7 @@ export async function GET(request: NextRequest) {
     let usedLabel = '';
     for (const ep of endpoints) {
       steps.push(`[2] Trying ${ep.label}`);
-      const r = await fetch(ep.path, {
-        headers: {
-          'X-IG-API-KEY': apiKey,
-          'CST': cst,
-          'X-SECURITY-TOKEN': securityToken,
-          'Accept': 'application/json; charset=UTF-8',
-          'Version': ep.version,
-        },
-      });
+      const r = await fetch(ep.path, { headers: igRequestHeaders(auth, ep.version) });
       steps.push(`[2] HTTP ${r.status}`);
       if (r.ok) {
         rawText   = await r.text();

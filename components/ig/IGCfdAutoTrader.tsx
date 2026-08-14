@@ -52,10 +52,19 @@ const INSTRUMENTS: Instrument[] = [
 ];
 
 type IgPosition = { dealId: string; epic: string; direction: string; size: number; level: number; upl: number; instrumentName: string };
-type IgAuth = { cst: string; securityToken: string; apiKey: string; env: 'demo' | 'live'; accountId: string };
+// OAuth (Version 3), not the legacy CST/X-SECURITY-TOKEN this used to use —
+// deliberately, so this bot can run concurrently with the persistent
+// server-side spread-bet bots (igStrategyBot.ts/fxScalperBot.ts) without
+// the session collision documented below in start(). Access tokens last
+// only 30min (confirmed live against IG's API), hence refreshToken +
+// expiresAt for the proactive refresh cycle — see scheduleRefresh.
+type IgAuth = { accessToken: string; refreshToken: string; apiKey: string; env: 'demo' | 'live'; accountId: string; expiresAt: number };
 
 const SEVERE_LOSS_MULT = 5;
 const PROFIT_LOCK_MULT = 1.5;
+// Refresh well before the real 30min expiry — leaves headroom for a slow
+// network call or a missed interval tick, rather than cutting it fine.
+const TOKEN_REFRESH_MS = 20 * 60_000;
 
 function uid(): string { return Math.random().toString(36).slice(2, 9); }
 
@@ -70,7 +79,7 @@ const STRATEGY_OPTIONS: { value: StrategyName; label: string }[] = [
 
 function igHeaders(auth: IgAuth): Record<string, string> {
   return {
-    'x-ig-cst': auth.cst, 'x-ig-security-token': auth.securityToken,
+    'x-ig-access-token': auth.accessToken, 'x-ig-account-id': auth.accountId,
     'x-ig-api-key': auth.apiKey, 'x-ig-env': auth.env, 'Content-Type': 'application/json',
   };
 }
@@ -104,8 +113,9 @@ export function IGCfdAutoTrader({ fixedEnv }: IGCfdAutoTraderProps = {}) {
     balance: number; available: number; currency: string;
   } | null>(null);
 
-  const authRef    = useRef<IgAuth | null>(null);
+  const authRef     = useRef<IgAuth | null>(null);
   const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const refreshRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const runningRef  = useRef(false);
 
   const addLog = useCallback((type: LogEntry['type'], symbol: string, msg: string) => {
@@ -274,27 +284,60 @@ export function IGCfdAutoTrader({ fixedEnv }: IGCfdAutoTraderProps = {}) {
     }
   }, [refreshAccountInfo, refreshPositionsAndGuard, evaluateOne, addLog]);
 
+  // Proactive token refresh — OAuth access tokens last only 30min
+  // (confirmed live against IG's API), so this needs its own cycle
+  // independent of the poll loop rather than re-logging-in from scratch.
+  const refreshOAuthToken = useCallback(async () => {
+    const auth = authRef.current;
+    if (!auth) return;
+    try {
+      const r = await fetch('/api/ig/refresh-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: auth.refreshToken, apiKey: auth.apiKey, env: auth.env }),
+      });
+      const d = await r.json() as { ok: boolean; error?: string; accessToken?: string; refreshToken?: string; expiresIn?: number };
+      if (!d.ok || !d.accessToken || !d.refreshToken) {
+        addLog('error', '—', `Token refresh failed: ${d.error ?? 'unknown'} — session may drop soon`);
+        return;
+      }
+      authRef.current = {
+        ...auth,
+        accessToken:  d.accessToken,
+        refreshToken: d.refreshToken,
+        expiresAt:    Date.now() + (d.expiresIn ?? 1800) * 1000,
+      };
+    } catch (e) {
+      addLog('error', '—', `Token refresh failed: ${e instanceof Error ? e.message : String(e)} — session may drop soon`);
+    }
+  }, [addLog]);
+
   const start = useCallback(async () => {
     setError(null);
     if (!username || !password || !apiKey) { setError('Username, password and API key are required'); return; }
-    // Confirmed live: logging into a CFD session invalidates any other
-    // active session on the same login (tested directly — a second login
-    // for a different account type kills the first one's session, 401 on
-    // its next call). igStrategyBot.ts and fxScalperBot.ts both hold their
-    // own persistent live spread-bet sessions on this same IG login — a
-    // live CFD login here would very likely kick them. Demo-only until a
-    // real fix (e.g. a separate API key, if IG's session limit turns out to
-    // be scoped per-key rather than per-login) is actually verified.
-    if (env === 'live') { setError('Live is disabled for now — starting a CFD session risks kicking out the other live bots’ IG sessions. Use demo.'); return; }
+    // The underlying reason live used to be hard-disabled here (a CFD login
+    // colliding with the other bots' own spread-bet session) is genuinely
+    // fixed now — this logs in via OAuth (Version 3) instead of the legacy
+    // CST/X-SECURITY-TOKEN mechanism those bots use, and a legacy session +
+    // an OAuth session on the same account were verified live to coexist
+    // without colliding. Left gated regardless: that verification was
+    // against IG's raw API directly, not this component's actual end-to-end
+    // flow (login → poll → order placement) with a real account, which
+    // hasn't been run yet. Remove this block once that's been tested on
+    // demo and confirmed working.
+    if (env === 'live') { setError('Live is gated for now — the session-collision issue is fixed, but this OAuth flow hasn’t been tested end-to-end yet. Test on demo first.'); return; }
     try {
       const r = await fetch('/api/ig/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, apiKey, env, accountType: 'CFD' }),
+        body: JSON.stringify({ username, password, apiKey, env, accountType: 'CFD', authMode: 'oauth' }),
       });
-      const d = await r.json() as { ok: boolean; error?: string; cst?: string; securityToken?: string; accountId?: string };
-      if (!d.ok || !d.cst || !d.securityToken) { setError(d.error ?? 'Login failed'); return; }
-      authRef.current = { cst: d.cst, securityToken: d.securityToken, apiKey, env, accountId: d.accountId ?? '' };
+      const d = await r.json() as { ok: boolean; error?: string; accessToken?: string; refreshToken?: string; expiresIn?: number; accountId?: string };
+      if (!d.ok || !d.accessToken || !d.refreshToken) { setError(d.error ?? 'Login failed'); return; }
+      authRef.current = {
+        accessToken: d.accessToken, refreshToken: d.refreshToken, apiKey, env,
+        accountId: d.accountId ?? '', expiresAt: Date.now() + (d.expiresIn ?? 1800) * 1000,
+      };
       setConnected(true);
 
       // Confirm and log the exact account BEFORE marking as running — if
@@ -304,24 +347,25 @@ export function IGCfdAutoTrader({ fixedEnv }: IGCfdAutoTraderProps = {}) {
 
       runningRef.current = true;
       setRunning(true);
-      addLog('info', '—', `Started — ${strategy} on ${INSTRUMENTS.map(i => i.name).join(', ')} | £${maxRiskGbp} risk/trade | ${env} CFD account`);
+      addLog('info', '—', `Started — ${strategy} on ${INSTRUMENTS.map(i => i.name).join(', ')} | £${maxRiskGbp} risk/trade | ${env} CFD account (OAuth)`);
 
       pollRef.current = setInterval(() => { void pollOnce(); }, STRATEGY_META[strategy].pollMs);
+      refreshRef.current = setInterval(() => { void refreshOAuthToken(); }, TOKEN_REFRESH_MS);
       void pollOnce();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start');
     }
-  }, [username, password, apiKey, env, strategy, maxRiskGbp, addLog, pollOnce, refreshAccountInfo]);
+  }, [username, password, apiKey, env, strategy, maxRiskGbp, addLog, pollOnce, refreshAccountInfo, refreshOAuthToken]);
 
   const stop = useCallback(() => {
     runningRef.current = false;
     setRunning(false);
     setConnected(false);
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-    // IG only tolerates one active session per login — explicitly logging
-    // out (rather than just abandoning the session) frees that slot up for
-    // the other bots sharing the same demo/live login immediately, instead
-    // of leaving it occupied until its own multi-hour token expiry.
+    if (pollRef.current)    { clearInterval(pollRef.current);    pollRef.current    = null; }
+    if (refreshRef.current) { clearInterval(refreshRef.current); refreshRef.current = null; }
+    // Explicitly logging out (rather than just abandoning the session)
+    // frees it up immediately instead of leaving it occupied until its own
+    // expiry — best-effort either way (see /api/ig/logout's own comment).
     if (authRef.current) {
       const auth = authRef.current;
       void fetch('/api/ig/logout', { method: 'POST', headers: igHeaders(auth) }).catch(() => {});
@@ -332,7 +376,8 @@ export function IGCfdAutoTrader({ fixedEnv }: IGCfdAutoTraderProps = {}) {
 
   useEffect(() => () => {
     runningRef.current = false;
-    if (pollRef.current) clearInterval(pollRef.current);
+    if (pollRef.current)    clearInterval(pollRef.current);
+    if (refreshRef.current) clearInterval(refreshRef.current);
     if (authRef.current) {
       void fetch('/api/ig/logout', { method: 'POST', headers: igHeaders(authRef.current) }).catch(() => {});
     }
@@ -351,7 +396,7 @@ export function IGCfdAutoTrader({ fixedEnv }: IGCfdAutoTraderProps = {}) {
           <span className="text-[10px] text-gray-500">{connected ? `Connected — ${env} CFD` : 'Not connected'}</span>
         </div>
         <p className="text-[10px] text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5 mb-3">
-          Runs only while this tab is open. Closing the tab stops everything — no background trading, no server-side persistence. Live is disabled for now: logging into a CFD session has been confirmed to invalidate other active sessions on the same IG login, which would risk kicking the other live bots (Gemini Opinion, FX Scalper) off their own sessions.
+          Runs only while this tab is open. Closing the tab stops everything — no background trading, no server-side persistence. Login now uses OAuth (a session type verified live to coexist with the other bots&apos; own spread-bet sessions, unlike the old CST/token login this used to share the collision risk with) — but this exact flow hasn&apos;t been run end-to-end yet, so Live stays off here until it&apos;s been tested on demo first.
         </p>
 
         {error && <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded px-2 py-1 mb-3">{error}</div>}
@@ -389,7 +434,7 @@ export function IGCfdAutoTrader({ fixedEnv }: IGCfdAutoTraderProps = {}) {
                   <select value={env} onChange={e => setEnv(e.target.value as 'demo' | 'live')}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white">
                     <option value="demo">Demo</option>
-                    <option value="live" disabled>Live (disabled — see note below)</option>
+                    <option value="live" disabled>Live (pending demo test — see note above)</option>
                   </select>
                 )}
               </div>

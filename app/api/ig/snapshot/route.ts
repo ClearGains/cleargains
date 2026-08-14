@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveIgAuth, igRequestHeaders } from '@/lib/igAuthHeaders';
 
 /**
  * GET /api/ig/snapshot?epics=EPIC1,EPIC2,...
@@ -26,13 +27,11 @@ const CACHE_TTL = 60_000; // 60 seconds
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const epicsParam = searchParams.get('epics') ?? '';
-  const cst           = request.headers.get('x-ig-cst') ?? '';
-  const securityToken = request.headers.get('x-ig-security-token') ?? '';
-  const apiKey        = request.headers.get('x-ig-api-key') ?? '';
-  const env           = (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live';
+  const env         = (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live';
+  const auth        = resolveIgAuth(request);
 
   if (!epicsParam) return NextResponse.json({ ok: false, error: 'epics parameter required' }, { status: 400 });
-  if (!cst || !securityToken || !apiKey) return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 401 });
+  if (!auth) return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 401 });
 
   // Deduplicate and cap at 50 (IG limit)
   const epics = [...new Set(epicsParam.split(',').map(e => e.trim()).filter(Boolean))].slice(0, 50);
@@ -51,13 +50,7 @@ export async function GET(request: NextRequest) {
     const res = await fetch(
       `${baseUrl}/markets?epics=${encodeURIComponent(epics.join(','))}`,
       {
-        headers: {
-          'X-IG-API-KEY':      apiKey,
-          'CST':               cst,
-          'X-SECURITY-TOKEN':  securityToken,
-          'Accept':            'application/json; charset=UTF-8',
-          'Version':           '1',
-        },
+        headers: igRequestHeaders(auth, '1'),
         signal: AbortSignal.timeout(8_000),
       },
     );

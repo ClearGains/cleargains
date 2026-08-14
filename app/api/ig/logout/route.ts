@@ -1,22 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveIgAuth, igRequestHeaders } from '@/lib/igAuthHeaders';
 
 /**
  * POST /api/ig/logout
- * Headers: x-ig-cst, x-ig-security-token, x-ig-api-key, x-ig-env
+ * Headers: x-ig-api-key, x-ig-env, plus either (x-ig-cst + x-ig-security-token)
+ * or (x-ig-access-token + x-ig-account-id) — see lib/igAuthHeaders.ts.
  *
- * IG only tolerates one active session per login. Leaving a session open
- * when a bot/tab stops (rather than explicitly logging out) keeps it
- * occupying that one-session slot until its own multi-hour token expiry,
- * which can block every other consumer of the same login in the meantime.
- * This actually tells IG the session is done.
+ * A legacy session only tolerates one other concurrent legacy session per
+ * login. Leaving one open when a bot/tab stops (rather than explicitly
+ * logging out) keeps it occupying that slot until its own multi-hour token
+ * expiry, which can block every other consumer of the same login in the
+ * meantime. This actually tells IG the session is done. An OAuth session
+ * doesn't carry that same collision risk (confirmed live — see
+ * igAuthHeaders.ts) and expires in 30min on its own regardless, so this
+ * stays best-effort for both styles rather than something callers need to
+ * depend on succeeding.
  */
 export async function POST(request: NextRequest) {
-  const cst   = request.headers.get('x-ig-cst');
-  const token = request.headers.get('x-ig-security-token');
-  const key   = request.headers.get('x-ig-api-key');
-  const env   = request.headers.get('x-ig-env') ?? 'demo';
+  const env  = request.headers.get('x-ig-env') ?? 'demo';
+  const auth = resolveIgAuth(request);
 
-  if (!cst || !token || !key) {
+  if (!auth) {
     return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 400 });
   }
 
@@ -27,13 +31,7 @@ export async function POST(request: NextRequest) {
   try {
     await fetch(`${base}/session`, {
       method: 'DELETE',
-      headers: {
-        'X-IG-API-KEY': key,
-        'CST': cst,
-        'X-SECURITY-TOKEN': token,
-        'Version': '1',
-        'Accept': 'application/json; charset=UTF-8',
-      },
+      headers: igRequestHeaders(auth, '1'),
       signal: AbortSignal.timeout(8_000),
     });
   } catch {

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveIgAuth, igRequestHeaders, type IgOutboundAuth } from '@/lib/igAuthHeaders';
 
 // ── Verified IG spread-bet epic map (DFB / TODAY rolling instruments only) ────
 // ⚠️  Using a CFD epic on a spread-bet account returns REJECT_CFD_ORDER_ON_SPREADBET_ACCOUNT
@@ -32,7 +33,7 @@ const VERIFIED_EPIC_SET = new Set(Object.values(VERIFIED_EPICS));
 /** Validate and resolve an epic against the live IG account. */
 async function resolveEpic(
   epic: string,
-  apiKey: string, cst: string, securityToken: string,
+  auth: IgOutboundAuth,
   base: string,
 ): Promise<{ epic: string; resolvedVia: string }> {
   if (VERIFIED_EPIC_SET.has(epic)) return { epic, resolvedVia: 'verified' };
@@ -40,7 +41,7 @@ async function resolveEpic(
   // 1. Direct epic lookup — IG validates it against the actual account
   try {
     const r = await fetch(`${base}/markets/${encodeURIComponent(epic)}`, {
-      headers: igHeaders(apiKey, cst, securityToken, '1'),
+      headers: igRequestHeaders(auth, '1'),
       signal: AbortSignal.timeout(5_000),
     });
     if (r.ok) {
@@ -53,7 +54,7 @@ async function resolveEpic(
   // 2. Text search fallback (covers partial/mistyped epics)
   try {
     const r = await fetch(`${base}/markets?searchTerm=${encodeURIComponent(epic)}&pageSize=5`, {
-      headers: igHeaders(apiKey, cst, securityToken, '1'),
+      headers: igRequestHeaders(auth, '1'),
       signal: AbortSignal.timeout(5_000),
     });
     if (r.ok) {
@@ -66,23 +67,14 @@ async function resolveEpic(
   return { epic, resolvedVia: 'unresolved' };
 }
 
-function igHeaders(apiKey: string, cst: string, securityToken: string, version = '2'): Record<string, string> {
-  return {
-    'X-IG-API-KEY': apiKey,
-    'CST': cst,
-    'X-SECURITY-TOKEN': securityToken,
-    'Content-Type': 'application/json',
-    'Accept': 'application/json; charset=UTF-8',
-    'Version': version,
-  };
+function igHeaders(auth: IgOutboundAuth, version = '2'): Record<string, string> {
+  return { ...igRequestHeaders(auth, version), 'Content-Type': 'application/json' };
 }
 
-function getAuth(request: NextRequest) {
+function getAuth(request: NextRequest): { auth: IgOutboundAuth | null; env: 'demo' | 'live' } {
   return {
-    cst:           request.headers.get('x-ig-cst') ?? '',
-    securityToken: request.headers.get('x-ig-security-token') ?? '',
-    apiKey:        request.headers.get('x-ig-api-key') ?? '',
-    env:          (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live',
+    auth: resolveIgAuth(request),
+    env:  (request.headers.get('x-ig-env') ?? 'demo') as 'demo' | 'live',
   };
 }
 
@@ -95,8 +87,8 @@ function baseUrl(env: 'demo' | 'live') {
 // ── POST — open market position OR create working order ───────────────────────
 export async function POST(request: NextRequest) {
   try {
-    const { cst, securityToken, apiKey, env } = getAuth(request);
-    if (!cst || !securityToken || !apiKey) {
+    const { auth, env } = getAuth(request);
+    if (!auth) {
       return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 401 });
     }
 
@@ -123,7 +115,7 @@ export async function POST(request: NextRequest) {
     const orderType = body.orderType ?? 'MARKET';
 
     // Resolve epic — validate against verified set, search IG if unknown
-    const { epic: resolvedEpic, resolvedVia } = await resolveEpic(body.epic, apiKey, cst, securityToken, base);
+    const { epic: resolvedEpic, resolvedVia } = await resolveEpic(body.epic, auth, base);
 
     // ── Working order (LIMIT or STOP) ─────────────────────────────────────────
     if (orderType === 'LIMIT' || orderType === 'STOP') {
@@ -149,7 +141,7 @@ export async function POST(request: NextRequest) {
       if (body.limitLevel)      woPayload.limitLevel    = body.limitLevel;
       const wRes = await fetch(`${base}/workingorders/otc`, {
         method: 'POST',
-        headers: igHeaders(apiKey, cst, securityToken, '2'),
+        headers: igHeaders(auth, '2'),
         body: JSON.stringify(woPayload),
       });
       let wData: { dealReference?: string; errorCode?: string } = {};
@@ -179,7 +171,7 @@ export async function POST(request: NextRequest) {
 
     const res = await fetch(`${base}/positions/otc`, {
       method: 'POST',
-      headers: igHeaders(apiKey, cst, securityToken, '2'),
+      headers: igHeaders(auth, '2'),
       body: JSON.stringify(payload),
     });
 
@@ -203,7 +195,7 @@ export async function POST(request: NextRequest) {
         await new Promise(r => setTimeout(r, 1_500));
         try {
           const cr = await fetch(`${base}/confirms/${encodeURIComponent(dealRef)}`, {
-            headers: igHeaders(apiKey, cst, securityToken, '1'),
+            headers: igHeaders(auth, '1'),
             signal: AbortSignal.timeout(5_000),
           });
           if (cr.ok) {
@@ -259,7 +251,7 @@ export async function POST(request: NextRequest) {
         try {
           const upd = await fetch(`${base}/positions/otc/${encodeURIComponent(confirm.dealId!)}`, {
             method: 'PUT',
-            headers: igHeaders(apiKey, cst, securityToken, '2'),
+            headers: igHeaders(auth, '2'),
             body: JSON.stringify(slTpPayload),
           });
           if (upd.ok) return { ok: true };
@@ -302,8 +294,8 @@ export async function POST(request: NextRequest) {
 // ── DELETE — close an existing position ──────────────────────────────────────
 export async function DELETE(request: NextRequest) {
   try {
-    const { cst, securityToken, apiKey, env } = getAuth(request);
-    if (!cst || !securityToken || !apiKey) {
+    const { auth, env } = getAuth(request);
+    if (!auth) {
       return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 401 });
     }
 
@@ -324,7 +316,7 @@ export async function DELETE(request: NextRequest) {
 
     const res = await fetch(`${base}/positions/otc`, {
       method: 'POST',
-      headers: { ...igHeaders(apiKey, cst, securityToken, '1'), '_method': 'DELETE' },
+      headers: { ...igHeaders(auth, '1'), '_method': 'DELETE' },
       body: JSON.stringify(closePayload),
     });
 
@@ -348,8 +340,8 @@ export async function DELETE(request: NextRequest) {
 // ── PATCH — update stop/limit levels on an existing open position ─────────────
 export async function PATCH(request: NextRequest) {
   try {
-    const { cst, securityToken, apiKey, env } = getAuth(request);
-    if (!cst || !securityToken || !apiKey) {
+    const { auth, env } = getAuth(request);
+    if (!auth) {
       return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 401 });
     }
 
@@ -372,7 +364,7 @@ export async function PATCH(request: NextRequest) {
 
     const res = await fetch(`${base}/positions/otc/${encodeURIComponent(body.dealId)}`, {
       method: 'PUT',
-      headers: igHeaders(apiKey, cst, securityToken, '2'),
+      headers: igHeaders(auth, '2'),
       body: JSON.stringify(updatePayload),
     });
 

@@ -1,16 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveIgAuth, igRequestHeaders } from '@/lib/igAuthHeaders';
 
 /**
  * GET /api/ig/account
- * Headers: x-ig-cst, x-ig-security-token, x-ig-api-key, x-ig-env
+ * Headers: x-ig-api-key, x-ig-env, plus either (x-ig-cst + x-ig-security-token)
+ * or (x-ig-access-token + x-ig-account-id) — see lib/igAuthHeaders.ts.
  *
  * Returns available funds and balance for the connected IG account.
  */
 export async function GET(request: NextRequest) {
-  const cst   = request.headers.get('x-ig-cst');
-  const token = request.headers.get('x-ig-security-token');
-  const key   = request.headers.get('x-ig-api-key');
-  const env   = request.headers.get('x-ig-env') ?? 'demo';
+  const env  = request.headers.get('x-ig-env') ?? 'demo';
+  const auth = resolveIgAuth(request);
   // IG's own "preferred" flag on each account is a sticky per-account
   // setting, NOT "which account this session is currently switched to" —
   // confirmed live it stays pointed at the spread-bet account even after a
@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
   // back to whichever account IG considers "preferred".
   const wantedAccountId = request.nextUrl.searchParams.get('accountId');
 
-  if (!cst || !token || !key) {
+  if (!auth) {
     return NextResponse.json({ ok: false, error: 'Missing IG auth headers' }, { status: 400 });
   }
 
@@ -30,13 +30,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const res = await fetch(`${base}/accounts`, {
-      headers: {
-        'X-IG-API-KEY': key,
-        'CST': cst,
-        'X-SECURITY-TOKEN': token,
-        'Version': '1',
-        'Accept': 'application/json; charset=UTF-8',
-      },
+      headers: igRequestHeaders(auth, '1'),
       signal: AbortSignal.timeout(10_000),
     });
 
