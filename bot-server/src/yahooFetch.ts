@@ -128,6 +128,40 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'KA.D.GSK.DAILY.IP':    'GSK.L',
   'KA.D.AZN.DAILY.IP':    'AZN.L',
   'KA.D.LLOY.DAILY.IP':   'LLOY.L',
+
+  // ── CFD-account .CASH.IP epics for the same stocks above ──────────────
+  // igCfdBot.ts swaps most of these ".DAILY.IP" epics for a distinct,
+  // genuinely CFD-dealable ".CASH.IP" epic (see CFD_STOCK_EPIC_OVERRIDES
+  // there) — this map is keyed by exact epic string, so those lookups
+  // missed entirely without these additional entries, silently starving
+  // the CFD bot of bar data ("Not enough bar data yet" forever) even
+  // though order placement itself was already fixed. Same underlying
+  // company/ticker as the .DAILY.IP entry above in each case.
+  'UC.D.MSFT.CASH.IP':    'MSFT',
+  'UC.D.NVDA.CASH.IP':    'NVDA',
+  'UB.D.GOOGL.CASH.IP':   'GOOGL',
+  'UB.D.FB.CASH.IP':      'META',
+  'UD.D.TSLA.CASH.IP':    'TSLA',
+  'UC.D.NFLX.CASH.IP':    'NFLX',
+  'SA.D.AMD.CASH.IP':     'AMD',
+  'UA.D.AVGO.CASH.IP':    'AVGO',
+  'UB.D.INTC.CASH.IP':    'INTC',
+  'UC.D.QCOM.CASH.IP':    'QCOM',
+  'UC.D.MU.CASH.IP':      'MU',
+  'UD.D.SNDKUS.CASH.IP':  'SNDK',
+  'UD.D.STX.CASH.IP':     'STX',
+  'UC.D.MRVL.CASH.IP':    'MRVL',
+  'UD.D.SKHYUS.CASH.IP':  '000660.KS',
+  'UD.D.WDC.CASH.IP':     'WDC',
+  'UC.D.RIMM.CASH.IP':    'BB',
+  'EC.D.NOKIAFP.CASH.IP': 'NOKIA.HE',
+  'KA.D.BARC.CASH.IP':    'BARC.L',
+  'KA.D.BP.CASH.IP':      'BP.L',
+  'KA.D.HSBA.CASH.IP':    'HSBA.L',
+  'KA.D.SHELLN.CASH.IP':  'SHEL.L',
+  'KA.D.GSK.CASH.IP':     'GSK.L',
+  'KA.D.AZN.CASH.IP':     'AZN.L',
+  'KA.D.LLOY.CASH.IP':    'LLOY.L',
 };
 
 // ── Epic → Alpaca ticker map ──────────────────────────────────────────────────
@@ -162,6 +196,27 @@ export const EPIC_TO_ALPACA: Record<string, string> = {
   'UC.D.RIMM.DAILY.IP':   'BB',
   // SK Hynix (Korean primary listing) and Nokia (Helsinki listing) aren't
   // Alpaca-tradable US symbols — Yahoo-only for those two, as before.
+
+  // CFD-account .CASH.IP equivalents — see the matching block in
+  // EPIC_TO_YAHOO above for why these are needed as separate keys.
+  'UC.D.MSFT.CASH.IP':   'MSFT',
+  'UC.D.NVDA.CASH.IP':   'NVDA',
+  'UB.D.GOOGL.CASH.IP':  'GOOGL',
+  'UB.D.FB.CASH.IP':     'META',
+  'UD.D.TSLA.CASH.IP':   'TSLA',
+  'UC.D.NFLX.CASH.IP':   'NFLX',
+  'SA.D.AMD.CASH.IP':    'AMD',
+  'UA.D.AVGO.CASH.IP':   'AVGO',
+  'UB.D.INTC.CASH.IP':   'INTC',
+  'UC.D.QCOM.CASH.IP':   'QCOM',
+  'UC.D.MU.CASH.IP':     'MU',
+  'UD.D.SNDKUS.CASH.IP': 'SNDK',
+  'UD.D.STX.CASH.IP':    'STX',
+  'UC.D.MRVL.CASH.IP':   'MRVL',
+  'UD.D.WDC.CASH.IP':    'WDC',
+  'UC.D.RIMM.CASH.IP':   'BB',
+  // UK stocks aren't Alpaca-tradable either — Yahoo-only (BARC/BP/HSBA/etc.
+  // already have .CASH.IP entries in EPIC_TO_YAHOO above).
 };
 
 // ── Bars with fallback ────────────────────────────────────────────────────────
