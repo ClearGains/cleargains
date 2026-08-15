@@ -12,6 +12,8 @@
 //  - Signals are computed on the bar CLOSE and filled at the next bar's open
 //    (no look-ahead).
 
+import { ruleBasedAnalysis } from './ruleBasedAnalysis';
+
 export type BTBar = { t: string; o: number; h: number; l: number; c: number; v: number };
 
 // ── IG universe ────────────────────────────────────────────────────────────
@@ -99,11 +101,13 @@ export type BTStrategy =
   | 'weekly_momentum'
   | 'ratchet_streak'
   | 'donchian_breakout'
-  | 'macd_crossover';
+  | 'macd_crossover'
+  | 'rule_based_analysis';
 
 export const BT_STRATEGY_LABELS: Record<BTStrategy, string> = {
   rsi_mean_reversion: 'RSI Mean Reversion (5-min)',
   ema_crossover:      'EMA Crossover (daily)',
+  rule_based_analysis: 'Rule-Based Analysis (Daily Brief)',
   vwap:               'VWAP Reversion (5-min)',
   orb:                'Opening Range Breakout (5-min)',
   weekly_momentum:    'Weekly Momentum (daily→weekly)',
@@ -588,6 +592,32 @@ function makeDonchianBreakout(bars: BTBar[], p: BTParams) {
   };
 }
 
+// ── Rule-Based Analysis (Daily Brief's swing engine, ported) ────────────────
+// Same engine as alpacaStrategies.ts's ruleBasedAnalysisSignal, adapted to
+// this simulator's incremental (bar, position) contract instead of a fresh
+// bars array per call. Recomputes the full indicator set on a growing
+// slice at every bar — O(n) per bar, O(n²) total — same cost profile the
+// standalone walk-forward backtest already accepted for this same engine.
+function makeRuleBasedAnalysis(bars: BTBar[], p: BTParams) {
+  return (i: number, pos: OpenPos | null): StepSignal => {
+    if (i < 210) return { action: 'none' }; // needs ~200 bars for SMA200 to populate — see ruleBasedAnalysis's own trend filter
+    const slice = bars.slice(0, i + 1).map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v }));
+    let analysis;
+    try { analysis = ruleBasedAnalysis('', slice); } catch { return { action: 'none' }; }
+    const swing = analysis.swing;
+
+    if (pos) {
+      if (pos.side === 'long'  && swing.direction !== 'LONG')  return { action: 'exit', reason: 'Thesis no longer bullish' };
+      if (pos.side === 'short' && swing.direction !== 'SHORT') return { action: 'exit', reason: 'Thesis no longer bearish' };
+      return { action: 'none' };
+    }
+
+    if (swing.direction === 'LONG')  return { action: 'enter', side: 'long',  stop: swing.stopLoss, tp: swing.takeProfit1 };
+    if (swing.direction === 'SHORT') return { action: 'enter', side: 'short', stop: swing.stopLoss, tp: swing.takeProfit1 };
+    return { action: 'none' };
+  };
+}
+
 // ── MACD Signal-Line Crossover (daily) ───────────────────────────────────────
 function makeMacdCrossover(bars: BTBar[], p: BTParams) {
   const closes = bars.map(b => b.c);
@@ -728,6 +758,9 @@ export const BT_DATA_NEEDS: Record<BTStrategy, { interval: '5m' | '1d'; range: s
   ratchet_streak:     { interval: '5m', range: '60d' },
   donchian_breakout:  { interval: '1d', range: '2y' },
   macd_crossover:     { interval: '1d', range: '2y' },
+  // Needs ~200+ daily bars for its SMA200 trend filter to actually be
+  // populated — the plain 2y other daily strategies use is already enough.
+  rule_based_analysis: { interval: '1d', range: '2y' },
 };
 
 // ── Walk-forward validation ───────────────────────────────────────────────────
@@ -746,6 +779,7 @@ const WF_GRIDS: Record<BTStrategy, Partial<BTParams>[]> = (() => {
     ratchet_streak: [],
     donchian_breakout: [],
     macd_crossover: [],
+    rule_based_analysis: [], // no tunable params of its own — fixed rule, not parameterized
   };
   for (const rsiBuy of [20, 25, 30])
     for (const rsiExitLong of [55, 60, 65])
@@ -854,6 +888,9 @@ export function runBacktest(
       break;
     case 'macd_crossover':
       out = runSim(bars, params, makeMacdCrossover(bars, params));
+      break;
+    case 'rule_based_analysis':
+      out = runSim(bars, params, makeRuleBasedAnalysis(bars, params));
       break;
   }
 
