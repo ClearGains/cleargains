@@ -71,9 +71,10 @@ export async function GET(req: NextRequest) {
     const intraday = cfg.intraday ?? false;
     const candles = timestamps
       .map((ts, i) => ({
-        time: intraday
-          ? new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')
-          : new Date(ts * 1000).toISOString().slice(0, 10),
+        // lightweight-charts only accepts a UTCTimestamp (seconds) or a strict
+        // 'yyyy-mm-dd' string for Time — a "yyyy-mm-dd HH:MM" string silently
+        // breaks the Candlestick series, so intraday bars use the raw epoch seconds.
+        time: intraday ? ts : new Date(ts * 1000).toISOString().slice(0, 10),
         open:   q.open?.[i]   ?? 0,
         high:   q.high?.[i]   ?? 0,
         low:    q.low?.[i]    ?? 0,
