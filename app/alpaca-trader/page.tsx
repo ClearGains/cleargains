@@ -456,7 +456,7 @@ function RecommendationPanel({
 
 // ── IG Spread Bet tab ─────────────────────────────────────────────────────────
 
-type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion';
+type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis';
 type IgMode         = 'demo' | 'live';
 
 type IgOpenPosition = {
@@ -551,6 +551,7 @@ const IG_STRATEGIES: { value: IgStrategyName; label: string; timeframe: string; 
   { value: 'vwap',               label: 'VWAP Reversion',         timeframe: 'Intraday (1-min)', description: 'Bet on price returning to VWAP when it dips 0.5% below and RSI < 45. Backtested negative after costs.' },
   { value: 'weekly_momentum',    label: 'Weekly Momentum',        timeframe: 'Position (Weekly)', description: 'Ride weekly trends: above 12-week SMA + 4-week momentum > 1% + RSI 50–70. Backtested negative after financing costs.' },
   { value: 'gemini_opinion',     label: '🧪 Gemini Opinion (Experimental)', timeframe: 'Intraday (30-min)', description: 'No technical entry rule — Gemini decides BUY/SELL/HOLD from scratch off 30-min price shape, RSI/MACD context, and near-daily news, and sets its own stop/TP. Exits handled entirely by Gemini Position Watch. No track record yet — start small.' },
+  { value: 'rule_based_analysis', label: '📊 Rule-Based Analysis (Daily Brief)', timeframe: 'Swing (Daily)', description: 'Same RSI/MACD/SMA/Bollinger engine the Daily Brief page uses, with an SMA200 trend filter. Backtested 4th of 9 overall (avg -3.74%, PF 0.79) — but restricted here to 15 instruments individually re-verified profitable (return>0 AND PF>1) under the same real cost model: FTSE 100, Japan 225, Apple, Barclays, Alphabet, HSBC, BP, Silver, Brent Crude, Natural Gas, Bitcoin, Rivian, Uber, Ford, Coinbase. Most consistent of the top strategies (100% of its own instruments profitable, highest win rate ~52%) but smaller average wins than the trend-following strategies above — donchian_breakout/ema_crossover/macd_crossover all beat it on raw return even on this exact instrument set.' },
 ];
 
 const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
@@ -564,6 +565,7 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
   macd_crossover:     'MACD Crossover',
   pivot_points:       'Daily Pivot Points',
   gemini_opinion:     'Gemini Opinion (Experimental)',
+  rule_based_analysis: 'Rule-Based Analysis (Daily Brief)',
 };
 
 function IgSpreadBetTab() {
@@ -1692,13 +1694,14 @@ function FxSwingBotTab() {
 // colliding — see bot-server/src/igOAuthApi.ts.
 
 type CfdMode = 'demo' | 'live';
-type CfdStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'vwap' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points';
+type CfdStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'vwap' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'rule_based_analysis';
 
 const CFD_STRATEGIES: { value: CfdStrategyName; label: string; timeframe: string }[] = [
   { value: 'donchian_breakout',  label: 'Donchian Breakout',          timeframe: 'Swing (Daily)' },
   { value: 'donchian_hourly',    label: 'Donchian Breakout (Hourly)', timeframe: 'Hours–2 days' },
   { value: 'ema_crossover',      label: 'EMA Crossover',              timeframe: 'Swing (Daily)' },
   { value: 'macd_crossover',     label: 'MACD Crossover',             timeframe: 'Swing (Daily)' },
+  { value: 'rule_based_analysis', label: 'Rule-Based Analysis (Daily Brief)', timeframe: 'Swing (Daily)' },
   { value: 'pivot_points',       label: 'Daily Pivot Points',         timeframe: 'Intraday (S1/R1 bounce)' },
   { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion',         timeframe: 'Intraday (5-min)' },
   { value: 'vwap',               label: 'VWAP Reversion',             timeframe: 'Intraday (1-min)' },

@@ -76,6 +76,22 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'KA.D.GSK.DAILY.IP',    name: 'GSK'          },
   { epic: 'KA.D.AZN.DAILY.IP',    name: 'AstraZeneca'  },
   { epic: 'KA.D.LLOY.DAILY.IP',   name: 'Lloyds'       },
+  // Commodities/crypto/extra shares — added 2026-08-15 after backtesting
+  // confirmed real edge on these specifically (scripts/backtestDailyBrief.ts
+  // + backtest.ts's leaderboard engine), but they weren't in this universe
+  // at all before. Epics verified live via IG's own market search first
+  // (this codebase has repeatedly found guessed epics silently wrong) —
+  // picked the plain DFB/"24 Hours" variant over month-dated futures
+  // contracts or leveraged ETP variants, matching the convention every
+  // other entry above already uses.
+  { epic: 'CS.D.USCSI.TODAY.IP',  name: 'Silver'       },
+  { epic: 'CC.D.LCO.USS.IP',      name: 'Brent Crude'  },
+  { epic: 'CC.D.NG.USS.IP',       name: 'Natural Gas'  },
+  { epic: 'CS.D.BITCOIN.TODAY.IP', name: 'Bitcoin'     },
+  { epic: 'UC.D.RIVNUS.DAILY.IP', name: 'Rivian'       },
+  { epic: 'SH.D.UBERUS.DAILY.IP', name: 'Uber'         },
+  { epic: 'SC.D.F.DAILY.IP',      name: 'Ford'         },
+  { epic: 'UA.D.COINUS.DAILY.IP', name: 'Coinbase'     },
 ];
 
 // Rough sector grouping for the stock universe above — used to warn the
@@ -135,9 +151,18 @@ export const SECTOR_MAP: Record<string, string> = {
 // could independently decide to trade the same pair fxScalperBot.ts is
 // already watching, racing two uncoordinated bots against each other on one
 // live account with no shared awareness of one another's positions.
-export const FX_EPICS = new Set(
-  IG_EPICS.filter(e => e.epic.startsWith('CS.')).map(e => e.epic),
-);
+//
+// Explicit list, NOT derived by epic prefix — Bitcoin and Spot Silver's
+// real IG epics also happen to start with "CS." (IG's generic "currencies"
+// dealing category, not actually FX) despite not being FX pairs at all.
+// A prefix-based `.filter(e => e.epic.startsWith('CS.'))` would have
+// silently swept both into this set the moment they were added to
+// IG_EPICS below, wrongly excluding them from every stock-bot strategy's
+// scan pool as if fxScalperBot.ts owned them too.
+export const FX_EPICS = new Set([
+  'CS.D.GBPUSD.TODAY.IP', 'CS.D.EURUSD.TODAY.IP', 'CS.D.USDJPY.TODAY.IP',
+  'CS.D.EURGBP.TODAY.IP', 'CS.D.AUDUSD.TODAY.IP',
+]);
 
 // Restricts rule_based_analysis to only the instruments genuinely confirmed
 // profitable — SUPERSEDES an earlier version of this list (2026-08-15,
@@ -155,14 +180,26 @@ export const FX_EPICS = new Set(
 // profitable (return>0 AND profitFactor>1) under the proper engine.
 // BP is a genuine surprise here: excluded as a loser (-0.24R) under the old
 // test, confirmed profitable (+4.00%, PF 1.24) under the real one.
+// Extended 2026-08-15 with commodities/crypto/extra shares that also
+// backtested genuinely profitable but weren't in IG_EPICS at all until
+// now (see that array's own comment) — epics verified live via IG's
+// market search before adding, same discipline as everything else here.
 export const RULE_BASED_ANALYSIS_CONFIRMED_EPICS = new Set([
-  'IX.D.FTSE.DAILY.IP',   // FTSE 100   return=+2.66%  PF=1.38
-  'IX.D.NIKKEI.DAILY.IP', // Japan 225  return=+10.76% PF=1.83
-  'UA.D.AAPL.CASH.IP',    // Apple      return=+11.23% PF=2.33
-  'KA.D.BARC.DAILY.IP',   // Barclays   return=+2.03%  PF=1.14
-  'UB.D.GOOGL.DAILY.IP',  // Alphabet   return=+14.53% PF=4.21 (best performer in the IG universe)
-  'KA.D.HSBA.DAILY.IP',   // HSBC       return=+10.98% PF=1.82
-  'KA.D.BP.DAILY.IP',     // BP         return=+4.00%  PF=1.24
+  'IX.D.FTSE.DAILY.IP',   // FTSE 100     return=+2.66%  PF=1.38
+  'IX.D.NIKKEI.DAILY.IP', // Japan 225    return=+10.76% PF=1.83
+  'UA.D.AAPL.CASH.IP',    // Apple        return=+11.23% PF=2.33
+  'KA.D.BARC.DAILY.IP',   // Barclays     return=+2.03%  PF=1.14
+  'UB.D.GOOGL.DAILY.IP',  // Alphabet     return=+14.53% PF=4.21 (best performer in the IG universe)
+  'KA.D.HSBA.DAILY.IP',   // HSBC         return=+10.98% PF=1.82
+  'KA.D.BP.DAILY.IP',     // BP           return=+4.00%  PF=1.24
+  'CS.D.USCSI.TODAY.IP',  // Silver       return=+26.17% PF=2.45 (best raw return of any symbol tested)
+  'CC.D.LCO.USS.IP',      // Brent Crude  return=+22.98% PF=2.55
+  'CC.D.NG.USS.IP',       // Natural Gas  return=+17.69% PF=2.32
+  'CS.D.BITCOIN.TODAY.IP', // Bitcoin     return=+13.78% PF=2.13
+  'UC.D.RIVNUS.DAILY.IP', // Rivian       return=+12.79% PF=1.51
+  'SH.D.UBERUS.DAILY.IP', // Uber         return=+3.73%  PF=1.38
+  'SC.D.F.DAILY.IP',      // Ford         return=+3.56%  PF=1.21
+  'UA.D.COINUS.DAILY.IP', // Coinbase     return=+2.54%  PF=1.65
 ]);
 
 // Indices fxScalperBot.ts is also allowed to trade, alongside the 5 FX
