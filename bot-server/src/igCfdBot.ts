@@ -202,6 +202,22 @@ const TOKEN_REFRESH_MS = 20 * 60_000; // access tokens last 30min (confirmed liv
 // per-trade loss cap.
 const MARGIN_BUFFER_MIN_PCT = 0.15;
 
+// User call (2026-08-15): give this bot a genuine break every weekend
+// instead of scanning the whole universe every cycle for two straight days
+// — during Sat/Sun almost every entry attempt was getting rejected anyway
+// (real exchanges and most "24 Hours" CFD share products aren't reliably
+// dealable then), which was just burning IG's API allowance and filling
+// the log with noise for nothing. Quiet window is Saturday through Sunday,
+// resuming Monday 00:00 UTC — position management (severe-loss/profit-lock
+// on anything already open) stays active throughout; only new-entry
+// scanning pauses. Different boundary than alpacaApi.ts's
+// isScannerQuietWeekend() (Sunday 22:00 UTC) — that one's tuned for the
+// live spread-bet bot; this is what was actually asked for here.
+function isCfdQuietWeekend(): boolean {
+  const day = new Date().getUTCDay(); // 0=Sun, 6=Sat
+  return day === 6 || day === 0;
+}
+
 function uid(): string { return Math.random().toString(36).slice(2, 9); }
 function ts(): string { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
 function epicName(epic: string): string { return epic.split('.').slice(0, 3).join('.'); }
@@ -234,6 +250,7 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
   let maxPositions  = 3;
   let allowShorts   = true;
   let lastKnownBalance = 0, lastKnownAvailable = 0;
+  let weekendNoticeLogged = false;
   let lastKnownPositions: CfdPositionStatus[] = [];
   const log: CfdLogEntry[] = [];
   // Some names in the shared spread-bet epic list aren't entitled for CFD
@@ -432,11 +449,16 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
         }
       }
 
-      const openCount = positions.length;
-      for (const inst of INSTRUMENTS) {
-        if (!running) break;
-        await evaluateOne(inst, positions, openCount);
-        await new Promise(r => setTimeout(r, 300)); // light throttle across instruments
+      if (isCfdQuietWeekend()) {
+        if (!weekendNoticeLogged) { addLog('wait', '—', '😴 Weekend — pausing new-entry scanning until Monday 00:00 UTC (open positions still managed)'); weekendNoticeLogged = true; }
+      } else {
+        weekendNoticeLogged = false;
+        const openCount = positions.length;
+        for (const inst of INSTRUMENTS) {
+          if (!running) break;
+          await evaluateOne(inst, positions, openCount);
+          await new Promise(r => setTimeout(r, 300)); // light throttle across instruments
+        }
       }
     } catch (e) {
       addLog('error', '—', `Poll cycle failed: ${e instanceof Error ? e.message : String(e)}`);
