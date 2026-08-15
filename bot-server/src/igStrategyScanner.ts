@@ -139,32 +139,30 @@ export const FX_EPICS = new Set(
   IG_EPICS.filter(e => e.epic.startsWith('CS.')).map(e => e.epic),
 );
 
-// Restricts rule_based_analysis to only the instruments its own backtest
-// actually confirmed profitable (scripts/backtestDailyBrief.ts,
-// 2026-08-15, walk-forward, 2y daily bars, with the SMA200 trend filter).
-// The full 27-instrument backtest universe also included Gold/Oil/Silver/
-// Bitcoin/Rolls-Royce/Vodafone (all profitable) — not included here since
-// none of them are in IG_EPICS above, so there's nothing to restrict there.
-// Excludes real, confirmed losers from that same backtest: GBP/USD (-3.07R),
-// USD/JPY (-7.18R), EUR/GBP (-4.32R), Lloyds (-2.71R), BP (-0.24R),
-// Shell (-4.39R), NVIDIA (-14.67R — the single worst performer), Tesla
-// (-2.59R), Amazon (-12.62R). Every other IG_EPICS name (Alphabet, Netflix,
-// JPMorgan, semiconductors, etc.) was never in the Daily Brief's own
-// backtested universe at all — no verdict either way, so also excluded
-// here rather than assumed safe.
+// Restricts rule_based_analysis to only the instruments genuinely confirmed
+// profitable — SUPERSEDES an earlier version of this list (2026-08-15,
+// scripts/backtestDailyBrief.ts) that turned out to be built on an
+// unrealistically generous test: no slippage, no overnight financing cost,
+// and only the Daily Brief's own 27-instrument universe. Re-tested properly
+// through backtest.ts's real engine (same slippage/financing model, same
+// 52-symbol BT_UNIVERSE, every other strategy in the leaderboard already
+// uses) and the result was genuinely different — 8 of that original 12
+// turned out to be real losers once costs were included: S&P 500 (-7.21%),
+// NASDAQ 100 (-12.64%), Germany 40 (-5.03%), Wall St (-9.98%), Microsoft
+// (-11.22%), Meta (-10.45%, profit factor 0.21 — one of the single worst
+// performers in the entire 52-symbol set), EUR/USD (-4.02%), AUD/USD
+// (-5.63%). This list is the corrected one — every entry re-verified
+// profitable (return>0 AND profitFactor>1) under the proper engine.
+// BP is a genuine surprise here: excluded as a loser (-0.24R) under the old
+// test, confirmed profitable (+4.00%, PF 1.24) under the real one.
 export const RULE_BASED_ANALYSIS_CONFIRMED_EPICS = new Set([
-  'IX.D.FTSE.DAILY.IP',   // FTSE 100    R=+16.87
-  'IX.D.SPTRD.DAILY.IP',  // S&P 500     R=+5.16
-  'IX.D.NASDAQ.CASH.IP',  // NASDAQ 100  R=+3.57
-  'IX.D.DAX.DAILY.IP',    // Germany 40  R=+3.90
-  'IX.D.DOW.DAILY.IP',    // Wall St     R=+1.97
-  'IX.D.NIKKEI.DAILY.IP', // Japan 225   R=+6.40
-  'CS.D.EURUSD.TODAY.IP', // EUR/USD     R=+3.15
-  'CS.D.AUDUSD.TODAY.IP', // AUD/USD     R=+4.60
-  'KA.D.BARC.DAILY.IP',   // Barclays    R=+2.17
-  'UA.D.AAPL.CASH.IP',    // Apple       R=+6.49
-  'UC.D.MSFT.DAILY.IP',   // Microsoft   R=+1.60
-  'UB.D.FB.DAILY.IP',     // Meta        R=+11.50
+  'IX.D.FTSE.DAILY.IP',   // FTSE 100   return=+2.66%  PF=1.38
+  'IX.D.NIKKEI.DAILY.IP', // Japan 225  return=+10.76% PF=1.83
+  'UA.D.AAPL.CASH.IP',    // Apple      return=+11.23% PF=2.33
+  'KA.D.BARC.DAILY.IP',   // Barclays   return=+2.03%  PF=1.14
+  'UB.D.GOOGL.DAILY.IP',  // Alphabet   return=+14.53% PF=4.21 (best performer in the IG universe)
+  'KA.D.HSBA.DAILY.IP',   // HSBC       return=+10.98% PF=1.82
+  'KA.D.BP.DAILY.IP',     // BP         return=+4.00%  PF=1.24
 ]);
 
 // Indices fxScalperBot.ts is also allowed to trade, alongside the 5 FX
