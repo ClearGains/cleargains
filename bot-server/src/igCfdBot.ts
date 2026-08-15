@@ -14,7 +14,7 @@ import {
 import { fetchBarsWithFallback } from './yahooFetch';
 import type { Timeframe } from './alpacaApi';
 import { resolveCredentials, type IgMode } from './igStrategyBot';
-import { IG_EPICS, FX_EPICS, isIndexEpic } from './igStrategyScanner';
+import { IG_EPICS, FX_EPICS, isIndexEpic, RULE_BASED_ANALYSIS_CONFIRMED_EPICS } from './igStrategyScanner';
 
 // ── Persistent, server-side IG CFD bot ──────────────────────────────────────
 // Distinct from components/ig/IGCfdAutoTrader.tsx (the browser-resident
@@ -290,6 +290,17 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
     const held = currentPositions.find(p => p.epic === inst.epic);
     const inPosition = !!held;
     const side: 'long' | 'short' | undefined = held ? (held.direction === 'BUY' ? 'long' : 'short') : undefined;
+
+    // rule_based_analysis: restrict new entries to only the instruments its
+    // own backtest confirmed profitable (RULE_BASED_ANALYSIS_CONFIRMED_EPICS
+    // in igStrategyScanner.ts) — this bot iterates its whole fixed
+    // INSTRUMENTS list every cycle regardless of strategy, unlike
+    // igStrategyBot.ts's dynamic scanner, so the restriction has to live
+    // here instead. Doesn't affect managing anything already held (e.g. a
+    // leftover position from a different strategy) — only blocks fresh
+    // entries. No log line — silent skip, not worth spamming ~15 exclusions
+    // every single poll cycle.
+    if (!inPosition && strategy === 'rule_based_analysis' && !RULE_BASED_ANALYSIS_CONFIRMED_EPICS.has(inst.epic)) return;
 
     if (!inPosition && openCount >= maxPositions) {
       addLog('wait', name, `Max positions (${maxPositions}) reached`);

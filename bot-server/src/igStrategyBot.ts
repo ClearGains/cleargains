@@ -14,7 +14,7 @@ import {
   STRATEGY_META,
   type StrategySignal,
 } from './alpacaStrategies';
-import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic, SECTOR_MAP } from './igStrategyScanner';
+import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic, SECTOR_MAP, RULE_BASED_ANALYSIS_CONFIRMED_EPICS } from './igStrategyScanner';
 import { askGeminiDailyVerdict, askGeminiTradeIdea } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchAllHeadlines } from './newsFetch';
@@ -998,7 +998,13 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
   let heldEpics = new Set<string>();
   try { heldEpics = new Set((await fetchFullPositions(st.session)).map(p => p.epic)); } catch {}
 
-  const candidates = IG_EPICS.map(e => e.epic).filter(epic => !heldEpics.has(epic) && !st.pausedEpics.has(epic));
+  // rule_based_analysis: restrict the recommendations sweep the same way
+  // scanIgEpics restricts the actual trading watchlist — no point
+  // surfacing a "recommendation" on an instrument this exact strategy's
+  // own backtest confirmed was a loser (see RULE_BASED_ANALYSIS_CONFIRMED_EPICS).
+  const candidates = IG_EPICS.map(e => e.epic)
+    .filter(epic => !heldEpics.has(epic) && !st.pausedEpics.has(epic))
+    .filter(epic => cfg.strategy !== 'rule_based_analysis' || RULE_BASED_ANALYSIS_CONFIRMED_EPICS.has(epic));
   if (force) addLog(mode, 'info', '—', `[Recommendation check] Scanning ${candidates.length} instrument(s)…`);
 
   // Batch-fetch live quotes once for whichever candidates would use the
