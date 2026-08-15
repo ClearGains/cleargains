@@ -9,6 +9,7 @@ import {
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal, pivotPointsSignal,
+  ruleBasedAnalysisSignal,
   calcRsi, calcMacdHist, calcAtr, calcEfficiencyRatio,
   STRATEGY_META,
   type StrategySignal,
@@ -269,7 +270,7 @@ function loadReleasedDeals(mode: IgMode): Set<string> {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion';
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis';
 export type IgMode         = 'demo' | 'live';
 
 export type IgStrategyConfig = {
@@ -590,6 +591,10 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   // (see FREE_DATA_PARAMS/usesFreeData/usesYahooScaled below), so this
   // barely touches IG's own allowance-limited candle API.
   gemini_opinion:     { resolution: 'MINUTE_30',  count: 240 },
+  // 250 daily bars (~1y) — see FREE_DATA_PARAMS.rule_based_analysis; this
+  // strategy is Yahoo/Alpaca-covered in practice (usesFreeData), so this
+  // IG-native resolution/count barely gets used, same as gemini_opinion.
+  rule_based_analysis: { resolution: 'DAY', count: 250 },
 };
 
 // Free-data params for strategies that need something other than the daily
@@ -600,7 +605,7 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
 // what makes them the most likely to burn through it (confirmed live:
 // daily-timeframe polling alone was already tripping the allowance before
 // this existed at all).
-const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1wk' }>> = {
+const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1d' | '1wk' }>> = {
   rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
   orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
@@ -614,6 +619,10 @@ const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   // Yahoo's 30m interval is only available for ~60 days back, well within
   // this 1-month range request.
   gemini_opinion:     { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m' },
+  // Needs ~250 daily bars for its SMA200 trend filter to actually be
+  // populated (see STRATEGY_META.rule_based_analysis) — every other daily
+  // strategy's 6mo default (~126 trading days) isn't enough.
+  rule_based_analysis: { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
 };
 
 // Daily-timeframe strategies poll far more often here than STRATEGY_META's
@@ -650,6 +659,15 @@ async function yahooPreCheckAction(
   const bars = await fetchYahooBars(yahooSym, '1d', '6mo');
   if (!bars || bars.length < 40) return null;  // Yahoo unavailable — caller decides fallback
 
+  // rule_based_analysis deliberately excluded — this pre-check only ever
+  // fetches 6mo of bars (line above), but that strategy needs ~250 daily
+  // bars for its SMA200 trend filter to be populated. Including it here
+  // would make it permanently HOLD on every pre-check (insufficient bars),
+  // silently blocking the real evaluation from ever running outside the
+  // guaranteed once-daily window. Falls to default: null, which skips this
+  // opportunistic path but still gets a proper full-history evaluation
+  // once a day via isDailyCheckTime() — fine for a daily-bar strategy with
+  // no new information intraday anyway.
   switch (strategy) {
     case 'ema_crossover':      return emaCrossoverSignal(bars, inPosition, side).action;
     case 'donchian_breakout':  return donchianBreakoutSignal(bars, inPosition, side).action;
@@ -1058,6 +1076,7 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
         case 'donchian_hourly':    signal = donchianBreakoutSignal(bars, false, undefined, 24, 12, 'hour'); break;
         case 'macd_crossover':     signal = macdCrossoverSignal(bars, false); break;
         case 'pivot_points':       signal = pivotPointsSignal(bars, false); break;
+        case 'rule_based_analysis': signal = ruleBasedAnalysisSignal(bars, false); break;
         default: break;  // orb/weekly_momentum need extra state this scan doesn't track
       }
 
@@ -1422,6 +1441,10 @@ async function evaluateEpic(
 
     case 'pivot_points':
       signal = pivotPointsSignal(bars, inPosition, side);
+      break;
+
+    case 'rule_based_analysis':
+      signal = ruleBasedAnalysisSignal(bars, inPosition, side);
       break;
 
     // No technical rule at all — Gemini decides from scratch. No exit logic

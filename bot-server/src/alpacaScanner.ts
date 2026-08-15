@@ -243,6 +243,7 @@ const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit
   macd_crossover:      { tf: '1Day',  limit: 40 },
   pivot_points:        { tf: '1Day',  limit: 30 },
   gemini_opinion:      { tf: '1Hour', limit: 40 },
+  rule_based_analysis: { tf: '1Day',  limit: 260 }, // needs ~250 for its SMA200 trend filter, see alpacaStrategies.ts
 };
 
 /**

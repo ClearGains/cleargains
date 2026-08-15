@@ -3,6 +3,8 @@ import { calcRsi, calcEma, calcAtr, calcVwap, calcSma, calcMacdHist, calcEfficie
 import type { AlpacaBar } from './alpacaApi';
 import type { IgStrategyName } from './igStrategyBot';
 import { fetchBarsWithFallback, EPIC_TO_ALPACA } from './yahooFetch';
+import { ruleBasedAnalysis } from './ruleBasedAnalysis';
+import type { LWCandle } from './chartIndicators';
 
 // ── Curated liquid IG epic universe ───────────────────────────────────────────
 // Indices, major US/UK stocks, and FX majors. Stake sizing is risk-based
@@ -216,6 +218,10 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   // accurate anyway (30-min bars, matching igStrategyBot.ts's IG_RES) so
   // this doesn't read as stale/wrong if that ever changes.
   gemini_opinion:     { resolution: 'MINUTE_30',  count: 240 },
+  // Also not used at runtime in practice — see YAHOO_SCAN_STRATEGIES below —
+  // kept accurate to match igStrategyBot.ts's IG_RES (250 daily bars for
+  // the SMA200 trend filter).
+  rule_based_analysis: { resolution: 'DAY', count: 250 },
 };
 
 // ── Bar conversion ────────────────────────────────────────────────────────────
@@ -345,6 +351,20 @@ function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
   return { epic, name, score: (crossed ? 40 : 0) + momentum * 1000 };
 }
 
+// Needs ~200+ daily bars for its SMA200 trend filter (see
+// ruleBasedAnalysisSignal in alpacaStrategies.ts) — a thin/short bar array
+// just means the filter doesn't kick in yet, not a crash, but a real
+// candidate here should have the full history the scan requested.
+function scoreRuleBasedAnalysis(bars: AlpacaBar[], epic: string, name: string): Scored {
+  if (bars.length < 60) return { epic, name, score: -1 };
+  const candles: LWCandle[] = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v }));
+  let analysis;
+  try { analysis = ruleBasedAnalysis('', candles); } catch { return { epic, name, score: -1 }; }
+  const swing = analysis.swing;
+  if (swing.direction === 'FLAT') return { epic, name, score: 0 };
+  return { epic, name, score: swing.confidence * 10 }; // confidence is 1-10 here — scale to be comparable with other strategies' score ranges
+}
+
 // Every strategy scores off free Alpaca/Yahoo bars instead of IG's allowance-
 // limited candle API — a 44-epic scan was burning a meaningful chunk of IG's
 // weekly historical-data allowance on every bot start or strategy switch, on
@@ -357,6 +377,7 @@ function scoreMacd(bars: AlpacaBar[], epic: string, name: string): Scored {
 const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>([
   'donchian_breakout', 'donchian_hourly', 'ema_crossover', 'macd_crossover',
   'rsi_mean_reversion', 'orb', 'vwap', 'weekly_momentum', 'gemini_opinion',
+  'rule_based_analysis',
 ]);
 
 // orb/rsi_mean_reversion are timeframe 'intraday' — igStrategyBot.ts's poll()
@@ -388,7 +409,7 @@ const ALPACA_ONLY_STRATEGIES = new Set<IgStrategyName>(['vwap', 'orb', 'rsi_mean
 // Mirrors igStrategyBot.ts's FREE_DATA_PARAMS — duplicated rather than
 // imported to avoid a circular import (igStrategyBot.ts already imports
 // scanIgEpics from this file).
-const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: '1Min' | '5Min' | '30Min' | '1Hour' | '1Week'; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1wk' }>> = {
+const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: '1Min' | '5Min' | '30Min' | '1Hour' | '1Day' | '1Week'; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1d' | '1wk' }>> = {
   rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
   orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
@@ -397,6 +418,7 @@ const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   // 30-min bars, not hourly — see STRATEGY_META.gemini_opinion in
   // alpacaStrategies.ts for why.
   gemini_opinion:     { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m' },
+  rule_based_analysis: { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
 };
 
 // Volatility-matched routing — a fast (hourly) strategy wants instruments
@@ -450,6 +472,7 @@ export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], ep
       // bonuses), not biased toward a specific technical thesis before
       // Gemini ever looks at it.
       case 'gemini_opinion':     return scoreGeminiOpinion(bars, epic, name).score;
+      case 'rule_based_analysis': return scoreRuleBasedAnalysis(bars, epic, name).score;
       default:                   return -1;
     }
   })();

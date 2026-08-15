@@ -1,4 +1,6 @@
 import type { AlpacaBar } from './alpacaApi';
+import { ruleBasedAnalysis } from './ruleBasedAnalysis';
+import type { LWCandle } from './chartIndicators';
 
 // ── Indicators ────────────────────────────────────────────────────────────────
 
@@ -632,9 +634,52 @@ export function pivotPointsSignal(
   return { action: 'HOLD', reason: `Price ${last.toFixed(2)} inside S1=${s1.toFixed(2)}–R1=${r1.toFixed(2)}` };
 }
 
+// ── Rule-Based Analysis (Daily Brief's swing engine, ported) ──────────────────
+// Same RSI/MACD/SMA/Bollinger scoring + trend filter as lib/ruleBasedAnalysis.ts
+// (the Daily Brief page) — added here after that engine backtested a real edge
+// (2026-08-15: walk-forward, 2y daily bars, 27 instruments, avg 0.10R/trade
+// with the trend filter vs 0.002R/trade without). Ported rather than shared
+// via package, since bot-server and the Next.js app are separately deployed —
+// see bot-server/src/ruleBasedAnalysis.ts's own header for the inlined-types
+// note. Needs a long daily history for its SMA200 trend filter to actually be
+// active (see FREE_DATA_PARAMS below — 2y range, unlike every other daily
+// strategy's 6mo), so gates on far more bars than the others.
+export function ruleBasedAnalysisSignal(
+  bars:       AlpacaBar[],
+  inPosition: boolean,
+  side?:      PositionSide,
+): StrategySignal {
+  if (bars.length < 210) return { action: 'HOLD', reason: `insufficient bars (${bars.length}/210) — needs ~200 for SMA200 trend filter` };
+
+  const candles: LWCandle[] = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v }));
+  let analysis;
+  try { analysis = ruleBasedAnalysis('', candles); } catch (e) {
+    return { action: 'HOLD', reason: `analysis failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const swing = analysis.swing;
+
+  if (inPosition) {
+    if (side === 'long'  && swing.direction !== 'LONG')  return { action: 'CLOSE_LONG',  reason: `Thesis no longer bullish — ${swing.reasoning}` };
+    if (side === 'short' && swing.direction !== 'SHORT') return { action: 'CLOSE_SHORT', reason: `Thesis no longer bearish — ${swing.reasoning}` };
+    return { action: 'HOLD', reason: `${analysis.bias} bias holding — ${swing.reasoning}` };
+  }
+
+  if (swing.direction === 'LONG' || swing.direction === 'SHORT') {
+    return {
+      action:           swing.direction === 'LONG' ? 'BUY' : 'SELL',
+      reason:           swing.reasoning,
+      stopPrice:        swing.stopLoss,
+      takeProfitPrice:  swing.takeProfit1,
+      orderType:        'market',
+      confidence:       swing.confidence * 10, // this engine's confidence is 1-10; StrategySignal.confidence is 0-100 elsewhere (gemini_opinion)
+    };
+  }
+  return { action: 'HOLD', reason: swing.reasoning || `${analysis.bias} bias — no clear swing setup` };
+}
+
 // ── Strategy metadata ─────────────────────────────────────────────────────────
 
-export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion';
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis';
 
 export const STRATEGY_META: Record<StrategyName, {
   label:     string;
@@ -683,4 +728,9 @@ export const STRATEGY_META: Record<StrategyName, {
   // igStrategyScanner.ts's scoreGeminiOpinion) so each indicator still
   // covers the same wall-clock window as before, not half of it.
   gemini_opinion:      { label: 'Gemini Opinion (Experimental)', timeframe: 'intraday', pollMs: 15 * 60_000, barPeriod: '30Min', barsNeeded: 240 },
+  // Daily Brief's backtested rule engine (RSI/MACD/SMA/BB + SMA200 trend
+  // filter) — see ruleBasedAnalysisSignal above. barsNeeded=250 (a year of
+  // trading days) so the SMA200 trend filter is populated in practice, not
+  // just technically non-crashing at the bare 200 minimum.
+  rule_based_analysis: { label: 'Rule-Based Analysis (Daily Brief)', timeframe: 'daily', pollMs: 60 * 60_000, barPeriod: '1Day', barsNeeded: 250 },
 };

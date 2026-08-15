@@ -8,6 +8,7 @@ import {
 } from './igOAuthApi';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, vwapSignal, donchianBreakoutSignal, macdCrossoverSignal, pivotPointsSignal,
+  ruleBasedAnalysisSignal,
   STRATEGY_META, type StrategyName, type StrategySignal,
 } from './alpacaStrategies';
 import { fetchBarsWithFallback } from './yahooFetch';
@@ -146,6 +147,9 @@ const FREE_DATA_PARAMS: Partial<Record<StrategyName, { range: string; alpacaTime
   donchian_breakout:   { range: '6mo', alpacaTimeframe: '1Day', yahooInterval: '1d' },
   macd_crossover:      { range: '6mo', alpacaTimeframe: '1Day', yahooInterval: '1d' },
   pivot_points:        { range: '6mo', alpacaTimeframe: '1Day', yahooInterval: '1d' },
+  // Needs ~250 daily bars for its SMA200 trend filter — every other daily
+  // strategy's 6mo (~126 trading days) isn't enough. See STRATEGY_META.rule_based_analysis.
+  rule_based_analysis: { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
 };
 
 export type CfdStartParams = {
@@ -306,6 +310,7 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
       case 'donchian_hourly':    signal = donchianBreakoutSignal(bars, inPosition, side, 24, 12, 'hour'); break;
       case 'macd_crossover':     signal = macdCrossoverSignal(bars, inPosition, side); break;
       case 'pivot_points':       signal = pivotPointsSignal(bars, inPosition, side); break;
+      case 'rule_based_analysis': signal = ruleBasedAnalysisSignal(bars, inPosition, side); break;
       default: signal = { action: 'HOLD', reason: 'unsupported strategy' };
     }
 
