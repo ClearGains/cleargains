@@ -8,6 +8,8 @@ import { TIMEFRAME_CONFIG, type Timeframe } from '@/lib/igStrategyEngine';
 import type { AnalysisResult } from '@/app/api/analyse/chart/route';
 import type { LWCandle } from '@/lib/chartIndicators';
 import { NewsStrip } from '@/components/ui/NewsStrip';
+import { ChartPanel, type Overlay } from '@/components/ChartPanel';
+import type { SRZone } from '@/lib/supportResistance';
 
 function RankBadge({ rank }: { rank: number }) {
   const cls =
@@ -227,8 +229,32 @@ function QuoteCard({ row }: { row: QuoteRow }) {
 
 type IdeaSettings = { riskPerTrade: number; availableFunds: number; marginOverride: number | null };
 
+const CHART_OVERLAYS: Set<Overlay> = new Set(['sma20', 'sma50', 'bb', 'volume']);
+
 function IdeaCard({ idea, settings, rank, total }: { idea: TradeIdea; settings: IdeaSettings; rank?: number; total?: number }) {
   const [expanded, setExpanded] = useState(false);
+  const [chartCandles, setChartCandles] = useState<LWCandle[] | null>(null);
+  const [chartLoading, setChartLoading] = useState(false);
+
+  // Lazy-load the chart only once a card is actually opened — fetching real
+  // candles for every idea up front (there can be a dozen+ on screen) would
+  // multiply this page's Yahoo call volume for charts most of them never
+  // get opened to see.
+  useEffect(() => {
+    if (!expanded || chartCandles || chartLoading) return;
+    setChartLoading(true);
+    const resolution = idea.setupUsed === 'scalp' ? '10DH' : '3M';
+    fetch(`/api/chart/history?symbol=${encodeURIComponent(idea.market.yahooSymbol)}&resolution=${resolution}`)
+      .then(r => r.json())
+      .then((d: { candles?: LWCandle[] }) => setChartCandles(d.candles ?? []))
+      .catch(() => setChartCandles([]))
+      .finally(() => setChartLoading(false));
+  }, [expanded, chartCandles, chartLoading, idea.market.yahooSymbol, idea.setupUsed]);
+
+  const srZones: SRZone[] = idea.analysis.keyLevels.map(k => ({
+    price: k.price, type: k.type, strength: 1,
+    priceHigh: k.price * 1.002, priceLow: k.price * 0.998,
+  }));
   const isBuy = idea.direction === 'BUY';
   const borderColor = isBuy ? 'border-emerald-600/30' : 'border-red-600/30';
   const accentColor = isBuy ? 'text-emerald-400' : 'text-red-400';
@@ -347,6 +373,18 @@ function IdeaCard({ idea, settings, rank, total }: { idea: TradeIdea; settings: 
             <div className="text-gray-400">2. Choose <span className={clsx('font-semibold', accentColor)}>{idea.direction}</span> · set order type: <span className="text-white">Limit</span> at <span className="font-mono text-white">{fmtIGPrice(idea.igEntry, idea.market.type)}</span></div>
             <div className="text-gray-400">3. Size: <span className="text-white font-semibold">{fmtSize(actualSize)}</span> · Stop: <span className="text-red-400 font-mono">{fmtIGPrice(idea.igStopLoss, idea.market.type)}</span> · Limit: <span className="text-emerald-400 font-mono">{fmtIGPrice(idea.igTakeProfit1, idea.market.type)}</span></div>
             <div className="text-gray-400">4. Estimated margin required: <span className="text-amber-400 font-semibold">£{actualMargin.toFixed(0)}</span> · Max loss: <span className="text-red-400 font-semibold">£{maxRisk.toFixed(2)}</span></div>
+          </div>
+
+          {/* Live chart — real candles/SMA/BB/volume via lightweight-charts, S/R zones from this idea's own analysis */}
+          <div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Chart ({idea.setupUsed === 'scalp' ? 'hourly' : 'daily'})</div>
+            {chartLoading && <div className="h-[480px] flex items-center justify-center text-xs text-gray-600 bg-gray-800/30 rounded-lg">Loading chart…</div>}
+            {!chartLoading && chartCandles && chartCandles.length > 0 && (
+              <ChartPanel candles={chartCandles} overlays={CHART_OVERLAYS} srZones={srZones} />
+            )}
+            {!chartLoading && chartCandles && chartCandles.length === 0 && (
+              <div className="h-[120px] flex items-center justify-center text-xs text-gray-600 bg-gray-800/30 rounded-lg">Chart data unavailable</div>
+            )}
           </div>
 
           {/* Key levels */}
