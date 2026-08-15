@@ -16,7 +16,7 @@ import {
 import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic, SECTOR_MAP } from './igStrategyScanner';
 import { askGeminiDailyVerdict, askGeminiTradeIdea } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
-import { fetchCompanyHeadlines } from './newsFetch';
+import { fetchAllHeadlines } from './newsFetch';
 import { createStreamManager, type StreamManager } from './igStream';
 import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
@@ -1481,7 +1481,7 @@ async function evaluateEpic(
       const macd  = calcMacdHist(bars, 24, 52, 18);
       const atr   = calcAtr(bars, 28);
       const ticker    = EPIC_TO_ALPACA[epic];
-      const headlines = ticker ? await fetchCompanyHeadlines(ticker, 8, epicName(epic)) : [];
+      const headlines = ticker ? await fetchAllHeadlines(ticker, 8, epicName(epic)) : [];
       // How far this has already moved today, from the bars already
       // fetched — no extra API call. Confirmed live this matters: Micron
       // got bought at 86690 after running from a 73900 prior close, i.e.
@@ -1957,7 +1957,7 @@ async function executeIgSignal(
       // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
       // Gemini still runs on technicals alone in that case (see prompt).
       const ticker    = EPIC_TO_ALPACA[epic];
-      const headlines = ticker ? await fetchCompanyHeadlines(ticker, 5, name) : [];
+      const headlines = ticker ? await fetchAllHeadlines(ticker, 5, name) : [];
       const verdict = await askGeminiDailyVerdict({
         instrumentName: name,
         direction,

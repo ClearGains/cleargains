@@ -7,7 +7,7 @@ import {
 import { resolveCredentials, addLog, recordLossExit, type IgMode } from './igStrategyBot';
 import { askGeminiPositionVerdict } from './gemini';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
-import { fetchCompanyHeadlines } from './newsFetch';
+import { fetchAllHeadlines } from './newsFetch';
 import { isNYSEOpen, type AlpacaBar } from './alpacaApi';
 
 // ── Gemini position watch — for positions opened outside the strategy bot
@@ -322,7 +322,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // another 45 minutes is the wrong tradeoff.
   if (!moved && !stale && !sharpDip && !justTurnedRed) return;
 
-  const headlines = ticker ? await fetchCompanyHeadlines(ticker, 8, name) : [];
+  const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
 
   const verdict = await askGeminiPositionVerdict({
     instrumentName: name,
