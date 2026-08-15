@@ -129,8 +129,29 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
   }
 
   function makeSwing(): TradeRec {
-    const dir: 'LONG' | 'SHORT' | 'FLAT' =
+    let dir: 'LONG' | 'SHORT' | 'FLAT' =
       bias === 'BULLISH' ? 'LONG' : bias === 'BEARISH' ? 'SHORT' : 'FLAT';
+
+    // Trend filter — backtested 2026-08-15 across 27 instruments, 2 years
+    // of daily bars, walk-forward with no lookahead: taking every raw
+    // RSI/BB-driven swing signal as-is netted essentially zero edge
+    // (480 trades, total R=1.02, avg 0.002R/trade) because the mean-
+    // reversion logic above keeps firing counter-trend against strongly
+    // trending names — confirmed live in the backtest as NVIDIA's exact
+    // failure mode (11% win rate, -20R over 28 trades: repeatedly shorting
+    // "overbought RSI" into a persistent uptrend). Refusing to fight an
+    // established trend — SHORT while price is still well above its own
+    // SMA200, or LONG while still well below it — took the same backtest
+    // to 435 trades, total R=43.56, avg 0.10R/trade: a ~50x improvement,
+    // and it helped on 15 of 27 instruments with only mild cost on a few
+    // (Amazon, Lloyds). FX barely moves this filter since pairs rarely sit
+    // 5%+ from their own SMA200 — it's mainly indices/commodities/shares.
+    let trendFiltered = false;
+    if (ind.sma200 !== null) {
+      const band = ind.sma200 * 0.05;
+      if (dir === 'SHORT' && price > ind.sma200 + band) { dir = 'FLAT'; trendFiltered = true; }
+      if (dir === 'LONG'  && price < ind.sma200 - band) { dir = 'FLAT'; trendFiltered = true; }
+    }
 
     let entry: number, sl: number, tp1: number, tp2: number;
 
@@ -159,12 +180,16 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
       stopLoss: sl, takeProfit1: tp1, takeProfit2: tp2,
       riskReward: parseFloat((reward / risk).toFixed(2)),
       confidence: confidence(false),
-      reasoning: `Swing trade targets ${dir === 'LONG' ? 'upper S/R cluster' : 'lower S/R cluster'} over days–weeks. ${signals[0] ?? 'Mixed signals'} supports the ${bias.toLowerCase()} bias.`,
+      reasoning: trendFiltered
+        ? `${bias} bias from RSI/MACD/BB, but this would be a ${bias === 'BULLISH' ? 'LONG' : 'SHORT'} against price still well ${bias === 'BULLISH' ? 'below' : 'above'} its own SMA200 — standing aside rather than fighting the established trend.`
+        : `Swing trade targets ${dir === 'LONG' ? 'upper S/R cluster' : 'lower S/R cluster'} over days–weeks. ${signals[0] ?? 'Mixed signals'} supports the ${bias.toLowerCase()} bias.`,
       invalidation: dir === 'LONG'
         ? `Daily close below ${sl} and loss of SMA20 invalidates.`
         : dir === 'SHORT'
           ? `Daily close above ${sl} invalidates.`
-          : 'No clear structure — wait for breakout confirmation.',
+          : trendFiltered
+            ? 'Would need price to reclaim the SMA200 trend before this setup is worth taking.'
+            : 'No clear structure — wait for breakout confirmation.',
     };
   }
 
