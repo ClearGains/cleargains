@@ -16,15 +16,26 @@ import { askGeminiFxSwing, type FxSwingEntrySignal } from './gemini';
 import { fetchMacroEvents } from './macroCalendar';
 import { resolveCredentials, isLossLocked, registerBotOpenedDeal, type IgMode } from './igStrategyBot';
 import { FX_EPICS, SCALPER_INDEX_EPICS } from './igStrategyScanner';
+import { createStreamManager } from './igStream';
 
 // ── Dedicated FX bot — persistent, real execution ───────────────────────────
 // Runs fxSwingStrategy.ts (hourly bars, hours-scale holds, position-condition
 // driven exits) rather than scalperStrategy.ts's 5-min mean-reversion, which
 // spent most of its "losses" to spread + noise rather than being wrong about
 // direction. scalperStrategy.ts itself is untouched and still in the repo —
-// this module just no longer runs it. Polls every 15 minutes via REST instead
-// of a continuous Lightstreamer tick stream — hourly-bar decisions don't need
-// tick-level granularity, and it's a much lighter footprint on IG's account.
+// this module just no longer runs it. Still polls every 15 minutes for
+// position management (severe-loss/profit-lock/weekend-guard) and the live
+// current-price check, but new hourly candles now arrive via a Lightstreamer
+// subscription (same demo-account data feed as before) instead of a REST
+// fetchCandleHistory call every cycle — that REST polling was originally
+// chosen specifically "to stay light on IG's historical-data allowance" (see
+// git history), but confirmed live it wasn't: 9 epics × a REST call every
+// 15min, continuously, was itself enough to exhaust that same allowance,
+// same failure the polling was meant to avoid, just via a different pattern.
+// Confirmed live separately that Lightstreamer ticks reliably and
+// continuously for every FX pair and index this bot trades — same
+// resolution/candle-close semantics as the REST bars it replaces, but zero
+// ongoing REST cost after the one-time prewarm on start.
 //
 // Deliberately its own factory/closure per mode (mirrors botAccount.ts's
 // createAccountBot pattern) rather than folding into igStrategyBot.ts's
@@ -69,7 +80,7 @@ export type FxScalperStatus = {
   mode:             FxMode;
   running:          boolean;
   paused:           boolean;
-  streamConnected:  boolean;  // poll-loop health, not a literal stream — kept for frontend compatibility
+  streamConnected:  boolean;  // real Lightstreamer connection status now (was poll-loop health only, before candles moved off REST polling)
   epics:            string[];
   maxRiskGbp:        number;
   epicStatuses:      Record<string, FxEpicStatus>;
@@ -239,6 +250,13 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   let pollTimer:           ReturnType<typeof setInterval> | null = null;
   let lastPollAt = 0;
   let authFailCount = 0;
+  // Own instance, not the shared default singleton from igStream.ts —
+  // igStrategyBot.ts already uses that singleton for its own donchian_hourly/
+  // gemini_opinion subscriptions, and connect() tears down any existing
+  // subscription on that client before creating a new one. Sharing it here
+  // would silently kill igStrategyBot's stream (or vice versa) every time
+  // either bot (re)started.
+  const stream = createStreamManager(tag);
 
   function uid() { return Math.random().toString(36).slice(2, 9); }
   function ts()  { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
@@ -320,6 +338,13 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       addLog('info', '—', 'Refreshing IG session(s)...');
       session     = await authExecSession(creds);
       dataSession = await authDataSession();
+      // Re-subscribes with the fresh session's tokens — igStream.ts bakes
+      // CST/XST into the Lightstreamer connection at connect() time, so if a
+      // rotated token ever did invalidate the existing stream, this is the
+      // only place that would catch it before this bot's next restart.
+      // Cheap and idempotent (connect() tears down and rebuilds), no REST
+      // allowance cost either way.
+      if (running) stream.connect(dataSession, currentEpics, onStreamTick, 'HOUR');
       authFailCount = 0;
       addLog('info', '—', `Session(s) refreshed — execution expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
       scheduleRefresh(session);
@@ -575,33 +600,32 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     }
   }
 
-  // ── Per-epic evaluation — fresh hourly bars + a live-price check every cycle ──
+  // New closed hourly candles arrive here via Lightstreamer instead of the
+  // REST poll that used to live in evaluateEpic below — see this file's top
+  // comment for why. Mirrors exactly what that REST path did per new bar,
+  // just triggered by the stream instead of a 15min poll diffing against
+  // lastBarTime. Non-closed in-progress ticks are ignored here — the live-
+  // price check in evaluateEpic below already covers real-time reactivity
+  // (stall detection etc.) via fetchMarketDetails, a separate, non-allowance-
+  // limited call.
+  function onStreamTick(tick: CandleTick): void {
+    if (!tick.candleClosed) return;
+    const st = epicStates[tick.epic];
+    if (!st) return;
+    const known = lastBarTime[tick.epic] ?? '';
+    if (tick.time <= known) return; // duplicate/replay — same bar already processed
+    const decision = processSwingTick(st, tick, currentConfig);
+    void handleDecision(tick.epic, tick, decision);
+    lastBarTime[tick.epic] = tick.time;
+    lastSuccessfulFetchAt[tick.epic] = Date.now();
+    saveEpicStates(mode, epicStates);
+  }
+
+  // ── Per-epic evaluation — live-price check every cycle, hourly bars now come
+  // from the Lightstream subscription (onStreamTick above), not a REST poll ──
   async function evaluateEpic(epic: string, detail: MarketDetail | undefined): Promise<void> {
     const st = epicStates[epic];
     if (!st || !dataSession) return;
-
-    try {
-      // Small window, not a full refill — the strategy already carries its
-      // own rolling closedCandles history forward across cycles (built once
-      // at prewarm), so each poll only needs enough bars to catch a newly
-      // closed one since last time. Requesting 80 bars every 15 minutes
-      // would burn through IG's historical-data allowance for no benefit —
-      // confirmed live that allowance exhausts fast under repeated polling.
-      const bars = await fetchCandleHistory(dataSession, epic, 'HOUR', 4);
-      if (bars.length) {
-        const known   = lastBarTime[epic] ?? '';
-        const newBars = bars.filter(b => b.snapshotTime > known);
-        for (const bar of newBars) {
-          const tick = barToTick(epic, bar);
-          const decision = processSwingTick(st, tick, currentConfig);
-          await handleDecision(epic, tick, decision);
-        }
-        lastBarTime[epic] = bars[bars.length - 1].snapshotTime;
-        lastSuccessfulFetchAt[epic] = Date.now();
-      }
-    } catch (e) {
-      addLog('info', epicName(epic), `Bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
 
     if (typeof detail?.bid === 'number') {
       const liveTick: CandleTick = {
@@ -689,16 +713,15 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   }
 
   // ── Candle pre-warmer ──────────────────────────────────────────────────────
-  // Restarting used to always pay the full 80-bar-per-epic IG REST cost,
-  // regardless of whether the persisted state (loaded into epicStates just
-  // before this runs) already had a good candle history from before the
-  // restart — confirmed live this is what actually exhausted the demo
-  // account's historical-data allowance on a day with a lot of restarts,
-  // not the regular poll cycle (already a light 4-bar top-up, see
-  // evaluateEpic). Reuses persisted history when there's enough of it and
-  // only tops up genuinely new bars since, the same incremental fetch the
-  // regular poll already does, instead of re-fetching everything from
-  // scratch on every restart.
+  // Still the one REST cost this bot pays — Lightstreamer only gives ticks
+  // going forward from subscribe time, not history, so a restart still needs
+  // this to rebuild closedCandles before the stream can take over. Restarting
+  // used to always pay the full 80-bar-per-epic cost regardless of whether
+  // persisted state (loaded into epicStates just before this runs) already
+  // had a good history from before the restart — confirmed live that alone
+  // was enough to exhaust the demo account's allowance on a day with a lot
+  // of restarts. Reuses persisted history when there's enough of it and only
+  // tops up genuinely new bars since, instead of re-fetching from scratch.
   const MIN_PERSISTED_CANDLES = 50;
   async function prewarmCandles(sess: IGSession, epics: string[]): Promise<void> {
     addLog('info', '—', `Pre-warming hourly candles for ${epics.length} epic(s)…`);
@@ -775,6 +798,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       }
 
       await prewarmCandles(dataSession, currentEpics);
+      stream.connect(dataSession, currentEpics, onStreamTick, 'HOUR');
 
       running = true;
       paused  = false;
@@ -800,6 +824,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     paused  = false;
     if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
     if (pollTimer)           { clearInterval(pollTimer);          pollTimer = null; }
+    stream.disconnect();
     session = null;
     dataSession = null;
     clearStartState(mode);
@@ -853,7 +878,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       mode,
       running,
       paused,
-      streamConnected: running && lastPollAt > 0 && (Date.now() - lastPollAt) < POLL_MS * 1.5,
+      streamConnected: running && stream.isConnected(),
       epics:           currentEpics,
       maxRiskGbp,
       epicStatuses:    statuses,
