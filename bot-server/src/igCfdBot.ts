@@ -103,6 +103,25 @@ const CFD_STOCK_EPIC_OVERRIDES: Record<string, string> = {
   // spread-bet epic already in IG_EPICS.
   'CS.D.BITCOIN.TODAY.IP': 'CS.D.BITCOIN.CFD.IP',
 };
+
+// RULE_BASED_ANALYSIS_CONFIRMED_EPICS (igStrategyScanner.ts) lists each
+// confirmed-profitable instrument's spread-bet epic — this bot's own
+// inst.epic for most of those gets translated to a different CFD-form epic
+// via CFD_STOCK_EPIC_OVERRIDES above (or the hardcoded FTSE entry below) by
+// the time evaluateOne checks it, so comparing directly against the
+// untranslated set silently failed to match Barclays/Alphabet/HSBC/BP/
+// Bitcoin/FTSE. Confirmed live: with zero open positions on this account,
+// none of them could ever pass that filter at all — rule_based_analysis
+// could never open a fresh entry on any of them, only ever manage a
+// position already open before this bug (Apple happens to match without
+// translation — IG_EPICS already stores it as .CASH.IP directly, unlike
+// the others). Japan 225 is a separate, still-open gap: no CFD-form epic
+// is hardcoded into INSTRUMENTS for it at all yet, needing its own live
+// verification before adding, same rigor as every other epic here.
+const RULE_BASED_ANALYSIS_CONFIRMED_CFD_EPICS = new Set([
+  ...[...RULE_BASED_ANALYSIS_CONFIRMED_EPICS].map(e => CFD_STOCK_EPIC_OVERRIDES[e] ?? e),
+  'IX.D.FTSE.CFD.IP',
+]);
 // No CFD-dealable share product exists for these on this account (verified
 // via a live IG market search — only leveraged ETPs/options came back).
 const CFD_UNAVAILABLE_EPICS = new Set([
@@ -333,7 +352,7 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
     // leftover position from a different strategy) — only blocks fresh
     // entries. No log line — silent skip, not worth spamming ~15 exclusions
     // every single poll cycle.
-    if (!inPosition && strategy === 'rule_based_analysis' && !RULE_BASED_ANALYSIS_CONFIRMED_EPICS.has(inst.epic)) return;
+    if (!inPosition && strategy === 'rule_based_analysis' && !RULE_BASED_ANALYSIS_CONFIRMED_CFD_EPICS.has(inst.epic)) return;
 
     if (!inPosition && openCount >= maxPositions) {
       addLog('wait', name, `Max positions (${maxPositions}) reached`);
