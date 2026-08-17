@@ -540,6 +540,14 @@ export type PositionReviewRequest = {
   // small move plus genuinely bad news is still worth closing over) —
   // instead this only adjusts how much weight to give the signal alone.
   isFx?: boolean;
+  // The same real candle shape and momentum indicators askGeminiTradeIdea
+  // already gets for the entry decision — review only ever got two numbers
+  // derived from price (dayChangePercent/sharpDipPercent above), never the
+  // shape or momentum itself, so Gemini judged whether to keep holding
+  // without seeing the same picture the entry thesis was built on.
+  recentCandles?: Array<{ open: number; high: number; low: number; close: number }>;
+  rsi?:           number | null;
+  macdHist?:      number | null;
 };
 
 export async function askGeminiPositionVerdict(req: PositionReviewRequest): Promise<PositionVerdict> {
@@ -567,6 +575,12 @@ export async function askGeminiPositionVerdict(req: PositionReviewRequest): Prom
     ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
     : '';
 
+  const candleBlock = req.recentCandles?.length
+    ? `\nLast ${req.recentCandles.length} closed hourly candles (oldest first, so you can see the actual recent shape of the move, not just where price ended up):\n${req.recentCandles.map((c, i) =>
+        `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
+      ).join('\n')}\n`
+    : '';
+
   const prompt = `You are reviewing an already-open spread bet position to decide whether to close it now or keep holding.
 
 Instrument: ${req.instrumentName}
@@ -575,7 +589,9 @@ Entry level: ${req.entryLevel.toFixed(2)}
 Current level: ${req.currentLevel.toFixed(2)} (${signedPct >= 0 ? '+' : ''}${signedPct.toFixed(2)}% favorable move)
 Unrealized P/L: £${req.uplGbp.toFixed(2)}
 Held for: ${req.heldHours.toFixed(1)} hours
-${req.dayChangePercent !== undefined ? `Instrument's overall move today (independent of this position's own entry): ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
+${req.rsi != null ? `RSI (14h lookback): ${req.rsi.toFixed(1)}` : ''}
+${req.macdHist != null ? `MACD histogram (12h/26h/9h): ${req.macdHist > 0 ? '+' : ''}${req.macdHist.toFixed(5)}` : ''}
+${candleBlock}${req.dayChangePercent !== undefined ? `Instrument's overall move today (independent of this position's own entry): ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
 ${req.sharpDipPercent !== undefined ? `⚠ SUDDEN MOVE: ${req.sharpDipPercent.toFixed(2)}% against this position in just the last few hours (independent of the day's overall move above). Treat a fast, sharp move against the position as a meaningful warning sign in its own right, not noise to smooth over — a real reversal often starts exactly like this, before news or the wider day's figures catch up to it.` : ''}
 ${req.reversedToRed ? `⚠ REVERSAL: this position was meaningfully in profit at an earlier point and has now swung into a loss. Even if the news below looks positive or is silent, a green-to-red reversal like this can mean a sell-off is already underway that hasn't been reported yet — weigh the reversal itself as a real reason to lean toward closing rather than assuming the fundamentals still hold just because nothing bad has been printed about it.` : ''}
 ${req.isFx ? `Note: this is an FX pair. Currency pairs oscillate more within what's still ordinary short-term noise than a stock does — a move under roughly 2-3% is often just normal chop, not a genuine reversal. Apply a higher bar of evidence than you would for a stock before leaning toward closing over any sharp-move or reversal signal above: look for a clearly larger and/or sustained move, or real corroborating news, rather than the move alone.` : ''}

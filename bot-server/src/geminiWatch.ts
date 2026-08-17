@@ -7,6 +7,7 @@ import {
 import { resolveCredentials, addLog, recordLossExit, type IgMode } from './igStrategyBot';
 import { askGeminiPositionVerdict } from './gemini';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
+import { calcRsi, calcMacdHist } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
 import { isNYSEOpen, type AlpacaBar } from './alpacaApi';
 
@@ -233,6 +234,18 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // still respects the throttle (and the daily cap) as before.
   let dayChangePercent: number | undefined;
   let sharpDipPercent:  number | undefined;
+  // Entry decisions (askGeminiTradeIdea) get real candle shape + RSI/MACD —
+  // review only ever got two numbers derived from price (dayChangePercent,
+  // sharpDipPercent), never the shape or momentum indicators themselves.
+  // Nobody ever deliberately chose that gap — every review enrichment so
+  // far (news, sharp-dip, reversal) patched a specific incident, and none
+  // of them happened to touch this. Gemini was deciding whether the entry
+  // thesis still holds without seeing the same picture that thesis was
+  // built on. Reuses the same already-scaled `bars` this block already
+  // fetches for dayChangePercent/sharpDipPercent — no extra fetch.
+  let recentCandles: Array<{ open: number; high: number; low: number; close: number }> | undefined;
+  let rsi:      number | null = null;
+  let macdHist: number | null = null;
   if (hasBarSource) {
     try {
       let bars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
@@ -307,6 +320,13 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
             const recentLow = Math.min(...window.map(b => b.l));
             if (recentLow > 0) sharpDipPercent = ((currentLevel - recentLow) / recentLow) * 100;
           }
+
+          // Hourly bars here (not 30-min like the entry path), so the
+          // standard 14/12-26-9 periods already cover the same wall-clock
+          // window the entry side doubles to 28/24-52-18 to preserve.
+          recentCandles = bars.slice(-8).map(b => ({ open: b.o, high: b.h, low: b.l, close: b.c }));
+          rsi = calcRsi(bars, 14);
+          macdHist = calcMacdHist(bars, 12, 26, 9)?.hist ?? null;
         }
       }
     } catch { /* best-effort — proceed without it */ }
@@ -351,6 +371,9 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     sharpDipPercent,
     reversedToRed,
     isFx,
+    recentCandles,
+    rsi,
+    macdHist,
   });
 
   addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
