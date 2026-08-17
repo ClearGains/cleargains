@@ -6,6 +6,7 @@ import {
   BarChart3, Clock, Wifi, ExternalLink, Download, Plus,
   ChevronDown, ChevronUp, Bell, Edit2, CheckCircle2, History,
   Layers, Zap, FlaskConical, PlayCircle, ArrowRightLeft, Search,
+  XCircle,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Card } from '@/components/ui/Card';
@@ -299,6 +300,8 @@ export default function PositionsPage() {
   const [closingId, setClosingId]       = useState<string | null>(null);
   const [closeError, setCloseError]     = useState<string | null>(null);
   const [closeSuccess, setCloseSuccess] = useState<string | null>(null);
+  const [closeAllConfirm, setCloseAllConfirm] = useState(false);
+  const [closingAll, setClosingAll]           = useState(false);
   const [chartPos, setChartPos]         = useState<UnifiedPosition | null>(null);
   const [fundsData, setFundsData]       = useState<Partial<Record<string, { available: number; label: string; color: string }>>>({});
   const [showHistory, setShowHistory]   = useState(false);
@@ -815,6 +818,20 @@ export default function PositionsPage() {
       setCloseError(e instanceof Error ? e.message : 'Unknown error');
     }
     setClosingId(null);
+  }
+
+  // Closes whatever's currently visible in the filtered list (respects the
+  // account tab — filtering to e.g. IG Live first, then "Close All", only
+  // touches that account's positions) — sequentially, reusing closePosition
+  // one at a time rather than firing them concurrently, same caution IG/
+  // T212's own APIs get everywhere else in this file.
+  async function closeAllPositions() {
+    setCloseAllConfirm(false);
+    setClosingAll(true);
+    for (const pos of filtered) {
+      await closePosition(pos);
+    }
+    setClosingAll(false);
   }
 
   // Keep closePositionRef pointing at the latest version so auto-close effect
@@ -1780,22 +1797,51 @@ export default function PositionsPage() {
       </div>
 
       {/* Positions / Orders sub-tab */}
-      <div className="flex items-center gap-1 bg-gray-800/40 rounded-lg p-0.5 w-fit">
-        {(['positions', 'orders'] as const).map(t => {
-          const orderCount = portfolioData
-            ? portfolioData.t212.reduce((s, a) => s + (a.orders as unknown[]).length, 0)
-              + portfolioData.ig.reduce((s, a) => s + a.workingOrders.length, 0)
-            : 0;
-          return (
-            <button key={t} onClick={() => setPosTab(t)}
-              className={clsx('px-3 py-1.5 text-xs font-medium rounded-md transition-all',
-                posTab === t ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
-              )}>
-              {t === 'positions' ? `Open Positions (${filtered.length})` : `Working Orders (${orderCount})`}
-            </button>
-          );
-        })}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1 bg-gray-800/40 rounded-lg p-0.5 w-fit">
+          {(['positions', 'orders'] as const).map(t => {
+            const orderCount = portfolioData
+              ? portfolioData.t212.reduce((s, a) => s + (a.orders as unknown[]).length, 0)
+                + portfolioData.ig.reduce((s, a) => s + a.workingOrders.length, 0)
+              : 0;
+            return (
+              <button key={t} onClick={() => setPosTab(t)}
+                className={clsx('px-3 py-1.5 text-xs font-medium rounded-md transition-all',
+                  posTab === t ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
+                )}>
+                {t === 'positions' ? `Open Positions (${filtered.length})` : `Working Orders (${orderCount})`}
+              </button>
+            );
+          })}
+        </div>
+        {posTab === 'positions' && filtered.length > 0 && (
+          <Button size="sm" variant="outline" loading={closingAll}
+            icon={<XCircle className="h-3.5 w-3.5" />}
+            onClick={() => setCloseAllConfirm(true)}
+            className="border-red-500/30 text-red-400 hover:border-red-500/60">
+            Close All ({filtered.length})
+          </Button>
+        )}
       </div>
+
+      {/* Close All confirmation */}
+      {closeAllConfirm && (
+        <div className="flex items-center gap-3 bg-red-500/10 border border-red-500/25 rounded-lg px-3 py-2.5 text-xs">
+          <AlertCircle className="h-4 w-4 flex-shrink-0 text-red-400" />
+          <span className="text-red-300">
+            Close all {filtered.length} {activeTab === 'ALL' ? '' : `${activeTab} `}position{filtered.length === 1 ? '' : 's'} at market? This can&apos;t be undone.
+          </span>
+          <div className="ml-auto flex items-center gap-2 flex-shrink-0">
+            <Button size="sm" variant="outline" onClick={() => setCloseAllConfirm(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => { void closeAllPositions(); }}
+              className="border-red-500/40 text-red-400 hover:border-red-500/70">
+              Confirm Close All
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Positions table */}
       {posTab === 'positions' && (
