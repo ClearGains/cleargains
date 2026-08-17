@@ -531,11 +531,19 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         // RSI-reversal gate (same idea, different failure mode) already
         // found prompt wording alone doesn't reliably hold up against a
         // good enough story.
+        // Non-strict (>=/<=) rather than requiring every step to strictly
+        // decrease — confirmed live the strict version would have missed a
+        // real EUR/USD case: two bars tied exactly at the same high before
+        // the third came in lower, which is still a genuine non-rising,
+        // rolling-over shape, not a reason to wave it through. Still
+        // requires the two endpoints to actually differ (a.high > c.high /
+        // a.low < c.low) so a fully flat 3 bars — nothing moving at all —
+        // doesn't trigger this on a technicality.
         const recent3 = st.closedCandles.slice(-3);
         if (recent3.length === 3) {
           const [a, b, c] = recent3;
-          const decliningHighs = verdict.direction === 'BUY'  && a.high > b.high && b.high > c.high;
-          const risingLows     = verdict.direction === 'SELL' && a.low  < b.low  && b.low  < c.low;
+          const decliningHighs = verdict.direction === 'BUY'  && a.high >= b.high && b.high >= c.high && a.high > c.high;
+          const risingLows     = verdict.direction === 'SELL' && a.low  <= b.low  && b.low  <= c.low  && a.low  < c.low;
           if (decliningHighs || risingLows) {
             const shape = decliningHighs
               ? `declining highs (${a.high.toFixed(2)} > ${b.high.toFixed(2)} > ${c.high.toFixed(2)})`
