@@ -583,11 +583,17 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           if (!protectionOk) addLog('error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
 
           registerBotOpenedDeal(mode, dealId);
-          try {
-            const { addToWatch } = await import('./geminiWatch');
-            addToWatch(mode, dealId);
-          } catch {}
-
+          // Deliberately NOT enrolled in Gemini Position Watch — unlike
+          // gemini_opinion (which has no exit logic of its own and relies
+          // entirely on Position Watch to ever close anything), this
+          // strategy already manages its own exits mechanically (signal
+          // invalidation, stall detection, severe-loss/profit-lock) and
+          // already has its own macro-event awareness independent of
+          // Gemini's news reading. The naked-stop self-heal above still
+          // covers this position regardless — that's a separate, account-
+          // wide safety net, not tied to watch enrollment. User call: save
+          // the Gemini calls/cost for the stock strategies that actually
+          // need them to exit at all.
           saveEpicStates(mode, epicStates);
         } catch (e) {
           addLog('error', name, `Order placement failed: ${e instanceof Error ? e.message : String(e)}`);
