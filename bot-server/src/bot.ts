@@ -86,7 +86,7 @@ let signalMonitorTimer: ReturnType<typeof setInterval> | null = null;
 const log: LogEntry[] = [];
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
-function ts()  { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+function ts()  { return new Date().toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' }); }
 
 function saveState(params: BotStartParams) {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(params), 'utf8'); } catch {}
@@ -168,7 +168,7 @@ async function refreshSession() {
     addLog('info', '—', 'Refreshing IG session...');
     const session = await authenticate(apiKey, username, password, env);
     authFailCount = 0;
-    addLog('info', '—', `Session refreshed — expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+    addLog('info', '—', `Session refreshed — expires ${new Date(session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
 
     if (running) {
       connect(session, currentEpics, handleTick, '5MINUTE');
@@ -399,7 +399,7 @@ export async function startBot(params: BotStartParams): Promise<{ ok: boolean; e
     scheduleSessionRefresh(session);
 
     saveState(params);
-    addLog('info', '—', `Bot started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+    addLog('info', '—', `Bot started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
     return { ok: true };
   } catch (e) {
     running = false;

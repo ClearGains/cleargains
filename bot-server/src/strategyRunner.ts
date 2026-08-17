@@ -30,7 +30,7 @@ function uid() { return Math.random().toString(36).slice(2, 9); }
 function addLog(type: string, msg: string) {
   const entry: RunnerLog = {
     id:   uid(),
-    ts:   new Date().toLocaleTimeString('en-GB', { hour12: false }),
+    ts:   new Date().toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' }),
     type, msg,
   };
   runLog.unshift(entry);

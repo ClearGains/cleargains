@@ -115,7 +115,7 @@ function s(mode: AccountMode): ModeState {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function uid() { return Math.random().toString(36).slice(2, 8); }
-function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' }); }
 function round2(v: number) { return Math.round(v * 100) / 100; }
 
 // Deterministic per-decision order ID. Stable across a retry of the *same*

@@ -271,7 +271,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   const stream = createStreamManager(tag);
 
   function uid() { return Math.random().toString(36).slice(2, 9); }
-  function ts()  { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+  function ts()  { return new Date().toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' }); }
 
   function addLog(type: FxLogEntry['type'], epic: string, msg: string): void {
     const entry: FxLogEntry = { id: uid(), ts: ts(), type, epic, msg };
@@ -358,7 +358,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       // allowance cost either way.
       if (running) stream.connect(dataSession, currentEpics, onStreamTick, 'HOUR');
       authFailCount = 0;
-      addLog('info', '—', `Session(s) refreshed — execution expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+      addLog('info', '—', `Session(s) refreshed — execution expires ${new Date(session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
       scheduleRefresh(session);
     } catch (e) {
       authFailCount++;
@@ -879,7 +879,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       pollTimer = setInterval(() => { void pollCycle(); }, POLL_MS);
 
       saveStartState(mode, { epics: currentEpics, maxRiskGbp, maxConcurrentPositions });
-      addLog('info', '—', `FX swing bot started — session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+      addLog('info', '—', `FX swing bot started — session expires ${new Date(session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
       return { ok: true };
     } catch (e) {
       running = false;

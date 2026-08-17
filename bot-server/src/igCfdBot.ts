@@ -275,7 +275,7 @@ function isCfdQuietWeekend(): boolean {
 }
 
 function uid(): string { return Math.random().toString(36).slice(2, 9); }
-function ts(): string { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+function ts(): string { return new Date().toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' }); }
 function epicName(epic: string): string { return epic.split('.').slice(0, 3).join('.'); }
 
 // ── Persistence ──────────────────────────────────────────────────────────────

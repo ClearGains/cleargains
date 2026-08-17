@@ -65,7 +65,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function uid() { return Math.random().toString(36).slice(2, 9); }
-  function ts()  { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+  function ts()  { return new Date().toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' }); }
 
   function addLog(type: LogEntry['type'], epic: string, msg: string) {
     const entry: LogEntry = { id: uid(), ts: ts(), type, epic, msg };
@@ -113,7 +113,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
       addLog('info', '—', 'Refreshing IG session...');
       session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, accountKey);
       authFailCount = 0;
-      addLog('info', '—', `Session refreshed — expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+      addLog('info', '—', `Session refreshed — expires ${new Date(session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
       if (running) stream.connect(session, currentEpics, handleTick, '5MINUTE');
       scheduleRefresh(session);
     } catch (e) {
@@ -281,7 +281,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
       const existing = getSession(accountKey);
       if (existing && Date.now() < existing.expiresAt - 2 * 60_000) {
         session = existing;
-        addLog('info', '—', `Reusing existing ${accountKey} session — expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+        addLog('info', '—', `Reusing existing ${accountKey} session — expires ${new Date(session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
       } else {
         session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, accountKey);
       }
@@ -299,7 +299,7 @@ export function createAccountBot(accountKey: AccountKey): AccountBotHandle {
       stream.connect(session, params.epics, handleTick, '5MINUTE');
       scheduleRefresh(session);
 
-      addLog('info', '—', `Stream started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
+      addLog('info', '—', `Stream started — ${params.epics.length} instrument(s). Session expires ${new Date(session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
       return { ok: true };
     } catch (e) {
       running = false;

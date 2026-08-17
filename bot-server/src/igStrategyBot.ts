@@ -684,7 +684,7 @@ async function yahooPreCheckAction(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function uid() { return Math.random().toString(36).slice(2, 8); }
-function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' }); }
 
 // FX/spread-bet markets close Friday 22:00 UTC and gap over the weekend —
 // true whenever we're within `leadMinutes` of that close, still on Friday.
@@ -871,7 +871,7 @@ async function doSessionRefresh(mode: IgMode) {
     addLog(mode, 'info', '—', 'Refreshing IG session…');
     st.session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, `igstrat:${mode}`);
     st.authFailCount = 0;
-    addLog(mode, 'info', '—', `Session refreshed — expires ${new Date(st.session.expiresAt).toLocaleTimeString()}`);
+    addLog(mode, 'info', '—', `Session refreshed — expires ${new Date(st.session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
     scheduleSessionRefresh(mode, st.session);
   } catch (e) {
     st.authFailCount++;
@@ -2682,7 +2682,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
     const existing   = getSession(sessionKey);
     if (existing && Date.now() < existing.expiresAt - 2 * 60_000) {
       st.session = existing;
-      addLog(mode, 'info', '—', `Reusing existing session — expires ${new Date(st.session.expiresAt).toLocaleTimeString()}`);
+      addLog(mode, 'info', '—', `Reusing existing session — expires ${new Date(st.session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
     } else {
       addLog(mode, 'info', '—', 'Authenticating with IG…');
       st.session = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, sessionKey);
