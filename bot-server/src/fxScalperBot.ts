@@ -12,7 +12,7 @@ import {
   type SwingEpicState, type SwingConfig, type Trend,
 } from './fxSwingStrategy';
 import { isMarketOpen, isClosingSoon } from './marketHours';
-import { askGeminiFxSwing, type FxSwingEntrySignal } from './gemini';
+import { askGeminiFxSwing, askGeminiPositionVerdict, type FxSwingEntrySignal } from './gemini';
 import { fetchMacroEvents } from './macroCalendar';
 import { resolveCredentials, isLossLocked, registerBotOpenedDeal, type IgMode } from './igStrategyBot';
 import { FX_EPICS, SCALPER_INDEX_EPICS } from './igStrategyScanner';
@@ -153,6 +153,14 @@ const POLL_MS                    = 15 * 60_000;  // scan cadence — hourly-bar 
 const WEEKEND_FLATTEN_BUFFER_MIN = 30;   // tighten (not flatten) open positions this many minutes before Friday 22:00 UTC close
 const MAX_LOSS_CEILING_MULT      = 3;    // matches igStrategyBot.ts's realized-max-loss ceiling ratio
 const PREWARM_SKIP_IF_FRESHER_THAN_MS = 70 * 60_000;  // hourly bars + buffer — see prewarmCandles
+// A position surviving a gap this long (typically the weekend) last had its
+// thesis checked against whatever news/technicals existed before the gap —
+// nothing re-confirms it holds up against what's actually happened since.
+// FX positions were deliberately dropped from the continuous Gemini Position
+// Watch cycle to save usage (see that removal's own comment in start()) —
+// this is intentionally NOT a return to that continuous cadence, just one
+// bounded, one-off check per surviving position right at reopen.
+const WEEKEND_GAP_REVIEW_THRESHOLD_MS = 24 * 60 * 60_000;
 
 function epicName(epic: string): string { return epic.split('.').slice(0, 3).join('.'); }
 
@@ -389,6 +397,50 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       saveEpicStates(mode, epicStates);
     } catch (e) {
       addLog('error', epicName(epic), `Close failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // ── Weekend/extended-gap re-check — one-off, not the removed continuous
+  // watch (see WEEKEND_GAP_REVIEW_THRESHOLD_MS above). Called from start()
+  // with whichever epics were flagged before prewarmCandles overwrote the
+  // gap-detection signal with fresh data. Runs after prewarm/stream-connect
+  // so it reviews against genuinely current candles/indicators, not the
+  // stale pre-gap ones. Fire-and-forget from the caller — never blocks start.
+  async function reviewSurvivedPositions(epics: Set<string>): Promise<void> {
+    if (!session) return;
+    let livePositions: Awaited<ReturnType<typeof fetchFullPositions>> = [];
+    try { livePositions = await fetchFullPositions(session); } catch { /* best-effort — review still runs, just can't close without a matched live deal */ }
+
+    for (const epic of epics) {
+      const st = epicStates[epic];
+      if (!st || st.state !== 'IN_POSITION' || !st.dealId) continue;
+      const name = epicName(epic);
+      const livePos = livePositions.find(p => p.dealId === st.dealId);
+      try {
+        const ind = getIndicators(st.closedCandles, currentConfig);
+        const recentCandles = st.closedCandles.slice(-8).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close }));
+        const currentLevel = st.closedCandles[st.closedCandles.length - 1]?.close ?? st.entryPrice;
+        const verdict = await askGeminiPositionVerdict({
+          instrumentName: name,
+          direction:      st.direction,
+          entryLevel:     st.entryPrice,
+          currentLevel,
+          uplGbp:         livePos?.upl ?? 0,
+          heldHours:      (Date.now() - st.entryTimeMs) / 3_600_000,
+          stopLevel:      st.dynamicStopPrice || undefined,
+          limitLevel:     st.takeProfitPrice || undefined,
+          recentCandles,
+          rsi:            ind.rsi,
+          macdHist:       ind.macd,
+          isFx:           true,
+        });
+        addLog('info', name, `[Weekend re-check] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+        if (verdict.action === 'CLOSE' && livePos) {
+          await closeAndReset(epic, st.dealId, st.direction, st.size);
+        }
+      } catch (e) {
+        addLog('error', name, `Weekend re-check failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
 
@@ -888,6 +940,20 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         epicStates[epic] = persisted?.[epic] ?? initSwingEpicState(epic);
       }
 
+      // Must capture this before prewarmCandles below — it overwrites
+      // closedCandles with fresh data, which would erase the very gap this
+      // is trying to detect. Live-only: see WEEKEND_GAP_REVIEW_THRESHOLD_MS.
+      const weekendGapEpics = new Set<string>();
+      if (mode === 'live') {
+        for (const epic of currentEpics) {
+          const st = epicStates[epic];
+          if (st.state !== 'IN_POSITION' || !st.dealId) continue;
+          const lastKnownTime = st.closedCandles[st.closedCandles.length - 1]?.time;
+          const gapMs = lastKnownTime ? Date.now() - new Date(lastKnownTime).getTime() : Infinity;
+          if (gapMs >= WEEKEND_GAP_REVIEW_THRESHOLD_MS) weekendGapEpics.add(epic);
+        }
+      }
+
       await prewarmCandles(dataSession, currentEpics);
       stream.connect(dataSession, currentEpics, onStreamTick, 'HOUR');
 
@@ -898,6 +964,8 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       void pollCycle();
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(() => { void pollCycle(); }, POLL_MS);
+
+      if (weekendGapEpics.size) void reviewSurvivedPositions(weekendGapEpics);
 
       saveStartState(mode, { epics: currentEpics, maxRiskGbp, maxConcurrentPositions });
       addLog('info', '—', `FX swing bot started — session expires ${new Date(session.expiresAt).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
