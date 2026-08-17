@@ -517,6 +517,35 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           return;
         }
 
+        // Declining-highs/rising-lows gate — FX only, not gemini_opinion's
+        // stock entries (a deliberate scope call: gemini_opinion has
+        // already missed real continuation moves, and this same check
+        // there would filter out more of those than it'd save; FX doesn't
+        // carry that same cost the same way). Confirmed live the failure
+        // mode this catches: a Silver "healthy consolidation, primed for
+        // continued momentum" BUY went in right as its last 3 closed bars
+        // printed two straight lower highs (66.735 → 66.640 → 66.585) — a
+        // real, visible short-term rollover that Gemini's own reading of
+        // the same candle data called consolidation instead. Mechanical
+        // check, not another prompt instruction — igStrategyBot.ts's own
+        // RSI-reversal gate (same idea, different failure mode) already
+        // found prompt wording alone doesn't reliably hold up against a
+        // good enough story.
+        const recent3 = st.closedCandles.slice(-3);
+        if (recent3.length === 3) {
+          const [a, b, c] = recent3;
+          const decliningHighs = verdict.direction === 'BUY'  && a.high > b.high && b.high > c.high;
+          const risingLows     = verdict.direction === 'SELL' && a.low  < b.low  && b.low  < c.low;
+          if (decliningHighs || risingLows) {
+            const shape = decliningHighs
+              ? `declining highs (${a.high.toFixed(2)} > ${b.high.toFixed(2)} > ${c.high.toFixed(2)})`
+              : `rising lows (${a.low.toFixed(2)} < ${b.low.toFixed(2)} < ${c.low.toFixed(2)})`;
+            addLog('wait', name, `Gemini said ${verdict.direction} ${verdict.confidence}% but the last 3 bars show ${shape} — that's an active short-term reversal against this direction, not confirmation; waiting for it to actually turn`);
+            revertToFlat();
+            return;
+          }
+        }
+
         try {
           const details = await fetchMarketDetails(session, [epic]);
           const detail  = details.get(epic);
