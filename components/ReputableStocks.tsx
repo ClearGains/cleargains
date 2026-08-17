@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Shield, Zap, TrendingUp, ArrowDown, ArrowUp, AlertCircle } from 'lucide-react';
+import { RefreshCw, Shield, Zap, TrendingUp, ArrowDown, ArrowUp, AlertCircle, BarChart3 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { NewsStrip } from '@/components/ui/NewsStrip';
+import { StockChartModal } from '@/components/StockChartModal';
 
 // ── Universe ──────────────────────────────────────────────────────────────────
 
@@ -213,7 +214,7 @@ function sortRows(rows: StockRow[]): StockRow[] {
 
 // ── Stock card ────────────────────────────────────────────────────────────────
 
-function StockCard({ row, rank, total, tf }: { row: StockRow; rank: number; total: number; tf: TF }) {
+function StockCard({ row, rank, total, tf, onChart }: { row: StockRow; rank: number; total: number; tf: TF; onChart: (row: StockRow) => void }) {
   const cur = row.currency;
   const up  = row.changePercent >= 0;
   const tfLabel = TF_OPTIONS.find(t => t.value === tf)?.label ?? tf;
@@ -228,6 +229,13 @@ function StockCard({ row, rank, total, tf }: { row: StockRow; rank: number; tota
             <span className="font-bold text-white font-mono">{row.symbol}</span>
             <VolBadge v={row.volatility} />
             <SignalBadge s={row.signal} />
+            <button
+              onClick={() => onChart(row)}
+              title="View chart"
+              className="flex items-center justify-center p-1 rounded text-gray-500 hover:text-orange-400 border border-gray-700 hover:border-orange-500/60 transition-all"
+            >
+              <BarChart3 className="h-2.5 w-2.5" />
+            </button>
           </div>
           <div className="text-xs text-gray-500 mt-0.5 truncate max-w-[220px]">{row.name}</div>
           <div className="text-[10px] text-gray-700 mt-0.5">{MARKET_LABELS[row.market]} · {row.sector}</div>
@@ -330,6 +338,7 @@ export function ReputableStocks() {
   const [loading,   setLoading]   = useState(false);
   const [error,     setError]     = useState('');
   const [lastFetch, setLastFetch] = useState<Date | null>(null);
+  const [chartStock, setChartStock] = useState<StockRow | null>(null);
 
   const fetch_ = useCallback(async (timeframe: TF) => {
     setLoading(true);
@@ -473,7 +482,7 @@ export function ReputableStocks() {
               </h2>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                 {displayed.filter(r => r.signal === 'DIP_BUY').map((row, i) => (
-                  <StockCard key={row.symbol} row={row} rank={rows.indexOf(row) + 1} total={displayed.length} tf={tf} />
+                  <StockCard key={row.symbol} row={row} rank={rows.indexOf(row) + 1} total={displayed.length} tf={tf} onChart={setChartStock} />
                 ))}
               </div>
             </section>
@@ -488,7 +497,7 @@ export function ReputableStocks() {
               </h2>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                 {displayed.filter(r => r.signal === 'STEADY').map((row, i) => (
-                  <StockCard key={row.symbol} row={row} rank={rows.indexOf(row) + 1} total={displayed.length} tf={tf} />
+                  <StockCard key={row.symbol} row={row} rank={rows.indexOf(row) + 1} total={displayed.length} tf={tf} onChart={setChartStock} />
                 ))}
               </div>
             </section>
@@ -504,7 +513,7 @@ export function ReputableStocks() {
               </h2>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                 {displayed.filter(r => r.signal === 'MOMENTUM').map((row, i) => (
-                  <StockCard key={row.symbol} row={row} rank={rows.indexOf(row) + 1} total={displayed.length} tf={tf} />
+                  <StockCard key={row.symbol} row={row} rank={rows.indexOf(row) + 1} total={displayed.length} tf={tf} onChart={setChartStock} />
                 ))}
               </div>
             </section>
@@ -519,6 +528,16 @@ export function ReputableStocks() {
       <p className="text-[10px] text-gray-700 text-center pt-2">
         Levels shown are indicative based on timeframe and volatility tier — not financial advice. Always verify before entering a trade. Spread betting involves significant risk of loss.
       </p>
+
+      <StockChartModal
+        stock={chartStock ? {
+          symbol: chartStock.symbol, name: chartStock.name, price: chartStock.price,
+          stopLoss: chartStock.stopLoss, takeProfit: chartStock.takeProfit,
+          entry: chartStock.signal === 'MOMENTUM' ? undefined : chartStock.entry,
+          pullbackEntry: chartStock.pullbackEntry, breakoutEntry: chartStock.breakoutEntry,
+        } : null}
+        onClose={() => setChartStock(null)}
+      />
     </div>
   );
 }
