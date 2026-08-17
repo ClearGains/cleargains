@@ -123,6 +123,13 @@ type StockRow = StockDef & QuoteData & {
   tpDist:     number;
   stopPct:    number;
   signal:     'MOMENTUM' | 'DIP_BUY' | 'STEADY';
+  // MOMENTUM only — see computeRow. DIP_BUY/STEADY's `entry` (current price)
+  // is already the intended action ("buy the dip"/"buy now"); MOMENTUM's
+  // isn't, despite the section header promising "enter on pullback or
+  // breakout" — entry was silently just current price for every signal,
+  // labeled "current price" in the UI, contradicting that copy outright.
+  pullbackEntry?: number;
+  breakoutEntry?: number;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -157,7 +164,14 @@ function computeRow(def: StockDef, q: QuoteData, tf: TF): StockRow {
   const signal: StockRow['signal'] =
     q.changePercent > 1   ? 'MOMENTUM' :
     q.changePercent < -1.5 ? 'DIP_BUY'  : 'STEADY';
-  return { ...def, ...q, entry: round2(price), stopLoss, takeProfit, stopDist, tpDist, stopPct, signal };
+  // Pullback/breakout levels, scaled by the same volatility-tiered distance
+  // already used for stopDist/tpDist above — a shallow pullback for a LOW-
+  // vol name, a wider one for a HIGH-vol name, symmetric on the breakout
+  // side. Only meaningful (and only shown) for MOMENTUM, where the stock is
+  // already running and buying at the current price means chasing it.
+  const pullbackEntry = signal === 'MOMENTUM' ? round2(price - stopDist / 2) : undefined;
+  const breakoutEntry = signal === 'MOMENTUM' ? round2(price + stopDist / 2) : undefined;
+  return { ...def, ...q, entry: round2(price), stopLoss, takeProfit, stopDist, tpDist, stopPct, signal, pullbackEntry, breakoutEntry };
 }
 
 // ── Volatility badge ──────────────────────────────────────────────────────────
@@ -233,8 +247,19 @@ function StockCard({ row, rank, total, tf }: { row: StockRow; rank: number; tota
       <div className="grid grid-cols-3 gap-1.5 text-xs font-mono">
         <div className="bg-blue-950/30 rounded-lg p-2 border border-blue-900/20">
           <div className="text-[9px] text-blue-400 font-semibold mb-0.5">ENTRY</div>
-          <div className="text-white font-bold">{fmtPrice(row.entry, cur)}</div>
-          <div className="text-[9px] text-blue-900">current price</div>
+          {row.signal === 'MOMENTUM' && row.pullbackEntry !== undefined && row.breakoutEntry !== undefined ? (
+            <>
+              <div className="text-white font-bold leading-tight">{fmtPrice(row.pullbackEntry, cur)}</div>
+              <div className="text-[9px] text-blue-900 leading-tight">pullback</div>
+              <div className="text-white font-bold leading-tight mt-1">{fmtPrice(row.breakoutEntry, cur)}</div>
+              <div className="text-[9px] text-blue-900 leading-tight">breakout</div>
+            </>
+          ) : (
+            <>
+              <div className="text-white font-bold">{fmtPrice(row.entry, cur)}</div>
+              <div className="text-[9px] text-blue-900">current price</div>
+            </>
+          )}
         </div>
         <div className="bg-red-950/30 rounded-lg p-2 border border-red-900/20">
           <div className="text-[9px] text-red-400 font-semibold mb-0.5 flex items-center gap-0.5"><ArrowDown className="h-2 w-2" />STOP LOSS</div>
