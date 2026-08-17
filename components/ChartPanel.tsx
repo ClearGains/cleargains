@@ -8,13 +8,20 @@ import type { SRZone } from '@/lib/supportResistance';
 
 export type Overlay = 'sma20' | 'sma50' | 'sma200' | 'bb' | 'vwap' | 'volume' | 'rsi' | 'macd';
 
+// Distinct from SRZone (support/resistance, always dashed green/red) —
+// these are solid-line markers for an actual position's own levels
+// (entry/stop/target), so they read as "this position" rather than being
+// mistaken for a technical S/R zone.
+export type PositionLevel = { price: number; label: string; color: string };
+
 type Props = {
   candles: LWCandle[];
   overlays: Set<Overlay>;
   srZones: SRZone[];
+  positionLevels?: PositionLevel[];
 };
 
-export function ChartPanel({ candles, overlays, srZones }: Props) {
+export function ChartPanel({ candles, overlays, srZones, positionLevels }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -96,6 +103,18 @@ export function ChartPanel({ candles, overlays, srZones }: Props) {
         });
       }
 
+      // ── Position levels (entry/stop/target) ──────────────────────────────
+      for (const lvl of positionLevels ?? []) {
+        candle.createPriceLine({
+          price: lvl.price,
+          color: lvl.color,
+          lineWidth: 2,
+          lineStyle: LineStyle.Solid,
+          axisLabelVisible: true,
+          title: lvl.label,
+        });
+      }
+
       // ── RSI sub-pane ──────────────────────────────────────────────────────
       if (rsiPane > 0) {
         const rsiData = calcRSI(candles, 14);
@@ -135,7 +154,7 @@ export function ChartPanel({ candles, overlays, srZones }: Props) {
       chartInstance?.remove();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candles, overlays, srZones]);
+  }, [candles, overlays, srZones, positionLevels]);
 
   return (
     <div className="bg-[#030712] rounded-lg border border-gray-800 overflow-hidden">

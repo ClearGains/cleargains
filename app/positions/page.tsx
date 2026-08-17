@@ -16,6 +16,7 @@ import {
   useLoadPortfolio, LoadPortfolioModal,
   PORTFOLIO_SNAPSHOT_KEY, type PortfolioData,
 } from '@/components/portfolio/LoadPortfolioModal';
+import { PositionChartModal } from '@/components/PositionChartModal';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -203,9 +204,10 @@ function SummaryCard({ label, value, sub, highlight }: {
 
 // ── Position row ──────────────────────────────────────────────────────────────
 
-function PositionRow({ pos, onClose, closing, cgIds }: {
+function PositionRow({ pos, onClose, onViewChart, closing, cgIds }: {
   pos: UnifiedPosition;
   onClose: (p: UnifiedPosition) => void;
+  onViewChart: (p: UnifiedPosition) => void;
   closing: boolean;
   cgIds: Set<string>;
 }) {
@@ -253,14 +255,25 @@ function PositionRow({ pos, onClose, closing, cgIds }: {
       </td>
       <td className="px-3 py-2.5 text-[10px] text-gray-500">{fmtAge(pos.openedAt)}</td>
       <td className="px-3 py-2.5">
-        <button
-          onClick={() => onClose(pos)}
-          disabled={closing}
-          className="flex items-center gap-1 text-[10px] text-red-400 hover:text-red-300 border border-red-500/30 hover:border-red-500/60 rounded px-2 py-1 transition-all disabled:opacity-40"
-        >
-          {closing ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <X className="h-2.5 w-2.5" />}
-          Close
-        </button>
+        <div className="flex items-center gap-1.5">
+          {pos.epic && (
+            <button
+              onClick={() => onViewChart(pos)}
+              title="View chart"
+              className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-orange-400 border border-gray-700 hover:border-orange-500/60 rounded px-2 py-1 transition-all"
+            >
+              <BarChart3 className="h-2.5 w-2.5" />
+            </button>
+          )}
+          <button
+            onClick={() => onClose(pos)}
+            disabled={closing}
+            className="flex items-center gap-1 text-[10px] text-red-400 hover:text-red-300 border border-red-500/30 hover:border-red-500/60 rounded px-2 py-1 transition-all disabled:opacity-40"
+          >
+            {closing ? <RefreshCw className="h-2.5 w-2.5 animate-spin" /> : <X className="h-2.5 w-2.5" />}
+            Close
+          </button>
+        </div>
       </td>
     </tr>
   );
@@ -286,6 +299,7 @@ export default function PositionsPage() {
   const [closingId, setClosingId]       = useState<string | null>(null);
   const [closeError, setCloseError]     = useState<string | null>(null);
   const [closeSuccess, setCloseSuccess] = useState<string | null>(null);
+  const [chartPos, setChartPos]         = useState<UnifiedPosition | null>(null);
   const [fundsData, setFundsData]       = useState<Partial<Record<string, { available: number; label: string; color: string }>>>({});
   const [showHistory, setShowHistory]   = useState(false);
   const [historyFilter, setHistoryFilter] = useState<AccountKey | 'ALL'>('ALL');
@@ -1816,6 +1830,7 @@ export default function PositionsPage() {
                   {filtered.map(pos => (
                     <PositionRow key={pos.id} pos={pos}
                       onClose={closePosition}
+                      onViewChart={setChartPos}
                       closing={closingId === pos.id}
                       cgIds={cgIdsRef.current}
                     />
@@ -1990,6 +2005,14 @@ export default function PositionsPage() {
         totalPositions={portfolioModal.totalPositions}
         connectedCount={portfolioModal.connectedCount}
         onReload={portfolioModal.reload}
+      />
+      <PositionChartModal
+        pos={chartPos && chartPos.epic ? {
+          epic: chartPos.epic, name: chartPos.name, direction: chartPos.direction,
+          entryPrice: chartPos.entryPrice, currentPrice: chartPos.currentPrice,
+          stopLevel: chartPos.stopLevel, limitLevel: chartPos.limitLevel,
+        } : null}
+        onClose={() => setChartPos(null)}
       />
 
       {/* Manual position modal */}
