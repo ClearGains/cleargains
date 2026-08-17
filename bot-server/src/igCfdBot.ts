@@ -119,6 +119,22 @@ const CFD_UNAVAILABLE_EPICS = new Set([
   // extra IG API call every poll cycle for every instrument just to cover
   // this one name — not worth it for a single stock. Simpler to exclude.
   'UD.D.SKHYUS.DAILY.IP', // SK Hynix
+  // 2026-08-15's high-beta/screener batch (PLTR, COIN, SNAP, UBER, SHOP, SQ,
+  // PYPL, RBLX, DKNG, RIVN, NIO, GME) — same check run live against all 12:
+  // only the spread-bet "24 Hours" DAILY.IP product, leveraged ETPs, and
+  // options came back for every one, no plain CFD share product for any.
+  'SE.D.PLTRUS.DAILY.IP',  // Palantir
+  'UA.D.COINUS.DAILY.IP',  // Coinbase
+  'SG.D.SNAPUS.DAILY.IP',  // Snap
+  'SH.D.UBERUS.DAILY.IP',  // Uber
+  'SG.D.SHOPUS.DAILY.IP',  // Shopify
+  'SG.D.SQUS.DAILY.IP',    // Block Inc
+  'UC.D.PYPLVUS.DAILY.IP', // PayPal
+  'SG.D.RBLXUS.DAILY.IP',  // Roblox
+  'UB.D.DKNGUS.DAILY.IP',  // DraftKings
+  'UC.D.RIVNUS.DAILY.IP',  // Rivian
+  'SE.D.NIOUS.DAILY.IP',   // NIO
+  'SC.D.GMEUS.DAILY.IP',   // GameStop
 ]);
 
 type CfdInstrument = { name: string; epic: string };

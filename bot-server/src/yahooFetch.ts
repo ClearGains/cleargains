@@ -128,6 +128,21 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'KA.D.GSK.DAILY.IP':    'GSK.L',
   'KA.D.AZN.DAILY.IP':    'AZN.L',
   'KA.D.LLOY.DAILY.IP':   'LLOY.L',
+  // US High-beta / Screener regulars — added to IG_STOCK_EPICS but never
+  // mapped here, so fetchBarsWithFallback returned null forever for these
+  // ("Not enough bar data yet" every scan, not a transient warm-up state).
+  'SE.D.PLTRUS.DAILY.IP':  'PLTR',
+  'UA.D.COINUS.DAILY.IP':  'COIN',
+  'SG.D.SNAPUS.DAILY.IP':  'SNAP',
+  'SH.D.UBERUS.DAILY.IP':  'UBER',
+  'SG.D.SHOPUS.DAILY.IP':  'SHOP',
+  'SG.D.SQUS.DAILY.IP':    'SQ',
+  'UC.D.PYPLVUS.DAILY.IP': 'PYPL',
+  'SG.D.RBLXUS.DAILY.IP':  'RBLX',
+  'UB.D.DKNGUS.DAILY.IP':  'DKNG',
+  'UC.D.RIVNUS.DAILY.IP':  'RIVN',
+  'SE.D.NIOUS.DAILY.IP':   'NIO',
+  'SC.D.GMEUS.DAILY.IP':   'GME',
 
   // ── CFD-account .CASH.IP epics for the same stocks above ──────────────
   // igCfdBot.ts swaps most of these ".DAILY.IP" epics for a distinct,
@@ -194,6 +209,20 @@ export const EPIC_TO_ALPACA: Record<string, string> = {
   'UD.D.WDC.DAILY.IP':    'WDC',
   'SB.D.DELLUS.DAILY.IP': 'DELL',
   'UC.D.RIMM.DAILY.IP':   'BB',
+  // US High-beta / Screener regulars — same missing-mapping gap as in
+  // EPIC_TO_YAHOO above; all confirmed Alpaca-tradable US common stock.
+  'SE.D.PLTRUS.DAILY.IP':  'PLTR',
+  'UA.D.COINUS.DAILY.IP':  'COIN',
+  'SG.D.SNAPUS.DAILY.IP':  'SNAP',
+  'SH.D.UBERUS.DAILY.IP':  'UBER',
+  'SG.D.SHOPUS.DAILY.IP':  'SHOP',
+  'SG.D.SQUS.DAILY.IP':    'SQ',
+  'UC.D.PYPLVUS.DAILY.IP': 'PYPL',
+  'SG.D.RBLXUS.DAILY.IP':  'RBLX',
+  'UB.D.DKNGUS.DAILY.IP':  'DKNG',
+  'UC.D.RIVNUS.DAILY.IP':  'RIVN',
+  'SE.D.NIOUS.DAILY.IP':   'NIO',
+  'SC.D.GMEUS.DAILY.IP':   'GME',
   // SK Hynix (Korean primary listing) and Nokia (Helsinki listing) aren't
   // Alpaca-tradable US symbols — Yahoo-only for those two, as before.
 
