@@ -97,6 +97,11 @@ const CFD_STOCK_EPIC_OVERRIDES: Record<string, string> = {
   'KA.D.GSK.DAILY.IP':    'KA.D.GSK.CASH.IP',
   'KA.D.AZN.DAILY.IP':    'KA.D.AZN.CASH.IP',
   'KA.D.LLOY.DAILY.IP':   'KA.D.LLOY.CASH.IP',
+  // Confirmed live via IG market search: unlike Silver/Brent/Natural Gas
+  // below, Bitcoin has a genuine continuous CFD product (expiry "-", same
+  // shape as IX.D.FTSE.CFD.IP/CS.D.GBPUSD.CFD.IP) distinct from the DFB
+  // spread-bet epic already in IG_EPICS.
+  'CS.D.BITCOIN.TODAY.IP': 'CS.D.BITCOIN.CFD.IP',
 };
 // No CFD-dealable share product exists for these on this account (verified
 // via a live IG market search — only leveraged ETPs/options came back).
@@ -135,6 +140,18 @@ const CFD_UNAVAILABLE_EPICS = new Set([
   'UC.D.RIVNUS.DAILY.IP',  // Rivian
   'SE.D.NIOUS.DAILY.IP',   // NIO
   'SC.D.GMEUS.DAILY.IP',   // GameStop
+  // Same 2026-08-15 batch, commodities/crypto/Ford. Confirmed live: Silver's
+  // only non-DFB product is monthly-rollover futures (MT.D.SI.MonthN.IP,
+  // expiring contracts, not a static epic) — too different to swap in as a
+  // drop-in override. Brent Crude and Natural Gas have no CFD-epic
+  // equivalent at all (CC.D.LCO.CFD.IP / CC.D.NG.CFD.IP both 404). Ford is
+  // the same single-DAILY.IP-only situation as the stock batch above.
+  // Bitcoin is the one exception — it has a real CFD epic, handled via
+  // CFD_STOCK_EPIC_OVERRIDES instead of exclusion.
+  'CS.D.USCSI.TODAY.IP',   // Silver
+  'CC.D.LCO.USS.IP',       // Brent Crude
+  'CC.D.NG.USS.IP',        // Natural Gas
+  'SC.D.F.DAILY.IP',       // Ford
 ]);
 
 type CfdInstrument = { name: string; epic: string };

@@ -143,6 +143,15 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'UC.D.RIVNUS.DAILY.IP':  'RIVN',
   'SE.D.NIOUS.DAILY.IP':   'NIO',
   'SC.D.GMEUS.DAILY.IP':   'GME',
+  // Commodities/crypto/Ford from the same 2026-08-15 batch — same missing-
+  // mapping gap. Tickers match the leaderboard's own convention for these
+  // exact instruments (see lib/yahooClient.ts / lib/backtest.ts).
+  'CS.D.USCSI.TODAY.IP':   'SI=F',
+  'CC.D.LCO.USS.IP':       'BZ=F',
+  'CC.D.NG.USS.IP':        'NG=F',
+  'CS.D.BITCOIN.TODAY.IP': 'BTC-USD',
+  'CS.D.BITCOIN.CFD.IP':   'BTC-USD',
+  'SC.D.F.DAILY.IP':       'F',
 
   // ── CFD-account .CASH.IP epics for the same stocks above ──────────────
   // igCfdBot.ts swaps most of these ".DAILY.IP" epics for a distinct,
@@ -223,8 +232,11 @@ export const EPIC_TO_ALPACA: Record<string, string> = {
   'UC.D.RIVNUS.DAILY.IP':  'RIVN',
   'SE.D.NIOUS.DAILY.IP':   'NIO',
   'SC.D.GMEUS.DAILY.IP':   'GME',
+  'SC.D.F.DAILY.IP':       'F',
   // SK Hynix (Korean primary listing) and Nokia (Helsinki listing) aren't
   // Alpaca-tradable US symbols — Yahoo-only for those two, as before.
+  // Silver/Brent Crude/Natural Gas/Bitcoin are commodities/crypto, not
+  // Alpaca-tradable equities — Yahoo-only (see EPIC_TO_YAHOO above).
 
   // CFD-account .CASH.IP equivalents — see the matching block in
   // EPIC_TO_YAHOO above for why these are needed as separate keys.
