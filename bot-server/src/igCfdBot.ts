@@ -471,6 +471,28 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
     lastPollTs = new Date().toISOString();
     try {
       const rawPositions = await fetchFullPositions(session);
+
+      // CFDs settle in the instrument's own currency — USD for US shares
+      // (see fetchMarketDetails' currencyCode comment in igOAuthApi.ts) —
+      // but this account and every other £ figure in the UI is GBP. Left
+      // unconverted, upl was a raw USD number displayed with a "£" label,
+      // overstating the true GBP P&L by roughly the GBPUSD rate (~35%).
+      // Convert once per cycle off a live GBP/USD quote, only when needed.
+      const needsFx = rawPositions.some(p => p.currency && p.currency !== 'GBP');
+      let gbpUsdRate: number | undefined;
+      if (needsFx) {
+        const fx = await fetchMarketDetails(session, ['CS.D.GBPUSD.CFD.IP']);
+        const rate = fx.get('CS.D.GBPUSD.CFD.IP');
+        if (typeof rate?.bid === 'number' && typeof rate?.offer === 'number') {
+          gbpUsdRate = (rate.bid + rate.offer) / 2;
+        }
+      }
+      const toGbp = (amount: number, currency: string): number => {
+        if (!currency || currency === 'GBP') return amount;
+        if (currency === 'USD' && gbpUsdRate) return amount / gbpUsdRate;
+        return amount; // unsupported currency or no live FX rate — leave unconverted rather than guess
+      };
+
       // IG reports no bid/offer (upl=0) whenever a market is currently
       // closed — true for every "24 Hours" CFD stock outside its real
       // exchange hours, which is most of the day for this bot's universe.
@@ -482,14 +504,14 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
       // UI can show it's not IG's own live tick.
       const positions: CfdPositionStatus[] = await Promise.all(rawPositions.map(async p => {
         if (p.hasLiveQuote) {
-          return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: p.upl };
+          return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: toGbp(p.upl, p.currency) };
         }
         try {
           const fallbackBars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Day', yahooInterval: '1d', rawShares: true });
           const lastClose = fallbackBars?.length ? fallbackBars[fallbackBars.length - 1].c : undefined;
           if (lastClose === undefined) throw new Error('no fallback price');
           const estimatedUpl = (p.direction === 'BUY' ? lastClose - p.level : p.level - lastClose) * p.size;
-          return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: estimatedUpl, estimated: true };
+          return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: toGbp(estimatedUpl, p.currency), estimated: true };
         } catch {
           return { dealId: p.dealId, epic: p.epic, instrumentName: p.instrumentName, direction: p.direction, size: p.size, level: p.level, upl: 0 };
         }
