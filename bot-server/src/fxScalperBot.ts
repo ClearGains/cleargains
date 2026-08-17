@@ -152,6 +152,7 @@ function loadEpicStates(mode: FxMode): Record<string, SwingEpicState> | null {
 const POLL_MS                    = 15 * 60_000;  // scan cadence — hourly-bar decisions don't need tighter
 const WEEKEND_FLATTEN_BUFFER_MIN = 30;   // tighten (not flatten) open positions this many minutes before Friday 22:00 UTC close
 const MAX_LOSS_CEILING_MULT      = 3;    // matches igStrategyBot.ts's realized-max-loss ceiling ratio
+const PREWARM_SKIP_IF_FRESHER_THAN_MS = 70 * 60_000;  // hourly bars + buffer — see prewarmCandles
 
 function epicName(epic: string): string { return epic.split('.').slice(0, 3).join('.'); }
 
@@ -797,6 +798,26 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         const st = epicStates[epic];
         if (!st) continue;
         const hasPersistedHistory = st.closedCandles.length >= MIN_PERSISTED_CANDLES;
+
+        // A restart minutes after the last one (a code deploy, a crash
+        // recovery) doesn't need a fresh REST top-up at all — the persisted
+        // last candle is still well inside the current hourly bar, and the
+        // live stream delivers the next real close once connected regardless.
+        // This call used to fire on every restart no matter how recently the
+        // bot last ran, and was confirmed live to be the single biggest
+        // consumer of the shared demo API key's allowance — a run of
+        // restarts minutes apart was enough to exhaust it on its own.
+        if (hasPersistedHistory) {
+          const lastKnownTime = st.closedCandles[st.closedCandles.length - 1]?.time;
+          const ageMs = lastKnownTime ? Date.now() - new Date(lastKnownTime).getTime() : Infinity;
+          if (ageMs < PREWARM_SKIP_IF_FRESHER_THAN_MS) {
+            lastBarTime[epic] = lastKnownTime;
+            lastSuccessfulFetchAt[epic] = Date.now();
+            warmed++;
+            addLog('info', epicName(epic), `Resumed from saved history (${st.closedCandles.length} candles, last bar ${(ageMs / 60_000).toFixed(0)}min old) — skipping REST top-up, live stream will catch up`);
+            continue;
+          }
+        }
 
         const bars = await fetchCandleHistory(sess, epic, 'HOUR', hasPersistedHistory ? 4 : 80);
         await new Promise(r => setTimeout(r, 1200));
