@@ -27,9 +27,10 @@ export async function fetchYahooBars(
   symbol:   string,
   interval: '1m' | '5m' | '15m' | '30m' | '1h' | '1d' | '1wk',
   range:    string,
+  includePrePost = false,
 ): Promise<AlpacaBar[] | null> {
   const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
-    `?interval=${interval}&range=${range}&includePrePost=false`;
+    `?interval=${interval}&range=${range}&includePrePost=${includePrePost}`;
   try {
     const res = await fetch(url, {
       headers: {
@@ -316,6 +317,20 @@ export async function fetchBarsWithFallback(
     // distance computed ~100x too wide (real price vs a still-scaled
     // signal price), meaning positions had essentially no working stop.
     rawShares?: boolean;
+    // Extended-hours mode — for IG's "24 Hour" US share CFDs, which are
+    // live/dealable well outside NASDAQ's 13:30-20:00 UTC regular session
+    // (confirmed live: MSFT/SNAP showing TRADEABLE with a moving bid/offer
+    // at ~00:30 UTC Monday, hours before real pre-market even opens ~08:00
+    // UTC). Alpaca's free IEX feed is skipped entirely when this is set —
+    // its own bars endpoint has no extended-hours toggle, and the existing
+    // Alpaca/Yahoo price cross-check below only catches a *wrong* price,
+    // not a *stale-but-still-accurate* one: if Friday's close hasn't moved
+    // much overnight, Alpaca's frozen Friday bar would pass the trust check
+    // and get returned with its own (stale) timestamp regardless of how
+    // fresh Yahoo's data is. Going straight to Yahoo with includePrePost on
+    // sidesteps that rather than trying to patch the trust check to reason
+    // about staleness as well as price.
+    includePrePost?: boolean;
   },
 ): Promise<AlpacaBar[] | null> {
   const alpacaTimeframe = opts?.alpacaTimeframe ?? '1Day';
@@ -323,7 +338,7 @@ export async function fetchBarsWithFallback(
   const isShare  = epic in EPIC_TO_ALPACA && !opts?.rawShares;
   const alpacaSym = EPIC_TO_ALPACA[epic];
   const yahooSym  = EPIC_TO_YAHOO[epic];
-  if (alpacaSym) {
+  if (alpacaSym && !opts?.includePrePost) {
     try {
       const { getBars } = await import('./alpacaApi');
       // 250 not 130 — gemini_opinion now asks for 240 30-min bars (5 days'
@@ -362,7 +377,7 @@ export async function fetchBarsWithFallback(
     }
   }
   if (!yahooSym) return null;
-  const yahooBars = await fetchYahooBars(yahooSym, yahooInterval, range);
+  const yahooBars = await fetchYahooBars(yahooSym, yahooInterval, range, opts?.includePrePost ?? false);
   if (!yahooBars?.length) return yahooBars;
   if (isShare) return scaleBars(yahooBars, IG_SHARE_POINTS_PER_UNIT);
   // liveReferenceLevel was documented above (and has been since this file's

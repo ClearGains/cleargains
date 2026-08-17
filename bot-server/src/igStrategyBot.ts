@@ -605,7 +605,7 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
 // what makes them the most likely to burn through it (confirmed live:
 // daily-timeframe polling alone was already tripping the allowance before
 // this existed at all).
-const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1d' | '1wk' }>> = {
+const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1d' | '1wk'; includePrePost?: boolean }>> = {
   rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
   orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
@@ -617,8 +617,12 @@ const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   // ? ... : fetchBarsWithFallback(epic, '6mo')` fallback at each call site).
   // 30-min bars, not hourly — see STRATEGY_META.gemini_opinion for why.
   // Yahoo's 30m interval is only available for ~60 days back, well within
-  // this 1-month range request.
-  gemini_opinion:     { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m' },
+  // this 1-month range request. includePrePost: true so IG's "24 Hour" US
+  // share CFDs (live/dealable well outside regular NASDAQ hours — confirmed
+  // live) get fresh extended-hours bars instead of sitting on a stale
+  // Friday-close bar until 13:30 UTC — see fetchBarsWithFallback's
+  // includePrePost doc for why this also routes around Alpaca entirely.
+  gemini_opinion:     { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m', includePrePost: true },
   // Needs ~250 daily bars for its SMA200 trend filter to actually be
   // populated (see STRATEGY_META.rule_based_analysis) — every other daily
   // strategy's 6mo default (~126 trading days) isn't enough.
