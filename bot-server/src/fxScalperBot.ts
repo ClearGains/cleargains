@@ -731,8 +731,15 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     if (!tick.candleClosed) return;
     const st = epicStates[tick.epic];
     if (!st) return;
-    const known = lastBarTime[tick.epic] ?? '';
-    if (tick.time <= known) return; // duplicate/replay — same bar already processed
+    // Same REST-vs-ISO format mismatch as prewarmCandles' bar filter above —
+    // lastBarTime can be seeded from either source, so this has to compare
+    // real timestamps, not raw strings. A raw string compare here silently
+    // discarded every live candle close once lastBarTime held a REST-format
+    // value (confirmed live: stuck on the same stale bar for 3+ hours,
+    // "connected" the whole time, no error — just every real tick bounced).
+    const known   = lastBarTime[tick.epic] ?? '';
+    const knownMs = known ? new Date(known).getTime() : 0;
+    if (new Date(tick.time).getTime() <= knownMs) return; // duplicate/replay — same bar already processed
     const decision = processSwingTick(st, tick, currentConfig);
     void handleDecision(tick.epic, tick, decision);
     lastBarTime[tick.epic] = tick.time;
@@ -876,8 +883,17 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         if (!bars.length) continue;
 
         if (hasPersistedHistory) {
+          // IG's REST snapshotTime ("2026/08/17 20:00:00") and the live
+          // stream's tick.time (ISO, "2026-08-17T21:00:00.000Z") are
+          // different string formats — a raw string comparison between them
+          // is meaningless (lexicographic '-' sorts before '/', so ISO
+          // always loses regardless of the real dates). Confirmed live this
+          // silently dropped every real stream tick for hours once
+          // lastBarTime got set from a REST-format value: parse both sides
+          // through Date instead of comparing the raw strings.
           const known   = lastBarTime[epic] ?? st.closedCandles[st.closedCandles.length - 1]?.time ?? '';
-          const newBars = bars.filter(b => b.snapshotTime > known);
+          const knownMs = known ? new Date(known).getTime() : 0;
+          const newBars = bars.filter(b => new Date(b.snapshotTime).getTime() > knownMs);
           for (const bar of newBars) processSwingTick(st, barToTick(epic, bar), currentConfig);
         } else {
           for (const bar of bars) processSwingTick(st, barToTick(epic, bar), currentConfig);
