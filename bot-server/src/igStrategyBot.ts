@@ -2356,6 +2356,21 @@ async function poll(mode: IgMode) {
   // this fix existed.
   for (const p of positions) {
     if (p.stopLevel !== undefined && p.limitLevel !== undefined) continue;
+    // Grace period — confirmed live this matters: IG's own /positions
+    // endpoint doesn't always report a guaranteed stop's level the same
+    // way a normal stop shows up. A Silver position's confirmed guaranteed
+    // stop (42pts, immune to slippage) came back as stopLevel:null ~71s
+    // after the order confirmed it was attached, tricking this check into
+    // replacing it with a much wider (~1.5%), non-guaranteed fallback stop
+    // — same pattern hit EUR/USD and Wall St the same day, both self-
+    // healed within a minute of opening. Skipping a position younger than
+    // this doesn't weaken the backstop for anything genuinely naked — it's
+    // still caught on this account's very next poll — it only stops
+    // overwriting a real guaranteed stop still propagating through IG's
+    // own reporting. Same grace window as geminiWatch.ts's identical fix.
+    const ageMs = p.openedAt ? Date.now() - new Date(p.openedAt).getTime() : Infinity;
+    const SELF_HEAL_GRACE_MS = 3 * 60_000;
+    if (ageMs < SELF_HEAL_GRACE_MS) continue;
     const detail    = st.marketDetails.get(p.epic);
     const minStop   = detail?.minStopDist || 1;
     const fallbackStopDist   = Math.max(minStop, p.level * 0.015);

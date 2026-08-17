@@ -158,11 +158,26 @@ async function fetchIgOffHoursBars(epic: string): Promise<AlpacaBar[] | null> {
 async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Promise<void> {
   const name = p.instrumentName;
 
+  const heldHours = p.openedAt ? (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000 : 0;
+
   // Hard backstop, independent of Gemini's judgment — a watched position
   // must always have a real IG-side stop. If Gemini is down, rate-limited,
   // or just wrong, this is what actually bounds the loss, same 3%-of-price
   // fallback the strategy bot's own self-heal uses.
-  if (p.stopLevel === undefined) {
+  //
+  // Grace period — confirmed live this matters: IG's own /positions
+  // endpoint doesn't always report a guaranteed stop's level the same way
+  // a normal stop shows up. A Silver position's confirmed guaranteed stop
+  // (42pts, immune to slippage) came back as stopLevel:null ~71s after the
+  // order confirmed it was attached, tricking this check into replacing it
+  // with a much wider (~199pts), non-guaranteed fallback stop — same
+  // pattern hit EUR/USD and Wall St the same day, both self-healed within
+  // a minute of opening. Skipping a position younger than this doesn't
+  // weaken the backstop for anything that's genuinely naked — it's still
+  // caught on this position's very next review — it only stops overwriting
+  // a real guaranteed stop still propagating through IG's own reporting.
+  const SELF_HEAL_GRACE_HOURS = 3 / 60; // 3 minutes
+  if (p.stopLevel === undefined && heldHours >= SELF_HEAL_GRACE_HOURS) {
     const fallbackDist = Math.max(1, p.level * 0.03);
     const fallbackStop = p.direction === 'BUY' ? p.level - fallbackDist : p.level + fallbackDist;
     try {
@@ -173,7 +188,6 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     }
   }
 
-  const heldHours    = p.openedAt ? (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000 : 0;
   const currentLevel = p.direction === 'BUY' ? p.bid : p.offer;
   // Confirmed live: IG's own position feed returned bid/offer as null during
   // a fast-moving/gapping market — the exact moment a real severe-loss event
