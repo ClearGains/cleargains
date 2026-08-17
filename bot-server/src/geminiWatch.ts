@@ -174,6 +174,19 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
 
   const heldHours    = p.openedAt ? (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000 : 0;
   const currentLevel = p.direction === 'BUY' ? p.bid : p.offer;
+  // Confirmed live: IG's own position feed returned bid/offer as null during
+  // a fast-moving/gapping market — the exact moment a real severe-loss event
+  // was also firing. Left unguarded, that null reached askGeminiPositionVerdict
+  // and crashed inside its prompt-building step (outside that function's own
+  // try/catch, which only wraps the network call), as an unhandled rejection
+  // that silently aborted review of every other watched position this cycle
+  // (see pollAll's own try/catch, added for the same incident). Skip this
+  // position for now rather than review on a fabricated price — same
+  // best-effort pattern used for bars above; the next poll retries.
+  if (currentLevel == null) {
+    addLog(mode, 'wait', name, '[Gemini watch] No live bid/offer yet — skipping this cycle');
+    return;
+  }
 
   const last = lastReview.get(p.dealId);
 
@@ -381,7 +394,17 @@ async function pollAll(): Promise<void> {
     for (const dealId of ids) {
       const p = positions.find(pos => pos.dealId === dealId);
       if (!p) { removeFromWatch(mode, dealId); continue; }  // closed elsewhere already
-      await reviewOne(mode, session, p);
+      // Confirmed live: an uncaught error reviewing one position (a null
+      // live price crashing askGeminiPositionVerdict) silently aborted this
+      // whole loop mid-cycle, skipping every remaining watched position with
+      // no retry until the next scheduled poll 15min later — right when a
+      // volatile market made review matter most. One position's failure
+      // must never again cost every other position its review this cycle.
+      try {
+        await reviewOne(mode, session, p);
+      } catch (e) {
+        addLog(mode, 'error', p.instrumentName, `[Gemini watch] Review failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
 }

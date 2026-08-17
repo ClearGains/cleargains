@@ -551,6 +551,15 @@ export async function askGeminiPositionVerdict(req: PositionReviewRequest): Prom
     return { action: 'HOLD', confidence: 0, reason: 'Daily Gemini call cap reached — holding, stop still protects the position', engine: 'passthrough' };
   }
 
+  // try starts here rather than just around the fetch below — confirmed
+  // live this matters: a null currentLevel (IG's own position feed
+  // returning bid/offer as null mid-gap) crashed the prompt-building
+  // .toFixed() calls below, which sat outside the try/catch, defeating this
+  // function's own documented "always defaults to HOLD on any failure"
+  // guarantee at exactly the moment (a volatile, fast-moving market) it
+  // mattered most. Now any unexpected input here fails the same safe way a
+  // Gemini API error already does.
+  try {
   const pctMove = req.entryLevel > 0 ? (req.currentLevel - req.entryLevel) / req.entryLevel * 100 : 0;
   const signedPct = req.direction === 'BUY' ? pctMove : -pctMove;  // positive = favorable regardless of side
 
@@ -578,7 +587,6 @@ A hard stop-loss protects this position independent of your decision — you are
 Respond with JSON only, no markdown:
 {"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
 
-  try {
     const res = await fetchGeminiWithRetry(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
       {
