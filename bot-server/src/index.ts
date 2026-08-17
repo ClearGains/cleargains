@@ -501,6 +501,13 @@ app.post('/fx-scalper/:mode/max-risk', auth, (req: Request, res: Response) => {
   res.json(getFxScalperBot(mode).setMaxRisk(riskGbp));
 });
 
+app.post('/fx-scalper/:mode/max-positions', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const n = Number((req.body as { maxConcurrentPositions?: unknown }).maxConcurrentPositions);
+  res.json(getFxScalperBot(mode).setMaxConcurrentPositions(n));
+});
+
 // ── IG CFD bot — persistent server-side, OAuth session (see igCfdBot.ts) ────
 app.get('/ig-cfd/:mode/status', auth, (req: Request, res: Response) => {
   const mode = resolveIgMode(req, res);

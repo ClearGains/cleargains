@@ -61,6 +61,13 @@ export type FxLogEntry = {
 export type FxScalperStartParams = {
   epics?:      string[];   // defaults to all 5 FX majors + 4 supported indices
   maxRiskGbp?: number;     // £ lost if stop hit — independent of igStrategyBot's own maxRiskGbp
+  // Confirmed live this had no cap at all — up to all 9 epics could be in a
+  // position simultaneously, and just 2 modest positions (EUR/USD 0.49,
+  // DOW 0.05) were already using ~49% of the whole live account's margin
+  // (£322 of £658 balance), starving the stock bots of available funds.
+  // Defaults to 2 — roughly what was actually open at the time this was
+  // added, as a real ceiling rather than an arbitrary round number.
+  maxConcurrentPositions?: number;
   config?:     Partial<SwingConfig>;
 };
 
@@ -83,6 +90,7 @@ export type FxScalperStatus = {
   streamConnected:  boolean;  // real Lightstreamer connection status now (was poll-loop health only, before candles moved off REST polling)
   epics:            string[];
   maxRiskGbp:        number;
+  maxConcurrentPositions: number;
   epicStatuses:      Record<string, FxEpicStatus>;
   log:               FxLogEntry[];
   sessionOk:         boolean;
@@ -103,11 +111,14 @@ export type FxScalperHandle = {
   // change it — on FX's naturally wide ATR-based stops, that sizes down to
   // a £/pt stake so small individual trades barely register either way.
   setMaxRisk: (riskGbp: number) => { ok: boolean; error?: string };
+  // Same live-override/persisted pattern as setMaxRisk — see
+  // maxConcurrentPositions's own doc comment above for why this exists.
+  setMaxConcurrentPositions: (n: number) => { ok: boolean; error?: string };
 };
 
 // ── Persistence ──────────────────────────────────────────────────────────────
 
-type PersistedStartParams = { epics: string[]; maxRiskGbp: number };
+type PersistedStartParams = { epics: string[]; maxRiskGbp: number; maxConcurrentPositions: number };
 
 function stateFile(mode: FxMode): string { return path.join(__dirname, '..', `fx-scalper-state-${mode}.json`); }
 function epicsFile(mode: FxMode): string { return path.join(__dirname, '..', `fx-scalper-epics-${mode}.json`); }
@@ -225,6 +236,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   let paused         = false;
   let currentEpics:  string[] = [];
   let maxRiskGbp     = 5;
+  let maxConcurrentPositions = 2;
   let currentConfig: SwingConfig = { ...DEFAULT_SWING_CONFIG };
   let epicStates:    Record<string, SwingEpicState> = {};
   const lastBarTime: Record<string, string> = {};
@@ -402,6 +414,17 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         }
 
         if (!session) { addLog('error', name, 'No session — cannot enter'); revertToFlat(); return; }
+
+        // Confirmed live this had no cap at all — see maxConcurrentPositions's
+        // own doc comment on FxScalperStartParams for the real numbers that
+        // motivated it. Checked before the correlation guard below since
+        // it's the cheaper, more fundamental gate.
+        const openCount = Object.values(epicStates).filter(s => s.dealId).length;
+        if (openCount >= maxConcurrentPositions) {
+          addLog('wait', name, `Max concurrent positions (${maxConcurrentPositions}) reached — skipping entry to protect margin for other strategies`);
+          revertToFlat();
+          return;
+        }
 
         // The live-tick path that reaches here doesn't require a bar fetch
         // to have just succeeded — it runs off a separate, allowance-free
@@ -782,6 +805,10 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       authFailCount = 0;
       currentEpics  = requestedEpics;
       maxRiskGbp    = params.maxRiskGbp ?? 5;
+      // ?? not a straight assignment — a persisted state file saved before
+      // this field existed has it as undefined at runtime despite the type
+      // saying required, same reasoning as maxRiskGbp's own default above.
+      maxConcurrentPositions = params.maxConcurrentPositions ?? 2;
       currentConfig = { ...DEFAULT_SWING_CONFIG, ...(params.config ?? {}) };
 
       addLog('info', '—', `Starting FX swing bot — epics: ${currentEpics.join(', ')} | £${maxRiskGbp} risk/trade | scanning every ${POLL_MS / 60_000}min, 1H bars`);
@@ -808,7 +835,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(() => { void pollCycle(); }, POLL_MS);
 
-      saveStartState(mode, { epics: currentEpics, maxRiskGbp });
+      saveStartState(mode, { epics: currentEpics, maxRiskGbp, maxConcurrentPositions });
       addLog('info', '—', `FX swing bot started — session expires ${new Date(session.expiresAt).toLocaleTimeString()}`);
       return { ok: true };
     } catch (e) {
@@ -848,8 +875,18 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     if (!Number.isFinite(riskGbp)) return { ok: false, error: 'Invalid amount' };
     const clamped = Math.min(100, Math.max(0.5, riskGbp));
     maxRiskGbp = clamped;
-    saveStartState(mode, { epics: currentEpics, maxRiskGbp });
+    saveStartState(mode, { epics: currentEpics, maxRiskGbp, maxConcurrentPositions });
     addLog('info', '—', `Risk per trade changed to £${clamped} — takes effect on the next entry`);
+    return { ok: true };
+  }
+
+  function setMaxConcurrentPositions(n: number): { ok: boolean; error?: string } {
+    if (!running) return { ok: false, error: 'Bot not running — start it first' };
+    if (!Number.isFinite(n) || n < 0) return { ok: false, error: 'Invalid amount' };
+    const clamped = Math.min(9, Math.max(1, Math.round(n))); // 9 = every epic this bot can trade
+    maxConcurrentPositions = clamped;
+    saveStartState(mode, { epics: currentEpics, maxRiskGbp, maxConcurrentPositions });
+    addLog('info', '—', `Max concurrent positions changed to ${clamped} — takes effect on the next entry`);
     return { ok: true };
   }
 
@@ -881,6 +918,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
       streamConnected: running && stream.isConnected(),
       epics:           currentEpics,
       maxRiskGbp,
+      maxConcurrentPositions,
       epicStatuses:    statuses,
       log:             log.slice(0, 100),
       sessionOk:       !!session && Date.now() < session.expiresAt,
@@ -890,7 +928,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
     };
   }
 
-  return { start, stop, pause, resume, status, setMaxRisk };
+  return { start, stop, pause, resume, status, setMaxRisk, setMaxConcurrentPositions };
 }
 
 // ── Singleton instances ───────────────────────────────────────────────────────
