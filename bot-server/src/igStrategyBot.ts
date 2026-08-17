@@ -1480,7 +1480,61 @@ async function evaluateEpic(
       // case (which was stale for *weeks*, not hours) comfortably.
       const STALE_ENTRY_DATA_MS = 20 * 60 * 60_000;
       if (barAgeMs > STALE_ENTRY_DATA_MS) {
-        signal = { action: 'HOLD', reason: `Data too stale to trust (${(barAgeMs / 3_600_000).toFixed(1)}h old) — skipping` };
+        // Gap mode — no real bars exist for RSI/MACD/efficiency-ratio to run
+        // on here (confirmed live: this only fires in the dead stretch
+        // between Friday's close and Monday's real pre-market data, since
+        // even IG's own Lightstreamer candle feed goes quiet then despite
+        // the raw dealing quote staying live — see includePrePost's comment
+        // in yahooFetch.ts). Rather than sitting out the whole gap and
+        // risking missing a genuine weekend catalyst, still ask Gemini
+        // using IG's live quote + news alone, explicitly told it has no
+        // technical confirmation, held to a stricter bar than the normal
+        // 70. Falls through to the same execution path as every other
+        // signal below, so a resulting position auto-enrolls into Gemini
+        // Position Watch exactly like normal (see the addToWatch call
+        // later in this file) — that reviews it again within 45min
+        // regardless of throttling, so it gets a first real technical
+        // check as soon as real data actually resumes, not just left
+        // alone until the next scheduled poll.
+        const live = st.marketDetails.get(epic);
+        if (!live?.bid || !live?.offer) {
+          signal = { action: 'HOLD', reason: `Data too stale to trust (${(barAgeMs / 3_600_000).toFixed(1)}h old) and no live IG quote available either — skipping` };
+          break;
+        }
+        const gapSectorBlock = sectorCooldownBlock(mode, epic);
+        if (gapSectorBlock) { signal = { action: 'HOLD', reason: gapSectorBlock }; break; }
+        const gapMsSinceLastEntry = Date.now() - st.lastGeminiEntryAt;
+        if (gapMsSinceLastEntry < GEMINI_ENTRY_SPACING_MS) {
+          signal = { action: 'HOLD', reason: `Pacing — last entry ${(gapMsSinceLastEntry / 60_000).toFixed(0)}min ago, waiting ${(GEMINI_ENTRY_SPACING_MS / 60_000).toFixed(0)}min between entries` };
+          break;
+        }
+        const gapTicker    = EPIC_TO_ALPACA[epic];
+        const gapHeadlines = gapTicker ? await fetchAllHeadlines(gapTicker, 8, epicName(epic)) : [];
+        if (!gapHeadlines.length) {
+          signal = { action: 'HOLD', reason: `Data too stale to trust (${(barAgeMs / 3_600_000).toFixed(1)}h old) and no news to evaluate on either — skipping` };
+          break;
+        }
+        const gapPrice = (live.bid + live.offer) / 2;
+        const gapIdea = await askGeminiTradeIdea({
+          instrumentName: epicName(epic), price: gapPrice, rsi: null, macdHist: null, atr: null,
+          headlines: gapHeadlines, noTechnicalData: true,
+        });
+        // Stricter than the normal 70 — this decision has zero technical
+        // grounding, only news plus a single live quote.
+        const GAP_MODE_MIN_CONFIDENCE = 85;
+        if (gapIdea.engine !== 'gemini' || gapIdea.action === 'HOLD' || gapIdea.confidence < GAP_MODE_MIN_CONFIDENCE) {
+          signal = { action: 'HOLD', reason: `[GEMINI-GAP] Data too stale (${(barAgeMs / 3_600_000).toFixed(1)}h old) — ${gapIdea.action} ${gapIdea.confidence}% — ${gapIdea.reason} (${gapIdea.engine})` };
+          break;
+        }
+        st.lastGeminiEntryAt = Date.now();
+        signal = {
+          action:          gapIdea.action,
+          reason:          `[GEMINI-GAP] No technical data (${(barAgeMs / 3_600_000).toFixed(1)}h stale) — news-only entry: ${gapIdea.reason}`,
+          confidence:      gapIdea.confidence,
+          stopPrice:       gapIdea.action === 'BUY' ? gapPrice - gapIdea.stopPoints : gapPrice + gapIdea.stopPoints,
+          takeProfitPrice: gapIdea.action === 'BUY' ? gapPrice + gapIdea.takeProfitPoints : gapPrice - gapIdea.takeProfitPoints,
+          orderType:       'market',
+        };
         break;
       }
       const last  = bars[bars.length - 1].c;

@@ -680,6 +680,16 @@ export type TradeIdeaRequest = {
   // right now — see nyseVolatilityRegime in alpacaApi.ts. Same US-listed-
   // only gating as sessionHoursRemaining.
   volatilityRegime?: 'post-open' | 'afternoon-lull' | 'closing-window';
+  // Set only for the weekend/overnight gap before real exchange trading has
+  // resumed — no real trades exist anywhere in that window (confirmed live:
+  // even IG's own Lightstreamer candle feed goes quiet then, despite the
+  // raw dealing quote staying live), so rsi/macdHist/atr/recentCandles/
+  // dayChangePercent/etc are all genuinely unavailable rather than just
+  // omitted, and `price` is IG's live quote, not a confirmed trade. Adds an
+  // explicit warning so Gemini calibrates for having only news + one price
+  // to go on, instead of silently reasoning as if the missing fields just
+  // happened not to apply.
+  noTechnicalData?: boolean;
 };
 
 export type TradeIdeaVerdict = {
@@ -716,6 +726,7 @@ This is leveraged spread betting, not a long-term investment — positions here 
 
 Instrument: ${req.instrumentName}
 Current price: ${req.price.toFixed(2)}
+${req.noTechnicalData ? `\n⚠ No technical data is available for this decision. This is being evaluated during the weekend/overnight gap before real exchange trading has resumed — there are no real trades happening anywhere right now, so RSI/MACD/ATR, recent candle shape, today's move, and trend context are all genuinely unavailable, not just omitted. The price above is IG's own live quoted price, not a confirmed exchange trade. You have ONLY the news below and this single price to go on, with no way to technically confirm or contradict it. Because of that, only recommend BUY/SELL for a genuinely clear, specific, high-conviction catalyst — a concrete, material headline, not a marginal or speculative case you'd otherwise rate a moderate confidence. Default to HOLD unless the news is decisive.\n` : ''}
 ${req.dayChangePercent !== undefined ? `Move so far today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
 ${req.sessionHoursRemaining !== undefined ? `Time left in today's regular NYSE session: ~${req.sessionHoursRemaining.toFixed(1)}h. This isn't a reason to avoid a genuine multi-day thesis (fine to hold overnight into tomorrow) — but a same-day breakout/continuation thesis specifically needs real time left for it to actually play out; the later in the session it starts, the less conviction it deserves purely on "room left today" grounds, independent of how clean the setup itself looks.` : ''}
 ${req.volatilityRegime === 'post-open' ? `Time-of-day volatility context (checked against real historical data, US session): still within the post-NYSE-open volatile window — moves right now are historically larger than typical in either direction. A clean breakout here has real weight behind it, but so does a false start that fades once this window passes.` : ''}${req.volatilityRegime === 'afternoon-lull' ? `Time-of-day volatility context (checked against real historical data, US session): the historically calmer mid-to-late-afternoon stretch — moves here are typically smaller and more prone to fading than during the open or the close. A fresh breakout thesis starting now deserves a bit more scrutiny than the identical setup during a genuinely active window, though a real catalyst can absolutely still work here.` : ''}${req.volatilityRegime === 'closing-window' ? `Time-of-day volatility context (checked against real historical data, US session): activity historically picks back up heading into the close — this can mean a genuine late-day move or just position-squaring noise as day traders flatten. Use the actual candle shape above to judge which this looks like, not the time of day alone.` : ''}
