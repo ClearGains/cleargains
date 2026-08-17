@@ -35,6 +35,24 @@ for (const [ticker, info] of Object.entries(IG_STOCK_EPICS)) {
   STOCK_EPIC_TO_YAHOO[info.epic] = info.exchange === 'LSE' ? `${ticker}.L` : ticker;
 }
 
+// IG quotes SPREAD-BET US shares in points = cents, not raw dollars —
+// confirmed repeatedly across this codebase (see bot-server/yahooFetch.ts's
+// IG_SHARE_POINTS_PER_UNIT) against the live account: AAPL real ~341, IG
+// shows ~33952; a live Micron position's own entry showed 98134 against a
+// real price of ~981.34. That ×100 is specific to (a) USD shares — GBP
+// shares already quote in pence, matching Yahoo's own .L pence-scale
+// tickers 1:1 — and (b) the spread-bet .DAILY.IP epic specifically: CFD
+// .CASH.IP share prices are confirmed raw/unscaled instead, matching
+// Yahoo/Alpaca's dollar values 1:1 (same file, same confirmation). Indices/
+// FX/commodities aren't scaled this way at all either.
+export function shareScaleFactor(epic: string): number {
+  if (epic.endsWith('.CASH.IP')) return 1; // CFD shares — always raw/unscaled
+  for (const info of Object.values(IG_STOCK_EPICS)) {
+    if (info.epic === epic) return info.currency === 'USD' ? 100 : 1;
+  }
+  return 1;
+}
+
 // Resolves an IG epic (spread-bet .DAILY.IP or CFD .CASH.IP form) to the
 // Yahoo Finance symbol used to chart it. Returns null when the epic isn't
 // in either the fixed non-stock map or the stock universe — callers should

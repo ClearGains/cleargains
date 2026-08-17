@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { X, BarChart3, RefreshCw } from 'lucide-react';
 import { ChartPanel, type Overlay, type PositionLevel } from '@/components/ChartPanel';
 import type { LWCandle } from '@/lib/chartIndicators';
-import { epicToYahooSymbol } from '@/lib/epicToYahoo';
+import { epicToYahooSymbol, shareScaleFactor } from '@/lib/epicToYahoo';
 
 const CHART_OVERLAYS: Set<Overlay> = new Set(['sma20', 'sma50', 'bb', 'volume']);
 
@@ -53,10 +53,18 @@ export function PositionChartModal({ pos, onClose }: { pos: ChartablePosition | 
 
   if (!pos) return null;
 
+  // The chart's candles come from Yahoo (real price units) — a spread-bet
+  // USD share position's own entry/stop/limit are IG's points-scaled
+  // figures (÷100 to match), everything else is already in the same units
+  // Yahoo uses. See shareScaleFactor's own comment for why this only
+  // applies to spread-bet USD shares specifically. Without this, these
+  // lines render ~100x off the visible price scale — confirmed live
+  // against a real Micron position (entry 98134 vs real price ~981.34).
+  const scale = shareScaleFactor(pos.epic);
   const levels: PositionLevel[] = [
-    { price: pos.entryPrice, label: 'Entry', color: '#e5e7eb' },
-    ...(pos.stopLevel  !== undefined ? [{ price: pos.stopLevel,  label: 'Stop',   color: '#ef4444' }] : []),
-    ...(pos.limitLevel !== undefined ? [{ price: pos.limitLevel, label: 'Target', color: '#10b981' }] : []),
+    { price: pos.entryPrice / scale, label: 'Entry', color: '#e5e7eb' },
+    ...(pos.stopLevel  !== undefined ? [{ price: pos.stopLevel  / scale, label: 'Stop',   color: '#ef4444' }] : []),
+    ...(pos.limitLevel !== undefined ? [{ price: pos.limitLevel / scale, label: 'Target', color: '#10b981' }] : []),
   ];
 
   const panel = (
