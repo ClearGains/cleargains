@@ -915,7 +915,13 @@ async function buildOrbRange(mode: IgMode, session: IGSession, epics: string[]) 
         addLog(mode, 'info', epicName(epic), `ORB: ${low.toFixed(2)}–${high.toFixed(2)}`);
         continue;
       }
-      const raw  = await fetchCandleHistory(session, epic, 'MINUTE', 60);
+      // Demo-sourced even in live mode — see getDemoDataSession's own
+      // comment. Not currently reachable from gemini_opinion (ORB isn't the
+      // active live strategy), but fixed for the same reason as the
+      // weekly_momentum branch below in evaluateEpic.
+      const dataSession = await getDemoDataSession(mode);
+      if (!dataSession) continue;
+      const raw  = await fetchCandleHistory(dataSession, epic, 'MINUTE', 60);
       const last30 = raw.slice(-30);
       if (!last30.length) continue;
       const high = Math.max(...last30.map(b => b.highPrice.mid ?? b.highPrice.bid));
@@ -1072,7 +1078,15 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
         if (!fetched?.length) continue;
         bars = fetched.slice(-count);
       } else {
-        bars = (await fetchCandleHistory(st.session, epic, resolution, count)).map(igBarToAlpacaBar);
+        // Demo-sourced even in live mode — see getDemoDataSession's own
+        // comment. Same class of gap as evaluateEpic's fallback: this
+        // scanner ranks every candidate, including ones with no free-data
+        // mapping yet, so it's an independent path to the same live-
+        // allowance drain that Japan 225 caused, not covered by fixing
+        // evaluateEpic alone.
+        const dataSession = await getDemoDataSession(mode);
+        if (!dataSession) throw new Error('No demo session available for bar fetch');
+        bars = (await fetchCandleHistory(dataSession, epic, resolution, count)).map(igBarToAlpacaBar);
       }
       if (!bars.length) throw new Error('No bar data');
       checked++;
@@ -1441,8 +1455,15 @@ async function evaluateEpic(
       break;
 
     case 'weekly_momentum': {
+      // Not currently reachable from live (gemini_opinion is the only live
+      // strategy today), but demo-sourced anyway so a future strategy
+      // switch can't reopen the same live-allowance gap fixed elsewhere in
+      // this function.
       let dailyBars: AlpacaBar[] = [];
-      try { dailyBars = (await fetchCandleHistory(session, epic, 'DAY', 30)).map(igBarToAlpacaBar); } catch {}
+      try {
+        const dataSession = await getDemoDataSession(mode);
+        if (dataSession) dailyBars = (await fetchCandleHistory(dataSession, epic, 'DAY', 30)).map(igBarToAlpacaBar);
+      } catch {}
       signal = weeklyMomentumSignal(bars, dailyBars, inPosition, side);
       break;
     }
