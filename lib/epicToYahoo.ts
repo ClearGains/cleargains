@@ -43,9 +43,33 @@ for (const [ticker, info] of Object.entries(IG_STOCK_EPICS)) {
 // shares already quote in pence, matching Yahoo's own .L pence-scale
 // tickers 1:1 — and (b) the spread-bet .DAILY.IP epic specifically: CFD
 // .CASH.IP share prices are confirmed raw/unscaled instead, matching
-// Yahoo/Alpaca's dollar values 1:1 (same file, same confirmation). Indices/
-// FX/commodities aren't scaled this way at all either.
+// Yahoo/Alpaca's dollar values 1:1 (same file, same confirmation).
+//
+// "Indices/FX/commodities aren't scaled this way at all either" was this
+// comment's original claim — wrong, caught live 2026-08-18 off a real open
+// Brent Crude position (entry showing 8960.90 against a real price of
+// ~89.6). Verified every NON_STOCK_EPIC_TO_YAHOO entry directly (IG live
+// bid ÷ Yahoo real price, same day): indices, gold, and Bitcoin genuinely
+// are 1:1 with Yahoo. FX majors are ×10000 (except JPY pairs, ×100 — fewer
+// JPY decimal places, standard FX convention). Oil/Silver/Brent are ×100,
+// same as shares; Natural Gas is ×1000. NASDAQ's ~1.13 ratio is NOT a scale
+// issue — IG's product tracks a different underlying than Yahoo's ^IXIC
+// cash index, so it's deliberately left unscaled rather than forcing a fake
+// correction onto a real product/quote difference.
+const NON_STOCK_SCALE_FACTOR: Record<string, number> = {
+  'CS.D.GBPUSD.TODAY.IP': 10000,
+  'CS.D.EURUSD.TODAY.IP': 10000,
+  'CS.D.EURGBP.TODAY.IP': 10000,
+  'CS.D.AUDUSD.TODAY.IP': 10000,
+  'CS.D.USDJPY.TODAY.IP': 100,
+  'CC.D.CL.USS.IP':       100,   // Oil (WTI)
+  'CS.D.USCSI.TODAY.IP':  100,   // Silver
+  'CC.D.LCO.USS.IP':      100,   // Brent Crude
+  'CC.D.NG.USS.IP':       1000,  // Natural Gas
+};
+
 export function shareScaleFactor(epic: string): number {
+  if (epic in NON_STOCK_SCALE_FACTOR) return NON_STOCK_SCALE_FACTOR[epic];
   if (epic.endsWith('.CASH.IP')) return 1; // CFD shares — always raw/unscaled
   for (const info of Object.values(IG_STOCK_EPICS)) {
     if (info.epic === epic) return info.currency === 'USD' ? 100 : 1;

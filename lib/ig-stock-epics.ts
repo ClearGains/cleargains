@@ -32,6 +32,15 @@ export const IG_STOCK_EPICS: Record<string, IGStockInfo> = {
   'INTC':  { epic: 'UB.D.INTC.DAILY.IP',   name: 'Intel',              exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
   'MU':    { epic: 'UC.D.MU.DAILY.IP',     name: 'Micron Technology',  exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
   'QCOM':  { epic: 'UC.D.QCOM.DAILY.IP',   name: 'Qualcomm',           exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  // Traded by the CFD bot (see CFD_STOCK_EPIC_OVERRIDES in
+  // bot-server/igCfdBot.ts) but never added here — meant charting silently
+  // failed with "no chart data source known" for any of them, caught live
+  // 2026-08-18 off a real open Western Digital position.
+  'WDC':   { epic: 'UD.D.WDC.DAILY.IP',    name: 'Western Digital',    exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'SNDK':  { epic: 'UD.D.SNDKUS.DAILY.IP', name: 'SanDisk',            exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'STX':   { epic: 'UD.D.STX.DAILY.IP',    name: 'Seagate',            exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'MRVL':  { epic: 'UC.D.MRVL.DAILY.IP',   name: 'Marvell',            exchange: 'NASDAQ', currency: 'USD', pointValue: 1, minSize: 1 },
+  'BB':    { epic: 'UC.D.RIMM.DAILY.IP',   name: 'BlackBerry',         exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   'CRM':   { epic: 'SB.D.CRM.DAILY.IP',    name: 'Salesforce',         exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   'ORCL':  { epic: 'SE.D.ORCLUS.DAILY.IP', name: 'Oracle',             exchange: 'NYSE',   currency: 'USD', pointValue: 1, minSize: 1 },
   // ── US High-beta / Screener regulars ──────────────────────────────────────
