@@ -1664,7 +1664,8 @@ async function evaluateEpic(
           signal = { action: 'HOLD', reason: `[GEMINI-GAP] Data too stale (${(barAgeMs / 3_600_000).toFixed(1)}h old) — ${gapIdea.action} ${gapIdea.confidence}% — ${gapIdea.reason} (${gapIdea.engine})` };
           break;
         }
-        st.lastGeminiEntryAt = Date.now();
+        // lastGeminiEntryAt is set on confirmed placement (executeIgSignal),
+        // not here — see that assignment's own comment.
         signal = {
           action:          gapIdea.action,
           reason:          `[GEMINI-GAP] No technical data (${(barAgeMs / 3_600_000).toFixed(1)}h stale) — news-only entry: ${gapIdea.reason}`,
@@ -1833,7 +1834,8 @@ async function evaluateEpic(
           break;
         }
       }
-      st.lastGeminiEntryAt = Date.now();
+      // lastGeminiEntryAt is set on confirmed placement (executeIgSignal),
+      // not here — see that assignment's own comment.
       signal = {
         action:           idea.action,
         reason:           `[GEMINI] ${idea.reason}`,
@@ -2261,6 +2263,14 @@ async function executeIgSignal(
     const { dealId, level, protectionOk, protectionError, guaranteedStop } =
       await placeMarketOrder(session, epic, effectiveDirection, stake, effectiveStopDist, profitDist, 'GBP', true);
     addLog(mode, 'enter', name, `Deal confirmed — id ${dealId} @ ${level.toFixed(2)}`);
+    // Moved here from evaluateEpic's signal-decision point — confirmed live
+    // that set the pacing clock the moment Gemini said BUY/SELL, before any
+    // of the checks below (loss ceiling, margin, live guard, second-opinion
+    // SKIP) had a chance to reject it. A Meta SELL that failed on
+    // insufficient margin still blocked every other instrument's entry for
+    // the full 20min, off a trade that never actually happened. Only counts
+    // as "an entry" once IG has actually confirmed one.
+    if (cfg.strategy === 'gemini_opinion') st.lastGeminiEntryAt = Date.now();
     st.botOpenedDeals.add(dealId);
     saveBotOpenedDeals(mode, st.botOpenedDeals);
     // Auto-enrol every bot-opened deal in Gemini Position Watch — previously
