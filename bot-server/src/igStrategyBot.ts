@@ -1690,6 +1690,28 @@ async function evaluateEpic(
           break;
         }
       }
+      // Same declining-highs/rising-lows gate fxScalperBot.ts has, scoped to
+      // FX only at the time — confirmed live 2026-08-18 the identical
+      // failure mode happens on stocks too: a Western Digital BUY fired
+      // citing "53500 support" while real price had already rolled over
+      // from ~539 to ~535 in the hours before, i.e. an active reversal
+      // against the thesis, not confirmation of it. Broader than the RSI-
+      // reversal gate above (that one only fires when RSI itself is in
+      // reversal territory) — this catches any BUY/SELL against a visible
+      // 3-bar reversal regardless of RSI.
+      const recent3 = bars.slice(-3);
+      if (recent3.length === 3) {
+        const [a, b, c] = recent3;
+        const decliningHighs = idea.action === 'BUY'  && a.h >= b.h && b.h >= c.h && a.h > c.h;
+        const risingLows     = idea.action === 'SELL' && a.l  <= b.l  && b.l  <= c.l  && a.l  < c.l;
+        if (decliningHighs || risingLows) {
+          const shape = decliningHighs
+            ? `declining highs (${a.h.toFixed(2)} > ${b.h.toFixed(2)} > ${c.h.toFixed(2)})`
+            : `rising lows (${a.l.toFixed(2)} < ${b.l.toFixed(2)} < ${c.l.toFixed(2)})`;
+          signal = { action: 'HOLD', reason: `[GEMINI] ${idea.action} ${idea.confidence}% called but the last 3 bars show ${shape} — that's an active short-term reversal against this direction, not confirmation; waiting for it to actually turn` };
+          break;
+        }
+      }
       st.lastGeminiEntryAt = Date.now();
       signal = {
         action:           idea.action,
