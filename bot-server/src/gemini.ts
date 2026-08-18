@@ -11,6 +11,21 @@ import * as path from 'path';
 // a short delay routes to a fresh connection, likely a different instance,
 // and often just works. Doesn't reserve a second call against the daily cap
 // — this is still one logical attempt at an answer, not two.
+// Pinned to a specific dated model, not the "gemini-flash-latest" alias
+// this used to point at. The alias was originally chosen specifically to
+// avoid a repeat of gemini-2.0-flash getting hard-retired (free-tier quota
+// dropped to 0) — but confirmed live via Google's own AI Studio usage
+// dashboard on 2026-08-18 that Google silently moved "latest" from
+// gemini-3.6-flash to gemini-3.7-flash around Aug 11-12, and 3.7's error
+// rate (503 ServiceUnavailable) has been dramatically worse since —
+// correlated with the model switch, not with our own request volume
+// (which was flat to lower over the same days). Pinning back to the
+// version that was actually working trades away "Google can't retire this
+// out from under us silently" for "we control exactly which model we hit"
+// — worth revisiting if 3.6 itself gets deprecated, but not worth eating
+// a newer model's rollout instability in the meantime.
+const GEMINI_MODEL = 'gemini-3.6-flash';
+
 async function fetchGeminiWithRetry(url: string, options: RequestInit): Promise<Response> {
   // AbortSignal.timeout() starts counting at creation, not per fetch() call —
   // reusing the caller's signal on a retry would mean a request that failed
@@ -198,20 +213,17 @@ Respond with JSON only, no markdown:
 
   try {
     const res = await fetchGeminiWithRetry(
-      // "latest" alias, not a pinned dated model — gemini-2.0-flash was
-      // retired outright (confirmed live: free-tier quota set to 0), and
-      // pinning a specific version again would just repeat that failure
-      // whenever Google retires this one too. The alias is Google's own
-      // responsibility to keep pointing at a working current model.
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      // See GEMINI_MODEL's own comment for why this is pinned rather than
+      // using the "latest" alias.
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          // No thinkingConfig — the "latest" alias resolves to a reasoning
-          // model (gemini-3.6-flash) that rejects thinkingBudget outright
-          // (confirmed live: {"thinkingConfig":{"thinkingBudget":0}} gets a
+          // No thinkingConfig — GEMINI_MODEL is a reasoning model that
+          // rejects thinkingBudget outright (confirmed live:
+          // {"thinkingConfig":{"thinkingBudget":0}} gets a
           // flat 400 INVALID_ARGUMENT, breaking every call). Thinking stays
           // on instead — cheap regardless — with maxOutputTokens raised to
           // 1500: 400 wasn't enough either, confirmed live — a longer
@@ -366,7 +378,7 @@ Respond with JSON only, no markdown:
 
   try {
     const res = await fetchGeminiWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -451,12 +463,9 @@ Respond with JSON only, no markdown:
 
   try {
     const res = await fetchGeminiWithRetry(
-      // "latest" alias, not a pinned dated model — gemini-2.0-flash was
-      // retired outright (confirmed live: free-tier quota set to 0), and
-      // pinning a specific version again would just repeat that failure
-      // whenever Google retires this one too. The alias is Google's own
-      // responsibility to keep pointing at a working current model.
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      // See GEMINI_MODEL's own comment for why this is pinned rather than
+      // using the "latest" alias.
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -604,7 +613,7 @@ Respond with JSON only, no markdown:
 {"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
 
     const res = await fetchGeminiWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -789,7 +798,7 @@ Respond with JSON only, no markdown:
 
   try {
     const res = await fetchGeminiWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
