@@ -766,31 +766,37 @@ function syncStreamSubscription(mode: IgMode): void {
   st.stream.connect(st.session, streamEpics, tick => handleStreamTick(mode, tick), 'HOUR');
 }
 
+// Demo-credentialed session even when mode is 'live' — mirrors
+// fxScalperBot.ts's identical reasoning: IG's own REST candle endpoint is
+// allowance-limited, so touching it from live's own account for a read
+// defeats the entire point of ever routing around that allowance. Demo's
+// allowance is independent and has headroom; the live account's own
+// allowance is never touched via this helper. Shared by
+// prewarmLightstreamBuffer and evaluateEpic's raw-IG fallback below — the
+// latter used to call fetchCandleHistory with the live session directly,
+// confirmed live 2026-08-18 as what let Japan 225 drain the live account's
+// allowance (Nokia hit the identical error before it got a Yahoo mapping —
+// this fallback branch was always one missing free-data entry away from
+// repeating it on whatever epic slipped through next).
+async function getDemoDataSession(mode: IgMode): Promise<IGSession | null> {
+  if (mode === 'demo') {
+    const st = ms(mode);
+    return st.session ?? null;
+  }
+  const existing = getSession('igstrat-data:live');
+  if (existing && Date.now() < existing.expiresAt - 2 * 60_000) return existing;
+  const creds = resolveCredentials('demo');
+  if (!creds.apiKey) return null;
+  return authenticate(creds.apiKey, creds.username, creds.password, creds.env, 'igstrat-data:live');
+}
+
 // One-time seed so a freshly-subscribed epic doesn't have to wait ~40 hours
 // accumulating live ticks from nothing before a strategy can evaluate it.
-// Sourced from a demo-credentialed session even when mode is 'live' —
-// mirrors fxScalperBot.ts's identical reasoning: this is IG's own REST
-// candle endpoint, which IS allowance-limited, so seeding it from live's
-// own account would defeat the entire point of this feature. Demo's
-// allowance is independent and has headroom; the live account's own
-// allowance is never touched by this.
 async function prewarmLightstreamBuffer(mode: IgMode, epic: string, count: number): Promise<void> {
   const st = ms(mode);
   try {
-    let dataSession: IGSession;
-    if (mode === 'demo') {
-      if (!st.session) return;
-      dataSession = st.session;
-    } else {
-      const existing = getSession('igstrat-data:live');
-      if (existing && Date.now() < existing.expiresAt - 2 * 60_000) {
-        dataSession = existing;
-      } else {
-        const creds = resolveCredentials('demo');
-        if (!creds.apiKey) return;
-        dataSession = await authenticate(creds.apiKey, creds.username, creds.password, creds.env, 'igstrat-data:live');
-      }
-    }
+    const dataSession = await getDemoDataSession(mode);
+    if (!dataSession) return;
     const bars = await fetchCandleHistory(dataSession, epic, 'HOUR', count);
     if (bars.length) st.candleBuffers.set(epic, bars.map(b => candleBarToTick(epic, b)));
   } catch (e) {
@@ -1387,7 +1393,14 @@ async function evaluateEpic(
     bars = fallbackBars.slice(-count);
   } else {
     try {
-      bars = (await fetchCandleHistory(session, epic, resolution, count)).map(igBarToAlpacaBar);
+      // Demo-sourced even in live mode — see getDemoDataSession's own
+      // comment. This is the last-resort path for whatever hasn't got a
+      // free-data mapping yet, so it's exactly the branch most likely to
+      // hit an epic nobody's added coverage for — must not be the one place
+      // that still touches the live account's own allowance for a read.
+      const dataSession = await getDemoDataSession(mode);
+      if (!dataSession) { addLog(mode, 'wait', epicName(epic), 'No bar data (demo session unavailable)'); return; }
+      bars = (await fetchCandleHistory(dataSession, epic, resolution, count)).map(igBarToAlpacaBar);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       addLog(mode, 'error', epicName(epic), `Bar fetch failed (${confirmSource}): ${msg}`);
