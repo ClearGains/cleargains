@@ -125,6 +125,16 @@ function fmtPnl(val: string): string {
   return `${n >= 0 ? '+' : ''}$${Math.abs(n).toFixed(2)}`;
 }
 
+// How old an "estimated" CFD P&L reading is — these only refresh on the
+// strategy's own poll cycle (up to an hour for daily strategies), so the
+// figure shown can meaningfully lag the real current price without this.
+function fmtAgeMin(iso: string): string {
+  const min = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min}m old`;
+  return `${Math.floor(min / 60)}h ${min % 60}m old`;
+}
+
 function logColor(type: LogEntry['type']): string {
   switch (type) {
     case 'enter': return 'text-green-400';
@@ -1982,7 +1992,14 @@ function IgCfdBotTab() {
                         <div className={clsx('text-sm font-semibold', p.upl >= 0 ? 'text-green-400' : 'text-red-400')}>
                           {p.estimated ? '~' : ''}{p.upl >= 0 ? '+' : ''}£{p.upl.toFixed(2)}
                         </div>
-                        {p.estimated && <div className="text-[10px] text-slate-500" title="Market closed — no live IG quote. Estimated from Yahoo/Alpaca's last price instead.">est.</div>}
+                        {p.estimated && (
+                          <div
+                            className="text-[10px] text-slate-500"
+                            title={`No live IG quote for this instrument — estimated from Yahoo/Alpaca's last price instead. This strategy only re-checks positions once an hour, so the estimate can be up to that old.${status?.lastPollTs ? ` Last computed ${new Date(status.lastPollTs).toLocaleTimeString()}.` : ''}`}
+                          >
+                            est.{status?.lastPollTs && ` (${fmtAgeMin(status.lastPollTs)})`}
+                          </div>
+                        )}
                       </div>
                       <button
                         onClick={() => {
