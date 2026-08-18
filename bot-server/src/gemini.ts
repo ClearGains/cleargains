@@ -678,6 +678,18 @@ export type TradeIdeaRequest = {
   // signals, separate from how far price has moved intraday since open.
   gapPercent?:          number;
   volumeSurgeMultiple?: number;
+  // Average move today of this instrument's own correlated peers (same
+  // sector/theme, e.g. AI storage/semis) — confirmed live this matters:
+  // Seagate's entry reasoning called a ~5% drop "intraday pullback finding
+  // strong support" while judged in total isolation, the same day Western
+  // Digital, Micron, Broadcom, SMCI, and NVDA were all down together too —
+  // a real, broad sector unwind, not stock-specific weakness, which nothing
+  // fed to that decision could reveal. dayChangePercent alone can't
+  // distinguish "this one name dipped" from "the whole group is unwinding
+  // together" — the second is a materially different, weaker setup for a
+  // dip-buy thesis even at an identical single-stock number.
+  peerGroupChangePercent?: number;
+  peerGroupLabel?:         string;
   // What Gemini Watch said the last time a position on this instrument got
   // cut, if recent — confirmed live this matters: Seagate got re-entered
   // on a bullish AI-demand thesis 8 times in one day, and 7 of 8 exits
@@ -756,6 +768,7 @@ ${req.sessionHoursRemaining !== undefined ? `Time left in today's regular NYSE s
 ${req.volatilityRegime === 'post-open' ? `Time-of-day volatility context (checked against real historical data, US session): still within the post-NYSE-open volatile window — moves right now are historically larger than typical in either direction. A clean breakout here has real weight behind it, but so does a false start that fades once this window passes.` : ''}${req.volatilityRegime === 'afternoon-lull' ? `Time-of-day volatility context (checked against real historical data, US session): the historically calmer mid-to-late-afternoon stretch — moves here are typically smaller and more prone to fading than during the open or the close. A fresh breakout thesis starting now deserves a bit more scrutiny than the identical setup during a genuinely active window, though a real catalyst can absolutely still work here.` : ''}${req.volatilityRegime === 'closing-window' ? `Time-of-day volatility context (checked against real historical data, US session): activity historically picks back up heading into the close — this can mean a genuine late-day move or just position-squaring noise as day traders flatten. Use the actual candle shape above to judge which this looks like, not the time of day alone.` : ''}
 ${req.multiDayTrendPercent !== undefined ? `Trend over the last ${req.multiDayTrendSpanDays} days: ${req.multiDayTrendPercent >= 0 ? '+' : ''}${req.multiDayTrendPercent.toFixed(1)}% — use this to tell a genuine pullback within an intact uptrend apart from a stock still mid-selloff. A bullish "buy the dip" thesis needs the multi-day trend to actually still be up (or at least flat) — buying because today looks oversold while the multi-day trend is sharply down is catching a falling knife, not a dip, unless you have a genuinely strong, specific reason the selloff itself is over (not just "RSI is low").` : ''}
 ${req.gapPercent !== undefined && req.gapPercent >= 2 ? `Gapped ${req.gapPercent.toFixed(1)}% at today's open vs yesterday's close — a real gap like this usually means genuine news/sentiment shifted overnight, not routine noise; worth weighing whether that gap has already fully played out or still has room.` : ''}
+${req.peerGroupChangePercent !== undefined ? `${req.peerGroupLabel ?? 'Correlated peers'} average move today: ${req.peerGroupChangePercent >= 0 ? '+' : ''}${req.peerGroupChangePercent.toFixed(1)}% — compare this against this instrument's own move above. A similar-sized move across the group means this is a sector-wide move, not stock-specific — a much weaker basis for a "this one name is oversold, buy the dip" thesis than if this instrument were moving alone while peers held steady. A genuinely isolated move (this instrument moving meaningfully more or less than its peers) is the stronger, more stock-specific signal.` : ''}
 ${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation, which lends more weight to whatever the price action is currently doing (a move on genuinely elevated volume is more likely to mean something than the same move on ordinary volume).` : ''}
 RSI (14h lookback): ${req.rsi?.toFixed(1) ?? 'N/A'}
 MACD histogram (12h/26h/9h): ${req.macdHist !== null ? (req.macdHist > 0 ? '+' : '') + req.macdHist.toFixed(5) : 'N/A'}

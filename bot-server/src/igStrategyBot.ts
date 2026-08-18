@@ -121,6 +121,40 @@ function loadLossCooldownEpics(mode: IgMode): Map<string, number> {
 // only (not persisted) since it's advisory context, not a safety guard.
 const EXIT_CONTEXT_MS = 4 * 60 * 60_000;
 
+// Opportunistic cache of each epic's own dayChangePercent, filled in by
+// evaluateEpic below whenever it computes one for ANY epic (demo or live —
+// the underlying market fact is the same regardless of account mode, no
+// reason to track it twice). Not a dedicated fetch — reuses whatever's
+// already being calculated per-entry-decision. Lets a candidate's own
+// evaluation see how its sector peers have moved today, even though this
+// bot only evaluates one epic at a time. Confirmed live this gap matters:
+// Seagate's entry reasoning called a ~5% drop "intraday pullback finding
+// strong support," judged with zero visibility into Western Digital/
+// Micron/Broadcom/SMCI/NVDA all being down together the same day — a real,
+// broad sector unwind, not stock-specific weakness. In-memory only, same
+// tradeoff as the exit-context maps above — advisory, not a safety guard.
+const dayChangeCache = new Map<string, { changePercent: number; day: string }>();
+
+function recordDayChange(epic: string, changePercent: number): void {
+  dayChangeCache.set(epic, { changePercent, day: new Date().toISOString().slice(0, 10) });
+}
+
+// Average of this epic's own sector peers' cached day-changes, today only —
+// stale (yesterday's) entries are excluded rather than averaged in, since a
+// peer that simply hasn't been evaluated yet today is silence, not evidence
+// the sector is flat. Returns undefined (not 0) when there's nothing fresh
+// to compare against, so the prompt can omit the line entirely rather than
+// claim a peer average of exactly 0%.
+function getPeerGroupChange(epic: string): { changePercent: number; label: string } | undefined {
+  const sector = SECTOR_MAP[epic];
+  if (!sector) return undefined;
+  const today = new Date().toISOString().slice(0, 10);
+  const peers = [...dayChangeCache.entries()].filter(([e, rec]) => e !== epic && SECTOR_MAP[e] === sector && rec.day === today);
+  if (!peers.length) return undefined;
+  const avg = peers.reduce((s, [, rec]) => s + rec.changePercent, 0) / peers.length;
+  return { changePercent: avg, label: `${sector} peers` };
+}
+
 // Called right after any position close where the realized P&L is known —
 // only losses set a re-entry cooldown, but the reason itself (win or loss)
 // is always kept as short-lived context for the next entry decision on the
@@ -1622,6 +1656,7 @@ async function evaluateEpic(
       const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
       const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
       const dayChangePercent = dayOpen ? ((last - dayOpen) / dayOpen) * 100 : undefined;
+      if (dayChangePercent !== undefined) recordDayChange(epic, dayChangePercent);
       // Multi-day trend, from the wider bar window (240 30-min bars = 5
       // days) — confirmed live this matters: SanDisk got bought on
       // "post-earnings selloff reversing" using only ~40h of history to
@@ -1663,10 +1698,12 @@ async function evaluateEpic(
       // Real, data-verified NYSE intraday volatility shape (see
       // nyseVolatilityRegime's own comment) — same US-listed-only gating.
       const volatilityRegime = ticker ? nyseVolatilityRegime() ?? undefined : undefined;
+      const peerGroup = getPeerGroupChange(epic);
       const idea = await askGeminiTradeIdea({
         instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
         multiDayTrendPercent, multiDayTrendSpanDays, gapPercent, volumeSurgeMultiple,
         recentExitContext, recentCandles, sessionHoursRemaining, volatilityRegime,
+        peerGroupChangePercent: peerGroup?.changePercent, peerGroupLabel: peerGroup?.label,
       });
       // Fails closed — no underlying rule to fall back to the way VWAP
       // falls back to its own technicals when Gemini's unavailable. A
