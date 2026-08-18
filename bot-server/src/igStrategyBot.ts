@@ -819,10 +819,20 @@ async function prewarmLightstreamBuffer(mode: IgMode, epic: string, count: numbe
 // than necessary, which is what was actually driving the repeated
 // INSUFFICIENT_FUNDS rejections on higher-priced-per-point shares, not a
 // genuine lack of funds for the size that was actually needed.
-function calcStake(maxRiskGbp: number, stopDist: number, minStake = 0.1): number {
+export function calcStake(maxRiskGbp: number, stopDist: number, minStake = 0.1): number {
   if (stopDist <= 0) return minStake;
   const raw = maxRiskGbp / stopDist;
   return Math.max(minStake, Math.round(raw * 100) / 100);
+}
+
+// Same purpose as isLossLocked below — geminiWatch.ts's reversal-flip needs
+// to respect both daily circuit breakers before opening a fresh position of
+// its own, not just the loss one.
+export function isProfitLocked(mode: IgMode): boolean {
+  return ms(mode).profitLock;
+}
+export function getMaxRiskGbp(mode: IgMode): number {
+  return ms(mode).config?.maxRiskGbp ?? 20;
 }
 
 export function resolveCredentials(mode: IgMode) {

@@ -2,10 +2,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   authenticate, getSession, fetchFullPositions, closePosition, updatePositionLevels, fetchCandleHistory,
+  placeMarketOrder, fetchMarketDetails,
   type FullPosition, type IGSession, type CandleBar,
 } from './igApi';
-import { resolveCredentials, addLog, recordLossExit, type IgMode } from './igStrategyBot';
-import { askGeminiPositionVerdict } from './gemini';
+import {
+  resolveCredentials, addLog, recordLossExit, calcStake, isLossLocked, isProfitLocked, getMaxRiskGbp,
+  registerBotOpenedDeal, type IgMode,
+} from './igStrategyBot';
+import { askGeminiPositionVerdict, askGeminiTradeIdea } from './gemini';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
 import { calcRsi, calcMacdHist } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
@@ -55,6 +59,7 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
   saveWatch(mode, set);
   lastReview.delete(dealId);
   peakUpl.delete(dealId);
+  lastStopTightenAt.delete(dealId);
 }
 
 // Throttle — a position that hasn't moved meaningfully since its last actual
@@ -77,6 +82,22 @@ const MAX_SILENCE_MS     = 45 * 60_000; // ...or at least this long has passed, 
 // one missed reversal detection on an already-reversed position, not a
 // silent failure to protect it (the hard stop still applies regardless).
 const peakUpl = new Map<string, number>();
+
+// Mechanical stop-tightening on a stalling position — same lesson
+// fxScalperBot.ts's stall detection already learned the hard way (see its
+// own comment): locking to flat breakeven on any giveback converts
+// promising trades into near-guaranteed small losses well before their
+// real take-profit gets a fair chance, so this only acts once a REAL chunk
+// of the peak favorable move has actually been given back, and locks in a
+// fraction of that peak — not all of it, not none of it. Reuses those same
+// two fractions for consistency. Built after confirming live 2026-08-18
+// that Gemini Position Watch had leaned on "the stop protects it" as its
+// own reasoning to keep holding Western Digital all the way through a
+// genuine reversal — a mechanical action here doesn't depend on Gemini's
+// judgment holding up on any given review the way that reasoning did.
+const STALL_RETRACE_FRAC = 0.65; // fraction of peak favorable £ given back before treating it as stalling
+const STALL_LOCK_IN_FRAC = 0.3;  // fraction of peak favorable move to lock in when it fires
+const lastStopTightenAt = new Map<string, number>();
 
 // Seeds a freshly-opened gemini_opinion position with its entry confidence,
 // so there's an immediate baseline to compare against rather than an
@@ -223,6 +244,36 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // once Gemini has seen it, the ordinary £3-move / 45-min throttle governs
   // follow-up calls same as anything else.
   const justTurnedRed = reversedToRed && (!last || last.upl >= 0);
+
+  // Mechanical stall-tightening — runs every poll regardless of the
+  // Gemini-call throttle below, on purpose (see STALL_RETRACE_FRAC's own
+  // comment above). Only acts once a real chunk of a real peak has been
+  // given back — not on ordinary noise near entry, and not to flat
+  // breakeven either.
+  if (peak >= GREEN_TO_RED_THRESHOLD_GBP && p.size > 0) {
+    const retracedFrac = (peak - p.upl) / peak;
+    const lastTightened = lastStopTightenAt.get(p.dealId) ?? 0;
+    if (retracedFrac >= STALL_RETRACE_FRAC && Date.now() - lastTightened > 30 * 60_000) {
+      const isLong    = p.direction === 'BUY';
+      const peakPts    = peak / p.size;
+      const lockInPts  = peakPts * STALL_LOCK_IN_FRAC;
+      const newStop    = isLong ? p.level + lockInPts : p.level - lockInPts;
+      const wouldTighten = p.stopLevel === undefined
+        || (isLong ? newStop > p.stopLevel : newStop < p.stopLevel);
+      // Never place a stop on the wrong side of current price — that
+      // would trigger an immediate close instead of protecting anything.
+      const stopIsValid = isLong ? newStop < currentLevel : newStop > currentLevel;
+      if (wouldTighten && stopIsValid) {
+        try {
+          await updatePositionLevels(session, p.dealId, newStop, p.limitLevel ?? null);
+          lastStopTightenAt.set(p.dealId, Date.now());
+          addLog(mode, 'info', name, `Stalling — gave back ${(retracedFrac * 100).toFixed(0)}%+ of its £${peak.toFixed(2)} peak, tightened stop to lock in ~£${(lockInPts * p.size).toFixed(2)} of it`);
+        } catch (e) {
+          addLog(mode, 'error', name, `Stop tighten failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
 
   // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
   // same pattern as the entry-confirmation flow. Lets Gemini weigh whether
@@ -406,9 +457,85 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
       addLog(mode, 'exit', name, `[Gemini watch] Closed — ${verdict.reason}`);
       recordLossExit(mode, p.epic, p.upl, verdict.reason);
       removeFromWatch(mode, p.dealId);
+
+      // Reversal flip — closing on a genuine, price-confirmed reversal is
+      // exactly the situation where the opposite direction has real merit,
+      // not "we lost, so try the other way." Requires independent
+      // confirmation (real price action, not just this CLOSE verdict's own
+      // reasoning) and a fresh full entry-quality read, not a bare
+      // mechanical trigger — see maybeReverseFlip's own comment.
+      await maybeReverseFlip(mode, session, p, recentCandles, verdict.reason);
     } catch (e) {
       addLog(mode, 'error', name, `[Gemini watch] Close failed, still watching: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+}
+
+// After a position closes on a genuine reversal (not just any CLOSE reason),
+// consider opening the opposite direction. Two independent things must both
+// confirm, not just one: the same 3-bar declining-highs/rising-lows pattern
+// igStrategyBot.ts's own entries already gate on (real price action backing
+// the reversal, not just Gemini's word for it), and a completely fresh
+// askGeminiTradeIdea call held to the exact same 70%+ bar a normal entry
+// needs — not the CLOSE verdict's own reasoning repurposed as an entry
+// thesis. Built 2026-08-18: real trade history showed this account is weak
+// at initial direction (28% win rate) but disciplined about cutting losses
+// small (wins average ~3x the size of losses) — a confirmed flip plays to
+// that second strength to offset the first, rather than compounding a bad
+// initial read by blindly reversing on every stop-out.
+async function maybeReverseFlip(
+  mode: IgMode, session: IGSession, closedPos: FullPosition,
+  recentCandles: Array<{ open: number; high: number; low: number; close: number }> | undefined,
+  closeReason: string,
+): Promise<void> {
+  const name = closedPos.instrumentName;
+  if (!recentCandles || recentCandles.length < 3) return;
+  const [a, b, c] = recentCandles.slice(-3);
+  const originalWasLong = closedPos.direction === 'BUY';
+  const decliningHighs = originalWasLong  && a.high >= b.high && b.high >= c.high && a.high > c.high;
+  const risingLows     = !originalWasLong && a.low  <= b.low  && b.low  <= c.low  && a.low  < c.low;
+  if (!decliningHighs && !risingLows) return;
+
+  if (isLossLocked(mode))   { addLog(mode, 'wait', name, 'Reversal flip skipped — daily-loss lock active'); return; }
+  if (isProfitLocked(mode)) { addLog(mode, 'wait', name, 'Reversal flip skipped — daily-profit target already banked'); return; }
+
+  const wantDirection = originalWasLong ? 'SELL' : 'BUY';
+  const currentLevel  = originalWasLong ? closedPos.offer : closedPos.bid;
+  if (!currentLevel) return;
+
+  const ticker    = EPIC_TO_ALPACA[closedPos.epic];
+  const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
+
+  let idea;
+  try {
+    idea = await askGeminiTradeIdea({
+      instrumentName: name, price: currentLevel,
+      rsi: null, macdHist: null, atr: null, headlines,
+      recentCandles: [a, b, c],
+      recentExitContext: `Just closed the opposite side (${closedPos.direction}) moments ago: "${closeReason}"`,
+    });
+  } catch { return; }
+
+  if (idea.engine !== 'gemini' || idea.action !== wantDirection || idea.confidence < 70) {
+    addLog(mode, 'wait', name, `Reversal flip not confirmed — fresh read said ${idea.action} ${idea.confidence}%, needed ${wantDirection} 70%+`);
+    return;
+  }
+
+  try {
+    const details  = await fetchMarketDetails(session, [closedPos.epic]);
+    const d        = details.get(closedPos.epic);
+    const minDeal  = d?.minDealSize || 0.1;
+    const minStop  = d?.minStopDist || 1;
+    const stopDist = Math.max(idea.stopPoints, minStop);
+    const stake    = calcStake(getMaxRiskGbp(mode), stopDist, minDeal);
+
+    const result = await placeMarketOrder(session, closedPos.epic, wantDirection, stake, stopDist, idea.takeProfitPoints, 'GBP');
+    addLog(mode, 'enter', name, `Reversal flip — ${wantDirection} @ ${result.level.toFixed(2)} — ${idea.reason}`);
+    registerBotOpenedDeal(mode, result.dealId);
+    addToWatch(mode, result.dealId);
+    recordEntryConfidence(result.dealId, idea.confidence);
+  } catch (e) {
+    addLog(mode, 'error', name, `Reversal flip entry failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
