@@ -1253,6 +1253,43 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
   }
 }
 
+// Auto-executes whatever's currently sitting in the Recommended list,
+// same execution path (openRecommendation) the manual "Open Position"
+// button uses — re-priced against the live market, sized off maxRiskGbp,
+// enrolled in Gemini Position Watch same as any other entry. The one real
+// difference from a manual click: this respects the same stock/index
+// position caps the main watchlist obeys (a manual click deliberately
+// bypasses them, since a human clicking is itself the override) — without
+// that check here, an unattended loop could keep stacking positions off a
+// recommendation list that scans a much wider universe than cfg.epics.
+// Demo-only, deliberately: this is a real change to how much the bot
+// trades on its own initiative, not just a UI convenience, and live money
+// shouldn't inherit that automatically just because demo does — extend to
+// live only on explicit request.
+async function autoOpenRecommendations(mode: IgMode): Promise<void> {
+  if (mode !== 'demo') return;
+  const st = ms(mode);
+  if (!st.running || !st.session || !st.config) return;
+  const cfg = st.config;
+
+  let livePositions;
+  try { livePositions = await fetchFullPositions(st.session); } catch { return; }
+  let stockCount = livePositions.filter(p => !isIndexEpic(p.epic)).length;
+  let indexCount = livePositions.filter(p => isIndexEpic(p.epic)).length;
+
+  for (const epic of [...st.recommendations.keys()]) {
+    if (!st.running) break;
+    const epicIsIndex = isIndexEpic(epic);
+    const poolCount = epicIsIndex ? indexCount : stockCount;
+    const poolCap   = epicIsIndex ? cfg.maxIndexPositions : cfg.maxStockPositions;
+    if (poolCount >= poolCap) continue;
+    const result = await openRecommendation(mode, epic);
+    if (result.ok) {
+      if (epicIsIndex) indexCount++; else stockCount++;
+    }
+  }
+}
+
 // Sets today's single best-scored pick the first time this runs after UTC
 // midnight (effectively overnight/first-thing-in-the-morning for a UK day),
 // then leaves it untouched for the rest of the day — a stable "here's the
@@ -1345,7 +1382,13 @@ export function startRecommendationRefresh(): void {
   recommendationTimer = setInterval(() => {
     if (isScannerQuietWeekend()) return;  // nothing tradeable to scan for — see isScannerQuietWeekend
     for (const mode of ['demo', 'live'] as const) {
-      void refreshRecommendations(mode);
+      // Sequenced, not fire-and-forget in parallel — autoOpenRecommendations
+      // needs this cycle's fresh st.recommendations, not whatever's left
+      // over from 30min ago.
+      void (async () => {
+        await refreshRecommendations(mode);
+        await autoOpenRecommendations(mode);
+      })();
       void ensureDailyPick(mode);
     }
   }, RECOMMENDATION_REFRESH_MS);
