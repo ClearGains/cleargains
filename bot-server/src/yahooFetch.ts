@@ -100,6 +100,11 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'CS.D.GBPUSD.CFD.IP':   'GBPUSD=X',
   // US stocks
   'UA.D.AAPL.CASH.IP':  'AAPL',
+  // Traded by the CFD bot (see igCfdBot.ts's IG_EPICS analog — already
+  // uses .CASH.IP directly, same as AAPL/AMZN above) but missing from both
+  // free-data maps until now, caught in the same 2026-08-18 sweep that
+  // found the Japan 225 gap.
+  'UA.D.AMAT.CASH.IP':  'AMAT',
   'UC.D.MSFT.DAILY.IP': 'MSFT',
   'UC.D.NVDA.DAILY.IP': 'NVDA',
   'UA.D.AMZN.CASH.IP':  'AMZN',
@@ -205,6 +210,7 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
 // Yahoo's unofficial one, so it's tried first for anything it covers.
 export const EPIC_TO_ALPACA: Record<string, string> = {
   'UA.D.AAPL.CASH.IP':    'AAPL',
+  'UA.D.AMAT.CASH.IP':    'AMAT',
   'UC.D.MSFT.DAILY.IP':   'MSFT',
   'UC.D.NVDA.DAILY.IP':   'NVDA',
   'UA.D.AMZN.CASH.IP':    'AMZN',
