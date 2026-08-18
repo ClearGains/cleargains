@@ -1262,12 +1262,10 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
 // bypasses them, since a human clicking is itself the override) — without
 // that check here, an unattended loop could keep stacking positions off a
 // recommendation list that scans a much wider universe than cfg.epics.
-// Demo-only, deliberately: this is a real change to how much the bot
-// trades on its own initiative, not just a UI convenience, and live money
-// shouldn't inherit that automatically just because demo does — extend to
-// live only on explicit request.
+// Runs on both demo and live — extended to live on explicit request after
+// running demo-only first. Still gated by the same position caps and
+// maxRiskGbp sizing as everything else this bot does on live money.
 async function autoOpenRecommendations(mode: IgMode): Promise<void> {
-  if (mode !== 'demo') return;
   const st = ms(mode);
   if (!st.running || !st.session || !st.config) return;
   const cfg = st.config;
