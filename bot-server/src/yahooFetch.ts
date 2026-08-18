@@ -79,6 +79,15 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'IX.D.FTSE.DAILY.IP':   '^FTSE',
   'IX.D.STXE.CASH.IP':    '^STOXX50E',
   'IX.D.DAX.DAILY.IP':    '^GDAXI',
+  // Missing entirely until now, despite Japan 225 being explicitly pinned to
+  // gemini_opinion's watchlist on every cycle by user request (see
+  // PRIORITY_EPIC in igStrategyScanner.ts) — meant every single evaluation
+  // fell through to IG's own allowance-limited fetchCandleHistory instead of
+  // this free path, confirmed live 2026-08-18 as the actual cause of an
+  // exceeded-account-historical-data-allowance error. Ratio confirmed live
+  // against real IG bid the same day (~1.00, unscaled — see
+  // lib/epicToYahoo.ts's NON_STOCK_SCALE_FACTOR verification).
+  'IX.D.NIKKEI.DAILY.IP': '^N225',
   // CFD-account epics — different codes from the spread-bet ones above for
   // the same underlying instrument, confirmed live (IX.D.FTSE.CFD.IP vs
   // IX.D.FTSE.DAILY.IP, CS.D.GBPUSD.CFD.IP vs CS.D.GBPUSD.TODAY.IP). Also
