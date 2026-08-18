@@ -365,6 +365,15 @@ export type IgRecommendation = {
   takeProfitPrice?: number;
   computedAt:       string;   // ISO timestamp
   score:            number;   // same conviction score the scanner uses to rank the watch list
+  // Read-only context shown next to the recommendation so a manual
+  // "Open Position" click isn't made blind to why the stock's actually
+  // moving — deliberately NOT a gate on the signal itself (that's what
+  // gemini_opinion is for; this strategy's backtested edge was validated
+  // on pure technicals with no news filter, and bolting one on here would
+  // mean trading a different strategy than the one that was tested).
+  // Undefined for IG-only instruments (indices/commodities) with no
+  // ticker to fetch headlines against.
+  headlines?:       string[];
 };
 
 // Confirmed live this needs a hard ceiling: every failed auto-entry adds one
@@ -1156,12 +1165,22 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
 
       if (signal && (signal.action === 'BUY' || signal.action === 'SELL')) {
         found++;
+        // Read-only context only — see IgRecommendation.headlines' own
+        // comment. Only fetched for the (few) epics that actually produce
+        // a signal, not the whole candidate pool, and failure here should
+        // never cost the recommendation itself.
+        const ticker = EPIC_TO_ALPACA[epic];
+        let headlines: string[] | undefined;
+        if (ticker) {
+          try { headlines = await fetchAllHeadlines(ticker, 3, name); } catch {}
+        }
         addRecommendation(st.recommendations, {
           epic, name, action: signal.action, reason: signal.reason,
           level: bars[bars.length - 1].c,
           stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice,
           computedAt: new Date().toISOString(),
           score: scoreForStrategy(cfg.strategy, bars, epic, name),
+          headlines,
         });
       } else {
         st.recommendations.delete(epic);

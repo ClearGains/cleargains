@@ -530,6 +530,7 @@ type IgRecommendation = {
   takeProfitPrice?: number;
   computedAt:       string;
   score:            number;
+  headlines?:       string[];
 };
 
 // Any open IG position for the account, however it was opened (manually,
@@ -1116,6 +1117,16 @@ function IgSpreadBetTab() {
                       <div className="text-xs text-slate-600">
                         score {status.dailyPick.score.toFixed(1)} · decided {new Date(status.dailyPick.computedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </div>
+                      {/* Read-only context, not a gate — this strategy's backtested
+                          edge was validated on pure technicals with no news filter,
+                          so headlines here inform a manual decision, never block one. */}
+                      {!!status.dailyPick.headlines?.length && (
+                        <div className="mt-1 space-y-0.5">
+                          {status.dailyPick.headlines.map((h, i) => (
+                            <div key={i} className="text-[11px] text-slate-500 truncate max-w-xs">{h}</div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="text-right text-xs">
@@ -1168,6 +1179,16 @@ function IgSpreadBetTab() {
                         <div className="font-medium text-white text-sm">{r.name || r.epic}</div>
                         <div className="text-xs text-slate-500 truncate">{r.reason}</div>
                         <div className="text-xs text-slate-600">decided {new Date(r.computedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                        {/* Read-only context, not a gate — see IgRecommendation's
+                            own comment on why this strategy's signal itself
+                            stays pure-technical. */}
+                        {!!r.headlines?.length && (
+                          <div className="mt-1 space-y-0.5">
+                            {r.headlines.map((h, i) => (
+                              <div key={i} className="text-[11px] text-slate-500 truncate max-w-xs">{h}</div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="text-right text-xs shrink-0">
