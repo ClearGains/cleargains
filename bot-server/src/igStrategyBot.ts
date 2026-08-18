@@ -1620,11 +1620,27 @@ async function evaluateEpic(
         signal = { action: 'HOLD', reason: 'Latest bar has no valid close price — skipping' };
         break;
       }
+      const todayUtc   = new Date().toISOString().slice(0, 10);
+      const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
       // Checked before spending a Gemini call — all three are cheap,
       // mechanical disqualifiers that don't need the AI's opinion first.
-      // Period doubled (20->40) — bars are now 30-min not hourly, so this
-      // keeps the same ~20h window the 0.22 threshold was tuned against.
-      const efficiencyRatio = calcEfficiencyRatio(bars, 40);
+      // Judged on TODAY's own bars once there are enough of them, not a
+      // fixed cross-day window — a straight 40-bar/~20h window nets a fresh
+      // reversal against yesterday's opposite move (yesterday +20, today
+      // reversing -20 nets to ~0 change over ~40 traveled = ~0 ratio) and
+      // calls it "chop," even though today's own move is a single clean
+      // direction — exactly the kind of fresh reversal this strategy
+      // should catch, not block. Falls back to the old ~20h window only
+      // early in the session, before today has enough bars (<~3h in) of
+      // its own to judge. Note: MIN_EFFICIENCY_RATIO was tuned against the
+      // ~20h window specifically — a shorter same-day window has a higher
+      // expected ratio from noise alone (ratio scales ~1/sqrt(bars) for a
+      // pure random walk), so this errs slightly more permissive early in
+      // the session than the original tuning assumed.
+      const MIN_TODAY_BARS_FOR_CHOP_CHECK = 6;
+      const efficiencyRatio = todaysBars.length > MIN_TODAY_BARS_FOR_CHOP_CHECK
+        ? calcEfficiencyRatio(todaysBars, todaysBars.length - 1)
+        : calcEfficiencyRatio(bars, 40);
       if (efficiencyRatio !== null && efficiencyRatio < MIN_EFFICIENCY_RATIO) {
         signal = { action: 'HOLD', reason: `Too choppy to trade — efficiency ratio ${efficiencyRatio.toFixed(2)} < ${MIN_EFFICIENCY_RATIO} (moved a lot, went nowhere)` };
         break;
@@ -1652,8 +1668,6 @@ async function evaluateEpic(
       // got bought at 86690 after running from a 73900 prior close, i.e.
       // after ~17% of the day's move had already happened, and nothing in
       // the prompt could tell Gemini that at the time.
-      const todayUtc   = new Date().toISOString().slice(0, 10);
-      const todaysBars = bars.filter(b => b.t.slice(0, 10) === todayUtc);
       const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
       const dayChangePercent = dayOpen ? ((last - dayOpen) / dayOpen) * 100 : undefined;
       if (dayChangePercent !== undefined) recordDayChange(epic, dayChangePercent);
