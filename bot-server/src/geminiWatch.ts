@@ -471,30 +471,29 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   }
 }
 
-// After a position closes on a genuine reversal (not just any CLOSE reason),
-// consider opening the opposite direction. Two independent things must both
-// confirm, not just one: the same 3-bar declining-highs/rising-lows pattern
-// igStrategyBot.ts's own entries already gate on (real price action backing
-// the reversal, not just Gemini's word for it), and a completely fresh
-// askGeminiTradeIdea call held to the exact same 70%+ bar a normal entry
-// needs — not the CLOSE verdict's own reasoning repurposed as an entry
-// thesis. Built 2026-08-18: real trade history showed this account is weak
-// at initial direction (28% win rate) but disciplined about cutting losses
-// small (wins average ~3x the size of losses) — a confirmed flip plays to
-// that second strength to offset the first, rather than compounding a bad
-// initial read by blindly reversing on every stop-out.
+// After a position closes, consider opening the opposite direction. The
+// original CLOSE is itself the evidence a mistake was made — deliberately
+// NOT re-gated behind a slow, strict 3-bar price-action pattern the way
+// entries are (that check earned its keep blocking brand-new ideas with no
+// evidence behind them yet; recycling it here mostly just cost time on a
+// leveraged trade, and a clean 3-bar monotonic sequence is rare enough in
+// real price action that this would barely ever have fired). The one gate
+// kept is a completely fresh askGeminiTradeIdea call actually agreeing with
+// the reversed direction — no confidence bar, deliberately loose, since the
+// real safety net here is what happens *after* it opens: it goes straight
+// into this same watched-position pipeline (stall-tightening, ongoing
+// review), not left to run unmanaged. Built 2026-08-18: real trade history
+// showed this account is weak at initial direction (28% win rate) but
+// disciplined about cutting losses small (wins average ~3x loss size) — a
+// flip plays to that second strength to offset the first, trusting the
+// exit-management to correct it fast if the flip itself turns out wrong.
 async function maybeReverseFlip(
   mode: IgMode, session: IGSession, closedPos: FullPosition,
   recentCandles: Array<{ open: number; high: number; low: number; close: number }> | undefined,
   closeReason: string,
 ): Promise<void> {
   const name = closedPos.instrumentName;
-  if (!recentCandles || recentCandles.length < 3) return;
-  const [a, b, c] = recentCandles.slice(-3);
   const originalWasLong = closedPos.direction === 'BUY';
-  const decliningHighs = originalWasLong  && a.high >= b.high && b.high >= c.high && a.high > c.high;
-  const risingLows     = !originalWasLong && a.low  <= b.low  && b.low  <= c.low  && a.low  < c.low;
-  if (!decliningHighs && !risingLows) return;
 
   if (isLossLocked(mode))   { addLog(mode, 'wait', name, 'Reversal flip skipped — daily-loss lock active'); return; }
   if (isProfitLocked(mode)) { addLog(mode, 'wait', name, 'Reversal flip skipped — daily-profit target already banked'); return; }
@@ -511,13 +510,16 @@ async function maybeReverseFlip(
     idea = await askGeminiTradeIdea({
       instrumentName: name, price: currentLevel,
       rsi: null, macdHist: null, atr: null, headlines,
-      recentCandles: [a, b, c],
+      recentCandles: recentCandles?.slice(-3) ?? [],
       recentExitContext: `Just closed the opposite side (${closedPos.direction}) moments ago: "${closeReason}"`,
     });
   } catch { return; }
 
-  if (idea.engine !== 'gemini' || idea.action !== wantDirection || idea.confidence < 70) {
-    addLog(mode, 'wait', name, `Reversal flip not confirmed — fresh read said ${idea.action} ${idea.confidence}%, needed ${wantDirection} 70%+`);
+  // Deliberately no confidence bar — see this function's own comment. Only
+  // blocks if Gemini actively disagrees (still says the original direction,
+  // or HOLD) or the call itself failed (passthrough).
+  if (idea.engine !== 'gemini' || idea.action !== wantDirection) {
+    addLog(mode, 'wait', name, `Reversal flip not confirmed — fresh read said ${idea.action} ${idea.confidence}%, needed ${wantDirection}`);
     return;
   }
 
