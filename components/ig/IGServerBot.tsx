@@ -412,6 +412,7 @@ type FxEpicStatus = {
   lastPrice:  number;
   dealId:     string;
   pnlPct:     number | null;
+  dataAgeMin: number | null;
 };
 
 type FxStatus = {
@@ -608,6 +609,17 @@ function FxScalperAccountPanel({ account, serverOnline }: { account: AccountKey;
                       </span>
                     )}
                     <span className="text-gray-600 font-mono">{s.lastPrice.toFixed(1)}</span>
+                    {s.dataAgeMin !== null && (
+                      <span
+                        className={clsx('font-mono',
+                          s.dataAgeMin >= 150 ? 'text-red-400' :
+                          s.dataAgeMin >= 75  ? 'text-yellow-400' : 'text-gray-600'
+                        )}
+                        title="Time since this pair's last known closed hourly candle — flags a stuck price feed even while the stream shows connected"
+                      >
+                        {s.dataAgeMin >= 150 ? '⚠ STALE ' : ''}{s.dataAgeMin < 60 ? `${s.dataAgeMin.toFixed(0)}m` : `${(s.dataAgeMin / 60).toFixed(1)}h`}
+                      </span>
+                    )}
                   </div>
                 </div>
               );

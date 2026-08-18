@@ -81,6 +81,12 @@ export type FxEpicStatus = {
   uplGbp:     number | null;   // real £ P&L from IG's own position data — cached from the last poll cycle, so up to POLL_MS stale
   stopPrice:  number | null;
   tpPrice:    number | null;
+  // Minutes since this epic's last known closed hourly candle. Surfaces the
+  // exact class of bug confirmed live 2026-08-17: the stream can silently
+  // stop delivering real candle closes while still reporting "connected",
+  // and "Waiting for signal" looks identical either way without this — this
+  // is what would have made that visible in minutes instead of hours.
+  dataAgeMin: number | null;
 };
 
 export type FxScalperStatus = {
@@ -1057,6 +1063,9 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         uplGbp:    livePos?.upl ?? null,
         stopPrice: st.dynamicStopPrice > 0 ? st.dynamicStopPrice : null,
         tpPrice:   st.takeProfitPrice   > 0 ? st.takeProfitPrice   : null,
+        dataAgeMin: st.closedCandles.length
+          ? (Date.now() - new Date(st.closedCandles[st.closedCandles.length - 1].time).getTime()) / 60_000
+          : null,
       };
     }
     return {
