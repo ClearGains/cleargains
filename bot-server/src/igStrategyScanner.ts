@@ -258,6 +258,18 @@ export const FX_EPICS = new Set([
 // backtested genuinely profitable but weren't in IG_EPICS at all until
 // now (see that array's own comment) — epics verified live via IG's
 // market search before adding, same discipline as everything else here.
+// Per-symbol numbers below predate 2026-08-19's scoring change (an
+// already-extended-today dampener plus a MIN_SWING_CONFIDENCE=6/10 floor
+// before a signal actually trades — see ruleBasedAnalysis.ts and
+// alpacaStrategies.ts's own comments) — a Uber entry at 5/10 conviction,
+// bought right at the top of its own day's range, prompted a real re-check
+// against backtest.ts's actual engine rather than just tightening on
+// intuition. Net effect across this exact 30-symbol list: 9 improved, 4
+// worsened, 17 unchanged; summed individual returns 367%→418%. Not uniform
+// — commodities (Brent Crude, Natural Gas) lost real edge, since they
+// trend harder and don't always deserve the same "already extended"
+// penalty a mean-reverting stock does. Shipped anyway on the net result;
+// worth revisiting per-asset-class if commodity performance keeps lagging.
 export const RULE_BASED_ANALYSIS_CONFIRMED_EPICS = new Set([
   'IX.D.FTSE.DAILY.IP',   // FTSE 100     return=+2.66%  PF=1.38
   'IX.D.NIKKEI.DAILY.IP', // Japan 225    return=+10.76% PF=1.83

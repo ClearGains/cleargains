@@ -644,6 +644,13 @@ export function pivotPointsSignal(
 // note. Needs a long daily history for its SMA200 trend filter to actually be
 // active (see FREE_DATA_PARAMS below — 2y range, unlike every other daily
 // strategy's 6mo), so gates on far more bars than the others.
+// Tuned by backtest sweep, not intuition — see the call site's own comment.
+// Exported so backtest.ts's makeRuleBasedAnalysis can apply the identical
+// gate — it calls ruleBasedAnalysis() directly rather than through this
+// function, so without sharing this constant the backtest would silently
+// simulate a different (gate-less) strategy than the one actually live.
+export const MIN_SWING_CONFIDENCE = 6;
+
 export function ruleBasedAnalysisSignal(
   bars:       AlpacaBar[],
   inPosition: boolean,
@@ -665,6 +672,16 @@ export function ruleBasedAnalysisSignal(
   }
 
   if (swing.direction === 'LONG' || swing.direction === 'SHORT') {
+    // Floor below which a "signal" is really just noise — nothing
+    // previously stopped a low-conviction score from executing exactly
+    // like a strong one, only from sizing slightly bigger once through
+    // (see igStrategyBot.ts's loss-ceiling confidence scaling). Value
+    // chosen from a real backtest sweep across the confirmed-epics universe
+    // (2026-08-19), not picked on intuition — see RULE_BASED_ANALYSIS_CONFIRMED_EPICS's
+    // own comment for the before/after numbers.
+    if (swing.confidence < MIN_SWING_CONFIDENCE) {
+      return { action: 'HOLD', reason: `${swing.direction} bias but only ${swing.confidence}/10 confidence — below the ${MIN_SWING_CONFIDENCE}/10 bar to actually trade it` };
+    }
     return {
       action:           swing.direction === 'LONG' ? 'BUY' : 'SELL',
       reason:           swing.reasoning,

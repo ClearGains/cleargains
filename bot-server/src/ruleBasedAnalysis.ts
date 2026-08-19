@@ -102,6 +102,27 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
     }
   }
 
+  // A name that's already made most of today's move before this signal even
+  // fires is being chased into strength/weakness, not caught at the start
+  // of it — confirmed live this matters (Uber bought at 78.51 on a day that
+  // ranged 73.97-79.31, i.e. right near the day's own high, on a fairly
+  // thin 5/10-confidence signal). Dampens whichever side is already
+  // leading rather than vetoing outright — a genuinely strong setup with
+  // several signals aligned still clears the bar; a marginal one riding
+  // mostly on "it already moved today" gets pulled back toward neutral.
+  let extensionNote = '';
+  const todaysMovePct = Number(last.open) > 0 ? ((price - Number(last.open)) / Number(last.open)) * 100 : 0;
+  const EXTENDED_TODAY_PCT = 4;
+  if (todaysMovePct >= EXTENDED_TODAY_PCT && bull > bear) {
+    bull -= 2;
+    extensionNote = `Already up ${todaysMovePct.toFixed(1)}% just today — this would be chasing an extended move, not catching the start of one`;
+    signals.push(extensionNote);
+  } else if (todaysMovePct <= -EXTENDED_TODAY_PCT && bear > bull) {
+    bear -= 2;
+    extensionNote = `Already down ${todaysMovePct.toFixed(1)}% just today — this would be chasing an extended move, not catching the start of one`;
+    signals.push(extensionNote);
+  }
+
   const bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL' =
     bull > bear + 2 ? 'BULLISH' : bear > bull + 2 ? 'BEARISH' : 'NEUTRAL';
 
@@ -277,6 +298,7 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
       : 'Normal volatility environment — respect stop losses',
     bias === 'NEUTRAL' ? 'No clear trend — range-bound conditions increase false-signal risk' : 'Momentum trades can reverse sharply on news events',
     ...(ind.volRatio !== null && ind.volRatio <= 0.5 ? [volNote] : []),
+    ...(extensionNote ? [extensionNote] : []),
   ];
 
   const catalysts: string[] = [
