@@ -297,41 +297,34 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     }
   }
 
-  // ── EOD profit-taking (every instrument, not just stocks) ──────────────
+  // ── EOD profit-taking trigger (every instrument, not just stocks) ──────
   // User's own trading intuition: a position sitting in real profit late in
-  // the day gets closed out rather than held into the next day, on the
-  // reasoning that direction can just as easily reverse overnight — FX and
-  // commodities carry the same daily-noise/reversal risk as stocks do, per
-  // explicit follow-up request, so this isn't stock-scoped the way the
-  // early-loss rule below still is. Uses the NYSE close as a single, already-
-  // defined "end of day" checkpoint for the whole account rather than
-  // inventing a separate one per market — FX/commodities don't structurally
-  // close then, but a consistent daily boundary matters more here than
-  // precisely matching each market's own session hours. Checked first
-  // against real trade history — directionally plausible on what little
-  // multi-day data existed, but nowhere near enough of a sample to confirm
-  // statistically; implemented anyway on explicit request. Closing the
-  // position removes it from tracking entirely, so no repeat-guard needed
-  // the way stop-tightening needs one.
-  // Needs a minimum age too — per explicit follow-up, this should only
-  // catch a position that's actually been running through the session, not
-  // one that happens to open during (or just before) this same 15min close
-  // buffer and gets swept up within minutes of opening. A position that
-  // opens overnight is meant to run until the *next* close, not get closed
-  // out the moment it happens to still be open when today's window hits —
-  // the natural ~24h gap between close windows already gives it that room,
-  // this just stops a same-window open from being caught immediately.
-  const EOD_PROFIT_MIN_GBP     = 2;    // same "meaningfully" bar as GREEN_TO_RED_THRESHOLD_GBP above
+  // the day is worth evaluating for closing rather than automatically held
+  // into the next day, on the reasoning that direction can just as easily
+  // reverse overnight — FX and commodities carry the same daily-noise/
+  // reversal risk as stocks do, per explicit follow-up, so this isn't
+  // stock-scoped the way the early-loss rule below still is. Uses the NYSE
+  // close as a single, already-defined "end of day" checkpoint for the
+  // whole account rather than inventing a separate one per market.
+  //
+  // Deliberately NOT a mechanical auto-close (an earlier version was) — per
+  // further explicit follow-up, the decision needs an actual evaluation of
+  // whether the profit is worth banking now, whether the trend looks set to
+  // continue (in which case holding through the close has a real case), and
+  // whether the opposite direction might be the better position from here —
+  // not just "profitable + near close = close." So this only sets a flag:
+  // it forces a fresh askGeminiPositionVerdict call below (bypassing the
+  // ordinary move/silence throttle, same as sharpDip/justTurnedRed already
+  // do) with end-of-day context added to the prompt, and lets that verdict's
+  // existing CLOSE handling (below) — including its existing reversal-flip
+  // check — decide what actually happens. Needs a minimum age too: a
+  // position opened during (or just before) this same 15min buffer
+  // shouldn't be swept into this evaluation within minutes of opening — an
+  // overnight-opened position is meant to run to the *next* close, which
+  // the natural ~24h gap between close windows already gives it.
+  const EOD_PROFIT_MIN_GBP       = 2;   // same "meaningfully" bar as GREEN_TO_RED_THRESHOLD_GBP above
   const EOD_PROFIT_MIN_AGE_HOURS = 0.5; // comfortably past the 15min close buffer itself
-  if (isNearClose(15) && heldHours >= EOD_PROFIT_MIN_AGE_HOURS && p.upl >= EOD_PROFIT_MIN_GBP) {
-    try {
-      await closePosition(session, p.dealId, p.direction, p.size);
-      addLog(mode, 'exit', name, `[EOD] Closing near end of day with +£${p.upl.toFixed(2)} — not holding a winner into a session that could reverse`);
-      return;
-    } catch (e) {
-      addLog(mode, 'error', name, `[EOD] Close failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
+  const nearEndOfDayProfit = isNearClose(15) && heldHours >= EOD_PROFIT_MIN_AGE_HOURS && p.upl >= EOD_PROFIT_MIN_GBP;
 
   // ── Early-loss escalation tightening (stocks only) ─────────────────────
   // Same user intuition, other direction: a stock position that's never
@@ -507,11 +500,12 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
 
   const moved = !last || Math.abs(p.upl - last.upl) >= MOVE_THRESHOLD_GBP;
   const stale = !last || (Date.now() - last.at) >= MAX_SILENCE_MS;
-  // A sharp dip or a just-turned-red reversal always gets a fresh Gemini call
-  // this cycle even if the ordinary throttle would otherwise skip it — these
-  // are exactly the situations where sitting on stale judgment for up to
-  // another 45 minutes is the wrong tradeoff.
-  if (!moved && !stale && !sharpDip && !justTurnedRed) return;
+  // A sharp dip, a just-turned-red reversal, or a real end-of-day profit
+  // worth evaluating always gets a fresh Gemini call this cycle even if the
+  // ordinary throttle would otherwise skip it — these are exactly the
+  // situations where sitting on stale judgment for up to another 45 minutes
+  // is the wrong tradeoff.
+  if (!moved && !stale && !sharpDip && !justTurnedRed && !nearEndOfDayProfit) return;
 
   const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
 
@@ -532,6 +526,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     recentCandles,
     rsi,
     macdHist,
+    nearEndOfDay: nearEndOfDayProfit,
   });
 
   addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
@@ -544,11 +539,25 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     confidence: verdict.engine === 'gemini' ? verdict.confidence : (last?.confidence ?? 60),
   });
 
-  if (verdict.action === 'CLOSE') {
+  // Passthrough always returns HOLD (see askGeminiPositionVerdict's own
+  // fail-closed default) — fine normally, since the stop still protects an
+  // ordinary position either way. But this specific evaluation exists to
+  // proactively bank a real profit before it's exposed to an unreviewed
+  // overnight/next-day reversal; silently falling back to "just hold
+  // through the close" because Gemini happened to be unavailable at this
+  // exact moment defeats the entire point. Falls back to the original
+  // mechanical behavior (just close) instead, only for this specific case.
+  const eodFallbackClose = nearEndOfDayProfit && verdict.engine === 'passthrough';
+  if (eodFallbackClose) addLog(mode, 'info', name, `[EOD] Gemini unavailable for the end-of-day review — closing on the original mechanical rule rather than holding unreviewed`);
+  const closeReason = eodFallbackClose
+    ? `[EOD] +£${p.upl.toFixed(2)} near end of day, Gemini unavailable to weigh trend continuation — closing rather than holding unreviewed`
+    : verdict.reason;
+
+  if (verdict.action === 'CLOSE' || eodFallbackClose) {
     try {
       await closePosition(session, p.dealId, p.direction, p.size);
-      addLog(mode, 'exit', name, `[Gemini watch] Closed — ${verdict.reason}`);
-      recordLossExit(mode, p.epic, p.upl, verdict.reason);
+      addLog(mode, 'exit', name, `[Gemini watch] Closed — ${closeReason}`);
+      recordLossExit(mode, p.epic, p.upl, closeReason);
       removeFromWatch(mode, p.dealId);
 
       // Reversal flip — closing on a genuine, price-confirmed reversal is
@@ -557,7 +566,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
       // confirmation (real price action, not just this CLOSE verdict's own
       // reasoning) and a fresh full entry-quality read, not a bare
       // mechanical trigger — see maybeReverseFlip's own comment.
-      await maybeReverseFlip(mode, session, p, recentCandles, verdict.reason);
+      await maybeReverseFlip(mode, session, p, recentCandles, closeReason);
     } catch (e) {
       addLog(mode, 'error', name, `[Gemini watch] Close failed, still watching: ${e instanceof Error ? e.message : String(e)}`);
     }
