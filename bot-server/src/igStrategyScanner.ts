@@ -274,6 +274,27 @@ export const RULE_BASED_ANALYSIS_CONFIRMED_EPICS = new Set([
   'SH.D.UBERUS.DAILY.IP', // Uber         return=+3.73%  PF=1.38
   'SC.D.F.DAILY.IP',      // Ford         return=+3.56%  PF=1.21
   'UA.D.COINUS.DAILY.IP', // Coinbase     return=+2.54%  PF=1.65
+  // Added 2026-08-19 — was one of live's epicStrategyOverrides picks
+  // (running under gemini_opinion since it wasn't in this list), checked
+  // against the real engine on request and it backtests genuinely well,
+  // beating several already-confirmed names above on both metrics.
+  // AstraZeneca and Broadcom were checked in the same pass and did NOT
+  // make the cut (AZN: -4.52% PF=0.79, a real loser; Broadcom: +0.67%
+  // PF=1.06, too marginal to call confirmed) — both correctly stay on
+  // Gemini via the override instead.
+  'UC.D.MRVL.DAILY.IP',   // Marvell      return=+13.62% PF=1.41
+  // Checked the full 19-name sector expansion (2026-08-19's IG_EPICS
+  // addition) the same way, on request — 5 of 19 confirmed genuinely
+  // profitable, 14 did not (several badly: Moderna -28.42% PF=0.50,
+  // Costco -12.22% PF=0.26, PayPal -12.72% PF=0.20, Disney -11.18%
+  // PF=0.31, Boeing -10.47% PF=0.49 — none of those 14 added here,
+  // reachable only via gemini_opinion/epicStrategyOverrides instead,
+  // same as every other unconfirmed name).
+  'SD.D.JNJ.DAILY.IP',     // Johnson & Johnson return=+8.44% PF=1.77
+  'SE.D.PLTRUS.DAILY.IP',  // Palantir          return=+8.03% PF=1.63
+  'SC.D.HON.DAILY.IP',     // Honeywell         return=+7.73% PF=1.72
+  'SB.D.CAT.DAILY.IP',     // Caterpillar       return=+6.23% PF=1.33
+  'SE.D.MCD.DAILY.IP',     // McDonald's        return=+4.89% PF=1.89
 ]);
 
 // Indices fxScalperBot.ts is also allowed to trade, alongside the 5 FX
