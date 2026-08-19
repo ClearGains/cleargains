@@ -21,10 +21,20 @@ import * as path from 'path';
 // correlated with the model switch, not with our own request volume
 // (which was flat to lower over the same days). Pinning back to the
 // version that was actually working trades away "Google can't retire this
-// out from under us silently" for "we control exactly which model we hit"
-// — worth revisiting if 3.6 itself gets deprecated, but not worth eating
-// a newer model's rollout instability in the meantime.
-const GEMINI_MODEL = 'gemini-3.6-flash';
+// out from under us silently" for "we control exactly which model we hit".
+// Moved off 3.6 itself on 2026-08-19: it degraded the same way 3.7 did —
+// confirmed live with a head-to-head test, 6 interleaved calls to each
+// model back to back, same few seconds. 3.6 timed out on 5/6 (full 20s,
+// no response at all); 3.5 succeeded on 6/6 in ~1s each. gemini-2.5-flash
+// and gemini-2.5-flash-lite are no longer callable at all on this
+// key/project ("no longer available to new users" 404) — Google is
+// steering everyone toward the 3.x line, and each new release in that
+// line has so far arrived undercapacity and settled down only once a
+// newer one took the traffic off it. 3.5-flash is the newest model that's
+// actually past that rollout period. Worth re-checking 3.6/3.7 again once
+// they've had more time to mature, but don't chase the newest release by
+// default — it has consistently been the least reliable one.
+const GEMINI_MODEL = 'gemini-3.5-flash';
 
 async function fetchGeminiWithRetry(url: string, options: RequestInit): Promise<Response> {
   // AbortSignal.timeout() starts counting at creation, not per fetch() call —
