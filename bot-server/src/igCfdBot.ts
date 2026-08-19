@@ -416,22 +416,8 @@ export function createIgCfdBot(mode: CfdMode): CfdHandle {
         if (d?.marketStatus && d.marketStatus !== 'TRADEABLE') { addLog('wait', name, `Market not tradeable (${d.marketStatus})`); return; }
       } catch { /* fall back to last bar close + defaults */ }
 
-      // Widen both the stop and target proportionally — per explicit user
-      // diagnosis, positions were feeling oversized relative to ordinary
-      // small moves. Stake below is sized as effectiveRiskGbp / stopDist,
-      // so a tight stop (this engine's default S/R-cluster + 0.8x ATR
-      // buffer) means a large £/pt stake, and an everyday small move
-      // already swings P&L by a noticeable amount. Widening both distances
-      // by the same factor keeps the same £ risk-at-stop and the same R:R
-      // ratio, just spread over more points — each point of ordinary
-      // movement is worth less, at the cost of needing a genuinely bigger
-      // move to hit either one. Scoped to this bot's own entries only —
-      // doesn't touch the shared ruleBasedAnalysis engine itself, so the
-      // Daily Brief page's displayed levels and the separate IG Strategy
-      // bot's stops are unaffected.
-      const CFD_STOP_WIDEN_MULT = 1.5;
-      const stopDist = Math.max(signal.stopPrice ? Math.abs(livePrice - signal.stopPrice) : livePrice * 0.02, minStop) * CFD_STOP_WIDEN_MULT;
-      const profitDist = signal.takeProfitPrice ? Math.abs(livePrice - signal.takeProfitPrice) * CFD_STOP_WIDEN_MULT : undefined;
+      const stopDist = Math.max(signal.stopPrice ? Math.abs(livePrice - signal.stopPrice) : livePrice * 0.02, minStop);
+      const profitDist = signal.takeProfitPrice ? Math.abs(livePrice - signal.takeProfitPrice) : undefined;
 
       // Margin-proportional risk target — CFDs are inherently leveraged
       // (marginFactorPct is the real fraction of notional exposure IG
