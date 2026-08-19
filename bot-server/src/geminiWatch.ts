@@ -16,6 +16,35 @@ import { fetchAllHeadlines } from './newsFetch';
 import { isNYSEOpen, isNearClose, type AlpacaBar } from './alpacaApi';
 import { FX_EPICS, isIndexEpic } from './igStrategyScanner';
 
+// Manual kill-switch for this watcher's own Gemini usage, independent of
+// which positions are flagged — same purpose as igStrategyBot.ts's own
+// strategy-side pause (see its own comment): back off Gemini specifically
+// during a stretch of real API degradation without having to un-watch
+// every position. Paused reviews simply don't fire this cycle — the hard
+// stop-loss still protects every watched position regardless, same as any
+// other Gemini outage. Persisted per mode so it survives a restart.
+function watchAiPauseFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-watch-ai-paused-${mode}.json`);
+}
+function loadWatchAiPaused(mode: IgMode): boolean {
+  try { return (JSON.parse(fs.readFileSync(watchAiPauseFile(mode), 'utf8')) as { paused: boolean }).paused; }
+  catch { return false; }
+}
+function saveWatchAiPaused(mode: IgMode, paused: boolean): void {
+  try { fs.writeFileSync(watchAiPauseFile(mode), JSON.stringify({ paused }), 'utf8'); } catch {}
+}
+const watchAiPaused = new Map<IgMode, boolean>([
+  ['demo', loadWatchAiPaused('demo')],
+  ['live', loadWatchAiPaused('live')],
+]);
+export function isWatchAiPaused(mode: IgMode): boolean {
+  return watchAiPaused.get(mode) ?? false;
+}
+export function setWatchAiPaused(mode: IgMode, paused: boolean): void {
+  watchAiPaused.set(mode, paused);
+  saveWatchAiPaused(mode, paused);
+}
+
 // ── Gemini position watch — for positions opened outside the strategy bot
 // (manually via IG's own app, the Demo Trader panel, or anywhere else) that
 // the user explicitly flags for Gemini to review periodically and close if
@@ -506,6 +535,11 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // situations where sitting on stale judgment for up to another 45 minutes
   // is the wrong tradeoff.
   if (!moved && !stale && !sharpDip && !justTurnedRed && !nearEndOfDayProfit) return;
+  // Mechanical checks above (stall-tightening, EOD, early-loss) already ran
+  // and don't touch Gemini at all — only the actual AI review is skipped
+  // here, so the hard stop-loss and every price-only protection still work
+  // normally while paused.
+  if (isWatchAiPaused(mode)) return;
 
   const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
 

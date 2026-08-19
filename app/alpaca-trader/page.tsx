@@ -515,6 +515,7 @@ type IgBotStatus = {
   // anything open but not in here is a manually-opened position the bot is
   // deliberately leaving alone.
   managedDeals?: string[];
+  aiPaused?: boolean;   // manual Gemini kill-switch for this bot's own entries
 };
 
 // A signal computed off IG's own data for an epic the bot isn't acting on
@@ -597,6 +598,8 @@ function IgSpreadBetTab() {
   const [watchPositions, setWatchPositions] = useState<WatchPosition[]>([]);
   const [watchedDealIds, setWatchedDealIds] = useState<Set<string>>(new Set());
   const [watchBusy, setWatchBusy]           = useState<string | null>(null);
+  const [watchAiPaused, setWatchAiPausedState] = useState(false);
+  const [aiPauseBusy, setAiPauseBusy]       = useState(false);
 
   const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const watchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -649,10 +652,11 @@ function IgSpreadBetTab() {
   const fetchWatch = useCallback(async () => {
     try {
       const res  = await fetch(`/api/ig-strategy?mode=${igMode}&action=watch`);
-      const data = await res.json() as { ok: boolean; positions?: WatchPosition[]; watchedDealIds?: string[] };
+      const data = await res.json() as { ok: boolean; positions?: WatchPosition[]; watchedDealIds?: string[]; aiPaused?: boolean };
       if (data.ok) {
         setWatchPositions(data.positions ?? []);
         setWatchedDealIds(new Set(data.watchedDealIds ?? []));
+        setWatchAiPausedState(!!data.aiPaused);
       }
     } catch { /* silent — this panel is secondary, main status polling already surfaces errors */ }
   }, [igMode]);
@@ -751,6 +755,33 @@ function IgSpreadBetTab() {
       setError(e instanceof Error ? e.message : 'Request failed');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const toggleStrategyAiPaused = async () => {
+    if (!status) return;
+    setAiPauseBusy(true);
+    try {
+      await fetch(`/api/ig-strategy?mode=${igMode}&action=ai-pause`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body:   JSON.stringify({ paused: !status.aiPaused }),
+      });
+      await fetchStatus();
+    } finally {
+      setAiPauseBusy(false);
+    }
+  };
+
+  const toggleWatchAiPaused = async () => {
+    setAiPauseBusy(true);
+    try {
+      await fetch(`/api/ig-strategy?mode=${igMode}&action=watch-ai-pause`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body:   JSON.stringify({ paused: !watchAiPaused }),
+      });
+      await fetchWatch();
+    } finally {
+      setAiPauseBusy(false);
     }
   };
 
@@ -965,6 +996,24 @@ function IgSpreadBetTab() {
                       <Square className="w-3.5 h-3.5" />Stop
                     </button>
                   </div>
+                  {/* AI kill-switch — independent of Pause/Stop above: keeps
+                      the bot running and managing existing positions, just
+                      stops it asking Gemini for new entries. Useful during a
+                      stretch of real API unreliability without losing the
+                      bot's other state. */}
+                  <button
+                    onClick={() => void toggleStrategyAiPaused()}
+                    disabled={aiPauseBusy}
+                    title="Stop this bot from calling Gemini for new entries — everything else keeps running"
+                    className={clsx(
+                      'w-full flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium transition-colors disabled:opacity-50 border',
+                      status?.aiPaused
+                        ? 'bg-orange-600/20 hover:bg-orange-600/30 border-orange-600/40 text-orange-300'
+                        : 'bg-slate-800/60 hover:bg-slate-700 border-slate-700 text-slate-400',
+                    )}
+                  >
+                    {status?.aiPaused ? 'AI Paused — Resume' : 'Pause AI (entries only)'}
+                  </button>
                 </div>
               )}
             </div>
@@ -1283,7 +1332,22 @@ function IgSpreadBetTab() {
           <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-300">Gemini Position Watch</h2>
-              <span className="text-xs text-slate-500">{watchedDealIds.size} watched</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500">{watchedDealIds.size} watched</span>
+                <button
+                  onClick={() => void toggleWatchAiPaused()}
+                  disabled={aiPauseBusy}
+                  title="Stop Gemini reviewing watched positions — the hard stop-loss still protects every one of them regardless"
+                  className={clsx(
+                    'px-2 py-0.5 rounded text-[11px] font-medium transition-colors disabled:opacity-50 border',
+                    watchAiPaused
+                      ? 'bg-orange-600/20 hover:bg-orange-600/30 border-orange-600/40 text-orange-300'
+                      : 'bg-slate-800/60 hover:bg-slate-700 border-slate-700 text-slate-400',
+                  )}
+                >
+                  {watchAiPaused ? 'AI Paused' : 'Pause AI'}
+                </button>
+              </div>
             </div>
             <div className="px-4 py-2 text-xs text-slate-500 border-b border-slate-800/60">
               Flag any open position (opened here, in IG&apos;s app, anywhere) for Gemini to review every ~15 min and close if it judges that&apos;s warranted.

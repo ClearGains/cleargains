@@ -113,5 +113,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return proxyTo(`/ig-strategy/${mode}/deals/${encodeURIComponent(dealId)}/hold`, 'POST');
   }
 
+  if (action === 'ai-pause') {
+    const body = await req.json() as { paused?: boolean };
+    return proxyTo(`/ig-strategy/${mode}/ai-pause`, 'POST', body);
+  }
+
+  if (action === 'watch-ai-pause') {
+    const body = await req.json() as { paused?: boolean };
+    return proxyTo(`/ig-strategy/${mode}/watch/ai-pause`, 'POST', body);
+  }
+
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
 }

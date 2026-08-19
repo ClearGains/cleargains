@@ -74,6 +74,37 @@ function loadBlockedEpics(mode: IgMode): Map<string, number> {
   }
 }
 
+// Manual kill-switch for this bot's own Gemini usage, independent of
+// running/stopped — lets the user back off Gemini specifically (e.g.
+// during a stretch of real API degradation, to stop burning daily-cap
+// budget and retry latency on a service that's currently unreliable)
+// without having to stop the whole bot. When paused, entry decisions fall
+// back to the exact same passthrough/skip behavior already used when
+// Gemini itself is genuinely unavailable — no new code path, just an
+// earlier, deliberate trigger for the one that already exists. Persisted
+// per mode so it survives a restart rather than silently re-enabling.
+function aiPauseFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-ai-paused-${mode}.json`);
+}
+function loadAiPaused(mode: IgMode): boolean {
+  try { return (JSON.parse(fs.readFileSync(aiPauseFile(mode), 'utf8')) as { paused: boolean }).paused; }
+  catch { return false; }
+}
+function saveAiPaused(mode: IgMode, paused: boolean): void {
+  try { fs.writeFileSync(aiPauseFile(mode), JSON.stringify({ paused }), 'utf8'); } catch {}
+}
+const strategyAiPaused = new Map<IgMode, boolean>([
+  ['demo', loadAiPaused('demo')],
+  ['live', loadAiPaused('live')],
+]);
+export function isStrategyAiPaused(mode: IgMode): boolean {
+  return strategyAiPaused.get(mode) ?? false;
+}
+export function setStrategyAiPaused(mode: IgMode, paused: boolean): void {
+  strategyAiPaused.set(mode, paused);
+  saveAiPaused(mode, paused);
+}
+
 // Per-epic cooldown after a losing exit — confirmed live this matters: the
 // account-wide daily-loss lock is a blunt, all-instruments circuit breaker,
 // so rapid repeated re-entry into the SAME instrument right after it just
@@ -424,6 +455,7 @@ export type IgStrategyBotStatus = {
   // explicitly released) — anything open but NOT in this list is a
   // manually-opened position the bot is deliberately leaving alone.
   managedDeals: string[];
+  aiPaused:   boolean;   // manual Gemini kill-switch for this bot's own entries — see isStrategyAiPaused
 };
 
 type OrbState  = { high: number; low: number; established: boolean };
@@ -1602,6 +1634,7 @@ async function evaluateEpic(
     // beyond "Gemini thought so" to re-evaluate here.
     case 'gemini_opinion': {
       if (inPosition) { signal = { action: 'HOLD', reason: 'Open position — managed by Gemini Position Watch' }; break; }
+      if (isStrategyAiPaused(mode)) { signal = { action: 'HOLD', reason: 'AI paused for this bot — resume to evaluate entries again' }; break; }
       // Data staleness kill switch — confirmed live this matters badly:
       // Alpaca's paper-account historical bars for INTC were stuck ~3 weeks
       // stale (last bar over 3 weeks old) despite the API call succeeding
@@ -2219,6 +2252,10 @@ async function executeIgSignal(
   // asking it to confirm itself would just double the cost for no benefit.
   let effectiveDirection: 'BUY' | 'SELL' = direction;
   if (cfg.strategy !== 'gemini_opinion' && classifyMarketType(epic) === 'SHARES') {
+    if (isStrategyAiPaused(mode)) {
+      addLog(mode, 'wait', name, 'AI paused for this bot — skipping entry rather than trading unconfirmed');
+      return;
+    }
     try {
       // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
       // Gemini still runs on technicals alone in that case (see prompt).
@@ -3003,5 +3040,6 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     dailyPick:  st.dailyPick,
     pausedEpics: [...st.pausedEpics],
     managedDeals: [...new Set([...st.botOpenedDeals, ...st.releasedDeals])],
+    aiPaused:   isStrategyAiPaused(mode),
   };
 }

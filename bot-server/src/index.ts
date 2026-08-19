@@ -16,11 +16,12 @@ import {
   refreshRecommendations, refreshDailyPick, openRecommendation,
   getPausedEpics, pauseEpic, resumeEpic,
   releaseDeal, holdDeal, updateMaxDailyLossPct, updateDailyProfitTargetGbp,
+  setStrategyAiPaused,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
 import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } from './leaderboard';
-import { startGeminiWatch, getWatchedDealIds, addToWatch, removeFromWatch } from './geminiWatch';
+import { startGeminiWatch, getWatchedDealIds, addToWatch, removeFromWatch, isWatchAiPaused, setWatchAiPaused } from './geminiWatch';
 import { fetchFullPositions, getSession } from './igApi';
 import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
 import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot';
@@ -564,10 +565,10 @@ app.get('/ig-strategy/:mode/watch', auth, async (req: Request, res: Response) =>
   const mode = resolveIgMode(req, res);
   if (!mode) return;
   const session = getSession(`igstrat:${mode}`);
-  if (!session) { res.json({ ok: true, positions: [], watchedDealIds: getWatchedDealIds(mode) }); return; }
+  if (!session) { res.json({ ok: true, positions: [], watchedDealIds: getWatchedDealIds(mode), aiPaused: isWatchAiPaused(mode) }); return; }
   try {
     const positions = await fetchFullPositions(session);
-    res.json({ ok: true, positions, watchedDealIds: getWatchedDealIds(mode) });
+    res.json({ ok: true, positions, watchedDealIds: getWatchedDealIds(mode), aiPaused: isWatchAiPaused(mode) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
   }
@@ -584,6 +585,22 @@ app.delete('/ig-strategy/:mode/watch/:dealId', auth, (req: Request, res: Respons
   const mode = resolveIgMode(req, res);
   if (!mode) return;
   removeFromWatch(mode, req.params.dealId);
+  res.json({ ok: true });
+});
+
+// Manual Gemini kill-switches — see isStrategyAiPaused/isWatchAiPaused's
+// own comments for why these exist separately from stop/start.
+app.post('/ig-strategy/:mode/ai-pause', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  setStrategyAiPaused(mode, !!req.body?.paused);
+  res.json({ ok: true });
+});
+
+app.post('/ig-strategy/:mode/watch/ai-pause', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  setWatchAiPaused(mode, !!req.body?.paused);
   res.json({ ok: true });
 });
 
