@@ -295,6 +295,29 @@ export const RULE_BASED_ANALYSIS_CONFIRMED_EPICS = new Set([
   'SC.D.HON.DAILY.IP',     // Honeywell         return=+7.73% PF=1.72
   'SB.D.CAT.DAILY.IP',     // Caterpillar       return=+6.23% PF=1.33
   'SE.D.MCD.DAILY.IP',     // McDonald's        return=+4.89% PF=1.89
+  // Checked the remaining 29 original-universe names that had never
+  // actually been tested under this specific engine (indices, megacap
+  // tech, semis, UK names) — on request, so "cover all" instruments
+  // could be evaluated instead of assumed either way. 9 of 29 confirmed,
+  // 20 did not (several badly: Qualcomm -23.71% PF=0.29, BlackBerry
+  // -22.58% PF=0.52, AMD -18.54% PF=0.58, Lloyds -15.94% PF=0.34,
+  // Microsoft -13.50% PF=0.30, Amazon -13.01% PF=0.39 — none of those 20
+  // added here, same as every other unconfirmed name). Deliberately did
+  // NOT pin any of the 20 losers (or the 14 from the sector-expansion
+  // pass above) to gemini_opinion en masse — 43 epics on a 15-min poll
+  // would run ~1,200 Gemini calls/day from entries alone, blowing past
+  // the 1000/day cap before Position Watch reviews are even counted.
+  // They stay reachable via the Recommended panel (zero ongoing cost)
+  // and the override picker for anyone the user wants to pin individually.
+  'EC.D.NOKIAFP.DAILY.IP', // Nokia             return=+53.66% PF=4.93 (best in the whole universe)
+  'UD.D.WDC.DAILY.IP',     // Western Digital   return=+36.66% PF=1.95
+  'UD.D.SKHYUS.DAILY.IP',  // SK Hynix          return=+32.71% PF=2.58
+  'UD.D.SNDKUS.DAILY.IP',  // SanDisk           return=+23.25% PF=2.46
+  'SB.D.DELLUS.DAILY.IP',  // Dell              return=+3.42%  PF=1.14
+  'SH.D.XOM.DAILY.IP',     // ExxonMobil        return=+3.06%  PF=1.24
+  'UB.D.INTC.DAILY.IP',    // Intel             return=+2.99%  PF=1.14
+  'UD.D.STX.DAILY.IP',     // Seagate           return=+2.25%  PF=1.11
+  'UC.D.NVDA.DAILY.IP',    // NVIDIA            return=+0.63%  PF=1.06
 ]);
 
 // Indices fxScalperBot.ts is also allowed to trade, alongside the 5 FX
