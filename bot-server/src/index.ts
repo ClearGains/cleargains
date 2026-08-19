@@ -400,13 +400,14 @@ app.post('/ig-strategy/:mode/start', auth, (req: Request, res: Response) => {
   const body = req.body as Partial<IgStrategyConfig>;
   const cfg: IgStrategyConfig = {
     mode,
-    strategy:          body.strategy          ?? 'rsi_mean_reversion',
-    epics:             [],                // filled by scanner
-    maxRiskGbp:        body.maxRiskGbp        ?? 20,
-    maxStockPositions: body.maxStockPositions ?? 3,
-    maxIndexPositions: body.maxIndexPositions ?? 3,
-    allowShorts:       body.allowShorts       ?? false,
-    maxDailyLossPct:   body.maxDailyLossPct   ?? 3,
+    strategy:               body.strategy               ?? 'rsi_mean_reversion',
+    epics:                  [],                // filled by scanner
+    epicStrategyOverrides:  body.epicStrategyOverrides,
+    maxRiskGbp:             body.maxRiskGbp             ?? 20,
+    maxStockPositions:      body.maxStockPositions      ?? 3,
+    maxIndexPositions:      body.maxIndexPositions      ?? 3,
+    allowShorts:            body.allowShorts            ?? false,
+    maxDailyLossPct:        body.maxDailyLossPct        ?? 3,
   };
 
   res.json({ ok: true, message: 'IG bot starting…' });

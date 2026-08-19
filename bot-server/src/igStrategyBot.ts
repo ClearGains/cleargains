@@ -342,6 +342,17 @@ export type IgStrategyConfig = {
   mode:             IgMode;
   strategy:         IgStrategyName;
   epics:            string[];   // populated by scanner at start
+  // Pins specific epics to a different strategy than the bot's own default
+  // above — e.g. running rule_based_analysis as the default (restricted to
+  // RULE_BASED_ANALYSIS_CONFIRMED_EPICS) while a handful of names that
+  // didn't backtest confirmed-profitable under that engine still get
+  // Gemini's own judgment instead of being dropped outright. Resolved once
+  // per epic at the top of evaluateEpic; every cfg.strategy check
+  // downstream (in evaluateEpic and executeIgSignal, which both receive
+  // the already-resolved cfg) then naturally applies to the right one —
+  // see evaluateEpic's own comment for why a local reassignment there is
+  // safe (doesn't mutate the shared config object).
+  epicStrategyOverrides?: Partial<Record<string, IgStrategyName>>;
   // Max £ lost if the stop is hit — NOT a notional-exposure target. Stake is
   // derived as maxRiskGbp ÷ stop-distance-in-points, which is scale-agnostic
   // (works correctly for FX at ~1.3 with a 0.0001 point size, and indices at
@@ -1444,6 +1455,17 @@ async function evaluateEpic(
   const inPosition = !!openPos;
   const side       = openPos ? (openPos.direction === 'BUY' ? 'long' : 'short') as 'long' | 'short' : undefined;
 
+  // Resolve this specific epic's effective strategy and rebind the local
+  // `cfg` parameter to it — every cfg.strategy check for the rest of this
+  // function, and in executeIgSignal (which receives this same rebound
+  // object below), then transparently applies to whichever strategy this
+  // epic is actually pinned to. Safe: reassigning a function parameter to
+  // a new object only changes this call's local binding, it does not
+  // mutate the original config object other concurrent/later calls still
+  // hold a reference to.
+  const effectiveStrategy = cfg.epicStrategyOverrides?.[epic] ?? cfg.strategy;
+  if (effectiveStrategy !== cfg.strategy) cfg = { ...cfg, strategy: effectiveStrategy };
+
   // Only epics with a genuine Alpaca mapping (EPIC_TO_ALPACA) use the free
   // fallback chain for real price levels — those are individually verified
   // US-listed shares. Everything else (indices, UK stocks, and non-USD-
@@ -1984,6 +2006,17 @@ async function executeIgSignal(
           const idx = st.config.epics.indexOf(epic);
           if (idx !== -1) st.config.epics[idx] = replacement;
           else st.config.epics.push(replacement);
+          // This epic was running under a per-epic override (cfg.strategy
+          // here is the resolved effective strategy, which differs from
+          // st.config's own default exactly when that's the case) — carry
+          // the override to whatever replaces it, or the replacement would
+          // silently fall back to the bot's default strategy instead.
+          if (cfg.strategy !== st.config.strategy) {
+            const overrides = { ...(st.config.epicStrategyOverrides ?? {}) };
+            delete overrides[epic];
+            overrides[replacement] = cfg.strategy;
+            st.config.epicStrategyOverrides = overrides;
+          }
           syncStreamSubscription(mode); // watchlist changed — keep the Lightstream subscription in sync, not just the config array
           addLog(mode, 'info', '—', `Slot replacement: ${name} → ${epicName(replacement)}`);
         } catch {}
@@ -2789,6 +2822,11 @@ async function poll(mode: IgMode) {
 
   for (const epic of cfg.epics) {
     if (!st.running) break;
+    // Same per-epic resolution evaluateEpic itself does — needed here too
+    // since both checks below (pool-cap exception, de-burst delay) are
+    // strategy-specific and cfg.strategy alone is only the bot's default,
+    // not necessarily what this particular epic is actually running under.
+    const epicStrategy = cfg.epicStrategyOverrides?.[epic] ?? cfg.strategy;
     const inPos = livePositions.find(p => p.epic === epic);
     const epicIsIndex = isIndexEpic(epic);
     const poolCount    = epicIsIndex ? indexCount : stockCount;
@@ -2799,7 +2837,7 @@ async function poll(mode: IgMode) {
     // Every other strategy keeps the original behaviour: skip entirely
     // when there's no room, since there's nothing to act on and no
     // comparison logic that would use the extra call anyway.
-    if (!inPos && poolCount >= poolCap && cfg.strategy !== 'gemini_opinion') {
+    if (!inPos && poolCount >= poolCap && epicStrategy !== 'gemini_opinion') {
       addLog(mode, 'wait', epicName(epic), `Max ${epicIsIndex ? 'index' : 'stock'} positions (${poolCap}) reached`);
       continue;
     }
@@ -2817,7 +2855,7 @@ async function poll(mode: IgMode) {
     // rate-limit-shaped failures (503s, request timeouts) that a lone call
     // wouldn't hit. A small gap here costs nothing against a 15min poll
     // interval but meaningfully de-bursts the request rate.
-    if (cfg.strategy === 'gemini_opinion') await new Promise(r => setTimeout(r, 3_000));
+    if (epicStrategy === 'gemini_opinion') await new Promise(r => setTimeout(r, 3_000));
   }
 
   schedule(mode, cfg);
@@ -2826,7 +2864,15 @@ async function poll(mode: IgMode) {
 function schedule(mode: IgMode, cfg: IgStrategyConfig) {
   const st = ms(mode);
   if (!st.running) return;
-  const delay  = pollIntervalFor(cfg.strategy);
+  // Overridden epics need their own strategy's cadence too — e.g. a
+  // gemini_opinion override under a rule_based_analysis default shouldn't
+  // be stuck polling only once an hour just because that's the default
+  // strategy's own interval. rule_based_analysis's daily-timeframe check
+  // is already gated by isDailyCheckTime() inside evaluateEpic regardless
+  // of how often this fires, so ticking faster costs nothing extra there.
+  const overrideStrategies = Object.values(cfg.epicStrategyOverrides ?? {}).filter((s): s is IgStrategyName => s !== undefined);
+  const strategiesInPlay = new Set<IgStrategyName>([cfg.strategy, ...overrideStrategies]);
+  const delay  = Math.min(...[...strategiesInPlay].map(pollIntervalFor));
   st.nextRunMs = Date.now() + delay;
   st.pollTimer = setTimeout(() => { void poll(mode); }, delay);
 }
@@ -2876,7 +2922,13 @@ async function refreshWatchlist(mode: IgMode): Promise<void> {
     return;
   }
 
-  const merged  = [...new Set([...openEpics, ...fresh])];
+  // Override epics stay pinned regardless of how they'd score under the
+  // scan above (which only ever runs cfg.strategy, the bot's default) —
+  // same protection openEpics gets, for the same reason: dropping one here
+  // would silently take it out of rotation with no way back in short of a
+  // manual reconfigure.
+  const overrideEpics = Object.keys(cfg.epicStrategyOverrides ?? {});
+  const merged  = [...new Set([...openEpics, ...overrideEpics, ...fresh])];
   const added   = merged.filter(e => !cfg.epics.includes(e));
   const dropped = cfg.epics.filter(e => !merged.includes(e));
   if (!added.length && !dropped.length) return; // nothing changed — skip the noisy log/persist/re-subscribe
@@ -2934,12 +2986,22 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
     addLog(mode, 'info', '—', `Scan failed — using default indices: ${e instanceof Error ? e.message : String(e)}`);
     cfg.epics = ['IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.CASH.IP', 'IX.D.FTSE.DAILY.IP'];
   }
+  // Always fold in every epic pinned via epicStrategyOverrides — the scan
+  // above only ever picks epics for cfg.strategy itself (e.g.
+  // rule_based_analysis's scan is restricted to
+  // RULE_BASED_ANALYSIS_CONFIRMED_EPICS), so an override epic would
+  // otherwise never make it into the tracked list at all.
+  const overrideEpics = Object.keys(cfg.epicStrategyOverrides ?? {});
+  if (overrideEpics.length) cfg.epics = [...new Set([...cfg.epics, ...overrideEpics])];
 
   if (cfg.strategy === 'orb') resetOrbState(mode, cfg.epics);
   scheduleSessionRefresh(mode, st.session);
   syncStreamSubscription(mode); // subscribe Lightstream now that cfg.epics is finalized (no-op unless strategy is donchian_hourly/gemini_opinion)
 
-  addLog(mode, 'info', '—', `Bot started — ${STRATEGY_META[cfg.strategy].label} | ${mode} | ${cfg.epics.map(epicName).join(', ')}`);
+  const overrideNote = overrideEpics.length
+    ? ` | overrides: ${overrideEpics.map(e => `${epicName(e)}→${STRATEGY_META[cfg.epicStrategyOverrides![e]!].label}`).join(', ')}`
+    : '';
+  addLog(mode, 'info', '—', `Bot started — ${STRATEGY_META[cfg.strategy].label} | ${mode} | ${cfg.epics.map(epicName).join(', ')}${overrideNote}`);
   addLog(mode, 'info', '—', `Max risk/trade: £${cfg.maxRiskGbp} | Max positions: ${cfg.maxStockPositions} stocks + ${cfg.maxIndexPositions} indices | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
 
   // Startup just fired a burst of IG calls (auth + balance + up to
