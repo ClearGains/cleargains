@@ -2028,6 +2028,38 @@ async function evaluateEpic(
     default: return;
   }
 
+  // Requested directly: rule-driven entries (rule_based_analysis, and
+  // gemini_confirmed's rule-qualified leg) compute their signal off the
+  // last available bar's close, which can already be stale by the time
+  // the order actually places — confirmed live 2026-08-18 a Western
+  // Digital BUY fired citing "support" while live price had already
+  // rolled over well past it (see the reversal-gate comment earlier in
+  // this switch, same underlying gap, that one just catches it a few
+  // bars sooner). This is the last-mile version: a final check that the
+  // live IG quote hasn't already moved a real, non-noise amount against
+  // the signal's own direction since that reference bar closed. 2% is
+  // deliberately tighter than the 3-4% "already extended" thresholds used
+  // elsewhere in this file (SHARP_DIP, the extension dampener in
+  // ruleBasedAnalysis.ts) — this is catching an active reversal against a
+  // *fresh* entry, not flagging an existing position as overextended, so
+  // a smaller real move already invalidates the thesis. Only gates entries
+  // (!openPos) — never blocks an exit signal for an already-open position.
+  if (!openPos && (cfg.strategy === 'rule_based_analysis' || cfg.strategy === 'gemini_confirmed')
+      && (signal.action === 'BUY' || signal.action === 'SELL')) {
+    const liveQuote = st.marketDetails.get(epic);
+    if (liveQuote?.bid && liveQuote?.offer) {
+      const livePrice = (liveQuote.bid + liveQuote.offer) / 2;
+      const refPrice  = bars[bars.length - 1].c;
+      const movePct   = ((livePrice - refPrice) / refPrice) * 100;
+      const REVERSAL_INVALIDATION_PCT = 2;
+      const reversedAgainst = signal.action === 'BUY' ? movePct <= -REVERSAL_INVALIDATION_PCT : movePct >= REVERSAL_INVALIDATION_PCT;
+      if (reversedAgainst) {
+        addLog(mode, 'info', epicName(epic), `Skipped ${signal.action} — signal priced off ${refPrice.toFixed(2)} but live quote has since moved ${movePct.toFixed(2)}% against it (now ${livePrice.toFixed(2)}) — real reversal since the signal was computed, not noise, thesis looks stale`);
+        return;
+      }
+    }
+  }
+
   let executionPrice  = bars[bars.length - 1].c;
   let executionSignal = signal;
 
