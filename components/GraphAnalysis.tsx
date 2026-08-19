@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, RefreshCw, TrendingUp, AlertCircle } from 'lucide-react';
 import type { LWCandle } from '@/lib/chartIndicators';
 import type { SRZone } from '@/lib/supportResistance';
-import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import type { AnalysisResult } from '@/lib/ruleBasedAnalysis';
 import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
 import { ChartPanel, type Overlay } from '@/components/ChartPanel';
 import { TradeCard } from '@/components/TradeCard';

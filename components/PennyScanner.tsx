@@ -14,7 +14,7 @@ import CandlestickChart from '@/components/CandlestickChart';
 import { calcIndicators } from '@/lib/indicators';
 import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
 import type { Candle, IndicatorResult } from '@/lib/indicators';
-import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import type { AnalysisResult } from '@/lib/ruleBasedAnalysis';
 import type { LWCandle } from '@/lib/chartIndicators';
 import type { QuoteResult } from '@/lib/yahooClient';
 

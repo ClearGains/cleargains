@@ -1,6 +1,36 @@
 import { summarizeIndicators, type LWCandle } from './chartIndicators';
 import { calcSupportResistance } from './supportResistance';
-import type { AnalysisResult, TradeRec } from '@/app/api/analyse/chart/route';
+
+// Previously imported from app/api/analyse/chart/route.ts — that route was
+// the original Claude-based version this function replaced (2026-08-15,
+// see this file's own history) and was left behind as dead code, still
+// holding a live Anthropic API call nothing ever called. Deleted; these
+// type definitions moved here since this is where the real logic (and the
+// real callers) actually live now.
+export type TradeRec = {
+  timeframe: 'scalp' | 'swing';
+  direction: 'LONG' | 'SHORT' | 'FLAT';
+  entry: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  riskReward: number;
+  confidence: number;
+  reasoning: string;
+  invalidation: string;
+};
+
+export type AnalysisResult = {
+  ticker: string;
+  price: number;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  summary: string;
+  keyLevels: { label: string; price: number; type: 'support' | 'resistance' }[];
+  scalp: TradeRec;
+  swing: TradeRec;
+  risks: string[];
+  catalysts: string[];
+};
 
 function estimateATR(candles: LWCandle[], period = 14): number {
   const slice = candles.slice(-period - 1);

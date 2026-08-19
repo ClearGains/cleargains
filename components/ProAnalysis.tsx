@@ -1,5 +1,5 @@
 'use client';
-import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import type { AnalysisResult } from '@/lib/ruleBasedAnalysis';
 
 type Props = { analysis: AnalysisResult };
 

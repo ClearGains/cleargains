@@ -1,5 +1,5 @@
 'use client';
-import type { TradeRec } from '@/app/api/analyse/chart/route';
+import type { TradeRec } from '@/lib/ruleBasedAnalysis';
 
 type Props = { trade: TradeRec; price: number };
 

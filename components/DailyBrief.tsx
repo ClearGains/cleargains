@@ -5,7 +5,7 @@ import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertCircle, ChevronDown, C
 import { clsx } from 'clsx';
 import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
 import { TIMEFRAME_CONFIG, type Timeframe } from '@/lib/igStrategyEngine';
-import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import type { AnalysisResult } from '@/lib/ruleBasedAnalysis';
 import type { LWCandle } from '@/lib/chartIndicators';
 import { NewsStrip } from '@/components/ui/NewsStrip';
 import { ChartPanel, type Overlay } from '@/components/ChartPanel';

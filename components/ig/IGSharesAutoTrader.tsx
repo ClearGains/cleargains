@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/Button';
 import { calcIndicators } from '@/lib/indicators';
 import type { Candle } from '@/lib/indicators';
 import { ruleBasedAnalysis } from '@/lib/ruleBasedAnalysis';
-import type { AnalysisResult } from '@/app/api/analyse/chart/route';
+import type { AnalysisResult } from '@/lib/ruleBasedAnalysis';
 import type { LWCandle } from '@/lib/chartIndicators';
 import type { QuoteResult } from '@/lib/yahooClient';
 
