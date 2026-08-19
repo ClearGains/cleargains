@@ -598,7 +598,11 @@ function IgSpreadBetTab() {
   // bot rather than being dropped outright (see epicStrategyOverrides on
   // IgStrategyConfig, bot-server/src/igStrategyBot.ts).
   const [overrideCandidates, setOverrideCandidates] = useState<{ epic: string; name: string }[]>([]);
-  const [selectedOverrides, setSelectedOverrides]   = useState<Set<string>>(new Set());
+  // epic -> which Gemini strategy it's pinned to, so each override can
+  // individually choose Gemini Opinion (from-scratch) vs Gemini Confirmed
+  // (rules qualify, Gemini only confirms) rather than always defaulting to
+  // one or the other.
+  const [selectedOverrides, setSelectedOverrides]   = useState<Map<string, 'gemini_opinion' | 'gemini_confirmed'>>(new Map());
   useEffect(() => {
     fetch('/api/ig-strategy?action=override-candidates')
       .then(res => res.json())
@@ -870,7 +874,7 @@ function IgSpreadBetTab() {
 
   const handleStart = () => {
     const epicStrategyOverrides = strategy === 'rule_based_analysis' && selectedOverrides.size
-      ? Object.fromEntries([...selectedOverrides].map(epic => [epic, 'gemini_opinion' as const]))
+      ? Object.fromEntries([...selectedOverrides.entries()])
       : undefined;
     void post('start', {
       strategy,
@@ -966,35 +970,71 @@ function IgSpreadBetTab() {
               {stratMeta && <p className="text-xs text-slate-500 mt-2">{stratMeta.description}</p>}
             </div>
 
-            {/* Pin specific instruments to Gemini instead, alongside rule_based_analysis */}
+            {/* Pin specific instruments to a Gemini strategy instead, alongside rule_based_analysis */}
             {strategy === 'rule_based_analysis' && overrideCandidates.length > 0 && (
               <div>
                 <label className="block text-xs text-slate-400 mb-1.5">
-                  Also let Gemini trade these (not backtest-confirmed for Rule-Based Analysis, so its own scan skips them — pin any you still want in play, decided by Gemini&apos;s own judgment instead)
+                  Also let Gemini trade these (not backtest-confirmed for Rule-Based Analysis, so its own scan skips them) — pin any you still want in play, and pick which Gemini strategy decides them
                 </label>
                 <div className={clsx(
-                  'max-h-40 overflow-y-auto grid grid-cols-2 gap-x-3 gap-y-1 p-2.5 rounded-lg border border-slate-700/50 bg-slate-800/40',
+                  'max-h-52 overflow-y-auto flex flex-col gap-1 p-2.5 rounded-lg border border-slate-700/50 bg-slate-800/40',
                   isRunning && 'opacity-60 pointer-events-none',
                 )}>
-                  {overrideCandidates.map(c => (
-                    <label key={c.epic} className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={selectedOverrides.has(c.epic)}
-                        disabled={isRunning}
-                        onChange={() => setSelectedOverrides(prev => {
-                          const next = new Set(prev);
-                          if (next.has(c.epic)) next.delete(c.epic); else next.add(c.epic);
-                          return next;
-                        })}
-                        className="accent-purple-500"
-                      />
-                      {c.name}
-                    </label>
-                  ))}
+                  {overrideCandidates.map(c => {
+                    const chosen = selectedOverrides.get(c.epic);
+                    return (
+                      <div key={c.epic} className="flex items-center justify-between gap-2 text-xs text-slate-400">
+                        <label className="flex items-center gap-1.5 cursor-pointer select-none min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={chosen !== undefined}
+                            disabled={isRunning}
+                            onChange={() => setSelectedOverrides(prev => {
+                              const next = new Map(prev);
+                              if (next.has(c.epic)) next.delete(c.epic);
+                              else next.set(c.epic, 'gemini_confirmed'); // default to the rules-qualified one
+                              return next;
+                            })}
+                            className="accent-purple-500 shrink-0"
+                          />
+                          <span className="truncate">{c.name}</span>
+                        </label>
+                        {chosen !== undefined && (
+                          <div className="flex shrink-0 rounded overflow-hidden border border-slate-700">
+                            <button
+                              type="button"
+                              disabled={isRunning}
+                              onClick={() => setSelectedOverrides(prev => new Map(prev).set(c.epic, 'gemini_confirmed'))}
+                              title="Rules must qualify a real setup first, then Gemini confirms or vetoes it"
+                              className={clsx(
+                                'px-1.5 py-0.5 text-[10px] font-medium transition-colors',
+                                chosen === 'gemini_confirmed' ? 'bg-purple-500/30 text-purple-200' : 'bg-transparent text-slate-500 hover:text-slate-300',
+                              )}
+                            >
+                              Confirmed
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isRunning}
+                              onClick={() => setSelectedOverrides(prev => new Map(prev).set(c.epic, 'gemini_opinion'))}
+                              title="Gemini decides from scratch, no technical qualifying rule"
+                              className={clsx(
+                                'px-1.5 py-0.5 text-[10px] font-medium transition-colors border-l border-slate-700',
+                                chosen === 'gemini_opinion' ? 'bg-purple-500/30 text-purple-200' : 'bg-transparent text-slate-500 hover:text-slate-300',
+                              )}
+                            >
+                              Opinion
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
                 {selectedOverrides.size > 0 && (
-                  <p className="text-[10px] text-purple-300 mt-1">{selectedOverrides.size} pinned to Gemini Opinion</p>
+                  <p className="text-[10px] text-purple-300 mt-1">
+                    {selectedOverrides.size} pinned — {[...selectedOverrides.values()].filter(s => s === 'gemini_confirmed').length} Confirmed, {[...selectedOverrides.values()].filter(s => s === 'gemini_opinion').length} Opinion
+                  </p>
                 )}
               </div>
             )}
