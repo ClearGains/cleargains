@@ -182,14 +182,21 @@ let dataAllowanceBlockedUntil = loadDataAllowanceBlockedUntil();
 const POLL_MS                    = 15 * 60_000;  // scan cadence — hourly-bar decisions don't need tighter
 const WEEKEND_FLATTEN_BUFFER_MIN = 30;   // tighten (not flatten) open positions this many minutes before Friday 22:00 UTC close
 const MAX_LOSS_CEILING_MULT      = 3;    // matches igStrategyBot.ts's realized-max-loss ceiling ratio
-// Raised 70min->4h on 2026-08-19 — 70min meant almost any restart more than
-// an hour after the last one still paid for a real REST call, which is
-// exactly what let 13 restarts in one session exhaust the shared demo
-// account's allowance (see DATA_ALLOWANCE_COOLDOWN_MS above). A few hours
-// of staleness barely matters for an EMA20/50 trend read, and the live
-// Lightstream feed keeps the actual current price accurate regardless —
-// only the deeper historical shape used to seed the indicators lags.
-const PREWARM_SKIP_IF_FRESHER_THAN_MS = 4 * 60 * 60_000;  // hourly bars + buffer — see prewarmCandles
+// Briefly raised 70min->4h on 2026-08-19, then reverted same day — a
+// multi-hour-stale trend read is a real decision-quality problem (missing
+// hours of real hourly-bar price action means EMA20/50 can be reading a
+// trend that's already reversed), not just an API-cost one, and 4h was
+// solving the wrong half of the problem. What actually stops a cluster of
+// restarts from repeating today's exhaustion is DATA_ALLOWANCE_COOLDOWN_MS
+// above (remembers a real failure for 6h, account-wide) — once that
+// exists, this threshold only controls how eagerly a *single* restart
+// re-checks freshness, not how much damage a burst of them can do: even
+// back at 70min, the first failure in a cluster trips the 6h cooldown and
+// every restart after it skips entirely regardless of this number. So
+// there's no longer a tradeoff between data freshness and allowance safety
+// here — keep this tight (hourly bars + a small buffer) and let the
+// cooldown above be the actual backstop.
+const PREWARM_SKIP_IF_FRESHER_THAN_MS = 70 * 60_000;  // hourly bars + buffer — see prewarmCandles
 // A position surviving a gap this long (typically the weekend) last had its
 // thesis checked against whatever news/technicals existed before the gap —
 // nothing re-confirms it holds up against what's actually happened since.
