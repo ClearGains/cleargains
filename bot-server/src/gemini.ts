@@ -597,6 +597,13 @@ export type PositionReviewRequest = {
   volumeSurgeMultiple?:     number;
   peerGroupChangePercent?:  number;
   peerGroupLabel?:          string;
+  // Free-text note the user attached when adding this position to Gemini
+  // Position Watch — their own stated intent/plan for it (e.g. "opened
+  // expecting a bounce off support, close if it breaks below X"), not
+  // something derived from price/news. Trusted input (the account owner's
+  // own text, not external content), but still just one more input to
+  // weigh, not a standing override — see the prompt's own framing below.
+  userNote?: string;
 };
 
 export async function askGeminiPositionVerdict(req: PositionReviewRequest): Promise<PositionVerdict> {
@@ -638,6 +645,7 @@ Entry level: ${req.entryLevel.toFixed(2)}
 Current level: ${req.currentLevel.toFixed(2)} (${signedPct >= 0 ? '+' : ''}${signedPct.toFixed(2)}% favorable move)
 Unrealized P/L: £${req.uplGbp.toFixed(2)}
 Held for: ${req.heldHours.toFixed(1)} hours
+${req.userNote ? `\nNote from the user who's holding this position: "${req.userNote}"\nThis is their own stated intent or plan for the trade — weigh it alongside everything below, but it's one more input to your judgment, not a standing instruction to follow regardless of what the price/technicals/news actually show. If they said to close on a condition that hasn't happened yet, don't close just because they mentioned it.\n` : ''}
 ${req.rsi != null ? `RSI (14h lookback): ${req.rsi.toFixed(1)}` : ''}
 ${req.macdHist != null ? `MACD histogram (12h/26h/9h): ${req.macdHist > 0 ? '+' : ''}${req.macdHist.toFixed(5)}` : ''}
 ${candleBlock}${req.dayChangePercent !== undefined ? `Instrument's overall move today (independent of this position's own entry): ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}

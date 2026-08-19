@@ -600,6 +600,13 @@ function IgSpreadBetTab() {
   const [watchBusy, setWatchBusy]           = useState<string | null>(null);
   const [watchAiPaused, setWatchAiPausedState] = useState(false);
   const [aiPauseBusy, setAiPauseBusy]       = useState(false);
+  // Saved notes (from the server) vs. local drafts (what's currently typed,
+  // possibly not yet saved) — kept separate so the 15s poll doesn't stomp
+  // whatever the user is mid-typing in another tab/device, and so the Save
+  // button only lights up once the draft actually differs from what's saved.
+  const [watchNotes, setWatchNotes]         = useState<Record<string, string>>({});
+  const [noteDrafts, setNoteDrafts]         = useState<Record<string, string>>({});
+  const [noteBusy, setNoteBusy]             = useState<string | null>(null);
 
   const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const watchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -652,11 +659,21 @@ function IgSpreadBetTab() {
   const fetchWatch = useCallback(async () => {
     try {
       const res  = await fetch(`/api/ig-strategy?mode=${igMode}&action=watch`);
-      const data = await res.json() as { ok: boolean; positions?: WatchPosition[]; watchedDealIds?: string[]; aiPaused?: boolean };
+      const data = await res.json() as { ok: boolean; positions?: WatchPosition[]; watchedDealIds?: string[]; watchNotes?: Record<string, string>; aiPaused?: boolean };
       if (data.ok) {
         setWatchPositions(data.positions ?? []);
         setWatchedDealIds(new Set(data.watchedDealIds ?? []));
         setWatchAiPausedState(!!data.aiPaused);
+        const notes = data.watchNotes ?? {};
+        setWatchNotes(notes);
+        // Only seed a draft the first time a dealId is seen — once the user
+        // starts editing, further polls shouldn't overwrite their in-progress
+        // text with the still-unsaved server value.
+        setNoteDrafts(prev => {
+          const next = { ...prev };
+          for (const [dealId, note] of Object.entries(notes)) if (!(dealId in next)) next[dealId] = note;
+          return next;
+        });
       }
     } catch { /* silent — this panel is secondary, main status polling already surfaces errors */ }
   }, [igMode]);
@@ -696,12 +713,33 @@ function IgSpreadBetTab() {
         await fetch(`/api/ig-strategy?mode=${igMode}&action=watch`, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ dealId }),
+          body:    JSON.stringify({ dealId, note: noteDrafts[dealId] ?? '' }),
         });
       }
       await fetchWatch();
     } finally {
       setWatchBusy(null);
+    }
+  };
+
+  // Attaches the user's own plan/instructions for a watched position to
+  // Gemini's periodic review prompt (see gemini.ts's userNote field) — not
+  // a standing override, just one more input alongside price/news/technicals.
+  const saveNote = async (dealId: string) => {
+    setNoteBusy(dealId);
+    try {
+      const res  = await fetch(`/api/ig-strategy?mode=${igMode}&action=watch-note`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ dealId, note: noteDrafts[dealId] ?? '' }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok && data.error) setError(data.error);
+      else setWatchNotes(prev => ({ ...prev, [dealId]: noteDrafts[dealId] ?? '' }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save note');
+    } finally {
+      setNoteBusy(null);
     }
   };
 
@@ -1358,41 +1396,67 @@ function IgSpreadBetTab() {
             ) : (
               <div className="divide-y divide-slate-800/60">
                 {watchPositions.map(p => {
-                  const isWatched = watchedDealIds.has(p.dealId);
-                  const isBusy    = watchBusy === p.dealId;
+                  const isWatched  = watchedDealIds.has(p.dealId);
+                  const isBusy     = watchBusy === p.dealId;
+                  const draft      = noteDrafts[p.dealId] ?? '';
+                  const savedNote  = watchNotes[p.dealId] ?? '';
+                  const noteDirty  = draft !== savedNote;
+                  const isNoteBusy = noteBusy === p.dealId;
                   return (
-                    <div key={p.dealId} className="px-4 py-3 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        {p.direction === 'BUY'
-                          ? <TrendingUp   className="w-4 h-4 text-green-400" />
-                          : <TrendingDown className="w-4 h-4 text-red-400"   />}
-                        <div>
-                          <div className="font-medium text-white text-sm">{p.instrumentName || p.epic}</div>
-                          <div className="text-xs text-slate-500">
-                            {p.direction} · £{p.size}/pt · entry {p.level.toFixed(2)}
-                            {p.stopLevel === undefined && <span className="text-amber-400"> · no stop</span>}
+                    <div key={p.dealId} className="px-4 py-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          {p.direction === 'BUY'
+                            ? <TrendingUp   className="w-4 h-4 text-green-400" />
+                            : <TrendingDown className="w-4 h-4 text-red-400"   />}
+                          <div>
+                            <div className="font-medium text-white text-sm">{p.instrumentName || p.epic}</div>
+                            <div className="text-xs text-slate-500">
+                              {p.direction} · £{p.size}/pt · entry {p.level.toFixed(2)}
+                              {p.stopLevel === undefined && <span className="text-amber-400"> · no stop</span>}
+                            </div>
                           </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <div className="text-right">
+                            <div className={clsx('text-xs font-medium', (p.upl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
+                              {(p.upl ?? 0) >= 0 ? '+' : ''}£{(p.upl ?? 0).toFixed(2)}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => void toggleWatch(p.dealId, isWatched)}
+                            disabled={isBusy}
+                            className={clsx(
+                              'text-xs px-2.5 py-1 rounded font-medium transition-colors disabled:opacity-50',
+                              isWatched
+                                ? 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/30'
+                                : 'bg-slate-800 text-slate-400 hover:bg-slate-700',
+                            )}
+                          >
+                            {isBusy ? '…' : isWatched ? '✦ Watching' : 'Watch'}
+                          </button>
                         </div>
                       </div>
-                      <div className="flex items-center gap-3">
-                        <div className="text-right">
-                          <div className={clsx('text-xs font-medium', (p.upl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
-                            {(p.upl ?? 0) >= 0 ? '+' : ''}£{(p.upl ?? 0).toFixed(2)}
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => void toggleWatch(p.dealId, isWatched)}
-                          disabled={isBusy}
-                          className={clsx(
-                            'text-xs px-2.5 py-1 rounded font-medium transition-colors disabled:opacity-50',
-                            isWatched
-                              ? 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/30'
-                              : 'bg-slate-800 text-slate-400 hover:bg-slate-700',
+                      {isWatched && (
+                        <div className="mt-2 flex items-center gap-2 pl-7">
+                          <input
+                            type="text"
+                            value={draft}
+                            onChange={e => setNoteDrafts(prev => ({ ...prev, [p.dealId]: e.target.value }))}
+                            placeholder="Tell Gemini your plan for this position — e.g. close if it breaks below 210"
+                            className="flex-1 bg-slate-800/60 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-purple-500/60"
+                          />
+                          {noteDirty && (
+                            <button
+                              onClick={() => void saveNote(p.dealId)}
+                              disabled={isNoteBusy}
+                              className="text-xs px-2 py-1 rounded font-medium bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 disabled:opacity-50"
+                            >
+                              {isNoteBusy ? '…' : 'Save'}
+                            </button>
                           )}
-                        >
-                          {isBusy ? '…' : isWatched ? '✦ Watching' : 'Watch'}
-                        </button>
-                      </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

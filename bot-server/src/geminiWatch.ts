@@ -55,38 +55,66 @@ function watchFile(mode: IgMode): string {
   return path.join(__dirname, '..', `gemini-watch-${mode}.json`);
 }
 
-function loadWatch(mode: IgMode): Set<string> {
-  try { return new Set(JSON.parse(fs.readFileSync(watchFile(mode), 'utf8')) as string[]); }
-  catch { return new Set(); }
+// Value is a free-text note the user can attach when watching a position —
+// e.g. "opened this expecting a bounce off support, close if it breaks
+// below X" — passed straight into askGeminiPositionVerdict's prompt so
+// Gemini's periodic review has the user's own stated intent for the
+// position, not just the price/news/technicals it derives on its own.
+// Empty string means watched with no note, same as the old boolean-only
+// behaviour.
+function loadWatch(mode: IgMode): Map<string, string> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(watchFile(mode), 'utf8')) as string[] | Record<string, string>;
+    // Old format was a plain array of dealIds (no notes) — read those in
+    // as watched-with-no-note rather than losing them on the first load
+    // after this change ships.
+    if (Array.isArray(raw)) return new Map(raw.map(id => [id, '']));
+    return new Map(Object.entries(raw));
+  } catch { return new Map(); }
 }
 
-function saveWatch(mode: IgMode, ids: Set<string>): void {
-  try { fs.writeFileSync(watchFile(mode), JSON.stringify([...ids]), 'utf8'); } catch {}
+function saveWatch(mode: IgMode, notes: Map<string, string>): void {
+  try { fs.writeFileSync(watchFile(mode), JSON.stringify(Object.fromEntries(notes)), 'utf8'); } catch {}
 }
 
-const watched = new Map<IgMode, Set<string>>([
+const watched = new Map<IgMode, Map<string, string>>([
   ['demo', loadWatch('demo')],
   ['live', loadWatch('live')],
 ]);
 
 export function getWatchedDealIds(mode: IgMode): string[] {
-  return [...(watched.get(mode) ?? new Set())];
+  return [...(watched.get(mode) ?? new Map()).keys()];
+}
+
+export function getWatchNotes(mode: IgMode): Record<string, string> {
+  return Object.fromEntries(watched.get(mode) ?? new Map());
+}
+
+export function getWatchNote(mode: IgMode, dealId: string): string {
+  return watched.get(mode)?.get(dealId) ?? '';
 }
 
 export function isWatched(mode: IgMode, dealId: string): boolean {
   return watched.get(mode)?.has(dealId) ?? false;
 }
 
-export function addToWatch(mode: IgMode, dealId: string): void {
-  const set = watched.get(mode)!;
-  set.add(dealId);
-  saveWatch(mode, set);
+export function addToWatch(mode: IgMode, dealId: string, note = ''): void {
+  const map = watched.get(mode)!;
+  map.set(dealId, note);
+  saveWatch(mode, map);
+}
+
+export function setWatchNote(mode: IgMode, dealId: string, note: string): void {
+  const map = watched.get(mode)!;
+  if (!map.has(dealId)) return; // no-op on a deal that isn't actually watched
+  map.set(dealId, note);
+  saveWatch(mode, map);
 }
 
 export function removeFromWatch(mode: IgMode, dealId: string): void {
-  const set = watched.get(mode)!;
-  set.delete(dealId);
-  saveWatch(mode, set);
+  const map = watched.get(mode)!;
+  map.delete(dealId);
+  saveWatch(mode, map);
   lastReview.delete(dealId);
   peakUpl.delete(dealId);
   lastStopTightenAt.delete(dealId);
@@ -553,10 +581,12 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
 
   const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
   const peerGroup = getPeerGroupChange(p.epic);
+  const userNote  = getWatchNote(mode, p.dealId);
 
   const verdict = await askGeminiPositionVerdict({
     instrumentName: name,
     headlines,
+    userNote: userNote || undefined,
     direction:      p.direction,
     entryLevel:     p.level,
     currentLevel,

@@ -21,7 +21,7 @@ import {
 } from './igStrategyBot';
 import { getJournal } from './tradeJournal';
 import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } from './leaderboard';
-import { startGeminiWatch, getWatchedDealIds, addToWatch, removeFromWatch, isWatchAiPaused, setWatchAiPaused } from './geminiWatch';
+import { startGeminiWatch, getWatchedDealIds, getWatchNotes, addToWatch, setWatchNote, removeFromWatch, isWatchAiPaused, setWatchAiPaused } from './geminiWatch';
 import { fetchFullPositions, getSession } from './igApi';
 import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
 import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot';
@@ -566,10 +566,10 @@ app.get('/ig-strategy/:mode/watch', auth, async (req: Request, res: Response) =>
   const mode = resolveIgMode(req, res);
   if (!mode) return;
   const session = getSession(`igstrat:${mode}`);
-  if (!session) { res.json({ ok: true, positions: [], watchedDealIds: getWatchedDealIds(mode), aiPaused: isWatchAiPaused(mode) }); return; }
+  if (!session) { res.json({ ok: true, positions: [], watchedDealIds: getWatchedDealIds(mode), watchNotes: getWatchNotes(mode), aiPaused: isWatchAiPaused(mode) }); return; }
   try {
     const positions = await fetchFullPositions(session);
-    res.json({ ok: true, positions, watchedDealIds: getWatchedDealIds(mode), aiPaused: isWatchAiPaused(mode) });
+    res.json({ ok: true, positions, watchedDealIds: getWatchedDealIds(mode), watchNotes: getWatchNotes(mode), aiPaused: isWatchAiPaused(mode) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
   }
@@ -578,7 +578,16 @@ app.get('/ig-strategy/:mode/watch', auth, async (req: Request, res: Response) =>
 app.post('/ig-strategy/:mode/watch/:dealId', auth, (req: Request, res: Response) => {
   const mode = resolveIgMode(req, res);
   if (!mode) return;
-  addToWatch(mode, req.params.dealId);
+  const note = typeof req.body?.note === 'string' ? req.body.note : '';
+  addToWatch(mode, req.params.dealId, note);
+  res.json({ ok: true });
+});
+
+app.post('/ig-strategy/:mode/watch/:dealId/note', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const note = typeof req.body?.note === 'string' ? req.body.note : '';
+  setWatchNote(mode, req.params.dealId, note);
   res.json({ ok: true });
 });
 

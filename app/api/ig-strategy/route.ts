@@ -71,9 +71,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   if (action === 'watch') {
-    const { dealId } = await req.json() as { dealId?: string };
+    const { dealId, note } = await req.json() as { dealId?: string; note?: string };
     if (!dealId) return NextResponse.json({ ok: false, error: 'dealId required' }, { status: 400 });
-    return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}`, 'POST');
+    return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}`, 'POST', { note });
+  }
+
+  if (action === 'watch-note') {
+    const { dealId, note } = await req.json() as { dealId?: string; note?: string };
+    if (!dealId) return NextResponse.json({ ok: false, error: 'dealId required' }, { status: 400 });
+    return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}/note`, 'POST', { note });
   }
 
   if (action === 'open-recommendation') {
