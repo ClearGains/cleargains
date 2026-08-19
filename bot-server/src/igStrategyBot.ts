@@ -2748,6 +2748,18 @@ async function poll(mode: IgMode) {
         // doesn't actually own the exit thesis for.
         if (p.epic.startsWith('CS.')) continue;
 
+        // Same scaling bug as the FX case above, just never caught for this
+        // prefix — commodities (CC.D.*, Brent Crude/Natural Gas) have the
+        // identical IG-scaled-points-vs-Yahoo-raw-price mismatch (confirmed
+        // live: Brent Crude read "+9737.17% vs today's open", IG's ~8994
+        // points compared directly against Yahoo BZ=F's raw ~$68/barrel,
+        // no conversion). Silver and Bitcoin happen to already be covered
+        // by the CS. check above purely by coincidence — they're commodities
+        // too, but their real IG epics share FX's "CS." prefix (see
+        // FX_EPICS's own comment in igStrategyScanner.ts) — CC.* has no such
+        // accidental protection.
+        if (p.epic.startsWith('CC.')) continue;
+
         // No alpacaTimeframe passed here, so fetchBarsWithFallback's Alpaca
         // branch (used for every Alpaca-covered share — most of this bot's
         // stock universe) defaults to 250 DAILY bars, not today's intraday
