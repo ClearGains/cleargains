@@ -114,12 +114,18 @@ export type IndicatorSummary = {
   bbUpper: number | null; bbMid: number | null; bbLower: number | null;
   bbWidth: number | null;
   priceVsBB: 'above' | 'inside' | 'below' | null;
+  // Ratio of the last 5 bars' average volume to the preceding 20 bars'
+  // average — null when volume isn't populated at all (some feeds/instruments
+  // don't carry it) rather than defaulting to 1, so callers can tell "no
+  // signal" apart from "confirmed normal volume".
+  volRatio: number | null;
 };
 
 export function summarizeIndicators(candles: LWCandle[]): IndicatorSummary {
   if (candles.length < 27) {
     return { rsi: null, rsiTrend: 'flat', macdValue: 0, macdSignal: 0, macdHist: 0, macdCross: 'none',
-      sma20: null, sma50: null, sma200: null, bbUpper: null, bbMid: null, bbLower: null, bbWidth: null, priceVsBB: null };
+      sma20: null, sma50: null, sma200: null, bbUpper: null, bbMid: null, bbLower: null, bbWidth: null, priceVsBB: null,
+      volRatio: null };
   }
   const rsiArr = calcRSI(candles, 14);
   const rsi    = rsiArr.at(-1)?.value ?? null;
@@ -149,6 +155,13 @@ export function summarizeIndicators(candles: LWCandle[]): IndicatorSummary {
     ? last.close > bbUpper ? 'above' : last.close < bbLower ? 'below' : 'inside'
     : null;
 
+  const recent5     = candles.slice(-5);
+  const prior20     = candles.slice(-25, -5);
+  const haveVolume  = prior20.length >= 10 && candles.some(c => (c.volume ?? 0) > 0);
+  const avgRecent   = recent5.reduce((s, c) => s + (c.volume ?? 0), 0) / Math.max(recent5.length, 1);
+  const avgPrior    = prior20.reduce((s, c) => s + (c.volume ?? 0), 0) / Math.max(prior20.length, 1);
+  const volRatio    = haveVolume && avgPrior > 0 ? avgRecent / avgPrior : null;
+
   return { rsi, rsiTrend, macdValue, macdSignal: macdSig, macdHist, macdCross,
-    sma20, sma50, sma200, bbUpper, bbMid, bbLower, bbWidth, priceVsBB };
+    sma20, sma50, sma200, bbUpper, bbMid, bbLower, bbWidth, priceVsBB, volRatio };
 }

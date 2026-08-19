@@ -85,6 +85,23 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
   if (ind.priceVsBB === 'below') { bull += 2; signals.push('price at/below BB lower band'); }
   if (ind.priceVsBB === 'above') { bear += 2; signals.push('price at/above BB upper band'); }
 
+  // Volume confirms which way the crowd is actually leaning — it doesn't
+  // create a direction on its own (heavy volume with no other signal is
+  // just as often capitulation/distribution as a real breakout), but it
+  // does say whether the signals above are backed by real participation or
+  // not. Only amplifies whichever side is already ahead; a tie stays a tie.
+  let volNote = '';
+  if (ind.volRatio !== null) {
+    if (ind.volRatio >= 1.6) {
+      if (bull > bear)      { bull += 2; volNote = `Volume running ${ind.volRatio.toFixed(1)}x average — real demand behind the bullish signals`; }
+      else if (bear > bull) { bear += 2; volNote = `Volume running ${ind.volRatio.toFixed(1)}x average — real supply behind the bearish signals`; }
+      if (volNote) signals.push(volNote);
+    } else if (ind.volRatio <= 0.5) {
+      volNote = `Volume only ${ind.volRatio.toFixed(1)}x average — this move lacks real participation, weight it less`;
+      signals.push(volNote);
+    }
+  }
+
   const bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL' =
     bull > bear + 2 ? 'BULLISH' : bear > bull + 2 ? 'BEARISH' : 'NEUTRAL';
 
@@ -259,6 +276,7 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
       ? 'Bollinger Band squeeze detected — breakout direction is uncertain'
       : 'Normal volatility environment — respect stop losses',
     bias === 'NEUTRAL' ? 'No clear trend — range-bound conditions increase false-signal risk' : 'Momentum trades can reverse sharply on news events',
+    ...(ind.volRatio !== null && ind.volRatio <= 0.5 ? [volNote] : []),
   ];
 
   const catalysts: string[] = [
@@ -270,6 +288,7 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
       : ind.rsi !== null && ind.rsi > 65
         ? 'Overbought RSI — watch for mean reversion'
         : `SMA ${ind.sma20 && price > ind.sma20 ? 'support holding' : 'acting as resistance'}`,
+    ...(ind.volRatio !== null && ind.volRatio >= 1.6 ? [volNote] : []),
   ];
 
   return {
