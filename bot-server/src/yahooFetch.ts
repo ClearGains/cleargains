@@ -168,6 +168,27 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'CS.D.BITCOIN.CFD.IP':   'BTC-USD',
   'SC.D.F.DAILY.IP':       'F',
 
+  // ── Sector expansion 2026-08-19 — see IG_EPICS's own comment in
+  // igStrategyScanner.ts for why. All confirmed Alpaca-tradable US common
+  // stock (checked against EPIC_TO_ALPACA below too), so Yahoo here is
+  // mainly the fallback path, not the primary one.
+  'SD.D.JNJ.DAILY.IP':    'JNJ',
+  'SE.D.PFE.DAILY.IP':    'PFE',
+  'SD.D.LLY.DAILY.IP':    'LLY',
+  'UC.D.MRNAUS.DAILY.IP': 'MRNA',
+  'SE.D.NKE.DAILY.IP':    'NKE',
+  'SE.D.MCD.DAILY.IP':    'MCD',
+  'SH.D.WMT.DAILY.IP':    'WMT',
+  'UA.D.COST.DAILY.IP':   'COST',
+  'SA.D.BA.DAILY.IP':     'BA',
+  'SB.D.CAT.DAILY.IP':    'CAT',
+  'SC.D.HON.DAILY.IP':    'HON',
+  'SB.D.DIS.DAILY.IP':    'DIS',
+  'SG.D.T.DAILY.IP':      'T',
+  'SC.D.FPL.DAILY.IP':    'NEE',
+  'UA.D.ASML.DAILY.IP':   'ASML',
+  'UC.D.ONNN.DAILY.IP':   'ON',
+
   // ── CFD-account .CASH.IP epics for the same stocks above ──────────────
   // igCfdBot.ts swaps most of these ".DAILY.IP" epics for a distinct,
   // genuinely CFD-dealable ".CASH.IP" epic (see CFD_STOCK_EPIC_OVERRIDES
@@ -249,6 +270,23 @@ export const EPIC_TO_ALPACA: Record<string, string> = {
   'SE.D.NIOUS.DAILY.IP':   'NIO',
   'SC.D.GMEUS.DAILY.IP':   'GME',
   'SC.D.F.DAILY.IP':       'F',
+  // Sector expansion 2026-08-19 — see EPIC_TO_YAHOO above for the same set.
+  'SD.D.JNJ.DAILY.IP':    'JNJ',
+  'SE.D.PFE.DAILY.IP':    'PFE',
+  'SD.D.LLY.DAILY.IP':    'LLY',
+  'UC.D.MRNAUS.DAILY.IP': 'MRNA',
+  'SE.D.NKE.DAILY.IP':    'NKE',
+  'SE.D.MCD.DAILY.IP':    'MCD',
+  'SH.D.WMT.DAILY.IP':    'WMT',
+  'UA.D.COST.DAILY.IP':   'COST',
+  'SA.D.BA.DAILY.IP':     'BA',
+  'SB.D.CAT.DAILY.IP':    'CAT',
+  'SC.D.HON.DAILY.IP':    'HON',
+  'SB.D.DIS.DAILY.IP':    'DIS',
+  'SG.D.T.DAILY.IP':      'T',
+  'SC.D.FPL.DAILY.IP':    'NEE',
+  'UA.D.ASML.DAILY.IP':   'ASML',
+  'UC.D.ONNN.DAILY.IP':   'ON',
   // SK Hynix (Korean primary listing) and Nokia (Helsinki listing) aren't
   // Alpaca-tradable US symbols — Yahoo-only for those two, as before.
   // Silver/Brent Crude/Natural Gas/Bitcoin are commodities/crypto, not

@@ -92,6 +92,54 @@ export const IG_EPICS: { epic: string; name: string }[] = [
   { epic: 'SH.D.UBERUS.DAILY.IP', name: 'Uber'         },
   { epic: 'SC.D.F.DAILY.IP',      name: 'Ford'         },
   { epic: 'UA.D.COINUS.DAILY.IP', name: 'Coinbase'     },
+  // Sector expansion 2026-08-19 — the universe above had no healthcare/
+  // pharma beyond AZN/GSK/UNH, and no consumer/retail, industrials, or
+  // media/communication at all, so a stock in any of those sectors having
+  // a genuinely good day was structurally invisible to every strategy
+  // regardless of how it performed. Every epic below individually verified
+  // live against IG's own market search first (see igApi.ts's authenticate
+  // + a throwaway /markets?searchTerm= script) — this codebase has
+  // repeatedly found guessed epics silently wrong (see the UK-stocks
+  // comment above). None of these are in RULE_BASED_ANALYSIS_CONFIRMED_EPICS
+  // (no backtest data exists for them yet), so rule_based_analysis's own
+  // scan won't pick them up on its own — they're reachable via
+  // gemini_opinion (unrestricted) and epicStrategyOverrides, same as
+  // AstraZeneca/Broadcom/Marvell/Meta.
+  // Healthcare / pharma (beyond the existing AZN/GSK/UNH)
+  { epic: 'SD.D.JNJ.DAILY.IP',    name: 'Johnson & Johnson' },
+  { epic: 'SE.D.PFE.DAILY.IP',    name: 'Pfizer'       },
+  { epic: 'SD.D.LLY.DAILY.IP',    name: 'Eli Lilly'    },
+  // Moderna specifically — missed a real move entirely on 2026-08-19
+  // because it wasn't in this universe at all (a manually-opened position
+  // was the only reason the account even had exposure to it that day).
+  { epic: 'UC.D.MRNAUS.DAILY.IP', name: 'Moderna'      },
+  // Consumer / retail — entirely new sector for this universe
+  { epic: 'SE.D.NKE.DAILY.IP',    name: 'Nike'         },
+  { epic: 'SE.D.MCD.DAILY.IP',    name: 'McDonald\'s'  },
+  { epic: 'SH.D.WMT.DAILY.IP',    name: 'Walmart'      },
+  { epic: 'UA.D.COST.DAILY.IP',   name: 'Costco'       },
+  // Industrials — entirely new sector for this universe
+  { epic: 'SA.D.BA.DAILY.IP',     name: 'Boeing'       },
+  { epic: 'SB.D.CAT.DAILY.IP',    name: 'Caterpillar'  },
+  // Confirmed live via market search this is "Honeywell International Inc"
+  // (SC.D.HON) — a decoy match, "Honeywell Aerospace Inc" (UB.D.HONAUS),
+  // came back first in the same search and is a different, much thinner
+  // instrument.
+  { epic: 'SC.D.HON.DAILY.IP',    name: 'Honeywell'    },
+  // Communication / media — entirely new sector for this universe
+  { epic: 'SB.D.DIS.DAILY.IP',    name: 'Disney'       },
+  { epic: 'SG.D.T.DAILY.IP',      name: 'AT&T'         },
+  // Utilities — entirely new sector for this universe
+  { epic: 'SC.D.FPL.DAILY.IP',    name: 'NextEra Energy' },
+  // More AI/semiconductors — same sector as existing NVDA/AMD/AVGO etc.
+  { epic: 'UA.D.ASML.DAILY.IP',   name: 'ASML'         },
+  { epic: 'UC.D.ONNN.DAILY.IP',   name: 'ON Semiconductor' },
+  // Already had Yahoo/Alpaca data mappings from an earlier sweep but were
+  // never actually added to this tradeable universe — closing that gap
+  // here rather than duplicating the mapping work.
+  { epic: 'SE.D.PLTRUS.DAILY.IP', name: 'Palantir'     },
+  { epic: 'SG.D.SHOPUS.DAILY.IP', name: 'Shopify'      },
+  { epic: 'UC.D.PYPLVUS.DAILY.IP', name: 'PayPal'      },
 ];
 
 // Rough sector grouping for the stock universe above — used to warn the
@@ -141,6 +189,32 @@ export const SECTOR_MAP: Record<string, string> = {
   'SH.D.XOM.DAILY.IP':    'energy',
   'KA.D.BP.DAILY.IP':     'energy',
   'KA.D.SHELLN.DAILY.IP': 'energy',
+  // Healthcare / pharma
+  'SD.D.JNJ.DAILY.IP':    'healthcare',
+  'SE.D.PFE.DAILY.IP':    'healthcare',
+  'SD.D.LLY.DAILY.IP':    'healthcare',
+  'UC.D.MRNAUS.DAILY.IP': 'healthcare',
+  // Consumer / retail
+  'SE.D.NKE.DAILY.IP':    'consumer/retail',
+  'SE.D.MCD.DAILY.IP':    'consumer/retail',
+  'SH.D.WMT.DAILY.IP':    'consumer/retail',
+  'UA.D.COST.DAILY.IP':   'consumer/retail',
+  // Industrials
+  'SA.D.BA.DAILY.IP':     'industrials',
+  'SB.D.CAT.DAILY.IP':    'industrials',
+  'SC.D.HON.DAILY.IP':    'industrials',
+  // Communication / media
+  'SB.D.DIS.DAILY.IP':    'communication/media',
+  'SG.D.T.DAILY.IP':      'communication/media',
+  // Utilities
+  'SC.D.FPL.DAILY.IP':    'utilities',
+  // AI / semiconductors (extends the existing group above)
+  'UA.D.ASML.DAILY.IP':   'AI/semiconductors',
+  'UC.D.ONNN.DAILY.IP':   'AI/semiconductors',
+  // Growth / fintech
+  'SE.D.PLTRUS.DAILY.IP':  'growth/fintech',
+  'SG.D.SHOPUS.DAILY.IP':  'growth/fintech',
+  'UC.D.PYPLVUS.DAILY.IP': 'growth/fintech',
 };
 
 // The 5 FX majors above, also owned exclusively by fxScalperBot.ts (a
