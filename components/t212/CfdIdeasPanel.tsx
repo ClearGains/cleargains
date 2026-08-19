@@ -3,10 +3,15 @@
 // Read-only, on-demand CFD trade ideas for manual execution on Trading212's
 // CFD account. T212's CFD product has no API access at all, so this never
 // connects to or authenticates with T212 in any way — it just runs the same
-// rules-engine + Gemini-confirmation logic already proven on the IG live
-// stock bot (see bot-server/src/cfdIdeas.ts for why levels here are real $
-// prices, not IG's spread-bet points), and hands back a plain list for the
-// user to read and manually open in the real T212 CFD app themselves.
+// rules engine already proven on the IG live stock bot (see
+// bot-server/src/cfdIdeas.ts for why levels here are real $ prices, not IG's
+// spread-bet points), and hands back a plain list for the user to read and
+// manually open in the real T212 CFD app themselves.
+//
+// Deliberately no Gemini/AI layer here (per explicit decision) — the user
+// reviews every idea before acting on it anyway, so a second AI opinion
+// wasn't worth spending Gemini calls the live bots also share. Headlines
+// are shown as plain informational context, not fed to any model.
 //
 // No scheduled scanning, no persistence between visits — every "Scan" click
 // is a fresh, independent pass over the universe.
@@ -24,9 +29,9 @@ type CfdIdea = {
   price: number;
   stopLoss: number;
   takeProfit: number;
-  confidence: number;
   ruleConfidence: number;
   reason: string;
+  headlines: string[];
   computedAt: string;
 };
 
@@ -63,12 +68,12 @@ function IdeaCard({ idea }: { idea: CfdIdea }) {
           <div className="flex items-center gap-3 mt-1 text-xs text-gray-400 flex-wrap">
             <span>{fmtUSD(idea.price)}</span>
             <span className={clsx('font-semibold',
-              idea.confidence >= 85 ? 'text-emerald-400' : idea.confidence >= 70 ? 'text-blue-400' : 'text-amber-400'
+              idea.ruleConfidence >= 8 ? 'text-emerald-400' : idea.ruleConfidence >= 7 ? 'text-blue-400' : 'text-amber-400'
             )}>
-              Gemini {idea.confidence}%
+              Rules {idea.ruleConfidence}/10
             </span>
-            <span className="text-gray-500">Rules {idea.ruleConfidence}/10</span>
             {rr !== null && <span className="text-gray-500">R:R ~{rr.toFixed(1)}:1</span>}
+            {idea.headlines.length > 0 && <span className="text-gray-500">📰 {idea.headlines.length}</span>}
           </div>
         </div>
         <button
@@ -97,8 +102,16 @@ function IdeaCard({ idea }: { idea: CfdIdea }) {
       </div>
 
       {expanded && (
-        <div className="bg-gray-800/50 rounded-lg p-3 text-xs text-gray-300 leading-relaxed">
-          {idea.reason}
+        <div className="bg-gray-800/50 rounded-lg p-3 space-y-2 text-xs">
+          <p className="text-gray-300 leading-relaxed">{idea.reason}</p>
+          {idea.headlines.length > 0 && (
+            <div className="space-y-1 pt-1 border-t border-gray-700/50">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wider">Recent headlines — for your own read, not part of the score</p>
+              {idea.headlines.slice(0, 5).map((h, i) => (
+                <p key={i} className="text-gray-400 text-[11px]">• {h}</p>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -131,7 +144,7 @@ export function CfdIdeasPanel() {
     <Card>
       <CardHeader
         title="CFD Ideas"
-        subtitle="Read-only — for manually opening positions on your Trading212 CFD account. Nothing here connects to T212 or executes anything; levels are real $ prices from the same rules+Gemini engine proven on the live IG stock bot."
+        subtitle="Read-only — for manually opening positions on your Trading212 CFD account. Nothing here connects to T212 or executes anything, and no AI is involved; levels are real $ prices from the same rules engine proven on the live IG stock bot."
       />
       <div className="space-y-4">
         <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -144,7 +157,7 @@ export function CfdIdeasPanel() {
             )}
           >
             <RefreshCw className={clsx('h-4 w-4', scanning && 'animate-spin')} />
-            {scanning ? 'Scanning universe (this can take a minute or two)…' : 'Scan for ideas'}
+            {scanning ? 'Scanning universe…' : 'Scan for ideas'}
           </button>
           {scannedAt && !scanning && (
             <span className="text-xs text-gray-500">
@@ -161,7 +174,7 @@ export function CfdIdeasPanel() {
 
         {!scanning && !error && scannedAt && ideas.length === 0 && (
           <div className="text-center text-gray-600 text-sm py-8">
-            No setups qualified this scan — nothing both cleared the rules-based bar and got confirmed by Gemini. Try again later.
+            No setups qualified this scan — nothing cleared the rules-based bar. Try again later.
           </div>
         )}
 

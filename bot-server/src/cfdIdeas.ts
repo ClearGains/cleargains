@@ -5,10 +5,9 @@
 // opens themselves in the real T212 CFD app. No position tracking, no
 // execution, no persistence — every call is a fresh scan.
 //
-// Reuses the exact same proven engine already backtest-confirmed and
-// live-tuned all session for the IG stock strategy (ruleBasedAnalysis +
-// askGeminiConfirmStockTrade, the same two-layer "rules qualify, Gemini
-// confirms" structure as the gemini_confirmed IG strategy) — but run
+// Reuses the exact same proven rules engine already backtest-confirmed and
+// live-tuned all session for the IG stock strategy (ruleBasedAnalysis — real
+// RSI/MACD/SMA/BB/volume scoring, real ATR-based stop/TP levels), run
 // directly against real Alpaca $ prices with no IG-specific point scaling
 // applied at any stage, since T212 CFD prices (like IG's underlying
 // reference price) are just the real market price, not IG's spread-bet
@@ -16,6 +15,14 @@
 // than just relabelling igStrategyBot.ts's own recommendations: those are
 // computed for IG's own scaled epic pricing and would need an error-prone
 // manual conversion to be usable for a T212 CFD order.
+//
+// Deliberately does NOT call Gemini (unlike gemini_confirmed on IG) — per
+// explicit decision: this only ever produces a read-only reference the user
+// reviews themselves before manually placing anything, so the user IS the
+// confirmation layer. Spending Gemini calls (shared allowance with the live
+// IG/FX bots) for a second AI opinion the user reviews anyway wasn't worth
+// the cost. Headlines are still fetched and returned, but purely as
+// informational context alongside the numbers — not fed to any model.
 //
 // Universe: the US-listed half of lib/stockUniverse.ts's UNIVERSE (the same
 // list the T212 demo-trader/position-review features use) — kept as an
@@ -26,10 +33,9 @@
 // quote to rescale against — there's no equivalent reference price
 // available here, so real UK $ price levels can't be produced right now.
 import { getBars } from './alpacaApi';
-import { calcRsi, calcMacdHist, MIN_SWING_CONFIDENCE } from './alpacaStrategies';
+import { MIN_SWING_CONFIDENCE } from './alpacaStrategies';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
 import { fetchAllHeadlines } from './newsFetch';
-import { askGeminiConfirmStockTrade } from './gemini';
 
 const CFD_IDEAS_UNIVERSE: Array<{ symbol: string; name: string; sector: string }> = [
   { symbol: 'AAPL',  name: 'Apple Inc.',                sector: 'Technology' },
@@ -119,13 +125,11 @@ export type CfdIdea = {
   price:       number;   // real $ — same units you'd see quoted for the CFD
   stopLoss:    number;
   takeProfit:  number;
-  confidence:  number;   // Gemini's own 0-100 confirmation confidence
-  ruleConfidence: number; // 1-10, the underlying rule engine's own conviction
+  ruleConfidence: number; // 1-10, the rule engine's own conviction — the only score here, no AI involved
   reason:      string;
+  headlines:   string[]; // plain informational context — not fed to any model, just shown alongside the numbers
   computedAt:  string;
 };
-
-const CONFIRM_MIN_CONFIDENCE = 70; // same floor gemini_confirmed/gemini_opinion require on IG
 
 // Sequential with a short stagger — mirrors the same rate-limit courtesy
 // every other Alpaca-fetching loop in this codebase already uses (e.g.
@@ -147,47 +151,14 @@ export async function scanCfdIdeas(
       const analysis = ruleBasedAnalysis(stock.symbol, candles);
       const swing = analysis.swing;
 
-      // Zero-cost mechanical gate before any Gemini spend — same bar
-      // rule_based_analysis/gemini_confirmed require on IG.
+      // Sole filter — same bar rule_based_analysis/gemini_confirmed require
+      // on IG, no AI layer on top of it here.
       if (swing.direction === 'FLAT' || swing.confidence < MIN_SWING_CONFIDENCE) continue;
 
       const last = bars[bars.length - 1].c;
-      const rsi  = calcRsi(bars, 14);
-      const macd = calcMacdHist(bars, 12, 26, 9);
       const headlines = await fetchAllHeadlines(stock.symbol, 8, stock.name);
 
-      const today = new Date().toISOString().slice(0, 10);
-      const todaysBars = bars.filter(b => b.t.slice(0, 10) === today);
-      const dayOpen = todaysBars[0]?.o ?? bars[0]?.o;
-      const dayChangePercent = dayOpen ? ((last - dayOpen) / dayOpen) * 100 : undefined;
-
-      const recent5 = bars.slice(-5);
-      const prior20 = bars.slice(-25, -5);
-      const avgRecent = recent5.reduce((s, b) => s + b.v, 0) / Math.max(recent5.length, 1);
-      const avgPrior  = prior20.reduce((s, b) => s + b.v, 0) / Math.max(prior20.length, 1);
-      const volumeSurgeMultiple = prior20.length >= 10 && avgPrior > 0 ? avgRecent / avgPrior : undefined;
-
-      onProgress?.(`${stock.symbol}: rules ${swing.direction} ${swing.confidence}/10 — asking Gemini to confirm…`);
-
-      const verdict = await askGeminiConfirmStockTrade({
-        instrumentName: stock.name,
-        suggestedDir:   swing.direction === 'LONG' ? 'BUY' : 'SELL',
-        ruleReasoning:  swing.reasoning,
-        ruleConfidence: swing.confidence,
-        price:          last,
-        rsi,
-        macdHist:       macd?.hist ?? null,
-        lastCandles:    candles.slice(-8).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
-        headlines,
-        dayChangePercent,
-        volumeSurgeMultiple,
-        // No peer-group context here — getPeerGroupChange is keyed off IG
-        // epics/SECTOR_MAP, populated by the live IG bot's own poll cycle,
-        // and this scan has no IG epic to look up. Everything else Gemini
-        // needs (technicals, news, volume, day change) is still supplied.
-      });
-
-      if (verdict.direction === 'SKIP' || verdict.confidence < CONFIRM_MIN_CONFIDENCE) continue;
+      onProgress?.(`${stock.symbol}: rules ${swing.direction} ${swing.confidence}/10 — qualified`);
 
       ideas.push({
         symbol:         stock.symbol,
@@ -197,9 +168,9 @@ export async function scanCfdIdeas(
         price:          last,
         stopLoss:       swing.stopLoss,
         takeProfit:     swing.takeProfit1,
-        confidence:     verdict.confidence,
         ruleConfidence: swing.confidence,
-        reason:         `Rules (${swing.confidence}/10): ${swing.reasoning} | Gemini confirmed ${verdict.confidence}%: ${verdict.reason}`,
+        reason:         swing.reasoning,
+        headlines,
         computedAt:     new Date().toISOString(),
       });
     } catch (e) {
@@ -208,5 +179,5 @@ export async function scanCfdIdeas(
     await new Promise(r => setTimeout(r, FETCH_DELAY_MS));
   }
 
-  return ideas.sort((a, b) => b.confidence - a.confidence);
+  return ideas.sort((a, b) => b.ruleConfidence - a.ruleConfidence);
 }
