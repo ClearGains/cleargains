@@ -313,8 +313,17 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // statistically; implemented anyway on explicit request. Closing the
   // position removes it from tracking entirely, so no repeat-guard needed
   // the way stop-tightening needs one.
-  const EOD_PROFIT_MIN_GBP = 2; // same "meaningfully" bar as GREEN_TO_RED_THRESHOLD_GBP above
-  if (isNearClose(15) && p.upl >= EOD_PROFIT_MIN_GBP) {
+  // Needs a minimum age too — per explicit follow-up, this should only
+  // catch a position that's actually been running through the session, not
+  // one that happens to open during (or just before) this same 15min close
+  // buffer and gets swept up within minutes of opening. A position that
+  // opens overnight is meant to run until the *next* close, not get closed
+  // out the moment it happens to still be open when today's window hits —
+  // the natural ~24h gap between close windows already gives it that room,
+  // this just stops a same-window open from being caught immediately.
+  const EOD_PROFIT_MIN_GBP     = 2;    // same "meaningfully" bar as GREEN_TO_RED_THRESHOLD_GBP above
+  const EOD_PROFIT_MIN_AGE_HOURS = 0.5; // comfortably past the 15min close buffer itself
+  if (isNearClose(15) && heldHours >= EOD_PROFIT_MIN_AGE_HOURS && p.upl >= EOD_PROFIT_MIN_GBP) {
     try {
       await closePosition(session, p.dealId, p.direction, p.size);
       addLog(mode, 'exit', name, `[EOD] Closing near end of day with +£${p.upl.toFixed(2)} — not holding a winner into a session that could reverse`);
