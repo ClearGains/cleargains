@@ -27,6 +27,7 @@ import { fetchFullPositions, getSession } from './igApi';
 import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
 import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot';
 import { startAlpacaNewsStream, isNewsStreamEnabled, setNewsStreamEnabled } from './alpacaNewsStream';
+import { scanCfdIdeas } from './cfdIdeas';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -637,6 +638,21 @@ app.get('/alpaca-news-stream', auth, (_req: Request, res: Response) => {
 app.post('/alpaca-news-stream', auth, (req: Request, res: Response) => {
   setNewsStreamEnabled(!!req.body?.enabled);
   res.json({ ok: true, enabled: isNewsStreamEnabled() });
+});
+
+// T212 CFD ideas — on-demand only (no scheduled scan, no persistence, no
+// T212 connection at all: their CFD account has no API). User triggers a
+// fresh scan when they open the tab; this just runs it and returns the
+// result. See cfdIdeas.ts for why this is a separate module rather than
+// reusing igStrategyBot.ts's own recommendations (IG's levels are in
+// spread-bet points, not real prices).
+app.get('/cfd-ideas', auth, async (_req: Request, res: Response) => {
+  try {
+    const ideas = await scanCfdIdeas();
+    res.json({ ok: true, ideas, scannedAt: new Date().toISOString() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 // Manual trigger for allowance-blocked recommendation refresh, bypassing the

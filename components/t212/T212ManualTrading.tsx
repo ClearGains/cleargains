@@ -67,6 +67,9 @@ type OrderResult = {
   orderId?: string | number;
   error?: string;
   orders?: Array<Record<string, unknown>>;
+  slFailed?: boolean;
+  tpFailed?: boolean;
+  protectionWarning?: string;
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -753,10 +756,18 @@ export function T212ManualTrading({ defaultTradeAmount = 50 }: T212ManualTrading
 
       skipOpportunity(id);
 
-      showToast(true,
-        `Trade placed — ${guidance.ticker} ${filledQty.toFixed(4)} shares` +
-        ` · TP: £${takeProfit.toFixed(2)} | SL: £${stopLoss.toFixed(2)}`
-      );
+      // Previously always showed this same success line regardless of
+      // whether the SL/TP orders actually landed — a rejected protective
+      // order was only visible later, if you happened to check the
+      // position row for "no order". Surface it immediately instead.
+      if (d.protectionWarning) {
+        showToast(false, `${guidance.ticker}: ${d.protectionWarning} Check the position below and consider placing it manually.`);
+      } else {
+        showToast(true,
+          `Trade placed — ${guidance.ticker} ${filledQty.toFixed(4)} shares` +
+          ` · TP: £${takeProfit.toFixed(2)} | SL: £${stopLoss.toFixed(2)}`
+        );
+      }
     } catch (e) {
       showToast(false, `Error: ${e instanceof Error ? e.message : String(e)}`);
     }

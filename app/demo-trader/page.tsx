@@ -24,6 +24,7 @@ import { IGStockAutoTrader } from '@/components/ig/IGStockAutoTrader';
 import { IBKRAutoTrader } from '@/components/ibkr/IBKRAutoTrader';
 import { IGCfdAutoTrader } from '@/components/ig/IGCfdAutoTrader';
 import { T212StrategyTrader } from '@/components/t212/T212StrategyTrader';
+import { CfdIdeasPanel } from '@/components/t212/CfdIdeasPanel';
 import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 import { NewsFeed } from '@/components/news/NewsFeed';
 
@@ -1589,7 +1590,7 @@ export default function DemoTraderPage() {
   const SIZE_PRESETS = [10, 50, 100, 250] as const;
   type SizePreset = typeof SIZE_PRESETS[number] | 'custom';
 
-  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'stock-bot' | 'server-bot' | 'ibkr' | 'ig-cfd' | 'ig-cfd-live' | 't212' | 'news'>('stocks');
+  const [traderTab, setTraderTab] = useState<'stocks' | 'forex' | 'ig' | 'stock-bot' | 'server-bot' | 'ibkr' | 'ig-cfd' | 'ig-cfd-live' | 't212' | 'cfd-ideas' | 'news'>('stocks');
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [showExecAccountPicker, setShowExecAccountPicker] = useState(false);
   const [budgetStr, setBudgetStr] = useState(String(paperBudget));
@@ -1601,6 +1602,20 @@ export default function DemoTraderPage() {
   // Industrials/Communication/Utilities too) was silently never scanned
   // unless a user happened to toggle it on manually. Default to everything.
   const [sectors, setSectors] = useState<Sector[]>(['All']);
+
+  // Accumulates signals across the API route's rotating scan windows (see
+  // windowIndexInCycle in app/api/demo-trader/signals/route.ts) so a real
+  // BUY selection only happens once a full pass over the whole filtered
+  // universe has been seen — not off whichever partial 60-stock slice
+  // happened to be scanned this particular run. Per explicit request: the
+  // user is the one placing trades off this, so it shouldn't act on a
+  // partial picture mid-cycle. A ref (not state) since it's pure bookkeeping
+  // that shouldn't trigger re-renders on its own.
+  const scanAccumulatorRef = useRef<{
+    signalsByKey:    Map<string, Signal>;
+    windowsSeen:     Set<number>;
+    windowsPerCycle: number;
+  }>({ signalsByKey: new Map(), windowsSeen: new Set(), windowsPerCycle: 1 });
   const [signals, setSignals] = useState<Signal[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -2333,6 +2348,7 @@ export default function DemoTraderPage() {
         scannedCount?: number; candidateCount?: number; apiCallsUsed?: number;
         skippedSummary?: string | null;
         debugLog?: string[]; timestamp?: string;
+        capped?: boolean; windowsPerCycle?: number; windowIndexInCycle?: number;
       };
 
       // Capture debug info from API
@@ -2346,12 +2362,42 @@ export default function DemoTraderPage() {
         return;
       }
 
-      const allSignals = sigData.signals ?? [];
-      setSignals(allSignals);
+      // Accumulate this window's signals into the running set for the
+      // current cycle. If the universe isn't capped (windowsPerCycle=1) or
+      // the API predates this field, every call is already a full pass —
+      // behaves exactly as before.
+      const acc = scanAccumulatorRef.current;
+      const windowsPerCycle = sigData.windowsPerCycle ?? 1;
+      const windowIndex     = sigData.windowIndexInCycle ?? 0;
+      if (acc.windowsPerCycle !== windowsPerCycle) {
+        // Sector selection (or the universe) changed size — old partial
+        // accumulation no longer lines up with the new window boundaries.
+        acc.signalsByKey.clear();
+        acc.windowsSeen.clear();
+        acc.windowsPerCycle = windowsPerCycle;
+      }
+      for (const sig of sigData.signals ?? []) acc.signalsByKey.set(sig.symbol, sig);
+      acc.windowsSeen.add(windowIndex);
+
+      const cycleComplete = acc.windowsSeen.size >= acc.windowsPerCycle;
+      const accumulatedSignals = Array.from(acc.signalsByKey.values());
+      setSignals(accumulatedSignals); // always show everything seen so far, even mid-cycle
+
+      if (!cycleComplete) {
+        setRunLog(l => [...l, `📡 Partial scan complete — window ${windowIndex + 1}/${windowsPerCycle} (${accumulatedSignals.length} stocks seen so far this cycle). Waiting for the full universe before selecting trades.`]);
+        return;
+      }
+
+      // Full cycle done — this is the complete picture, use it for real
+      // selection, then reset so the next cycle starts clean.
+      const allSignals = accumulatedSignals;
+      acc.signalsByKey.clear();
+      acc.windowsSeen.clear();
+
       setApiCalls(sigData.apiCallsUsed ?? 0);
       const scanSummary = sigData.skippedSummary
         ? `✓ ${sigData.skippedSummary} — ${allSignals.filter(s => s.signal === 'BUY').length} BUY · ${allSignals.filter(s => s.signal === 'SELL').length} SELL signals.`
-        : `✓ Scanned ${sigData.scannedCount ?? 0} stocks (${sigData.candidateCount ?? 0} momentum candidates) — ${allSignals.filter(s => s.signal === 'BUY').length} BUY · ${allSignals.filter(s => s.signal === 'SELL').length} SELL signals. ${sigData.apiCallsUsed ?? 0} API calls used.`;
+        : `✓ Full universe scanned (${windowsPerCycle > 1 ? `${windowsPerCycle} windows, ` : ''}${allSignals.length} stocks) — ${allSignals.filter(s => s.signal === 'BUY').length} BUY · ${allSignals.filter(s => s.signal === 'SELL').length} SELL signals. ${sigData.apiCallsUsed ?? 0} API calls this window.`;
       setRunLog(l => [...l, scanSummary]);
 
       // Push notifications for strong signals (score > 50)
@@ -2914,7 +2960,7 @@ export default function DemoTraderPage() {
 
       {/* Tab toggle */}
       <div className="flex gap-1 mb-4 bg-gray-800/60 rounded-xl p-1 w-fit">
-        {(['stocks', 'forex', 'ig', 'stock-bot', 'server-bot', 'ibkr', 'ig-cfd', 'ig-cfd-live', 't212', 'news'] as const).map(tab => (
+        {(['stocks', 'forex', 'ig', 'stock-bot', 'server-bot', 'ibkr', 'ig-cfd', 'ig-cfd-live', 't212', 'cfd-ideas', 'news'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setTraderTab(tab)}
@@ -2932,6 +2978,7 @@ export default function DemoTraderPage() {
              tab === 'ig-cfd'    ? '📊 IG CFD Demo' :
              tab === 'ig-cfd-live' ? '📊 IG CFD Live' :
              tab === 't212'     ? 'T212 Strategy'  :
+             tab === 'cfd-ideas'? '🎯 CFD Ideas'   :
              tab === 'news'     ? '📰 News Feed'   :
              tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
@@ -2979,6 +3026,8 @@ export default function DemoTraderPage() {
         null
       ) : traderTab === 't212' ? (
         <T212Trader />
+      ) : traderTab === 'cfd-ideas' ? (
+        <CfdIdeasPanel />
       ) : traderTab === 'news' ? (
         <NewsFeed
           openPositions={demoPositions.map(p => ({ symbol: p.ticker, direction: 'LONG', size: p.entryPrice * p.quantity }))}

@@ -158,14 +158,24 @@ export async function POST(request: NextRequest) {
   // same slice forever. Bucket width matches the frontend's own 300_000ms
   // auto-scan interval (app/demo-trader/page.tsx).
   const MAX_STOCKS = 60;
+  const capped = filteredUniverse.length > MAX_STOCKS;
+  // How many consecutive rotating windows it takes to cover the full
+  // filtered universe once (e.g. 93 names / 60 per window = 2). The caller
+  // (app/demo-trader/page.tsx) uses windowIndexInCycle to know whether this
+  // response completes a full pass — it accumulates signals across windows
+  // and only actually selects/trades once every window in the cycle has
+  // been seen, rather than trading off whichever partial slice happened to
+  // be scanned this run.
+  const windowsPerCycle = capped ? Math.ceil(filteredUniverse.length / MAX_STOCKS) : 1;
+  const bucket = Math.floor(Date.now() / 300_000);
   let universe = filteredUniverse;
-  if (filteredUniverse.length > MAX_STOCKS) {
-    const bucket = Math.floor(Date.now() / 300_000);
+  if (capped) {
     const offset = (bucket * MAX_STOCKS) % filteredUniverse.length;
     universe = [...filteredUniverse.slice(offset), ...filteredUniverse.slice(0, offset)].slice(0, MAX_STOCKS);
   }
-  const cappedNote = filteredUniverse.length > MAX_STOCKS
-    ? ` (capped at ${MAX_STOCKS} of ${filteredUniverse.length}, rotating window)`
+  const windowIndexInCycle = bucket % windowsPerCycle;
+  const cappedNote = capped
+    ? ` (window ${windowIndexInCycle + 1}/${windowsPerCycle} — ${MAX_STOCKS} of ${filteredUniverse.length}, rotating)`
     : '';
 
   debugLog.push(`📋 Universe: ${universe.length} stocks for sectors: ${sectors.join(', ')}${cappedNote}`);
@@ -519,6 +529,9 @@ export async function POST(request: NextRequest) {
     apiCallsUsed: apiCalls,
     skippedSummary,
     timestamp: new Date().toISOString(),
+    capped,
+    windowsPerCycle,
+    windowIndexInCycle,
     note: isSmartMoney
       ? 'Smart Money Swing: vol ≥1.3× + news catalyst + 0.3–6% move. R:R 2:1 (SL −1.5%, TP +3%). Risk 1% portfolio per trade.'
       : 'Selected based on momentum, volume surge, and news catalysts — not company size. UK stocks shown as LSE (Yahoo Finance, 15min delay) or US ADR.',

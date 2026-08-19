@@ -227,6 +227,15 @@ export async function POST(request: NextRequest) {
   const results: unknown[] = [mainResult.data];
 
   // ── Atomic SL/TP placement for strategy market buys ───────────────────────
+  // Previously: a failed SL/TP order was only console.warn'd server-side —
+  // the response always said ok:true regardless, so a caller (and the user)
+  // had no reliable way to tell "protection genuinely placed" from
+  // "silently rejected, position is naked." Now each sub-order's real
+  // success/failure is embedded directly (`ok`/`error` per entry) and
+  // rolled up into slFailed/tpFailed/protectionWarning below so a caller
+  // can't miss it without explicitly ignoring those fields.
+  let slFailed = false;
+  let tpFailed = false;
   if (orderType === 'MARKET' && roundedQty > 0 && (stopLossPrice || takeProfitPrice)) {
     const fillPrice = (mainResult.data as Record<string, unknown>)?.fillPrice as number | undefined;
     const basePrice = fillPrice ?? stopLossPrice ?? takeProfitPrice ?? 0;
@@ -237,7 +246,8 @@ export async function POST(request: NextRequest) {
       const slPath = `${base}/equity/orders/stop`;
       console.log(`[t212/live-order] → SL stop`, JSON.stringify(slBody));
       const slResult = await placeT212Order(slPath, slBody, encoded);
-      results.push({ type: 'STOP_LOSS', ...(slResult.data as Record<string, unknown> ?? {}) });
+      slFailed = !slResult.ok;
+      results.push({ type: 'STOP_LOSS', ok: slResult.ok, error: slResult.ok ? undefined : slResult.error, ...(slResult.data as Record<string, unknown> ?? {}) });
       if (!slResult.ok) console.warn('[t212/live-order] SL placement failed:', slResult.error);
     }
 
@@ -247,7 +257,8 @@ export async function POST(request: NextRequest) {
       const tpPath = `${base}/equity/orders/limit`;
       console.log(`[t212/live-order] → TP limit`, JSON.stringify(tpBody));
       const tpResult = await placeT212Order(tpPath, tpBody, encoded);
-      results.push({ type: 'TAKE_PROFIT', ...(tpResult.data as Record<string, unknown> ?? {}) });
+      tpFailed = !tpResult.ok;
+      results.push({ type: 'TAKE_PROFIT', ok: tpResult.ok, error: tpResult.ok ? undefined : tpResult.error, ...(tpResult.data as Record<string, unknown> ?? {}) });
       if (!tpResult.ok) console.warn('[t212/live-order] TP placement failed:', tpResult.error);
     }
 
@@ -263,6 +274,11 @@ export async function POST(request: NextRequest) {
     orderType,
     env,
     orders: results,
+    slFailed,
+    tpFailed,
+    protectionWarning: (slFailed || tpFailed)
+      ? `Position opened but ${slFailed && tpFailed ? 'both stop-loss AND take-profit' : slFailed ? 'the stop-loss' : 'the take-profit'} order was rejected by T212 — this position currently has ${slFailed && tpFailed ? 'no protection at all' : slFailed ? 'no stop-loss' : 'no take-profit'}.`
+      : undefined,
   });
 }
 
