@@ -53,8 +53,16 @@ const DEFAULT_SETTINGS: NewsSettings = {
 };
 
 const SCAN_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
-const STORAGE_KEY_FEED = 'news_feed';
-const STORAGE_KEY_DECISIONS = 'news_decisions';
+// _v2 suffix: bumped when the sentiment source changed from the Anthropic
+// API to plain keyword scoring — old cached entries carried confidence
+// values (up to 100) and verdicts the new classifier (capped at 90, and
+// with the "X sinks as market gains" fix) can no longer produce, and would
+// otherwise sit there being redisplayed forever since nothing was ever
+// re-scanning already-seen headlines. Orphans the old key rather than
+// trying to detect/filter stale entries by shape — everyone just starts
+// fresh under the new key.
+const STORAGE_KEY_FEED = 'news_feed_v2';
+const STORAGE_KEY_DECISIONS = 'news_decisions_v2';
 const STORAGE_KEY_SETTINGS = 'news_settings';
 
 function timeAgo(ts: number | string): string {
