@@ -26,6 +26,7 @@ import { startGeminiWatch, getWatchedDealIds, getWatchNotes, addToWatch, setWatc
 import { fetchFullPositions, getSession } from './igApi';
 import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
 import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot';
+import { startAlpacaNewsStream, isNewsStreamEnabled, setNewsStreamEnabled } from './alpacaNewsStream';
 
 const app    = express();
 const PORT   = parseInt(process.env.PORT ?? '3001', 10);
@@ -627,6 +628,17 @@ app.post('/ig-strategy/:mode/watch/ai-pause', auth, (req: Request, res: Response
   res.json({ ok: true });
 });
 
+// Alpaca real-time news stream — opt-in, off by default, mode-independent
+// (it's a shared background connection, not per-account). See
+// alpacaNewsStream.ts for why this needs to be trivially toggleable.
+app.get('/alpaca-news-stream', auth, (_req: Request, res: Response) => {
+  res.json({ ok: true, enabled: isNewsStreamEnabled() });
+});
+app.post('/alpaca-news-stream', auth, (req: Request, res: Response) => {
+  setNewsStreamEnabled(!!req.body?.enabled);
+  res.json({ ok: true, enabled: isNewsStreamEnabled() });
+});
+
 // Manual trigger for allowance-blocked recommendation refresh, bypassing the
 // normal 6h cooldown — otherwise waits for the hourly background check.
 app.post('/ig-strategy/:mode/refresh-recommendations', auth, async (req: Request, res: Response) => {
@@ -701,6 +713,7 @@ app.listen(PORT, '0.0.0.0', () => {
   startLeaderboardSchedule();
   startGeminiWatch();
   startRecommendationRefresh();
+  startAlpacaNewsStream(); // no-op unless previously toggled on — see alpacaNewsStream.ts
 
   // Auto-resume legacy single-account bot if it was running before restart
   const saved = loadSavedState();

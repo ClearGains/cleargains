@@ -624,6 +624,33 @@ function IgSpreadBetTab() {
   const [noteDrafts, setNoteDrafts]         = useState<Record<string, string>>({});
   const [noteBusy, setNoteBusy]             = useState<string | null>(null);
 
+  // Alpaca real-time news stream — account-independent (one shared bot-server
+  // connection, not per demo/live), opt-in and off by default. See
+  // bot-server/src/alpacaNewsStream.ts for why this needs to be trivially
+  // toggleable without a redeploy.
+  const [newsStreamEnabled, setNewsStreamEnabledState] = useState(false);
+  const [newsStreamBusy, setNewsStreamBusy]             = useState(false);
+  useEffect(() => {
+    fetch('/api/alpaca-news-stream')
+      .then(res => res.json())
+      .then((data: { ok: boolean; enabled?: boolean }) => { if (data.ok) setNewsStreamEnabledState(!!data.enabled); })
+      .catch(() => {});
+  }, []);
+  const toggleNewsStream = async () => {
+    setNewsStreamBusy(true);
+    try {
+      const res  = await fetch('/api/alpaca-news-stream', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ enabled: !newsStreamEnabled }),
+      });
+      const data = await res.json() as { ok: boolean; enabled?: boolean };
+      if (data.ok) setNewsStreamEnabledState(!!data.enabled);
+    } finally {
+      setNewsStreamBusy(false);
+    }
+  };
+
   const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const watchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -1425,6 +1452,19 @@ function IgSpreadBetTab() {
               <h2 className="text-sm font-semibold text-slate-300">Gemini Position Watch</h2>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-500">{watchedDealIds.size} watched</span>
+                <button
+                  onClick={() => void toggleNewsStream()}
+                  disabled={newsStreamBusy}
+                  title="Real-time Alpaca news headlines — forces a fresh Gemini review the moment breaking news hits a watched position, instead of waiting on the ordinary throttle. Shared across demo/live. Off by default."
+                  className={clsx(
+                    'px-2 py-0.5 rounded text-[11px] font-medium transition-colors disabled:opacity-50 border',
+                    newsStreamEnabled
+                      ? 'bg-sky-600/20 hover:bg-sky-600/30 border-sky-600/40 text-sky-300'
+                      : 'bg-slate-800/60 hover:bg-slate-700 border-slate-700 text-slate-400',
+                  )}
+                >
+                  {newsStreamEnabled ? '📡 News Stream On' : 'News Stream Off'}
+                </button>
                 <button
                   onClick={() => void toggleWatchAiPaused()}
                   disabled={aiPauseBusy}

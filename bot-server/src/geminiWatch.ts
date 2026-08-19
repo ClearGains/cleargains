@@ -13,6 +13,7 @@ import { askGeminiPositionVerdict, askGeminiTradeIdea } from './gemini';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
 import { calcRsi, calcMacdHist } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
+import { hasBreakingNews } from './alpacaNewsStream';
 import { isNYSEOpen, isNearClose, type AlpacaBar } from './alpacaApi';
 import { FX_EPICS, isIndexEpic } from './igStrategyScanner';
 
@@ -567,12 +568,19 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
 
   const moved = !last || Math.abs(p.upl - last.upl) >= MOVE_THRESHOLD_GBP;
   const stale = !last || (Date.now() - last.at) >= MAX_SILENCE_MS;
+  // A real headline just hit for this instrument (Alpaca's real-time news
+  // stream, opt-in — see alpacaNewsStream.ts) — same bypass category as a
+  // sharp dip: price hasn't necessarily moved yet, but that's exactly the
+  // case where waiting for the ordinary throttle to notice a move is too
+  // late. Doesn't feed the prompt itself, just makes sure this cycle's
+  // review actually runs instead of being silently skipped.
+  const breakingNews = !!ticker && hasBreakingNews(ticker);
   // A sharp dip, a just-turned-red reversal, or a real end-of-day profit
   // worth evaluating always gets a fresh Gemini call this cycle even if the
   // ordinary throttle would otherwise skip it — these are exactly the
   // situations where sitting on stale judgment for up to another 45 minutes
   // is the wrong tradeoff.
-  if (!moved && !stale && !sharpDip && !justTurnedRed && !nearEndOfDayProfit) return;
+  if (!moved && !stale && !sharpDip && !justTurnedRed && !nearEndOfDayProfit && !breakingNews) return;
   // Mechanical checks above (stall-tightening, EOD, early-loss) already ran
   // and don't touch Gemini at all — only the actual AI review is skipped
   // here, so the hard stop-loss and every price-only protection still work
