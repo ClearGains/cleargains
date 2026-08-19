@@ -11,11 +11,12 @@ import {
   vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal, pivotPointsSignal,
   ruleBasedAnalysisSignal,
   calcRsi, calcMacdHist, calcAtr, calcEfficiencyRatio,
-  STRATEGY_META,
+  STRATEGY_META, MIN_SWING_CONFIDENCE,
   type StrategySignal,
 } from './alpacaStrategies';
+import { ruleBasedAnalysis } from './ruleBasedAnalysis';
 import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic, SECTOR_MAP, RULE_BASED_ANALYSIS_CONFIRMED_EPICS } from './igStrategyScanner';
-import { askGeminiDailyVerdict, askGeminiTradeIdea } from './gemini';
+import { askGeminiDailyVerdict, askGeminiTradeIdea, askGeminiConfirmStockTrade } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchAllHeadlines } from './newsFetch';
 import { createStreamManager, type StreamManager } from './igStream';
@@ -335,7 +336,7 @@ function loadReleasedDeals(mode: IgMode): Set<string> {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis';
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed';
 export type IgMode         = 'demo' | 'live';
 
 export type IgStrategyConfig = {
@@ -681,6 +682,9 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   // strategy is Yahoo/Alpaca-covered in practice (usesFreeData), so this
   // IG-native resolution/count barely gets used, same as gemini_opinion.
   rule_based_analysis: { resolution: 'DAY', count: 250 },
+  // Same daily/250-bar shape as rule_based_analysis — built on the exact
+  // same underlying scoring, just with a Gemini confirmation layer on top.
+  gemini_confirmed:    { resolution: 'DAY', count: 250 },
 };
 
 // Free-data params for strategies that need something other than the daily
@@ -713,6 +717,9 @@ const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   // populated (see STRATEGY_META.rule_based_analysis) — every other daily
   // strategy's 6mo default (~126 trading days) isn't enough.
   rule_based_analysis: { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
+  // Same 2y/daily need as rule_based_analysis — same underlying scoring,
+  // same SMA200 trend filter requirement.
+  gemini_confirmed:    { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
 };
 
 // Daily-timeframe strategies poll far more often here than STRATEGY_META's
@@ -1220,6 +1227,12 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
         case 'macd_crossover':     signal = macdCrossoverSignal(bars, false); break;
         case 'pivot_points':       signal = pivotPointsSignal(bars, false); break;
         case 'rule_based_analysis': signal = ruleBasedAnalysisSignal(bars, false); break;
+        // Read-only preview only — shows what the rule layer thinks;
+        // actual execution in evaluateEpic also requires Gemini's
+        // confirmation on top of this, which isn't worth spending a real
+        // Gemini call on for every candidate this recommendations sweep
+        // considers.
+        case 'gemini_confirmed':   signal = ruleBasedAnalysisSignal(bars, false); break;
         default: break;  // orb/weekly_momentum need extra state this scan doesn't track
       }
 
@@ -1665,6 +1678,99 @@ async function evaluateEpic(
     case 'rule_based_analysis':
       signal = ruleBasedAnalysisSignal(bars, inPosition, side);
       break;
+
+    // Two-layer entry, built per explicit request: give stocks the same
+    // structure that's made the FX swing bot's own entries meaningfully
+    // more reliable than gemini_opinion's from-scratch approach — rules
+    // qualify a real setup first, Gemini only confirms or vetoes it with
+    // context the rules can't see (real news, sector-peer correlation),
+    // rather than inventing a thesis on its own. Exits reuse
+    // ruleBasedAnalysisSignal's own thesis-recheck directly — same
+    // underlying engine, so a position closes the moment the rule-based
+    // bias itself flips away from the held side.
+    case 'gemini_confirmed': {
+      if (inPosition) { signal = ruleBasedAnalysisSignal(bars, true, side); break; }
+      if (isStrategyAiPaused(mode)) { signal = { action: 'HOLD', reason: 'AI paused for this bot — resume to evaluate entries again' }; break; }
+
+      const candles = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v }));
+      let analysis;
+      try { analysis = ruleBasedAnalysis('', candles); } catch (e) {
+        signal = { action: 'HOLD', reason: `Rule analysis failed: ${e instanceof Error ? e.message : String(e)}` };
+        break;
+      }
+      const swing = analysis.swing;
+      if (swing.direction === 'FLAT') {
+        signal = { action: 'HOLD', reason: swing.reasoning || `${analysis.bias} bias — no clear swing setup` };
+        break;
+      }
+      // Below this bar, don't even spend a Gemini call — nothing to
+      // confirm if the rules themselves aren't convinced. Same floor
+      // pure rule_based_analysis now requires to actually trade.
+      if (swing.confidence < MIN_SWING_CONFIDENCE) {
+        signal = { action: 'HOLD', reason: `${swing.direction} bias but only ${swing.confidence}/10 rule confidence — below the ${MIN_SWING_CONFIDENCE}/10 bar to even ask Gemini to confirm` };
+        break;
+      }
+
+      const sectorBlock = sectorCooldownBlock(mode, epic);
+      if (sectorBlock) { signal = { action: 'HOLD', reason: sectorBlock }; break; }
+
+      const last  = candles[candles.length - 1].close;
+      const rsi   = calcRsi(bars, 14);
+      const macd  = calcMacdHist(bars, 12, 26, 9);
+      const ticker    = EPIC_TO_ALPACA[epic];
+      const headlines = ticker ? await fetchAllHeadlines(ticker, 8, epicName(epic)) : [];
+      const todayUtc    = new Date().toISOString().slice(0, 10);
+      const todaysBars  = bars.filter(b => b.t.slice(0, 10) === todayUtc);
+      const dayOpen     = todaysBars[0]?.o ?? bars[0]?.o;
+      const dayChangePercent = dayOpen ? ((last - dayOpen) / dayOpen) * 100 : undefined;
+      // Same relative-volume computation as the rule engine's own volume
+      // signal (chartIndicators.ts's summarizeIndicators) — recomputed
+      // here rather than plumbed through AnalysisResult, since that type
+      // doesn't expose it.
+      const recent5   = bars.slice(-5);
+      const prior20   = bars.slice(-25, -5);
+      const avgRecent = recent5.reduce((s, b) => s + b.v, 0) / Math.max(recent5.length, 1);
+      const avgPrior  = prior20.reduce((s, b) => s + b.v, 0) / Math.max(prior20.length, 1);
+      const volumeSurgeMultiple = prior20.length >= 10 && avgPrior > 0 ? avgRecent / avgPrior : undefined;
+      const peerGroup = getPeerGroupChange(epic);
+
+      const verdict = await askGeminiConfirmStockTrade({
+        instrumentName: epicName(epic),
+        suggestedDir:   swing.direction === 'LONG' ? 'BUY' : 'SELL',
+        ruleReasoning:  swing.reasoning,
+        ruleConfidence: swing.confidence,
+        price:          last,
+        rsi,
+        macdHist:       macd?.hist ?? null,
+        lastCandles:    candles.slice(-8).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+        headlines,
+        dayChangePercent,
+        volumeSurgeMultiple,
+        peerGroupChangePercent: peerGroup?.changePercent,
+        peerGroupLabel:         peerGroup?.label,
+      });
+
+      addLog(mode, 'info', epicName(epic), `[GEMINI-CONFIRM] ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+
+      // Same 70% floor gemini_opinion's own entries already require —
+      // consistent bar for "Gemini's own conviction," whichever role it's
+      // playing (deciding vs confirming).
+      const CONFIRM_MIN_CONFIDENCE = 70;
+      if (verdict.direction === 'SKIP' || verdict.confidence < CONFIRM_MIN_CONFIDENCE) {
+        signal = { action: 'HOLD', reason: `[GEMINI-CONFIRM] Vetoed rule signal (${swing.direction} ${swing.confidence}/10) — ${verdict.reason} (${verdict.engine})` };
+        break;
+      }
+
+      signal = {
+        action:           swing.direction === 'LONG' ? 'BUY' : 'SELL',
+        reason:           `Rules (${swing.confidence}/10): ${swing.reasoning} | Gemini confirmed ${verdict.confidence}%: ${verdict.reason}`,
+        stopPrice:        swing.stopLoss,
+        takeProfitPrice:  swing.takeProfit1,
+        orderType:        'market',
+        confidence:       verdict.confidence,
+      };
+      break;
+    }
 
     // No technical rule at all — Gemini decides from scratch. No exit logic
     // of its own either: an open position here is managed entirely by
@@ -2300,8 +2406,13 @@ async function executeIgSignal(
   // where a sanity check on the setup earns its cost. Skipped entirely for
   // gemini_opinion — the entry signal already IS Gemini's own judgment,
   // asking it to confirm itself would just double the cost for no benefit.
+  // Same reasoning for gemini_confirmed — its own entry decision already
+  // went through a real, purpose-built Gemini confirmation
+  // (askGeminiConfirmStockTrade, richer context than this generic check's
+  // fixed strength:70 placeholder); running this too would just be a
+  // second, worse-informed opinion capable of overriding the first one.
   let effectiveDirection: 'BUY' | 'SELL' = direction;
-  if (cfg.strategy !== 'gemini_opinion' && classifyMarketType(epic) === 'SHARES') {
+  if (cfg.strategy !== 'gemini_opinion' && cfg.strategy !== 'gemini_confirmed' && classifyMarketType(epic) === 'SHARES') {
     if (isStrategyAiPaused(mode)) {
       addLog(mode, 'wait', name, 'AI paused for this bot — skipping entry rather than trading unconfirmed');
       return;

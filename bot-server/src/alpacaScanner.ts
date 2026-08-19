@@ -244,6 +244,10 @@ const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit
   pivot_points:        { tf: '1Day',  limit: 30 },
   gemini_opinion:      { tf: '1Hour', limit: 40 },
   rule_based_analysis: { tf: '1Day',  limit: 260 }, // needs ~250 for its SMA200 trend filter, see alpacaStrategies.ts
+  // IG-bot-only in practice (see igStrategyBot.ts) — entry exists purely
+  // to satisfy StrategyName's exhaustiveness here, this Alpaca-side
+  // scanner never actually offers it as a selectable strategy.
+  gemini_confirmed:    { tf: '1Day',  limit: 260 },
 };
 
 /**

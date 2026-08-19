@@ -696,7 +696,7 @@ export function ruleBasedAnalysisSignal(
 
 // ── Strategy metadata ─────────────────────────────────────────────────────────
 
-export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis';
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed';
 
 export const STRATEGY_META: Record<StrategyName, {
   label:     string;
@@ -750,4 +750,14 @@ export const STRATEGY_META: Record<StrategyName, {
   // trading days) so the SMA200 trend filter is populated in practice, not
   // just technically non-crashing at the bare 200 minimum.
   rule_based_analysis: { label: 'Rule-Based Analysis (Daily Brief)', timeframe: 'daily', pollMs: 60 * 60_000, barPeriod: '1Day', barsNeeded: 250 },
+  // Two-layer entry: the same RSI/MACD/SMA/BB/volume qualifying rules as
+  // rule_based_analysis above must agree on a real setup first, then Gemini
+  // confirms or vetoes it with context the rules can't see (real news,
+  // sector-peer correlation) — the stock-side analog of how the FX swing
+  // bot already works (rules qualify, Gemini only confirms), rather than
+  // gemini_opinion's from-scratch approach. Daily bars/1y history, same as
+  // rule_based_analysis, since it's built on the exact same underlying
+  // scoring — see askGeminiConfirmStockTrade in gemini.ts for the prompt,
+  // and evaluateEpic's own 'gemini_confirmed' case in igStrategyBot.ts.
+  gemini_confirmed:    { label: 'Gemini Confirmed (Rules + AI)', timeframe: 'daily', pollMs: 60 * 60_000, barPeriod: '1Day', barsNeeded: 250 },
 };

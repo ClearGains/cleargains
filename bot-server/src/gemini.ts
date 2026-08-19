@@ -898,3 +898,124 @@ Respond with JSON only, no markdown:
     };
   }
 }
+
+// ── Gemini confirmation for a rule-qualified stock/instrument setup ─────────
+// ("gemini_confirmed" strategy, 2026-08-19) — the stock-side analog of
+// askGeminiFxSwing: unlike askGeminiTradeIdea (gemini_opinion), a real
+// technical setup already exists before this is ever called
+// (ruleBasedAnalysis's own RSI/MACD/SMA/BB/volume scoring, same engine
+// rule_based_analysis uses) — Gemini's job is to confirm or veto it with
+// real context, not invent a thesis from nothing. Built per explicit
+// request: give stocks the same two-layer structure (rules qualify, Gemini
+// confirms) that's made the FX bot's own entries meaningfully more
+// reliable than gemini_opinion's from-scratch approach.
+export type StockConfirmSignal = {
+  instrumentName: string;
+  suggestedDir:   'BUY' | 'SELL';
+  ruleReasoning:  string; // ruleBasedAnalysis's own stated reasoning for this direction
+  ruleConfidence: number; // 1-10, ruleBasedAnalysis's own scale
+  price:          number;
+  rsi:            number | null;
+  macdHist:       number | null;
+  lastCandles:    Array<{ open: number; high: number; low: number; close: number }>;
+  headlines:      string[];
+  dayChangePercent?:       number;
+  volumeSurgeMultiple?:    number;
+  peerGroupChangePercent?: number;
+  peerGroupLabel?:         string;
+};
+
+export type StockConfirmVerdict = {
+  direction:  'BUY' | 'SELL' | 'SKIP';
+  confidence: number;
+  reason:     string;
+  engine:     'gemini' | 'passthrough';
+};
+
+export async function askGeminiConfirmStockTrade(req: StockConfirmSignal): Promise<StockConfirmVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  // Fail closed, not open — same discipline as the SHARES-only second-
+  // opinion check in igStrategyBot.ts (confirmed live this matters: a
+  // Qualcomm entry went through unconfirmed purely because Gemini 503'd at
+  // that exact moment, on a setup extreme enough that the check exists
+  // specifically to catch it). Unlike FX's own confirmation (which passes
+  // through at a flat 65% since correlation/currency risk is already
+  // guarded elsewhere), a stock setup here is only as safe as this actual
+  // confirmation running — SKIP on any failure rather than trading the
+  // rule signal alone as if it had been reviewed and approved.
+  if (!apiKey) {
+    return { direction: 'SKIP', confidence: 0, reason: 'No Gemini key configured', engine: 'passthrough' };
+  }
+  if (!reserveGeminiCall()) {
+    return { direction: 'SKIP', confidence: 0, reason: 'Daily Gemini call cap reached', engine: 'passthrough' };
+  }
+
+  const headlineBlock = req.headlines.length
+    ? `\nRecent news (last 7 days, dated — weigh today's/yesterday's far more heavily than one from most of a week ago, likely already priced in):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '\nNo recent company-specific news found.\n';
+
+  const candleBlock = req.lastCandles.length
+    ? `\nLast ${req.lastCandles.length} closed daily candles (oldest first):\n${req.lastCandles.map((c, i) =>
+        `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
+      ).join('\n')}\n`
+    : '';
+
+  const prompt = `A technical rule-based system (RSI/MACD/SMA/Bollinger Bands, daily bars) has already qualified the following setup — your job is to confirm or veto it with real-world context the rules can't see, not to invent a thesis of your own from nothing.
+
+Instrument: ${req.instrumentName}
+Rule-based signal: ${req.suggestedDir} (${req.ruleConfidence}/10 conviction) — "${req.ruleReasoning}"
+Current price: ${req.price.toFixed(2)}
+${req.rsi != null ? `RSI (14d): ${req.rsi.toFixed(1)}` : ''}
+${req.macdHist != null ? `MACD histogram: ${req.macdHist > 0 ? '+' : ''}${req.macdHist.toFixed(5)}` : ''}
+${req.dayChangePercent !== undefined ? `Move today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
+${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation right now.` : ''}
+${req.peerGroupChangePercent !== undefined ? `${req.peerGroupLabel ?? 'Correlated peers'} average move today: ${req.peerGroupChangePercent >= 0 ? '+' : ''}${req.peerGroupChangePercent.toFixed(1)}% — a similar-sized move across the group means this is sector-wide, not stock-specific, a weaker basis for the rule signal than an isolated move.` : ''}
+${candleBlock}${headlineBlock}
+Your job: does the real-world context above support this signal, or is there a clear reason to override it — fresh contradicting news, this instrument already extended well past its peers on no real news of its own, or the recent candle shape actively reversing against the signal's own direction? The rules already did the technical qualifying; don't re-litigate RSI/MACD from scratch, weigh what they can't see instead.
+
+Respond with JSON only, no markdown:
+{"direction":"BUY","confidence":75,"reason":"max 20 words"}
+(direction must be "${req.suggestedDir}" to confirm, or "SKIP" to veto — never the opposite direction, this is confirm-or-veto, not a second opinion on direction)`;
+
+  try {
+    const res = await fetchGeminiWithRetry(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          contents:         [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+
+    if (!res.ok) {
+      return { direction: 'SKIP', confidence: 0, reason: `Gemini ${res.status}`, engine: 'passthrough' };
+    }
+
+    const data    = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
+
+    // Enforce confirm-or-veto even if the model didn't follow instructions —
+    // any direction other than the exact one asked to confirm is a veto,
+    // not a silent flip to trading the opposite way.
+    const direction: StockConfirmVerdict['direction'] = parsed.direction === req.suggestedDir ? req.suggestedDir : 'SKIP';
+
+    return {
+      direction,
+      confidence: Math.max(0, Math.min(100, parsed.confidence ?? 0)),
+      reason:     parsed.reason ?? '',
+      engine:     'gemini',
+    };
+  } catch (e) {
+    return {
+      direction: 'SKIP', confidence: 0,
+      reason: `Gemini failed (${e instanceof Error ? e.message : String(e)})`,
+      engine: 'passthrough',
+    };
+  }
+}

@@ -466,7 +466,7 @@ function RecommendationPanel({
 
 // ── IG Spread Bet tab ─────────────────────────────────────────────────────────
 
-type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis';
+type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed';
 type IgMode         = 'demo' | 'live';
 
 type IgOpenPosition = {
@@ -563,7 +563,8 @@ const IG_STRATEGIES: { value: IgStrategyName; label: string; timeframe: string; 
   { value: 'vwap',               label: 'VWAP Reversion',         timeframe: 'Intraday (1-min)', description: 'Bet on price returning to VWAP when it dips 0.5% below and RSI < 45. Backtested negative after costs.' },
   { value: 'weekly_momentum',    label: 'Weekly Momentum',        timeframe: 'Position (Weekly)', description: 'Ride weekly trends: above 12-week SMA + 4-week momentum > 1% + RSI 50–70. Backtested negative after financing costs.' },
   { value: 'gemini_opinion',     label: '🧪 Gemini Opinion (Experimental)', timeframe: 'Intraday (30-min)', description: 'No technical entry rule — Gemini decides BUY/SELL/HOLD from scratch off 30-min price shape, RSI/MACD context, and near-daily news, and sets its own stop/TP. Exits handled entirely by Gemini Position Watch. No track record yet — start small.' },
-  { value: 'rule_based_analysis', label: '📊 Rule-Based Analysis (Daily Brief)', timeframe: 'Swing (Daily)', description: 'Same RSI/MACD/SMA/Bollinger engine the Daily Brief page uses, with an SMA200 trend filter. Backtested 4th of 9 overall (avg -3.74%, PF 0.79) — but restricted here to 15 instruments individually re-verified profitable (return>0 AND PF>1) under the same real cost model: FTSE 100, Japan 225, Apple, Barclays, Alphabet, HSBC, BP, Silver, Brent Crude, Natural Gas, Bitcoin, Rivian, Uber, Ford, Coinbase. Most consistent of the top strategies (100% of its own instruments profitable, highest win rate ~52%) but smaller average wins than the trend-following strategies above — donchian_breakout/ema_crossover/macd_crossover all beat it on raw return even on this exact instrument set.' },
+  { value: 'rule_based_analysis', label: '📊 Rule-Based Analysis (Daily Brief)', timeframe: 'Swing (Daily)', description: 'Same RSI/MACD/SMA/Bollinger engine the Daily Brief page uses, with an SMA200 trend filter, a same-day-extension dampener, and a 7/10 minimum-confidence floor before a signal actually trades. Restricted to 30 instruments individually backtest-confirmed profitable under this exact engine.' },
+  { value: 'gemini_confirmed',   label: '🎯 Gemini Confirmed (Rules + AI)', timeframe: 'Swing (Daily)', description: 'Two-layer entry: the same rule engine as Rule-Based Analysis must qualify a real setup first (7/10+ confidence), then Gemini confirms or vetoes it with real news and sector-peer context — the stock-side version of how the FX Swing Bot already works. Unrestricted universe (not limited to the 30 confirmed names) since Gemini\'s own confirmation is the safety check here instead of a pre-vetted list. No track record yet — new strategy.' },
 ];
 
 const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
@@ -578,6 +579,7 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
   pivot_points:       'Daily Pivot Points',
   gemini_opinion:     'Gemini Opinion (Experimental)',
   rule_based_analysis: 'Rule-Based Analysis (Daily Brief)',
+  gemini_confirmed:    'Gemini Confirmed (Rules + AI)',
 };
 
 function IgSpreadBetTab() {

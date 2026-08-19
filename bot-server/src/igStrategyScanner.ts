@@ -415,6 +415,8 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   // kept accurate to match igStrategyBot.ts's IG_RES (250 daily bars for
   // the SMA200 trend filter).
   rule_based_analysis: { resolution: 'DAY', count: 250 },
+  // Also not used at runtime — same reason as rule_based_analysis above.
+  gemini_confirmed:    { resolution: 'DAY', count: 250 },
 };
 
 // ── Bar conversion ────────────────────────────────────────────────────────────
@@ -570,7 +572,7 @@ function scoreRuleBasedAnalysis(bars: AlpacaBar[], epic: string, name: string): 
 const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>([
   'donchian_breakout', 'donchian_hourly', 'ema_crossover', 'macd_crossover',
   'rsi_mean_reversion', 'orb', 'vwap', 'weekly_momentum', 'gemini_opinion',
-  'rule_based_analysis',
+  'rule_based_analysis', 'gemini_confirmed',
 ]);
 
 // orb/rsi_mean_reversion are timeframe 'intraday' — igStrategyBot.ts's poll()
@@ -612,6 +614,7 @@ const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   // alpacaStrategies.ts for why.
   gemini_opinion:     { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m' },
   rule_based_analysis: { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
+  gemini_confirmed:    { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
 };
 
 // Volatility-matched routing — a fast (hourly) strategy wants instruments
@@ -666,6 +669,11 @@ export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], ep
       // Gemini ever looks at it.
       case 'gemini_opinion':     return scoreGeminiOpinion(bars, epic, name).score;
       case 'rule_based_analysis': return scoreRuleBasedAnalysis(bars, epic, name).score;
+      // Same scoring as rule_based_analysis for ranking purposes — they
+      // share the same underlying rule engine, and Gemini's confirmation
+      // only applies at actual entry time (evaluateEpic), not the ranking
+      // phase, so there's no separate signal to score by here.
+      case 'gemini_confirmed':   return scoreRuleBasedAnalysis(bars, epic, name).score;
       default:                   return -1;
     }
   })();
