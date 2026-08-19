@@ -297,20 +297,27 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     }
   }
 
-  // ── EOD profit-taking (stocks only) ────────────────────────────────────
-  // User's own trading intuition: a stock position sitting in real profit
-  // late in the NYSE session gets closed out rather than held into the
-  // next day, on the reasoning that direction can just as easily reverse
-  // overnight. Checked first against real trade history — directionally
-  // plausible on what little multi-day stock data existed, but nowhere
-  // near enough of a sample to confirm statistically; implemented anyway
-  // on explicit request. Closing the position removes it from tracking
-  // entirely, so no repeat-guard needed the way stop-tightening needs one.
+  // ── EOD profit-taking (every instrument, not just stocks) ──────────────
+  // User's own trading intuition: a position sitting in real profit late in
+  // the day gets closed out rather than held into the next day, on the
+  // reasoning that direction can just as easily reverse overnight — FX and
+  // commodities carry the same daily-noise/reversal risk as stocks do, per
+  // explicit follow-up request, so this isn't stock-scoped the way the
+  // early-loss rule below still is. Uses the NYSE close as a single, already-
+  // defined "end of day" checkpoint for the whole account rather than
+  // inventing a separate one per market — FX/commodities don't structurally
+  // close then, but a consistent daily boundary matters more here than
+  // precisely matching each market's own session hours. Checked first
+  // against real trade history — directionally plausible on what little
+  // multi-day data existed, but nowhere near enough of a sample to confirm
+  // statistically; implemented anyway on explicit request. Closing the
+  // position removes it from tracking entirely, so no repeat-guard needed
+  // the way stop-tightening needs one.
   const EOD_PROFIT_MIN_GBP = 2; // same "meaningfully" bar as GREEN_TO_RED_THRESHOLD_GBP above
-  if (isStockEpic(p.epic) && isNearClose(15) && p.upl >= EOD_PROFIT_MIN_GBP) {
+  if (isNearClose(15) && p.upl >= EOD_PROFIT_MIN_GBP) {
     try {
       await closePosition(session, p.dealId, p.direction, p.size);
-      addLog(mode, 'exit', name, `[EOD] Closing near NYSE close with +£${p.upl.toFixed(2)} — not holding a winner into a session that could reverse`);
+      addLog(mode, 'exit', name, `[EOD] Closing near end of day with +£${p.upl.toFixed(2)} — not holding a winner into a session that could reverse`);
       return;
     } catch (e) {
       addLog(mode, 'error', name, `[EOD] Close failed: ${e instanceof Error ? e.message : String(e)}`);
