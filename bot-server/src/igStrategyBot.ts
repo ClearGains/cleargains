@@ -880,13 +880,30 @@ async function getDemoDataSession(mode: IgMode): Promise<IGSession | null> {
 // accumulating live ticks from nothing before a strategy can evaluate it.
 async function prewarmLightstreamBuffer(mode: IgMode, epic: string, count: number): Promise<void> {
   const st = ms(mode);
+  // Same blockedEpics cooldown evaluateEpic's own allowance gate uses —
+  // this call site was missing it (found 2026-08-19 auditing the FX bot's
+  // near-identical bug, prewarmCandles in fxScalperBot.ts): a restart while
+  // the candle buffer hadn't filled yet re-attempted this on every restart
+  // regardless of a previous allowance failure, same failure shape that
+  // exhausted the demo account that day. Currently dormant in practice
+  // (only donchian_hourly reaches this path — gemini_opinion was already
+  // moved off Lightstream for the same reason, see usesLightstream's own
+  // comment above), but closing it now rather than waiting for it to bite
+  // the same way once donchian_hourly is used again.
+  const unblockAt = st.blockedEpics.get(epic);
+  if (unblockAt !== undefined && Date.now() < unblockAt) return;
   try {
     const dataSession = await getDemoDataSession(mode);
     if (!dataSession) return;
     const bars = await fetchCandleHistory(dataSession, epic, 'HOUR', count);
     if (bars.length) st.candleBuffers.set(epic, bars.map(b => candleBarToTick(epic, b)));
   } catch (e) {
-    addLog(mode, 'info', epicName(epic), `Lightstream prewarm skipped: ${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    addLog(mode, 'info', epicName(epic), `Lightstream prewarm skipped: ${msg}`);
+    if (msg.toLowerCase().includes('allowance')) {
+      st.blockedEpics.set(epic, Date.now() + BLOCK_COOLDOWN_MS);
+      saveBlockedEpics(mode, st.blockedEpics);
+    }
   }
 }
 
