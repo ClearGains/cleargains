@@ -649,7 +649,7 @@ export function pivotPointsSignal(
 // gate — it calls ruleBasedAnalysis() directly rather than through this
 // function, so without sharing this constant the backtest would silently
 // simulate a different (gate-less) strategy than the one actually live.
-export const MIN_SWING_CONFIDENCE = 6;
+export const MIN_SWING_CONFIDENCE = 7;
 
 export function ruleBasedAnalysisSignal(
   bars:       AlpacaBar[],
