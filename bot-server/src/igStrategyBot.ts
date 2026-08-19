@@ -176,7 +176,7 @@ function recordDayChange(epic: string, changePercent: number): void {
 // the sector is flat. Returns undefined (not 0) when there's nothing fresh
 // to compare against, so the prompt can omit the line entirely rather than
 // claim a peer average of exactly 0%.
-function getPeerGroupChange(epic: string): { changePercent: number; label: string } | undefined {
+export function getPeerGroupChange(epic: string): { changePercent: number; label: string } | undefined {
   const sector = SECTOR_MAP[epic];
   if (!sector) return undefined;
   const today = new Date().toISOString().slice(0, 10);

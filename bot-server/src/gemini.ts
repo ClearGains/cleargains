@@ -564,6 +564,14 @@ export type PositionReviewRequest = {
   // to make from the price/momentum context already in the prompt — this
   // just tells it *why* it's being asked right now.
   nearEndOfDay?: boolean;
+  // Same two checks askGeminiTradeIdea already gets at entry — carried into
+  // the ongoing review too, per explicit request: the entry decision could
+  // see an unusual volume surge or a sector-wide move, then went blind to
+  // both for the rest of the position's life since the periodic review
+  // never got either. Reuses the exact same computations, not new metrics.
+  volumeSurgeMultiple?:     number;
+  peerGroupChangePercent?:  number;
+  peerGroupLabel?:          string;
 };
 
 export async function askGeminiPositionVerdict(req: PositionReviewRequest): Promise<PositionVerdict> {
@@ -612,6 +620,8 @@ ${req.sharpDipPercent !== undefined ? `⚠ SUDDEN MOVE: ${req.sharpDipPercent.to
 ${req.reversedToRed ? `⚠ REVERSAL: this position was meaningfully in profit at an earlier point and has now swung into a loss. Even if the news below looks positive or is silent, a green-to-red reversal like this can mean a sell-off is already underway that hasn't been reported yet — weigh the reversal itself as a real reason to lean toward closing rather than assuming the fundamentals still hold just because nothing bad has been printed about it.` : ''}
 ${req.isFx ? `Note: this is an FX pair. Currency pairs oscillate more within what's still ordinary short-term noise than a stock does — a move under roughly 2-3% is often just normal chop, not a genuine reversal. Apply a higher bar of evidence than you would for a stock before leaning toward closing over any sharp-move or reversal signal above: look for a clearly larger and/or sustained move, or real corroborating news, rather than the move alone.` : ''}
 ${req.nearEndOfDay ? `⏰ END OF DAY: this position is already in real profit and the trading day is about to close. Specifically weigh: is this profit worth banking now before an unreviewed overnight/next-day gap, or does the trend/momentum above look genuinely set to continue, in which case holding through the close has a real case? Being profitable and near the close isn't automatically a reason to close — only close if you'd actually expect this to give some of it back, not out of a blanket rule that a winner should never be held overnight.` : ''}
+${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation right now, which lends more weight to whatever the price action above is currently doing, favorable or not.` : ''}
+${req.peerGroupChangePercent !== undefined ? `${req.peerGroupLabel ?? 'Correlated peers'} average move today: ${req.peerGroupChangePercent >= 0 ? '+' : ''}${req.peerGroupChangePercent.toFixed(1)}% — compare against this instrument's own move above. A similar-sized move across the group means whatever's happening is sector-wide, not specific to this position — weigh that differently than an isolated move (this instrument moving meaningfully more or less than its peers), which is more likely to be driven by something specific to this name.` : ''}
 ${req.stopLevel !== undefined ? `Stop-loss already attached at: ${req.stopLevel.toFixed(2)}` : 'No stop currently attached'}
 ${req.limitLevel !== undefined ? `Take-profit already attached at: ${req.limitLevel.toFixed(2)}` : 'No take-profit currently set'}
 ${headlineBlock}

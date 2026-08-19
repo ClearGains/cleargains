@@ -7,7 +7,7 @@ import {
 } from './igApi';
 import {
   resolveCredentials, addLog, recordLossExit, calcStake, isLossLocked, isProfitLocked, getMaxRiskGbp,
-  registerBotOpenedDeal, type IgMode,
+  registerBotOpenedDeal, getPeerGroupChange, type IgMode,
 } from './igStrategyBot';
 import { askGeminiPositionVerdict, askGeminiTradeIdea } from './gemini';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
@@ -412,8 +412,9 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // promptly rather than waiting on the ordinary £3-move / 45-min throttle —
   // Alpaca/Yahoo bars are free, unlike the Gemini call itself below, which
   // still respects the throttle (and the daily cap) as before.
-  let dayChangePercent: number | undefined;
-  let sharpDipPercent:  number | undefined;
+  let dayChangePercent:     number | undefined;
+  let sharpDipPercent:      number | undefined;
+  let volumeSurgeMultiple:  number | undefined;
   // Entry decisions (askGeminiTradeIdea) get real candle shape + RSI/MACD —
   // review only ever got two numbers derived from price (dayChangePercent,
   // sharpDipPercent), never the shape or momentum indicators themselves.
@@ -507,6 +508,15 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
           recentCandles = bars.slice(-8).map(b => ({ open: b.o, high: b.h, low: b.l, close: b.c }));
           rsi = calcRsi(bars, 14);
           macdHist = calcMacdHist(bars, 12, 26, 9)?.hist ?? null;
+
+          // Same relative-volume check askGeminiTradeIdea already gets at
+          // entry — carried into the ongoing review too, per explicit
+          // request (an entry could see a volume surge, then the review
+          // went blind to it for the rest of the position's life).
+          const recent20    = bars.slice(-20);
+          const avgVolPrior = bars.slice(0, -20).reduce((s, b) => s + b.v, 0) / Math.max(bars.length - 20, 1);
+          const recentVol   = recent20.reduce((s, b) => s + b.v, 0) / recent20.length;
+          volumeSurgeMultiple = avgVolPrior > 0 ? recentVol / avgVolPrior : undefined;
         }
       }
     } catch { /* best-effort — proceed without it */ }
@@ -542,6 +552,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   if (isWatchAiPaused(mode)) return;
 
   const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
+  const peerGroup = getPeerGroupChange(p.epic);
 
   const verdict = await askGeminiPositionVerdict({
     instrumentName: name,
@@ -561,6 +572,9 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     rsi,
     macdHist,
     nearEndOfDay: nearEndOfDayProfit,
+    volumeSurgeMultiple,
+    peerGroupChangePercent: peerGroup?.changePercent,
+    peerGroupLabel: peerGroup?.label,
   });
 
   addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
