@@ -153,12 +153,43 @@ function loadEpicStates(mode: FxMode): Record<string, SwingEpicState> | null {
   try { return JSON.parse(fs.readFileSync(epicsFile(mode), 'utf8')) as Record<string, SwingEpicState>; } catch { return null; }
 }
 
+// ── Data-session allowance cooldown ──────────────────────────────────────────
+// Pre-warm always sources from the demo-credentialed session (see
+// authDataSession below) regardless of which mode this bot instance is —
+// so an allowance exhaustion here is account-wide on the demo key, not
+// per-mode and not per-epic. Confirmed live 2026-08-19: all 9 epics failed
+// identically in the same restart, and 13 restarts that session (each
+// re-attempting the full pre-warm with nothing remembering the previous
+// failure) kept the account pinned at zero headroom instead of ever
+// getting a chance to recover. Same cooldown-and-remember pattern
+// igStrategyBot.ts already uses for its own per-epic allowance blocks
+// (BLOCK_COOLDOWN_MS, 6h) — reused here at account scope instead of
+// per-epic, since this specific allowance is shared across every epic on
+// this key, not held individually per instrument.
+const DATA_ALLOWANCE_COOLDOWN_MS  = 6 * 60 * 60_000;
+const DATA_ALLOWANCE_BLOCK_FILE   = path.join(__dirname, '..', 'fx-scalper-data-allowance-block.json');
+function loadDataAllowanceBlockedUntil(): number {
+  try { return (JSON.parse(fs.readFileSync(DATA_ALLOWANCE_BLOCK_FILE, 'utf8')) as { until: number }).until; }
+  catch { return 0; }
+}
+function saveDataAllowanceBlockedUntil(until: number): void {
+  try { fs.writeFileSync(DATA_ALLOWANCE_BLOCK_FILE, JSON.stringify({ until }), 'utf8'); } catch {}
+}
+let dataAllowanceBlockedUntil = loadDataAllowanceBlockedUntil();
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const POLL_MS                    = 15 * 60_000;  // scan cadence — hourly-bar decisions don't need tighter
 const WEEKEND_FLATTEN_BUFFER_MIN = 30;   // tighten (not flatten) open positions this many minutes before Friday 22:00 UTC close
 const MAX_LOSS_CEILING_MULT      = 3;    // matches igStrategyBot.ts's realized-max-loss ceiling ratio
-const PREWARM_SKIP_IF_FRESHER_THAN_MS = 70 * 60_000;  // hourly bars + buffer — see prewarmCandles
+// Raised 70min->4h on 2026-08-19 — 70min meant almost any restart more than
+// an hour after the last one still paid for a real REST call, which is
+// exactly what let 13 restarts in one session exhaust the shared demo
+// account's allowance (see DATA_ALLOWANCE_COOLDOWN_MS above). A few hours
+// of staleness barely matters for an EMA20/50 trend read, and the live
+// Lightstream feed keeps the actual current price accurate regardless —
+// only the deeper historical shape used to seed the indicators lags.
+const PREWARM_SKIP_IF_FRESHER_THAN_MS = 4 * 60 * 60_000;  // hourly bars + buffer — see prewarmCandles
 // A position surviving a gap this long (typically the weekend) last had its
 // thesis checked against whatever news/technicals existed before the gap —
 // nothing re-confirms it holds up against what's actually happened since.
@@ -856,6 +887,16 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   // tops up genuinely new bars since, instead of re-fetching from scratch.
   const MIN_PERSISTED_CANDLES = 50;
   async function prewarmCandles(sess: IGSession, epics: string[]): Promise<void> {
+    // Known-exhausted from a previous attempt this cooldown window — every
+    // epic would fail identically (see DATA_ALLOWANCE_COOLDOWN_MS), so skip
+    // the whole pass rather than re-proving that 9 times over on every
+    // restart in the meantime. Whatever's already in closedCandles (however
+    // stale) plus the live stream going forward is what this runs on until
+    // the cooldown clears.
+    if (Date.now() < dataAllowanceBlockedUntil) {
+      addLog('info', '—', `Data account allowance still exhausted — skipping pre-warm entirely, retrying after ${new Date(dataAllowanceBlockedUntil).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' })}`);
+      return;
+    }
     addLog('info', '—', `Pre-warming hourly candles for ${epics.length} epic(s)…`);
     let warmed = 0;
     for (const epic of epics) {
@@ -920,7 +961,18 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           ? `Resumed from saved history (${st.closedCandles.length} candles) — topped up ${bars.length} bar(s)`
           : `Pre-warmed ${bars.length} hourly candles — ${st.closedCandles.length} closed`);
       } catch (e) {
-        addLog('info', epicName(epic), `Pre-warm skipped: ${e instanceof Error ? e.message : String(e)}`);
+        const msg = e instanceof Error ? e.message : String(e);
+        addLog('info', epicName(epic), `Pre-warm skipped: ${msg}`);
+        // Account-wide, not per-epic (confirmed live 2026-08-19: all 9
+        // epics fail identically once this hits) — remember it and stop
+        // attempting the rest of this pass too, instead of burning through
+        // 8 more calls that would fail the exact same way.
+        if (msg.toLowerCase().includes('allowance')) {
+          dataAllowanceBlockedUntil = Date.now() + DATA_ALLOWANCE_COOLDOWN_MS;
+          saveDataAllowanceBlockedUntil(dataAllowanceBlockedUntil);
+          addLog('info', '—', `Data account allowance exhausted — pausing all pre-warm for 6h rather than re-hitting it on every remaining epic/restart`);
+          break;
+        }
       }
     }
     addLog('info', '—', `Pre-warm done — ${warmed}/${epics.length} epic(s) ready`);
