@@ -38,7 +38,22 @@ async function fetchGeminiWithRetry(url: string, options: RequestInit): Promise<
     if (res.ok || res.status < 500) return res; // success, or a real error (bad request, auth) — retrying won't help
     await new Promise(r => setTimeout(r, 1_500));
     return await attempt();
-  } catch {
+  } catch (e) {
+    // A timeout (AbortSignal.timeout throws a TimeoutError specifically,
+    // distinct from a network-level failure) means nothing came back within
+    // the full 20s window at all — confirmed live via exact log timestamps
+    // that a failing evaluation was consistently taking ~45s (20s + 1.5s +
+    // 20s + overhead), meaning both the original attempt AND the retry were
+    // timing out back to back. That's the opposite of what this retry was
+    // built for: routing around one degraded instance among many healthy
+    // ones only helps if a fresh connection is likely to land somewhere
+    // faster, which a same-service-wide slow patch doesn't offer — paying a
+    // second full 20s wait for the same outcome just doubles how long a
+    // failing evaluation blocks the rest of the watchlist behind it. Only
+    // retry a genuine network-level failure (DNS, connection reset) here;
+    // still retry every real 5xx response above, where a different backend
+    // instance actually replying is a distinct, concrete possibility.
+    if (e instanceof Error && e.name === 'TimeoutError') throw e;
     await new Promise(r => setTimeout(r, 1_500));
     return await attempt();
   }
