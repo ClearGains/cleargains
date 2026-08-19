@@ -13,7 +13,8 @@ import { askGeminiPositionVerdict, askGeminiTradeIdea } from './gemini';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
 import { calcRsi, calcMacdHist } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
-import { isNYSEOpen, type AlpacaBar } from './alpacaApi';
+import { isNYSEOpen, isNearClose, type AlpacaBar } from './alpacaApi';
+import { FX_EPICS, isIndexEpic } from './igStrategyScanner';
 
 // ── Gemini position watch — for positions opened outside the strategy bot
 // (manually via IG's own app, the Demo Trader panel, or anywhere else) that
@@ -60,6 +61,7 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
   lastReview.delete(dealId);
   peakUpl.delete(dealId);
   lastStopTightenAt.delete(dealId);
+  lastEarlyLossTightenAt.delete(dealId);
 }
 
 // Throttle — a position that hasn't moved meaningfully since its last actual
@@ -98,6 +100,26 @@ const peakUpl = new Map<string, number>();
 const STALL_RETRACE_FRAC = 0.65; // fraction of peak favorable £ given back before treating it as stalling
 const STALL_LOCK_IN_FRAC = 0.3;  // fraction of peak favorable move to lock in when it fires
 const lastStopTightenAt = new Map<string, number>();
+
+// Real company shares only — excludes FX, indices, and the commodities/
+// crypto that share the same 'CS.'/'CC.' epic prefixes FX and indices use
+// (Silver and Bitcoin are both 'CS.'-prefixed but aren't FX_EPICS members;
+// Brent Crude/Natural Gas are 'CC.'-prefixed). Used to scope the two
+// mechanical rules below to what the user actually asked about ("in
+// particular stocks"), not FX/commodities where the same day-close/
+// early-loss intuition wasn't what was being tested.
+const NON_STOCK_EPICS = new Set(['CC.D.LCO.USS.IP', 'CC.D.NG.USS.IP', 'CS.D.USCSI.TODAY.IP', 'CS.D.BITCOIN.TODAY.IP']);
+function isStockEpic(epic: string): boolean {
+  return !FX_EPICS.has(epic) && !isIndexEpic(epic) && !NON_STOCK_EPICS.has(epic);
+}
+
+// Mechanical stop-tightening for a stock that's never gone meaningfully
+// green and is still red after a real amount of time open — see its own
+// use below for the reasoning (user's own trading intuition, checked first
+// against real trade history and found directionally plausible but on too
+// small a sample to statistically confirm; implemented anyway on explicit
+// request, moderately rather than as a hard close).
+const lastEarlyLossTightenAt = new Map<string, number>();
 
 // Seeds a freshly-opened gemini_opinion position with its entry confidence,
 // so there's an immediate baseline to compare against rather than an
@@ -270,6 +292,61 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
           addLog(mode, 'info', name, `Stalling — gave back ${(retracedFrac * 100).toFixed(0)}%+ of its £${peak.toFixed(2)} peak, tightened stop to lock in ~£${(lockInPts * p.size).toFixed(2)} of it`);
         } catch (e) {
           addLog(mode, 'error', name, `Stop tighten failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
+
+  // ── EOD profit-taking (stocks only) ────────────────────────────────────
+  // User's own trading intuition: a stock position sitting in real profit
+  // late in the NYSE session gets closed out rather than held into the
+  // next day, on the reasoning that direction can just as easily reverse
+  // overnight. Checked first against real trade history — directionally
+  // plausible on what little multi-day stock data existed, but nowhere
+  // near enough of a sample to confirm statistically; implemented anyway
+  // on explicit request. Closing the position removes it from tracking
+  // entirely, so no repeat-guard needed the way stop-tightening needs one.
+  const EOD_PROFIT_MIN_GBP = 2; // same "meaningfully" bar as GREEN_TO_RED_THRESHOLD_GBP above
+  if (isStockEpic(p.epic) && isNearClose(15) && p.upl >= EOD_PROFIT_MIN_GBP) {
+    try {
+      await closePosition(session, p.dealId, p.direction, p.size);
+      addLog(mode, 'exit', name, `[EOD] Closing near NYSE close with +£${p.upl.toFixed(2)} — not holding a winner into a session that could reverse`);
+      return;
+    } catch (e) {
+      addLog(mode, 'error', name, `[EOD] Close failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // ── Early-loss escalation tightening (stocks only) ─────────────────────
+  // Same user intuition, other direction: a stock position that's never
+  // gone meaningfully green and is still red after a real amount of time
+  // open is treated as more likely to keep escalating than recover —
+  // tighten the stop partway rather than wait for the original full
+  // distance. Same "lock in a fraction, not all/none" caution as the
+  // stall-tightening block above, applied to remaining risk instead of
+  // banked profit since there's no real peak to speak of here. Own
+  // cooldown map so it only fires once per position, same pattern.
+  const EARLY_LOSS_MIN_AGE_HOURS   = 20 / 60; // 20min — past pure entry noise
+  const EARLY_LOSS_NEVER_GREEN_GBP = 1;       // "never really went green" bar
+  const EARLY_LOSS_TIGHTEN_FRAC    = 0.5;     // halve the remaining stop distance
+  if (isStockEpic(p.epic) && heldHours >= EARLY_LOSS_MIN_AGE_HOURS && peak < EARLY_LOSS_NEVER_GREEN_GBP && p.upl < 0 && p.stopLevel !== undefined) {
+    const lastTightened = lastEarlyLossTightenAt.get(p.dealId) ?? 0;
+    if (Date.now() - lastTightened > 30 * 60_000) {
+      const isLong = p.direction === 'BUY';
+      const remainingDist = isLong ? currentLevel - p.stopLevel : p.stopLevel - currentLevel;
+      if (remainingDist > 0) {
+        const newStop = isLong
+          ? p.stopLevel + remainingDist * EARLY_LOSS_TIGHTEN_FRAC
+          : p.stopLevel - remainingDist * EARLY_LOSS_TIGHTEN_FRAC;
+        const stopIsValid = isLong ? newStop < currentLevel : newStop > currentLevel;
+        if (stopIsValid) {
+          try {
+            await updatePositionLevels(session, p.dealId, newStop, p.limitLevel ?? null);
+            lastEarlyLossTightenAt.set(p.dealId, Date.now());
+            addLog(mode, 'info', name, `[Early-loss] Never went green after ${(heldHours * 60).toFixed(0)}min, still red — tightened stop to cut further downside`);
+          } catch (e) {
+            addLog(mode, 'error', name, `[Early-loss] Stop tighten failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
       }
     }
