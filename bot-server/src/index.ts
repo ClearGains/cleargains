@@ -19,6 +19,7 @@ import {
   setStrategyAiPaused,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
+import { IG_EPICS, RULE_BASED_ANALYSIS_CONFIRMED_EPICS, FX_EPICS } from './igStrategyScanner';
 import { getJournal } from './tradeJournal';
 import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } from './leaderboard';
 import { startGeminiWatch, getWatchedDealIds, getWatchNotes, addToWatch, setWatchNote, removeFromWatch, isWatchAiPaused, setWatchAiPaused } from './geminiWatch';
@@ -391,6 +392,18 @@ app.get('/ig-strategy/:mode/status', auth, (req: Request, res: Response) => {
   const mode = resolveIgMode(req, res);
   if (!mode) return;
   void getIgStrategyBotStatus(mode).then(status => res.json(status));
+});
+
+// Powers the "pin to Gemini instead" picker for rule_based_analysis on the
+// Start Bot form — the instruments its own scan won't pick up on its own
+// (not in RULE_BASED_ANALYSIS_CONFIRMED_EPICS) but are still available via
+// epicStrategyOverrides. FX excluded — fxScalperBot.ts owns FX trading
+// exclusively regardless of which strategy this bot is running.
+app.get('/ig-strategy/override-candidates', auth, (_req: Request, res: Response) => {
+  const candidates = IG_EPICS
+    .filter(e => !FX_EPICS.has(e.epic) && !RULE_BASED_ANALYSIS_CONFIRMED_EPICS.has(e.epic))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.json({ ok: true, candidates });
 });
 
 app.post('/ig-strategy/:mode/start', auth, (req: Request, res: Response) => {

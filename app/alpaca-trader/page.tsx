@@ -590,6 +590,22 @@ function IgSpreadBetTab() {
   const [maxDailyLoss, setMaxDailyLoss] = useState('3');
   const lossPctInitialized = useRef(false);
 
+  // "Pin to Gemini instead" picker — only relevant for rule_based_analysis,
+  // whose own scan is restricted to backtest-confirmed instruments. Lets a
+  // few specific names run under gemini_opinion's own judgment in the same
+  // bot rather than being dropped outright (see epicStrategyOverrides on
+  // IgStrategyConfig, bot-server/src/igStrategyBot.ts).
+  const [overrideCandidates, setOverrideCandidates] = useState<{ epic: string; name: string }[]>([]);
+  const [selectedOverrides, setSelectedOverrides]   = useState<Set<string>>(new Set());
+  useEffect(() => {
+    fetch('/api/ig-strategy?action=override-candidates')
+      .then(res => res.json())
+      .then((data: { ok: boolean; candidates?: { epic: string; name: string }[] }) => {
+        if (data.ok) setOverrideCandidates(data.candidates ?? []);
+      })
+      .catch(() => {});
+  }, []);
+
   const [status, setStatus]   = useState<IgBotStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState<string | null>(null);
@@ -824,8 +840,12 @@ function IgSpreadBetTab() {
   };
 
   const handleStart = () => {
+    const epicStrategyOverrides = strategy === 'rule_based_analysis' && selectedOverrides.size
+      ? Object.fromEntries([...selectedOverrides].map(epic => [epic, 'gemini_opinion' as const]))
+      : undefined;
     void post('start', {
       strategy,
+      epicStrategyOverrides,
       maxRiskGbp:        parseFloat(maxRisk) || 20,
       maxStockPositions: parseInt(maxStockPos, 10) || 3,
       maxIndexPositions: parseInt(maxIndexPos, 10) || 3,
@@ -916,6 +936,39 @@ function IgSpreadBetTab() {
               </div>
               {stratMeta && <p className="text-xs text-slate-500 mt-2">{stratMeta.description}</p>}
             </div>
+
+            {/* Pin specific instruments to Gemini instead, alongside rule_based_analysis */}
+            {strategy === 'rule_based_analysis' && overrideCandidates.length > 0 && (
+              <div>
+                <label className="block text-xs text-slate-400 mb-1.5">
+                  Also let Gemini trade these (not backtest-confirmed for Rule-Based Analysis, so its own scan skips them — pin any you still want in play, decided by Gemini&apos;s own judgment instead)
+                </label>
+                <div className={clsx(
+                  'max-h-40 overflow-y-auto grid grid-cols-2 gap-x-3 gap-y-1 p-2.5 rounded-lg border border-slate-700/50 bg-slate-800/40',
+                  isRunning && 'opacity-60 pointer-events-none',
+                )}>
+                  {overrideCandidates.map(c => (
+                    <label key={c.epic} className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={selectedOverrides.has(c.epic)}
+                        disabled={isRunning}
+                        onChange={() => setSelectedOverrides(prev => {
+                          const next = new Set(prev);
+                          if (next.has(c.epic)) next.delete(c.epic); else next.add(c.epic);
+                          return next;
+                        })}
+                        className="accent-purple-500"
+                      />
+                      {c.name}
+                    </label>
+                  ))}
+                </div>
+                {selectedOverrides.size > 0 && (
+                  <p className="text-[10px] text-purple-300 mt-1">{selectedOverrides.size} pinned to Gemini Opinion</p>
+                )}
+              </div>
+            )}
 
             {/* Max risk & max positions */}
             <div className="grid grid-cols-3 gap-2">

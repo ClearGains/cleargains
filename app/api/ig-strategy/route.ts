@@ -35,6 +35,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const mode   = req.nextUrl.searchParams.get('mode') ?? 'demo';
   const action = req.nextUrl.searchParams.get('action') ?? 'status';
 
+  if (action === 'override-candidates') return proxyTo(`/ig-strategy/override-candidates`, 'GET');
+
   if (!validMode(mode)) return NextResponse.json({ ok: false, error: 'mode must be demo or live' }, { status: 400 });
   if (action === 'status') return proxyTo(`/ig-strategy/${mode}/status`, 'GET');
   if (action === 'watch')  return proxyTo(`/ig-strategy/${mode}/watch`,  'GET');
