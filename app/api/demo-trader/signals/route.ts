@@ -147,11 +147,25 @@ export async function POST(request: NextRequest) {
     ? UNIVERSE
     : UNIVERSE.filter(s => sectors.includes(s.sector));
 
-  // Cap at 60 stocks per run to stay within Finnhub's 60 calls/minute limit
+  // Cap at 60 stocks per run to stay within Finnhub's 60 calls/minute limit.
+  // A flat slice(0, 60) always covers the same first 60 in declaration
+  // order — with the universe now past 60 (grew to 93 after the 2026-08-19
+  // sector expansion), that meant Consumer, the new Industrials/
+  // Communication/Utilities sectors, and every UK stock would never be
+  // scanned at all under "All", regardless of being in UNIVERSE. Auto-scan
+  // runs this every 5min, so instead rotate the 60-wide window each run —
+  // over a couple of cycles the full list gets covered rather than the
+  // same slice forever. Bucket width matches the frontend's own 300_000ms
+  // auto-scan interval (app/demo-trader/page.tsx).
   const MAX_STOCKS = 60;
-  const universe = filteredUniverse.slice(0, MAX_STOCKS);
+  let universe = filteredUniverse;
+  if (filteredUniverse.length > MAX_STOCKS) {
+    const bucket = Math.floor(Date.now() / 300_000);
+    const offset = (bucket * MAX_STOCKS) % filteredUniverse.length;
+    universe = [...filteredUniverse.slice(offset), ...filteredUniverse.slice(0, offset)].slice(0, MAX_STOCKS);
+  }
   const cappedNote = filteredUniverse.length > MAX_STOCKS
-    ? ` (capped at ${MAX_STOCKS} of ${filteredUniverse.length})`
+    ? ` (capped at ${MAX_STOCKS} of ${filteredUniverse.length}, rotating window)`
     : '';
 
   debugLog.push(`📋 Universe: ${universe.length} stocks for sectors: ${sectors.join(', ')}${cappedNote}`);

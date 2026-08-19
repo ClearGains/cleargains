@@ -27,7 +27,15 @@ import { T212StrategyTrader } from '@/components/t212/T212StrategyTrader';
 import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
 import { NewsFeed } from '@/components/news/NewsFeed';
 
-const SECTORS = ['All', 'Technology', 'Healthcare', 'Energy', 'Finance', 'Consumer'] as const;
+// Kept in sync with every sector tag actually used in lib/stockUniverse.ts —
+// Telecom/Materials/Industrials/Transport (UK-only names) and Industrials/
+// Communication/Utilities (new US names) were previously present in the
+// data but had no filter button, so a user narrowing by sector could never
+// actually select them even though "All" included them.
+const SECTORS = [
+  'All', 'Technology', 'Healthcare', 'Energy', 'Finance', 'Consumer',
+  'Industrials', 'Communication', 'Utilities', 'Materials', 'Telecom', 'Transport',
+] as const;
 type Sector = typeof SECTORS[number];
 
 function fmtGBP(n: number) {
@@ -1589,7 +1597,10 @@ export default function DemoTraderPage() {
   const [customSizeStr, setCustomSizeStr] = useState('');
   const [slPctStr, setSlPctStr] = useState('2');
   const [tpPctStr, setTpPctStr] = useState('4');
-  const [sectors, setSectors] = useState<Sector[]>(['Technology']);
+  // Defaulted to Technology only before — meant every other sector (and now
+  // Industrials/Communication/Utilities too) was silently never scanned
+  // unless a user happened to toggle it on manually. Default to everything.
+  const [sectors, setSectors] = useState<Sector[]>(['All']);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);

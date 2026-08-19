@@ -36,6 +36,19 @@ export const UNIVERSE: UniverseStock[] = [
   { symbol: 'COIN',  name: 'Coinbase Global',       t212: 'COIN_US_EQ',  sector: 'Technology', isUK: false },
   { symbol: 'RBLX',  name: 'Roblox Corp.',          t212: 'RBLX_US_EQ',  sector: 'Technology', isUK: false },
   { symbol: 'SHOP',  name: 'Shopify Inc.',          t212: 'SHOP_US_EQ',  sector: 'Technology', isUK: false },
+  { symbol: 'NFLX',  name: 'Netflix Inc.',          t212: 'NFLX_US_EQ',  sector: 'Technology', isUK: false },
+  // Semiconductors/hardware — same names backtest-confirmed profitable for
+  // the IG rule-based strategy earlier this session (igStrategyScanner.ts's
+  // RULE_BASED_ANALYSIS_CONFIRMED_EPICS) — this universe had the same gap.
+  { symbol: 'ASML',  name: 'ASML Holding',          t212: 'ASML_US_EQ',  sector: 'Technology', isUK: false },
+  { symbol: 'ON',    name: 'ON Semiconductor',      t212: 'ON_US_EQ',    sector: 'Technology', isUK: false },
+  { symbol: 'TSM',   name: 'Taiwan Semiconductor',  t212: 'TSM_US_EQ',   sector: 'Technology', isUK: false },
+  { symbol: 'MRVL',  name: 'Marvell Technology',    t212: 'MRVL_US_EQ',  sector: 'Technology', isUK: false },
+  { symbol: 'NOK',   name: 'Nokia Corp.',           t212: 'NOK_US_EQ',   sector: 'Technology', isUK: false },
+  { symbol: 'WDC',   name: 'Western Digital',       t212: 'WDC_US_EQ',   sector: 'Technology', isUK: false },
+  { symbol: 'SNDK',  name: 'SanDisk Corp.',         t212: 'SNDK_US_EQ',  sector: 'Technology', isUK: false },
+  { symbol: 'DELL',  name: 'Dell Technologies',     t212: 'DELL_US_EQ',  sector: 'Technology', isUK: false },
+  { symbol: 'STX',   name: 'Seagate Technology',    t212: 'STX_US_EQ',   sector: 'Technology', isUK: false },
   // Healthcare — US
   { symbol: 'LLY',   name: 'Eli Lilly',            t212: 'LLY_US_EQ',   sector: 'Healthcare', isUK: false },
   { symbol: 'UNH',   name: 'UnitedHealth Group',   t212: 'UNH_US_EQ',   sector: 'Healthcare', isUK: false },
@@ -48,6 +61,7 @@ export const UNIVERSE: UniverseStock[] = [
   { symbol: 'VRTX',  name: 'Vertex Pharmaceuticals',t212: 'VRTX_US_EQ', sector: 'Healthcare', isUK: false },
   { symbol: 'MRNA',  name: 'Moderna Inc.',          t212: 'MRNA_US_EQ',  sector: 'Healthcare', isUK: false },
   { symbol: 'BIIB',  name: 'Biogen Inc.',           t212: 'BIIB_US_EQ',  sector: 'Healthcare', isUK: false },
+  { symbol: 'JNJ',   name: 'Johnson & Johnson',     t212: 'JNJ_US_EQ',   sector: 'Healthcare', isUK: false },
   // Energy — US
   { symbol: 'XOM',   name: 'ExxonMobil Corp.',     t212: 'XOM_US_EQ',   sector: 'Energy', isUK: false },
   { symbol: 'CVX',   name: 'Chevron Corp.',        t212: 'CVX_US_EQ',   sector: 'Energy', isUK: false },
@@ -79,6 +93,16 @@ export const UNIVERSE: UniverseStock[] = [
   { symbol: 'HD',    name: 'Home Depot Inc.',      t212: 'HD_US_EQ',    sector: 'Consumer', isUK: false },
   { symbol: 'TGT',   name: 'Target Corp.',         t212: 'TGT_US_EQ',   sector: 'Consumer', isUK: false },
   { symbol: 'SBUX',  name: 'Starbucks Corp.',      t212: 'SBUX_US_EQ',  sector: 'Consumer', isUK: false },
+  // Industrials — US (sector had zero US representation before — only
+  // Rolls-Royce on the UK side)
+  { symbol: 'BA',    name: 'Boeing Co.',            t212: 'BA_US_EQ',    sector: 'Industrials', isUK: false },
+  { symbol: 'CAT',   name: 'Caterpillar Inc.',      t212: 'CAT_US_EQ',   sector: 'Industrials', isUK: false },
+  { symbol: 'HON',   name: 'Honeywell International', t212: 'HON_US_EQ', sector: 'Industrials', isUK: false },
+  // Communication/Media — US (previously absent entirely)
+  { symbol: 'DIS',   name: 'Walt Disney Co.',       t212: 'DIS_US_EQ',   sector: 'Communication', isUK: false },
+  { symbol: 'T',     name: 'AT&T Inc.',             t212: 'T_US_EQ',     sector: 'Communication', isUK: false },
+  // Utilities — US (previously absent entirely)
+  { symbol: 'NEE',   name: 'NextEra Energy',        t212: 'NEE_US_EQ',   sector: 'Utilities', isUK: false },
   // UK — LSE
   { symbol: 'VOD.L',  name: 'Vodafone Group',       t212: 'VOD_UK_EQ',   sector: 'Telecom',  isUK: true },
   { symbol: 'BARC.L', name: 'Barclays PLC',         t212: 'BARC_UK_EQ',  sector: 'Finance',  isUK: true },
