@@ -246,18 +246,25 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          // No thinkingConfig — GEMINI_MODEL is a reasoning model that
-          // rejects thinkingBudget outright (confirmed live:
-          // {"thinkingConfig":{"thinkingBudget":0}} gets a
-          // flat 400 INVALID_ARGUMENT, breaking every call). Thinking stays
-          // on instead — cheap regardless — with maxOutputTokens raised to
-          // 1500: 400 wasn't enough either, confirmed live — a longer
-          // prompt (with news headlines added) pushed thinking to 381
-          // tokens, hit MAX_TOKENS, and truncated the JSON mid-word before
-          // the visible answer finished. Thinking-token usage isn't
-          // something this can control precisely, so headroom needs to be
-          // generous rather than tightly tuned.
-          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
+          // thinkingConfig.thinkingBudget:0 disables hidden reasoning —
+          // was believed unsupported ("GEMINI_MODEL rejects thinkingBudget
+          // outright, flat 400 INVALID_ARGUMENT") back when a different,
+          // older model was pinned here; re-verified live on 2026-08-19
+          // against gemini-3.5-flash across several prompt shapes and it's
+          // accepted fine now, 200/STOP every time. Worth checking again on
+          // any future model change rather than assuming either way — but
+          // for the currently pinned model, this is confirmed to work and
+          // is the actual fix for a real failure it was causing: a Marvell
+          // review came back "Gemini failed (Unexpected token 'h', "thought"
+          // is not valid JSON)" — thinking was consuming ~536 tokens on
+          // even a trivial prompt (confirmed live via a raw response
+          // inspection), and a longer real prompt risked exhausting
+          // maxOutputTokens on hidden reasoning before the visible JSON
+          // answer was ever fully generated. Disabling it removes that
+          // failure mode outright rather than just giving it more headroom
+          // to fail less often, and should also cut latency/cost since
+          // hidden reasoning tokens aren't free.
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500, thinkingConfig: { thinkingBudget: 0 } },
         }),
         signal: AbortSignal.timeout(20_000),
       }
@@ -409,7 +416,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500, thinkingConfig: { thinkingBudget: 0 } },
         }),
         signal: AbortSignal.timeout(20_000),
       }
@@ -496,7 +503,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500, thinkingConfig: { thinkingBudget: 0 } },
         }),
         signal: AbortSignal.timeout(20_000),
       }
@@ -670,7 +677,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500, thinkingConfig: { thinkingBudget: 0 } },
         }),
         signal: AbortSignal.timeout(20_000),
       },
@@ -855,7 +862,7 @@ Respond with JSON only, no markdown:
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.3, maxOutputTokens: 1500 },
+          generationConfig: { temperature: 0.3, maxOutputTokens: 1500, thinkingConfig: { thinkingBudget: 0 } },
         }),
         signal: AbortSignal.timeout(20_000),
       },
