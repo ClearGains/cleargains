@@ -748,8 +748,16 @@ export const STRATEGY_META: Record<StrategyName, {
   // Daily Brief's backtested rule engine (RSI/MACD/SMA/BB + SMA200 trend
   // filter) — see ruleBasedAnalysisSignal above. barsNeeded=250 (a year of
   // trading days) so the SMA200 trend filter is populated in practice, not
-  // just technically non-crashing at the bare 200 minimum.
-  rule_based_analysis: { label: 'Rule-Based Analysis (Daily Brief)', timeframe: 'daily', pollMs: 60 * 60_000, barPeriod: '1Day', barsNeeded: 250 },
+  // just technically non-crashing at the bare 200 minimum. pollMs matches
+  // gemini_opinion's 15min per explicit request 2026-08-19 — this had
+  // drifted to 60min since the "Daily Brief" framing was written, which
+  // meant real entries/exits (and the reversal-invalidation check in
+  // igStrategyBot.ts's evaluateEpic) were only ever re-evaluated once an
+  // hour, a real regression in trade-catching speed versus gemini_opinion's
+  // old cadence. The underlying signal is still computed off daily bars —
+  // this only shortens how often that signal gets re-checked against fresh
+  // data, which doesn't change what the backtest validated.
+  rule_based_analysis: { label: 'Rule-Based Analysis (Daily Brief)', timeframe: 'daily', pollMs: 15 * 60_000, barPeriod: '1Day', barsNeeded: 250 },
   // Two-layer entry: the same RSI/MACD/SMA/BB/volume qualifying rules as
   // rule_based_analysis above must agree on a real setup first, then Gemini
   // confirms or vetoes it with context the rules can't see (real news,
@@ -759,5 +767,6 @@ export const STRATEGY_META: Record<StrategyName, {
   // rule_based_analysis, since it's built on the exact same underlying
   // scoring — see askGeminiConfirmStockTrade in gemini.ts for the prompt,
   // and evaluateEpic's own 'gemini_confirmed' case in igStrategyBot.ts.
-  gemini_confirmed:    { label: 'Gemini Confirmed (Rules + AI)', timeframe: 'daily', pollMs: 60 * 60_000, barPeriod: '1Day', barsNeeded: 250 },
+  // pollMs matches rule_based_analysis's own 15min, same reasoning.
+  gemini_confirmed:    { label: 'Gemini Confirmed (Rules + AI)', timeframe: 'daily', pollMs: 15 * 60_000, barPeriod: '1Day', barsNeeded: 250 },
 };
