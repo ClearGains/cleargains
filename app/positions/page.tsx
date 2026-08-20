@@ -483,21 +483,37 @@ export default function PositionsPage() {
     async function fetchT212(key: string, secret: string, accountKey: AccountKey, env: string) {
       if (!key) return;
       try {
+        // Was calling /api/t212/positions, which doesn't exist (404) — every
+        // call silently failed into `errs` below and this account's rows
+        // never made it into the unified table, even though the account
+        // summary cards (LoadPortfolioModal, hitting /api/portfolio/t212)
+        // fetched and displayed the same account's data just fine. Confirmed
+        // live: T212 Demo showed 17 positions / +£724.20 P&L in its summary
+        // card while the position list right below it said "No open
+        // positions" — meaning there was no way to actually select and
+        // close anything for this account. Use the same working route the
+        // summary card already uses.
         const encoded = btoa(key + ':' + secret);
-        const r = await fetch(`/api/t212/positions?env=${env}`, {
-          headers: { 'x-t212-auth': encoded },
+        const r = await fetch('/api/portfolio/t212', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ encoded, env }),
         });
-        const raw = await r.json() as unknown;
-        const items: Record<string, unknown>[] = Array.isArray(raw)
-          ? (raw as Record<string, unknown>[])
-          : ((raw as Record<string, unknown[]>).items ?? []) as Record<string, unknown>[];
+        const raw = await r.json() as { ok: boolean; positions?: Record<string, unknown>[]; error?: string };
+        if (!raw.ok) { errs[accountKey] = raw.error ?? `T212 ${env} error`; return; }
+        const items: Record<string, unknown>[] = raw.positions ?? [];
 
         items.forEach((p) => {
           const qty    = Number(p.quantity   ?? 0);
           const entry  = Number(p.averagePrice ?? 0);
           const curr   = Number(p.currentPrice ?? 0);
-          const pnl    = Number(p.ppl ?? ((curr - entry) * qty));
-          const pnlPct = entry > 0 ? ((curr - entry) / entry) * 100 : 0;
+          // /api/portfolio/t212 already computes pnl/pnlPct server-side
+          // (preferring T212's own ppl field when present) — use those
+          // directly rather than recomputing from entry/current, which
+          // silently diverges from the account summary cards' own numbers
+          // whenever T212's ppl differs from a flat (curr-entry)*qty calc.
+          const pnl    = Number(p.pnl ?? ((curr - entry) * qty));
+          const pnlPct = Number(p.pnlPct ?? (entry > 0 ? ((curr - entry) / entry) * 100 : 0));
           all.push({
             id:           `${accountKey}_${p.ticker}`,
             account:      accountKey,
