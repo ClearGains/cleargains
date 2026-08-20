@@ -715,8 +715,17 @@ export async function startAlpacaBot(cfg: AlpacaBotConfig): Promise<{ ok: boolea
   // Always scan for best symbols before first poll
   addLog(mode, 'info', '—', 'Scanning market for best symbols…');
   try {
+    // Was maxPositions+2 — the watchlist size was tied directly to how many
+    // positions could be held at once, so a low maxPositions (the common
+    // case) meant the bot only ever considered a handful of names each
+    // cycle even though the scan pool behind it is ~200 liquid stocks/ETFs.
+    // openCount >= cfg.maxPositions is already enforced separately at entry
+    // time (see executeSignal), so a bigger watchlist doesn't risk holding
+    // more positions than the cap — it just means more real candidates get
+    // evaluated each cycle instead of the same 5-10 names every time.
+    const watchlistSize = Math.max(cfg.maxPositions + 2, 20);
     const best = await scanForBestSymbols(
-      cfg.strategy, mode, [], cfg.maxPositions + 2,
+      cfg.strategy, mode, [], watchlistSize,
       msg => addLog(mode, 'info', '—', msg),
     );
     cfg.symbols = best;
