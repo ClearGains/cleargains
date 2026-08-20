@@ -255,7 +255,8 @@ type GeminiClassification = { category: NewsCategory; sentiment: Sentiment; conf
 
 async function classifyWithGemini(items: RawFeed[]): Promise<GeminiClassification[] | null> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || items.length === 0) return null;
+  if (!apiKey) { console.error('[world-affairs gemini] no GEMINI_API_KEY configured'); return null; }
+  if (items.length === 0) return null;
 
   const list = items.map((it, i) => `${i + 1}. ${it.title}${it.summary ? ` — ${it.summary.slice(0, 200)}` : ''}`).join('\n');
 
@@ -284,28 +285,40 @@ Return ONLY a JSON array with exactly ${items.length} objects, one per headline,
         signal: AbortSignal.timeout(20_000),
       }
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error('[world-affairs gemini] HTTP', res.status, (await res.text()).slice(0, 300));
+      return null;
+    }
 
     const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     const match = text.match(/\[[\s\S]*\]/);
-    if (!match) return null;
+    if (!match) { console.error('[world-affairs gemini] no JSON array in response:', text.slice(0, 300)); return null; }
     const parsed = JSON.parse(match[0]) as GeminiClassification[];
     // Length mismatch means the model dropped or merged entries — the
     // index-based mapping back to headlines below would silently
     // misattribute every result after the gap, so fail closed to the free
     // classifier rather than show confidently-wrong data.
-    if (!Array.isArray(parsed) || parsed.length !== items.length) return null;
+    if (!Array.isArray(parsed) || parsed.length !== items.length) {
+      console.error('[world-affairs gemini] length mismatch: got', Array.isArray(parsed) ? parsed.length : typeof parsed, 'expected', items.length);
+      return null;
+    }
     // Guard against a hallucinated/misspelled category or sentiment value —
     // CAT_META[category] downstream would otherwise throw on an unknown key.
     const validCats: NewsCategory[] = ['geopolitical', 'economic', 'central-bank', 'commodities', 'earnings', 'health-crisis', 'energy', 'tech-regulation'];
     const validSentiments: Sentiment[] = ['bullish', 'bearish', 'neutral'];
     for (const p of parsed) {
-      if (!validCats.includes(p.category) || !validSentiments.includes(p.sentiment)) return null;
+      if (!validCats.includes(p.category) || !validSentiments.includes(p.sentiment)) {
+        console.error('[world-affairs gemini] invalid category/sentiment:', JSON.stringify(p).slice(0, 200));
+        return null;
+      }
       p.confidence = Math.max(0, Math.min(100, Number(p.confidence) || 50));
     }
     return parsed;
-  } catch { return null; }
+  } catch (e) {
+    console.error('[world-affairs gemini] exception:', e instanceof Error ? e.message : String(e));
+    return null;
+  }
 }
 
 function formatRelativeTime(ts: number): string {
