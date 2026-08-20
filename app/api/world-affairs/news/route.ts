@@ -104,6 +104,23 @@ function analyzeSentiment(title: string, summary: string): { sentiment: Sentimen
   return { sentiment: 'neutral', confidence: 50 };
 }
 
+// Previously: the headline-level sentiment (analyzeSentiment, a flat
+// bull/bear word-count ratio over the whole text) and the per-asset impact
+// directions below (keyword-matched per category, e.g. "easing" -> Stocks
+// bullish) were computed completely independently, with nothing keeping
+// them consistent. Confirmed live: "Stocks waver, dollar drops as US
+// Treasury moves to lower bond yields" — text contains "drops" and "fears"
+// (bearish word hits) AND "easing" (from "easing fears"), so the word-ratio
+// read bearish 83% while this function's own 'easing' branch hardcoded
+// Stocks/Bonds as bullish — the badge and the impact tags flatly
+// contradicted each other on the same story. The category-specific rules
+// below are the more domain-aware read (financial phrases like "rate cut"/
+// "easing"/"inflation" have well-established market implications a generic
+// word list can't capture), so this function now also returns an
+// `overrideSentiment` whenever a specific rule actually fired — the caller
+// uses that as the authoritative headline-level sentiment instead of the
+// generic ratio, which is now only trusted when nothing more specific
+// matched (the various category "else" branches).
 function analyzeImpact(category: NewsCategory, title: string, summary: string, sentiment: Sentiment) {
   const text = (title + ' ' + summary).toLowerCase();
   const bullish = sentiment === 'bullish';
@@ -113,6 +130,7 @@ function analyzeImpact(category: NewsCategory, title: string, summary: string, s
   const sectorImpacts: WorldNewsItem['sectorImpacts'] = [];
   const currencyImpacts: WorldNewsItem['currencyImpacts'] = [];
   const commodityImpacts: WorldNewsItem['commodityImpacts'] = [];
+  let overrideSentiment: Sentiment | null = null;
 
   switch (category) {
     case 'geopolitical':
@@ -120,6 +138,7 @@ function analyzeImpact(category: NewsCategory, title: string, summary: string, s
       currencyImpacts.push({ currency: 'USD', direction: 'strengthen' }, { currency: 'JPY', direction: 'strengthen' }, { currency: 'CHF', direction: 'strengthen' });
       commodityImpacts.push({ commodity: 'Gold', direction: 'rise', reason: 'Safe haven demand' });
       sectorImpacts.push({ sector: 'Defence', direction: 'bullish' });
+      overrideSentiment = 'bearish';
       if (text.includes('oil') || text.includes('opec') || text.includes('middle east') || text.includes('energy')) {
         commodityImpacts.push({ commodity: 'Oil', direction: 'rise', reason: 'Supply disruption risk' });
         sectorImpacts.push({ sector: 'Energy', direction: 'bullish' });
@@ -131,14 +150,17 @@ function analyzeImpact(category: NewsCategory, title: string, summary: string, s
         assetImpacts.push({ asset: 'Stocks', direction: 'bearish' }, { asset: 'Bonds', direction: 'bearish' });
         currencyImpacts.push({ currency: 'USD', direction: 'strengthen' });
         sectorImpacts.push({ sector: 'Growth Stocks', direction: 'bearish' }, { sector: 'Utilities', direction: 'bullish' });
+        overrideSentiment = 'bearish';
       } else if (text.includes('rate cut') || text.includes('stimulus') || text.includes('easing')) {
         assetImpacts.push({ asset: 'Stocks', direction: 'bullish' }, { asset: 'Bonds', direction: 'bullish' });
         currencyImpacts.push({ currency: 'USD', direction: 'weaken' });
         sectorImpacts.push({ sector: 'Growth Stocks', direction: 'bullish' }, { sector: 'Real Estate', direction: 'bullish' });
+        overrideSentiment = 'bullish';
       } else if (text.includes('recession') || text.includes('slowdown')) {
         assetImpacts.push({ asset: 'Stocks', direction: 'bearish' }, { asset: 'Bonds', direction: 'bullish' });
         sectorImpacts.push({ sector: 'Defensives', direction: 'bullish' }, { sector: 'Cyclicals', direction: 'bearish' });
         commodityImpacts.push({ commodity: 'Gold', direction: 'rise', reason: 'Recession hedge' });
+        overrideSentiment = 'bearish';
       } else {
         assetImpacts.push({ asset: 'Stocks', direction: bullish ? 'bullish' : bearish ? 'bearish' : 'neutral' });
       }
@@ -149,6 +171,8 @@ function analyzeImpact(category: NewsCategory, title: string, summary: string, s
       const isDovish  = text.includes('rate cut') || text.includes('dovish') || text.includes('easing');
       assetImpacts.push({ asset: 'Stocks', direction: isHawkish ? 'bearish' : isDovish ? 'bullish' : 'neutral' });
       assetImpacts.push({ asset: 'Bonds', direction: isHawkish ? 'bearish' : isDovish ? 'bullish' : 'neutral' });
+      if (isHawkish) overrideSentiment = 'bearish';
+      else if (isDovish) overrideSentiment = 'bullish';
       const dir = isHawkish ? 'strengthen' : 'weaken';
       if (text.includes('fed') || text.includes('federal reserve') || text.includes('fomc'))
         currencyImpacts.push({ currency: 'USD', direction: dir });
@@ -188,6 +212,7 @@ function analyzeImpact(category: NewsCategory, title: string, summary: string, s
       assetImpacts.push({ asset: 'Stocks', direction: 'bearish' });
       sectorImpacts.push({ sector: 'Healthcare', direction: 'bullish' }, { sector: 'Travel', direction: 'bearish' });
       commodityImpacts.push({ commodity: 'Gold', direction: 'rise', reason: 'Safe haven demand' });
+      overrideSentiment = 'bearish';
       break;
 
     case 'energy':
@@ -200,10 +225,11 @@ function analyzeImpact(category: NewsCategory, title: string, summary: string, s
     case 'tech-regulation':
       assetImpacts.push({ asset: 'Stocks', direction: 'bearish' });
       sectorImpacts.push({ sector: 'Technology', direction: 'bearish' });
+      overrideSentiment = 'bearish';
       break;
   }
 
-  return { assetImpacts, sectorImpacts, currencyImpacts, commodityImpacts };
+  return { assetImpacts, sectorImpacts, currencyImpacts, commodityImpacts, overrideSentiment };
 }
 
 function formatRelativeTime(ts: number): string {
@@ -279,8 +305,17 @@ export async function GET() {
 
   const analyzed: WorldNewsItem[] = deduped.map((item, idx) => {
     const category = categorize(item.title, item.summary);
-    const { sentiment, confidence } = analyzeSentiment(item.title, item.summary);
+    const wordRatio = analyzeSentiment(item.title, item.summary);
+    const { overrideSentiment, ...impacts } = analyzeImpact(category, item.title, item.summary, wordRatio.sentiment);
     const meta = CAT_META[category];
+    // When a specific category rule fired (e.g. "rate cut"/"easing"),
+    // that's the authoritative call — it drove the asset-impact tags below,
+    // so the headline-level badge has to agree with them or the two
+    // directly contradict each other on screen. 78% reflects a real,
+    // well-reasoned keyword match rather than a raw word-count ratio — not
+    // maxed out, but not a coin flip either.
+    const sentiment  = overrideSentiment ?? wordRatio.sentiment;
+    const confidence = overrideSentiment ? 78 : wordRatio.confidence;
     return {
       id: `${idx}-${item.publishedAt}`,
       title: item.title,
@@ -294,7 +329,7 @@ export async function GET() {
       categoryEmoji: meta.emoji,
       sentiment,
       confidence,
-      ...analyzeImpact(category, item.title, item.summary, sentiment),
+      ...impacts,
     };
   });
 
