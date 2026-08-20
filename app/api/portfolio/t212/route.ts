@@ -32,35 +32,55 @@ export async function POST(request: NextRequest) {
   }
 
   const [positionsRaw, cashRaw, ordersRaw] = await Promise.all([
-    safeFetch(`${base}/equity/portfolio`),
+    // Was /equity/portfolio, an older endpoint whose currentPrice/averagePrice
+    // are documented as "in instrument currency" (USD for a US stock) with no
+    // account-currency figure at all — every position's value/P&L was being
+    // computed as curr*qty and displayed with a £ prefix as if that were
+    // already GBP. Confirmed live: T212's own app showed £5,230.96 invested,
+    // this route reported £7,134.82 for the same 17-position portfolio — a
+    // ~36% inflation, consistent with US-stock $ face values read as £ with
+    // no FX conversion (GBP/USD ~0.73 explains the ratio almost exactly).
+    // /equity/positions is the current endpoint and includes walletImpact,
+    // which T212 computes in the account's own currency — use that instead
+    // of reconstructing an FX conversion ourselves.
+    safeFetch(`${base}/equity/positions`),
     safeFetch(`${base}/equity/account/cash`),
     safeFetch(`${base}/equity/orders?limit=50`),
   ]);
 
   // Normalise positions
-  type T212RawPos = {
-    ticker?: string; quantity?: number; averagePrice?: number;
-    currentPrice?: number; ppl?: number; fxPpl?: number; initialFillDate?: string;
+  type T212WalletImpact = {
+    currency?: string; currentValue?: number; fxImpact?: number;
+    totalCost?: number; unrealizedProfitLoss?: number;
   };
-  const rawItems = Array.isArray(positionsRaw)
-    ? (positionsRaw as T212RawPos[])
-    : ((positionsRaw as Record<string, T212RawPos[]> | null)?.items ?? []);
+  type T212RawPos = {
+    quantity?: number; averagePricePaid?: number; currentPrice?: number;
+    createdAt?: string; instrument?: { ticker?: string; name?: string; currency?: string };
+    walletImpact?: T212WalletImpact;
+  };
+  const rawItems = Array.isArray(positionsRaw) ? (positionsRaw as T212RawPos[]) : [];
 
   const positions = rawItems.map((p: T212RawPos) => {
     const qty   = Number(p.quantity ?? 0);
-    const entry = Number(p.averagePrice ?? 0);
+    // Per-share prices stay in instrument currency (USD etc.) for display —
+    // that's the stock's real quoted price, genuinely useful as-is. Only the
+    // aggregated value/P&L need the account-currency figures below.
+    const entry = Number(p.averagePricePaid ?? 0);
     const curr  = Number(p.currentPrice ?? 0);
-    const pnl   = Number(p.ppl ?? ((curr - entry) * qty));
+    const wi    = p.walletImpact;
+    const value = Number(wi?.currentValue ?? (curr * qty));
+    const pnl   = Number(wi?.unrealizedProfitLoss ?? ((curr - entry) * qty));
+    const totalCost = Number(wi?.totalCost ?? (entry * qty));
     return {
-      ticker:       String(p.ticker ?? ''),
-      name:         String(p.ticker ?? '').replace(/_[A-Z]{2}_[A-Z]{2}$/, ''),
+      ticker:       String(p.instrument?.ticker ?? ''),
+      name:         String(p.instrument?.ticker ?? '').replace(/_[A-Z]{2}_[A-Z]{2}$/, ''),
       quantity:     qty,
       averagePrice: entry,
       currentPrice: curr,
       pnl:          Math.round(pnl * 100) / 100,
-      pnlPct:       entry > 0 ? Math.round(((curr - entry) / entry) * 10000) / 100 : 0,
-      value:        Math.round(curr * qty * 100) / 100,
-      initialFillDate: p.initialFillDate,
+      pnlPct:       totalCost > 0 ? Math.round((pnl / totalCost) * 10000) / 100 : 0,
+      value:        Math.round(value * 100) / 100,
+      initialFillDate: p.createdAt,
     };
   });
 
