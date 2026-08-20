@@ -109,6 +109,19 @@ export function calcAtr(candles: CandleTick[], period = 14): number | null {
   return sum / period;
 }
 
+// Kaufman's Efficiency Ratio — net directional progress over a window,
+// divided by the total distance price actually travelled to get there.
+// Same measure as alpacaStrategies.ts's version, reimplemented here against
+// CandleTick's shape (.close, not .c) rather than forcing a type adapter.
+export function calcEfficiencyRatio(candles: CandleTick[], period = 20): number | null {
+  if (candles.length < period + 1) return null;
+  const window = candles.slice(-(period + 1));
+  const netChange = Math.abs(window[window.length - 1].close - window[0].close);
+  let pathLength = 0;
+  for (let i = 1; i < window.length; i++) pathLength += Math.abs(window[i].close - window[i - 1].close);
+  return pathLength > 0 ? netChange / pathLength : 0;
+}
+
 function getIndicators(candles: CandleTick[]): IndicatorSnapshot {
   return {
     rsi:        calcRsi(candles),

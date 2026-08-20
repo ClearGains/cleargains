@@ -1,4 +1,15 @@
-import { type CandleTick, calcRsi, calcMacdHist, calcAtr, isRed, isGreen } from './scalperStrategy';
+import { type CandleTick, calcRsi, calcMacdHist, calcAtr, calcEfficiencyRatio, isRed, isGreen } from './scalperStrategy';
+
+// No equivalent check existed here before: EMA/RSI/MACD can all agree on
+// paper while the pair is really just oscillating inside a range, not
+// trending — the stock bot had this exact same gap (see
+// alpacaStrategies.ts's MIN_DAILY_EFFICIENCY_RATIO). Not backtest-verified
+// like that one (no backtest harness exists here against IG's own hourly
+// candle format) — picked deliberately close to gemini_opinion's already-
+// proven intraday value (0.22, on 30-min bars) rather than guessed from
+// scratch, since this runs on a similarly fine hourly timeframe. Worth
+// revisiting once there's enough live data to check it against.
+const MIN_SWING_EFFICIENCY_RATIO = 0.20;
 
 // ── FX swing strategy — hourly bars, hours-scale holds ──────────────────────
 // The 5-min scalper (scalperStrategy.ts, left untouched) trades against the
@@ -157,6 +168,10 @@ export function processSwingTick(
         const macdOk = ind.macd === null || ind.macd > 0;
         if (!rsiOk)  return { action: 'WAIT', reason: `Uptrend but RSI ${ind.rsi?.toFixed(0)} overbought. Waiting.` };
         if (!macdOk) return { action: 'WAIT', reason: `Uptrend but MACD not confirming (${ind.macd?.toFixed(4)}). Waiting.` };
+        const upEfficiencyRatio = calcEfficiencyRatio(st.closedCandles, 20);
+        if (upEfficiencyRatio !== null && upEfficiencyRatio < MIN_SWING_EFFICIENCY_RATIO) {
+          return { action: 'WAIT', reason: `Uptrend but too choppy over the last 20h — efficiency ratio ${upEfficiencyRatio.toFixed(2)} < ${MIN_SWING_EFFICIENCY_RATIO} (moved a lot, went nowhere)` };
+        }
         st.state = 'IN_POSITION'; st.direction = 'BUY'; st.entryTrend = 'UP';
         return {
           action: 'ENTER', direction: 'BUY',
@@ -170,6 +185,10 @@ export function processSwingTick(
         const macdOk = ind.macd === null || ind.macd < 0;
         if (!rsiOk)  return { action: 'WAIT', reason: `Downtrend but RSI ${ind.rsi?.toFixed(0)} oversold. Waiting.` };
         if (!macdOk) return { action: 'WAIT', reason: `Downtrend but MACD not confirming (${ind.macd?.toFixed(4)}). Waiting.` };
+        const downEfficiencyRatio = calcEfficiencyRatio(st.closedCandles, 20);
+        if (downEfficiencyRatio !== null && downEfficiencyRatio < MIN_SWING_EFFICIENCY_RATIO) {
+          return { action: 'WAIT', reason: `Downtrend but too choppy over the last 20h — efficiency ratio ${downEfficiencyRatio.toFixed(2)} < ${MIN_SWING_EFFICIENCY_RATIO} (moved a lot, went nowhere)` };
+        }
         st.state = 'IN_POSITION'; st.direction = 'SELL'; st.entryTrend = 'DOWN';
         return {
           action: 'ENTER', direction: 'SELL',

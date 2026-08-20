@@ -505,6 +505,34 @@ export async function placeMarketOrder(
     protectionError = result.error;
   }
 
+  // The initial submitAndConfirm's ACCEPTED status only means IG accepted
+  // the open request — not proof the guaranteed-stop leg specifically
+  // survived. protectionOk above never actually re-checks that: when
+  // guaranteedApplied is true, stopStillNeeded is false, so the PUT block
+  // only ever validates the take-profit leg (if any) and protectionOk
+  // stays at its default `true` regardless of whether the stop is real.
+  // Confirmed live this gap is real, not theoretical: an AUD/USD entry
+  // logged "(guaranteed)" from an ACCEPTED confirm, protectionOk true, yet
+  // a live position fetch 7 minutes later found it naked with no stopLevel
+  // at all — only caught because a different bot's unrelated self-heal
+  // sweep happened to check it, not this function's own claim. Re-verify
+  // against the live position instead of trusting the open confirm alone.
+  if (guaranteedApplied) {
+    try {
+      const live = await fetchFullPositions(session);
+      const pos  = live.find(p => p.dealId === dealId);
+      if (!pos || pos.stopLevel === undefined) {
+        protectionOk = false;
+        protectionError = protectionError
+          ? `${protectionError}; guaranteed stop not present on live position`
+          : 'guaranteed stop not present on live position';
+      }
+    } catch {
+      // Fetch failed — can't confirm either way; leave protectionOk as-is
+      // rather than falsely flag a real success as unprotected.
+    }
+  }
+
   return { dealId, level, protectionOk, protectionError, guaranteedStop: guaranteedApplied };
 }
 
