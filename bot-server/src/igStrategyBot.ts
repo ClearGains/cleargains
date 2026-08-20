@@ -11,7 +11,7 @@ import {
   vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal, pivotPointsSignal,
   ruleBasedAnalysisSignal,
   calcRsi, calcMacdHist, calcAtr, calcEfficiencyRatio,
-  STRATEGY_META, MIN_SWING_CONFIDENCE,
+  STRATEGY_META, MIN_SWING_CONFIDENCE, MIN_DAILY_EFFICIENCY_RATIO,
   type StrategySignal,
 } from './alpacaStrategies';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
@@ -131,6 +131,26 @@ const GEMINI_ENTRY_SPACING_MS = 20 * 60_000;
 // strict a filter would starve the strategy of any trades at all.
 const MIN_EFFICIENCY_RATIO = 0.22;
 
+// lastExitReason persistence — confirmed via live evidence this was needed:
+// Seagate/Marvell/Western Digital lost repeatedly across a ~2 week span,
+// but sectorCooldownBlock's old window (3h, borrowed from lossCooldownEpics)
+// never once saw two of them "cooling" at the same time since the losses
+// were spread across days, not hours — and even that short window got
+// wiped on every restart anyway, since this map was in-memory only. Now
+// persisted like every other cooldown-relevant map in this file.
+function lastExitReasonFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-last-exit-reason-${mode}.json`);
+}
+function saveLastExitReason(mode: IgMode, map: Map<string, { reason: string; at: number; wasWin: boolean }>): void {
+  try { fs.writeFileSync(lastExitReasonFile(mode), JSON.stringify([...map]), 'utf8'); } catch {}
+}
+function loadLastExitReason(mode: IgMode): Map<string, { reason: string; at: number; wasWin: boolean }> {
+  try {
+    const pairs = JSON.parse(fs.readFileSync(lastExitReasonFile(mode), 'utf8')) as [string, { reason: string; at: number; wasWin: boolean }][];
+    return new Map(pairs);
+  } catch { return new Map(); }
+}
+
 function lossCooldownFile(mode: IgMode): string {
   return path.join(__dirname, '..', `ig-loss-cooldown-${mode}.json`);
 }
@@ -199,6 +219,7 @@ export function recordLossExit(mode: IgMode, epic: string, upl: number, reason: 
   const st = ms(mode);
   const wasWin = upl >= 0;
   st.lastExitReason.set(epic, { reason, at: Date.now(), wasWin });
+  saveLastExitReason(mode, st.lastExitReason);
   if (wasWin) { st.lossStreak.set(epic, 0); return; }
   const streak = (st.lossStreak.get(epic) ?? 0) + 1;
   st.lossStreak.set(epic, streak);
@@ -253,19 +274,30 @@ export function getRecentExitContext(mode: IgMode, epic: string): string {
 // Hard block, not advisory — confirmed live the advisory sector context
 // alone didn't stop it: Seagate/Marvell/Micron/Western Digital all got
 // bought through an active, already-flagged memory-sector selloff anyway,
-// each treated as an independent decision. Reuses lossCooldownEpics (only
-// ever set on an actual loss, see recordLossExit) rather than re-deriving
-// from lastExitReason, which also includes wins.
+// each treated as an independent decision.
+//
+// Originally reused lossCooldownEpics (3h expiry, needed 2+ concurrently
+// cooling) — confirmed live over a 2-week span this never actually fired
+// for the exact cluster it was built for: Seagate/Marvell/Western Digital's
+// losses landed hours to days apart, never overlapping within a 3h window,
+// so "2 currently cooling" was essentially never true even after 5-6
+// losses in the same sector. Sector-wide drag plays out over days, not
+// hours — LOSS_COOLDOWN_MS governs re-flipping the *same* instrument
+// (a genuinely different, shorter-timescale concern) and stays as-is;
+// this now uses its own longer window and fires on a single recent loss
+// rather than waiting for a second one to pile on top of it first.
+const SECTOR_BLOCK_LOOKBACK_MS = 24 * 60 * 60_000; // 24h
 function sectorCooldownBlock(mode: IgMode, epic: string): string | null {
   const st = ms(mode);
   const sector = SECTOR_MAP[epic];
   if (!sector) return null;
   const now = Date.now();
-  const sectorLosses = [...st.lossCooldownEpics.entries()]
-    .filter(([e, until]) => e !== epic && SECTOR_MAP[e] === sector && until > now);
-  if (sectorLosses.length < 2) return null;
+  const sectorLosses = [...st.lastExitReason.entries()]
+    .filter(([e, rec]) => e !== epic && SECTOR_MAP[e] === sector && !rec.wasWin && now - rec.at <= SECTOR_BLOCK_LOOKBACK_MS)
+    .sort((a, b) => b[1].at - a[1].at);
+  if (sectorLosses.length < 1) return null;
   const names = sectorLosses.map(([e]) => epicName(e)).join(', ');
-  return `${sectorLosses.length} other ${sector} names lost recently and are still cooling (${names}) — sector-wide weakness, skipping new entries here too`;
+  return `${sectorLosses.length} other ${sector} name(s) lost within the last 24h (${names}) — sector-wide weakness, skipping new entries here too`;
 }
 
 // User-paused epics — manual only, no auto-expiry, survives restarts.
@@ -597,6 +629,7 @@ const modeStates = new Map<IgMode, ModeState>([
 for (const [mode, st] of modeStates) {
   st.blockedEpics    = loadBlockedEpics(mode);
   st.lossCooldownEpics = loadLossCooldownEpics(mode);
+  st.lastExitReason  = loadLastExitReason(mode);
   st.pausedEpics     = loadPausedEpics(mode);
   st.lastEntryTrigger = loadLastEntryTrigger(mode);
   st.botOpenedDeals  = loadBotOpenedDeals(mode);
@@ -1708,6 +1741,13 @@ async function evaluateEpic(
       // pure rule_based_analysis now requires to actually trade.
       if (swing.confidence < MIN_SWING_CONFIDENCE) {
         signal = { action: 'HOLD', reason: `${swing.direction} bias but only ${swing.confidence}/10 rule confidence — below the ${MIN_SWING_CONFIDENCE}/10 bar to even ask Gemini to confirm` };
+        break;
+      }
+      // Same chop gate rule_based_analysis now has — checked here too,
+      // before spending a Gemini call, not after.
+      const geminiConfirmedEfficiency = calcEfficiencyRatio(bars, 20);
+      if (geminiConfirmedEfficiency !== null && geminiConfirmedEfficiency < MIN_DAILY_EFFICIENCY_RATIO) {
+        signal = { action: 'HOLD', reason: `${swing.direction} bias but too choppy over the last month — efficiency ratio ${geminiConfirmedEfficiency.toFixed(2)} < ${MIN_DAILY_EFFICIENCY_RATIO} (moved a lot, went nowhere) — not even worth asking Gemini` };
         break;
       }
 

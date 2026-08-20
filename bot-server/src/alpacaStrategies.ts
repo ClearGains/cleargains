@@ -651,6 +651,26 @@ export function pivotPointsSignal(
 // simulate a different (gate-less) strategy than the one actually live.
 export const MIN_SWING_CONFIDENCE = 7;
 
+// Kaufman efficiency ratio over the last 20 daily bars (~1 trading month) —
+// net directional move / total distance traveled, 0-1. Low means a lot of
+// back-and-forth for little net progress: "moved a lot, went nowhere."
+// gemini_opinion already had an equivalent chop gate on its own 30min-bar
+// timeframe; this strategy and gemini_confirmed never had one at all,
+// despite being the two strategies actually responsible for the real
+// losses that motivated adding it here (2026-08-20: Seagate/Marvell/Western
+// Digital lost repeatedly over a choppy multi-week stretch on pure
+// mechanical entries with nothing checking whether the underlying trend
+// was even real). Backtested at 0.28 first (the intraday gemini_opinion value) and it was
+// far too strict for a 20-day window on daily bars: it didn't trim chop,
+// it gutted trade count almost entirely (several names went from 10+
+// trades/year to 0-2). 0.15 keeps meaningful trade volume while still
+// cutting the worst offender's damage substantially (Seagate: -20.77%/PF
+// 0.22 -> -3.16%/PF 0.70 over the same test window). Not a universal win:
+// a few names (Micron, ExxonMobil, Johnson & Johnson, McDonald's) come out
+// worse under this filter, but it materially helps the names that
+// actually motivated adding it, without strangling the strategy.
+export const MIN_DAILY_EFFICIENCY_RATIO = 0.15;
+
 export function ruleBasedAnalysisSignal(
   bars:       AlpacaBar[],
   inPosition: boolean,
@@ -681,6 +701,10 @@ export function ruleBasedAnalysisSignal(
     // own comment for the before/after numbers.
     if (swing.confidence < MIN_SWING_CONFIDENCE) {
       return { action: 'HOLD', reason: `${swing.direction} bias but only ${swing.confidence}/10 confidence — below the ${MIN_SWING_CONFIDENCE}/10 bar to actually trade it` };
+    }
+    const efficiencyRatio = calcEfficiencyRatio(bars, 20);
+    if (efficiencyRatio !== null && efficiencyRatio < MIN_DAILY_EFFICIENCY_RATIO) {
+      return { action: 'HOLD', reason: `${swing.direction} bias but too choppy over the last month — efficiency ratio ${efficiencyRatio.toFixed(2)} < ${MIN_DAILY_EFFICIENCY_RATIO} (moved a lot, went nowhere)` };
     }
     return {
       action:           swing.direction === 'LONG' ? 'BUY' : 'SELL',

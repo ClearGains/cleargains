@@ -13,7 +13,7 @@
 //    (no look-ahead).
 
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
-import { MIN_SWING_CONFIDENCE } from './alpacaStrategies';
+import { MIN_SWING_CONFIDENCE, MIN_DAILY_EFFICIENCY_RATIO, calcEfficiencyRatio } from './alpacaStrategies';
 
 export type BTBar = { t: string; o: number; h: number; l: number; c: number; v: number };
 
@@ -618,6 +618,10 @@ function makeRuleBasedAnalysis(bars: BTBar[], p: BTParams) {
     // duplicated, so this simulates the actual live strategy, not a
     // gate-less version of it.
     if (swing.confidence < MIN_SWING_CONFIDENCE) return { action: 'none' };
+    // Same chop gate as live — kept in sync via the shared constant, same
+    // reasoning as MIN_SWING_CONFIDENCE above.
+    const efficiencyRatio = calcEfficiencyRatio(bars.slice(0, i + 1), 20);
+    if (efficiencyRatio !== null && efficiencyRatio < MIN_DAILY_EFFICIENCY_RATIO) return { action: 'none' };
     if (swing.direction === 'LONG')  return { action: 'enter', side: 'long',  stop: swing.stopLoss, tp: swing.takeProfit1 };
     if (swing.direction === 'SHORT') return { action: 'enter', side: 'short', stop: swing.stopLoss, tp: swing.takeProfit1 };
     return { action: 'none' };
