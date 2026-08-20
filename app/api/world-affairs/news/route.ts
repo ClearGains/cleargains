@@ -66,8 +66,19 @@ const CAT_META: Record<NewsCategory, { label: string; emoji: string }> = {
 
 const BULLISH_WORDS = ['surges', 'rally', 'beats', 'strong', 'growth', 'record',
   'upgrade', 'boost', 'rises', 'gains', 'recovery', 'optimism', 'improves', 'jumps', 'soars'];
+// 'sinks'/'sink'/'tumbles'/'tumble' were missing entirely — confirmed live this
+// let "GS Stock Sinks As Market Gains" score as 95% bullish (1 bullish hit on
+// "gains", zero bearish hits since "sinks" matched nothing), when the headline
+// is actually describing the stock underperforming a rising market.
 const BEARISH_WORDS = ['falls', 'drops', 'miss', 'weak', 'concern', 'risk', 'crisis',
-  'warning', 'cut', 'decline', 'slowdown', 'tension', 'threat', 'fear', 'plunges', 'slumps'];
+  'warning', 'cut', 'decline', 'slowdown', 'tension', 'threat', 'fear', 'plunges', 'slumps',
+  'sinks', 'sink', 'tumbles', 'tumble'];
+// "X sinks/falls/drops AS the market gains/rises" is a relative-performance
+// headline template (Zacks/CNBC use it constantly) — the stock is
+// underperforming even though a bullish-sounding word describes the market,
+// not the asset. Without this, the naive bull/bear word ratio above reads
+// "gains" as a bullish signal for the stock itself and gets it backwards.
+const RELATIVE_UNDERPERFORM = /\b(sinks?|falls?|drops?|declines?|slumps?|tumbles?)\b[^.!?]{0,40}\bas\b[^.!?]{0,20}\b(market|index|s&p|nasdaq|dow)\b/i;
 
 function categorize(title: string, summary: string): NewsCategory {
   const text = (title + ' ' + summary).toLowerCase();
@@ -83,7 +94,8 @@ function categorize(title: string, summary: string): NewsCategory {
 function analyzeSentiment(title: string, summary: string): { sentiment: Sentiment; confidence: number } {
   const text = (title + ' ' + summary).toLowerCase();
   const b = BULLISH_WORDS.filter(w => text.includes(w)).length;
-  const r = BEARISH_WORDS.filter(w => text.includes(w)).length;
+  let r = BEARISH_WORDS.filter(w => text.includes(w)).length;
+  if (RELATIVE_UNDERPERFORM.test(title) || RELATIVE_UNDERPERFORM.test(summary)) r += 2;
   const total = b + r;
   if (total === 0) return { sentiment: 'neutral', confidence: 50 };
   const ratio = b / total;
