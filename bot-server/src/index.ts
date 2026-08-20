@@ -396,6 +396,16 @@ app.get('/ig-strategy/:mode/status', auth, (req: Request, res: Response) => {
   void getIgStrategyBotStatus(mode).then(status => res.json(status));
 });
 
+// GET /ig-strategy/:mode/journal — persisted trade history + per-strategy
+// aggregates, same shape as /alpaca/:mode/journal above. Mirrors that route,
+// mapped onto the IG bot's own journal mode values (see tradeJournal.ts).
+app.get('/ig-strategy/:mode/journal', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  const limit = Math.min(parseInt(String(req.query.limit ?? '500'), 10) || 500, 2000);
+  res.json(getJournal(mode === 'live' ? 'ig-live' : 'ig-demo', limit));
+});
+
 // Powers the "pin to Gemini instead" picker for rule_based_analysis on the
 // Start Bot form — the instruments its own scan won't pick up on its own
 // (not in RULE_BASED_ANALYSIS_CONFIRMED_EPICS) but are still available via

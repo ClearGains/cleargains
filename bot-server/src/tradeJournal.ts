@@ -5,10 +5,16 @@
 import fs from 'fs';
 import path from 'path';
 
+// 'paper'/'live' are the Alpaca auto-trader's own modes; 'ig-demo'/'ig-live'
+// are the IG strategy bot's — kept as distinct values (not reused generic
+// 'live') so the two systems' P&L never gets aggregated together in one
+// strategy's stats despite genuinely being different accounts/instruments.
+export type JournalMode = 'paper' | 'live' | 'ig-demo' | 'ig-live';
+
 export type JournalEvent = {
   id:       string;
   ts:       string;            // ISO timestamp
-  mode:     'paper' | 'live';
+  mode:     JournalMode;
   event:    'entry' | 'exit';
   symbol:   string;
   strategy: string;
@@ -16,7 +22,8 @@ export type JournalEvent = {
   qty:      number;
   price:    number;            // fill/reference price at the time
   reason:   string;            // signal reason that caused it
-  plUsd?:   number;            // exits only — realized P&L in USD
+  confidence?: number;         // 0-100, when the strategy produced one (e.g. gemini_opinion, gemini_confirmed)
+  plUsd?:   number;            // exits only — realized P&L in account currency (USD for Alpaca, GBP for IG)
   plPct?:   number;            // exits only — realized P&L %
 };
 
@@ -33,13 +40,13 @@ export type StrategyAggregate = {
 
 const MAX_RECORDS = 5_000;
 
-function journalPath(mode: 'paper' | 'live'): string {
+function journalPath(mode: JournalMode): string {
   return path.join(process.cwd(), `trade-journal-${mode}.json`);
 }
 
-const cache = new Map<'paper' | 'live', JournalEvent[]>();
+const cache = new Map<JournalMode, JournalEvent[]>();
 
-function load(mode: 'paper' | 'live'): JournalEvent[] {
+function load(mode: JournalMode): JournalEvent[] {
   const cached = cache.get(mode);
   if (cached) return cached;
   let records: JournalEvent[] = [];
@@ -52,7 +59,7 @@ function load(mode: 'paper' | 'live'): JournalEvent[] {
   return records;
 }
 
-function persist(mode: 'paper' | 'live', records: JournalEvent[]): void {
+function persist(mode: JournalMode, records: JournalEvent[]): void {
   try {
     fs.writeFileSync(journalPath(mode), JSON.stringify(records), 'utf8');
   } catch (e) {
@@ -71,7 +78,7 @@ export function recordJournalEvent(ev: Omit<JournalEvent, 'id' | 'ts'>): void {
   persist(ev.mode, records);
 }
 
-export function getJournal(mode: 'paper' | 'live', limit = 500): {
+export function getJournal(mode: JournalMode, limit = 500): {
   records: JournalEvent[];
   aggregates: StrategyAggregate[];
 } {

@@ -15,6 +15,7 @@ import {
   type StrategySignal,
 } from './alpacaStrategies';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
+import { recordJournalEvent } from './tradeJournal';
 import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic, SECTOR_MAP, RULE_BASED_ANALYSIS_CONFIRMED_EPICS } from './igStrategyScanner';
 import { askGeminiDailyVerdict, askGeminiTradeIdea, askGeminiConfirmStockTrade } from './gemini';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
@@ -225,6 +226,43 @@ export function recordLossExit(mode: IgMode, epic: string, upl: number, reason: 
   st.lossStreak.set(epic, streak);
   st.lossCooldownEpics.set(epic, Date.now() + LOSS_COOLDOWN_MS);
   saveLossCooldownEpics(mode, st.lossCooldownEpics);
+}
+
+// Trade journal — persists per-strategy entry/exit history with reasoning so
+// a future "why did this lose" question is a query against real records, not
+// a manual reconstruction from raw IG transaction history (which is all that
+// existed before this). tradeJournal.ts already existed but was only ever
+// wired into the old, stopped Alpaca auto-trader — never into this bot,
+// despite it being the one actually live-trading.
+function journalMode(mode: IgMode): 'ig-demo' | 'ig-live' {
+  return mode === 'live' ? 'ig-live' : 'ig-demo';
+}
+
+function strategyFor(cfg: IgStrategyConfig, epic: string): IgStrategyName {
+  return cfg.epicStrategyOverrides?.[epic] ?? cfg.strategy;
+}
+
+function journalEntry(
+  mode: IgMode, cfg: IgStrategyConfig, epic: string,
+  side: 'long' | 'short', qty: number, price: number, reason: string, confidence?: number,
+): void {
+  recordJournalEvent({
+    mode: journalMode(mode), event: 'entry',
+    symbol: epicName(epic), strategy: strategyFor(cfg, epic),
+    side, qty, price, reason, confidence,
+  });
+}
+
+function journalExit(mode: IgMode, cfg: IgStrategyConfig, p: FullPosition, reason: string): void {
+  const notional = p.level * p.size;
+  recordJournalEvent({
+    mode: journalMode(mode), event: 'exit',
+    symbol: epicName(p.epic), strategy: strategyFor(cfg, p.epic),
+    side: p.direction === 'BUY' ? 'long' : 'short',
+    qty: p.size, price: p.level, reason,
+    plUsd: p.upl,
+    plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
+  });
 }
 
 // Short text for the entry prompt if this epic — or another name in the same
@@ -2184,6 +2222,7 @@ async function executeIgSignal(
       await igClosePos(session, openPos.dealId, openPos.direction, openPos.size);
       addLog(mode, 'exit', name, `Closed deal ${openPos.dealId}`);
       recordLossExit(mode, epic, openPos.upl, reason);
+      journalExit(mode, cfg, openPos, reason);
 
       // Find replacement epic — same race as blockEpicTemporarily below can
       // apply here too if multiple positions close around the same time,
@@ -2263,6 +2302,7 @@ async function executeIgSignal(
       try {
         await igClosePos(session, weakPos.dealId, weakPos.direction, weakPos.size);
         recordLossExit(mode, weakPos.epic, weakPos.upl, rotateReason);
+        journalExit(mode, cfg, weakPos, rotateReason);
       } catch (e) {
         addLog(mode, 'error', epicName(weakPos.epic), `Rotation close failed: ${e instanceof Error ? e.message : String(e)}`);
         return;  // couldn't actually free the slot — don't proceed with the new entry
@@ -2543,6 +2583,7 @@ async function executeIgSignal(
     if (cfg.strategy === 'gemini_opinion') st.lastGeminiEntryAt = Date.now();
     st.botOpenedDeals.add(dealId);
     saveBotOpenedDeals(mode, st.botOpenedDeals);
+    journalEntry(mode, cfg, epic, effectiveDirection === 'BUY' ? 'long' : 'short', stake, level, reason, signal.confidence);
     // Auto-enrol every bot-opened deal in Gemini Position Watch — previously
     // opt-in only (manually flagged via the UI), so a bot-opened position had
     // no qualitative review at all beyond the fixed 1.5x profit-lock number.
@@ -2627,6 +2668,7 @@ async function runSevereLossGuard(mode: IgMode): Promise<void> {
       try {
         await igClosePos(st.session, p.dealId, p.direction, p.size);
         recordLossExit(mode, p.epic, p.upl, slReason);
+        journalExit(mode, st.config, p, slReason);
       } catch (e) {
         addLog(mode, 'error', name, `🚨 Severe loss guard close FAILED: ${e instanceof Error ? e.message : String(e)}. Manual intervention needed.`);
       }
@@ -2683,11 +2725,12 @@ async function poll(mode: IgMode) {
         if (p.upl <= -severeLossCeiling) {
           const wkReason = `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing before the gap`;
           addLog(mode, 'exit', name, wkReason);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, wkReason); }
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, wkReason); journalExit(mode, cfg, p, wkReason); }
           catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.upl >= profitLockFloor) {
-          addLog(mode, 'exit', name, `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it before the gap`);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); }
+          const wkProfitReason = `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it before the gap`;
+          addLog(mode, 'exit', name, wkProfitReason);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); journalExit(mode, cfg, p, wkProfitReason); }
           catch (e) { addLog(mode, 'error', name, `Weekend profit-lock failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.stopLevel !== undefined) {
           const currentDist   = Math.abs(p.level - p.stopLevel);
@@ -2878,6 +2921,7 @@ async function poll(mode: IgMode) {
       // chasing the tail of the same move rather than a fresh setup. See
       // getRecentExitContext's win branch for the entry-side guardrail.
       recordLossExit(mode, p.epic, p.upl, plReason);
+      journalExit(mode, cfg, p, plReason);
     } catch (e) {
       addLog(mode, 'error', name, `Profit lock close failed: ${e instanceof Error ? e.message : String(e)}. Will retry next poll.`);
     }
@@ -2977,7 +3021,7 @@ async function poll(mode: IgMode) {
         if (corroborated) {
           const woReason = `Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, market broadly weak too (${idxPct?.toFixed(2)}%) — closing before it compounds`;
           addLog(mode, 'exit', name, `⚠️ ${woReason}`);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, woReason); }
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, woReason); journalExit(mode, cfg, p, woReason); }
           catch (e) { addLog(mode, 'error', name, `Weak-open close failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.stopLevel !== undefined) {
           const currentDist   = Math.abs(p.level - p.stopLevel);
