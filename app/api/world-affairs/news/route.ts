@@ -273,14 +273,21 @@ Return ONLY a JSON array with exactly ${items.length} objects, one per headline,
 [{"category":"economic","sentiment":"bullish","confidence":75,"reasoning":"under 12 words"}]`;
 
   try {
+    // Pinned, not "-latest" — confirmed live just now (2x in a row) that
+    // gemini-flash-latest returns 503 UNAVAILABLE ("high demand"), the same
+    // undercapacity-on-newer-releases pattern bot-server's own gemini.ts
+    // already hit and fixed by pinning to this exact version. thinkingBudget:0
+    // for the same reason as there too — this model spends hidden "thinking"
+    // tokens by default that can exhaust maxOutputTokens before the visible
+    // JSON answer finishes, leaving a truncated/unparseable fragment.
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`,
       {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents:         [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 4000 },
+          generationConfig: { temperature: 0.2, maxOutputTokens: 4000, thinkingConfig: { thinkingBudget: 0 } },
         }),
         signal: AbortSignal.timeout(20_000),
       }
