@@ -448,6 +448,12 @@ export function optionsDirectionalSignal(
     };
   }
 
+  // Confirmed live this message was misleading: RSI 3.6/89.3 (genuinely
+  // extreme) both landed here because the MACD confirmation didn't line up
+  // — "not extreme enough" reads as if RSI itself was the blocker even when
+  // it clearly wasn't. Distinguish the two cases instead of collapsing them.
+  if (rsi < 30)  return { action: 'HOLD', reason: `RSI oversold ${rsi.toFixed(1)} but MACD hist still falling — waiting for momentum to turn before buying the call` };
+  if (rsi > 70)  return { action: 'HOLD', reason: `RSI overbought ${rsi.toFixed(1)} but MACD hist still rising — waiting for momentum to turn before buying the put` };
   return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} — not extreme enough for options entry` };
 }
 
