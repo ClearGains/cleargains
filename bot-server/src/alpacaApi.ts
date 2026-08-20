@@ -335,10 +335,18 @@ export async function getOptionsContracts(
   const minExp = new Date(today.getTime() +  7 * 86_400_000).toISOString().split('T')[0];
   const maxExp = new Date(today.getTime() + 21 * 86_400_000).toISOString().split('T')[0];
 
+  // Previously .catch(() => []) — any real problem (auth failure, options
+  // not enabled on this account, a bad request) was indistinguishable from
+  // "genuinely no contracts right now," and the only visible symptom
+  // downstream was selectOptionsContract's generic "No tradable ATM
+  // contract found" with the actual cause thrown away. Log it instead.
   return alpacaFetch<{ option_contracts: AlpacaOptionsContract[] }>(mode,
     `/options/contracts?underlying_symbols=${underlying}&type=${type}` +
     `&expiration_date_gte=${minExp}&expiration_date_lte=${maxExp}&status=active&limit=30`,
-  ).then(d => d.option_contracts ?? []).catch(() => []);
+  ).then(d => d.option_contracts ?? []).catch(e => {
+    console.error(`[alpacaApi] getOptionsContracts failed for ${underlying} (${mode}): ${e instanceof Error ? e.message : String(e)}`);
+    return [];
+  });
 }
 
 // Find the ATM contract (strike closest to current price) with best liquidity
