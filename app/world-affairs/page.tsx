@@ -80,6 +80,7 @@ export default function WorldAffairsPage() {
 
   const [newsTs,    setNewsTs]    = useState<string | null>(null);
   const [marketsTs, setMarketsTs] = useState<string | null>(null);
+  const [aiReviewed, setAiReviewed] = useState(false);
 
   const [loadingNews,    setLoadingNews]    = useState(false);
   const [loadingMarkets, setLoadingMarkets] = useState(false);
@@ -91,19 +92,25 @@ export default function WorldAffairsPage() {
   const marketsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Fetch news ──────────────────────────────────────────────────────────────
-  const fetchNews = useCallback(async (force = false) => {
+  // `ai` is only ever true for the initial load and a manual "Refresh All"
+  // click — the background 15-min auto-refresh (below) always passes
+  // false, so an open tab never accumulates Gemini calls on its own. See
+  // app/api/world-affairs/news/route.ts's classifyWithGemini for why this
+  // batches every headline into one call instead of one per headline.
+  const fetchNews = useCallback(async (force = false, ai = false) => {
     if (!force) {
-      const cached = lsGet<WorldNewsItem[]>(LS_NEWS_CACHE, NEWS_TTL_MS);
-      if (cached) { setNews(cached); return; }
+      const cached = lsGet<{ items: WorldNewsItem[]; aiReviewed: boolean }>(LS_NEWS_CACHE, NEWS_TTL_MS);
+      if (cached) { setNews(cached.items); setAiReviewed(cached.aiReviewed); return; }
     }
     setLoadingNews(true);
     try {
-      const res = await fetch('/api/world-affairs/news');
+      const res = await fetch(`/api/world-affairs/news${ai ? '?ai=1' : ''}`);
       if (res.ok) {
-        const data = await res.json() as { items: WorldNewsItem[]; timestamp: string };
+        const data = await res.json() as { items: WorldNewsItem[]; timestamp: string; aiReviewed: boolean };
         setNews(data.items);
         setNewsTs(data.timestamp);
-        lsSet(LS_NEWS_CACHE, data.items);
+        setAiReviewed(data.aiReviewed);
+        lsSet(LS_NEWS_CACHE, { items: data.items, aiReviewed: data.aiReviewed });
       }
     } catch {}
     setLoadingNews(false);
@@ -146,7 +153,7 @@ export default function WorldAffairsPage() {
 
   // ── On mount ────────────────────────────────────────────────────────────────
   useEffect(() => {
-    fetchNews();
+    fetchNews(false, true); // initial load: AI-reviewed if not already cached fresh
     fetchMarkets();
     fetchCalendar();
 
@@ -156,8 +163,10 @@ export default function WorldAffairsPage() {
       setCountdown(60);
     }, MARKETS_TTL_MS);
 
-    // News: refresh every 15 min
-    const newsInterval = setInterval(() => fetchNews(true), NEWS_TTL_MS);
+    // News: refresh every 15 min in the background — free keyword scan
+    // only (ai=false), so a tab left open doesn't quietly spend Gemini
+    // calls on its own.
+    const newsInterval = setInterval(() => fetchNews(true, false), NEWS_TTL_MS);
 
     return () => {
       if (marketsIntervalRef.current) clearInterval(marketsIntervalRef.current);
@@ -209,10 +218,11 @@ export default function WorldAffairsPage() {
             <span className="text-xs text-gray-600 flex items-center gap-1">
               <Clock className="h-3 w-3" />
               News {formatMins(minsAgo(newsTs))}
+              {aiReviewed && <span className="text-emerald-500" title="This pass was reviewed by Gemini, not just keyword-matched">· AI-reviewed</span>}
             </span>
           )}
           <button
-            onClick={() => { fetchNews(true); fetchMarkets(true); fetchCalendar(); }}
+            onClick={() => { fetchNews(true, true); fetchMarkets(true); fetchCalendar(); }}
             disabled={loadingNews || loadingMarkets}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors disabled:opacity-50"
           >
