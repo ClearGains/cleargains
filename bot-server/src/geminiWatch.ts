@@ -122,6 +122,58 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
   lastEarlyLossTightenAt.delete(dealId);
 }
 
+// ── Auto-watch every open position, including manually-opened ones ─────────
+// Per explicit request: the user may open a position on their own (via IG's
+// own app, away from this site entirely) and not be able to get back in to
+// switch watching on for it — default should be watched, not unwatched.
+// Bot-opened deals already call addToWatch() directly at open time; this
+// exists specifically to catch anything that arrives some other way.
+//
+// autoWatchConsidered tracks every dealId this sweep has ever looked at —
+// NOT just currently-watched ones — so that if the user explicitly removes
+// a position from watch (removeFromWatch), it stays removed. Without this,
+// the sweep would just re-add it right back on the next cycle since it's
+// still open and (now) unwatched, silently overriding the user's own
+// choice. A dealId only needs to be offered once per position's lifetime.
+function autoWatchFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `gemini-watch-autoconsidered-${mode}.json`);
+}
+function loadAutoWatchConsidered(mode: IgMode): Set<string> {
+  try { return new Set(JSON.parse(fs.readFileSync(autoWatchFile(mode), 'utf8')) as string[]); }
+  catch { return new Set(); }
+}
+function saveAutoWatchConsidered(mode: IgMode, ids: Set<string>): void {
+  try { fs.writeFileSync(autoWatchFile(mode), JSON.stringify([...ids]), 'utf8'); } catch {}
+}
+const autoWatchConsidered = new Map<IgMode, Set<string>>([
+  ['demo', loadAutoWatchConsidered('demo')],
+  ['live', loadAutoWatchConsidered('live')],
+]);
+
+function autoWatchNewPositions(mode: IgMode, positions: FullPosition[]): void {
+  const considered = autoWatchConsidered.get(mode)!;
+  let changed = false;
+  for (const p of positions) {
+    if (considered.has(p.dealId)) continue;
+    considered.add(p.dealId);
+    changed = true;
+    if (!isWatched(mode, p.dealId)) {
+      addToWatch(mode, p.dealId);
+      addLog(mode, 'info', p.instrumentName, '[Gemini watch] Auto-watching — newly seen position, not opened by the bot (or opened before auto-watch existed)');
+    }
+  }
+  // Keep the "considered" set from growing forever with dealIds for
+  // long-closed positions — prune down to whatever's actually open right
+  // now plus anything still watched (a position can close between polls
+  // and still be worth remembering briefly via the watch file itself, but
+  // there's no reason to keep a closed, unwatched dealId around at all).
+  if (changed || considered.size > positions.length + 50) {
+    const stillRelevant = new Set([...positions.map(p => p.dealId), ...getWatchedDealIds(mode)]);
+    for (const id of considered) if (!stillRelevant.has(id)) considered.delete(id);
+    saveAutoWatchConsidered(mode, considered);
+  }
+}
+
 // Throttle — a position that hasn't moved meaningfully since its last actual
 // Gemini call gets skipped rather than re-asked every single 15-min cycle
 // for no new information. In-memory only (not persisted): worst case after
@@ -731,11 +783,11 @@ async function maybeReverseFlip(
 
 async function pollAll(): Promise<void> {
   for (const mode of ['demo', 'live'] as const) {
-    const ids = getWatchedDealIds(mode);
-    if (!ids.length) continue;
-
+    // No longer skips when nothing's currently watched — auto-watch (below)
+    // needs to see the full live position list every cycle to catch a
+    // manually-opened position, which by definition starts out unwatched.
     const session = await getOrAuthSession(mode);
-    if (!session) { addLog(mode, 'error', '—', '[Gemini watch] No IG session available — skipping this cycle'); continue; }
+    if (!session) continue; // most likely just means this mode has no active bot/session right now — not worth logging every 15min
 
     let positions: FullPosition[];
     try {
@@ -744,6 +796,9 @@ async function pollAll(): Promise<void> {
       addLog(mode, 'error', '—', `[Gemini watch] Position fetch failed: ${e instanceof Error ? e.message : String(e)}`);
       continue;
     }
+
+    autoWatchNewPositions(mode, positions);
+    const ids = getWatchedDealIds(mode);
 
     for (const dealId of ids) {
       const p = positions.find(pos => pos.dealId === dealId);
