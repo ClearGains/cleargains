@@ -14,7 +14,13 @@ import type { IndexQuote, CommodityQuote } from '../api/world-affairs/markets/ro
 import type { EconEvent } from '../api/world-affairs/calendar/route';
 
 // ── Cache keys ────────────────────────────────────────────────────────────────
-const LS_NEWS_CACHE    = 'wa_news_cache';
+// _v2: the cached value's shape changed from a plain WorldNewsItem[] to
+// {items, aiReviewed} when the Gemini pass was added — confirmed live this
+// crashed the whole page (setNews(undefined) from reading .items off the
+// old plain-array shape, then news.filter() throwing downstream) for any
+// browser that already had data cached under the old key. Bumping the key
+// orphans the old shape instead of trying to read it.
+const LS_NEWS_CACHE    = 'wa_news_cache_v2';
 const LS_MARKETS_CACHE = 'wa_markets_cache';
 const LS_CAL_CACHE     = 'wa_cal_cache';
 const NEWS_TTL_MS      = 15 * 60_000;  // 15 min
