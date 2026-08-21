@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   authenticate, getSession, fetchFullPositions, closePosition, updatePositionLevels, fetchCandleHistory,
-  placeMarketOrder, fetchMarketDetails,
+  placeMarketOrder, fetchMarketDetails, fetchAccountFunds,
   type FullPosition, type IGSession, type CandleBar,
 } from './igApi';
 import {
@@ -770,6 +770,27 @@ async function maybeReverseFlip(
     const minStop  = d?.minStopDist || 1;
     const stopDist = Math.max(idea.stopPoints, minStop);
     const stake    = calcStake(getMaxRiskGbp(mode), stopDist, minDeal);
+
+    // Margin affordability — the same pre-check every other entry path in
+    // this account already has (igStrategyBot.ts, igCfdBot.ts,
+    // fxScalperBot.ts) but this one never got. Confirmed live this was a
+    // real, recurring gap here specifically: "Reversal flip entry failed"
+    // showed up repeatedly across the account's error logs, always
+    // INSUFFICIENT_FUNDS — this fires the moment right after a close, when
+    // margin from other concurrent positions (the FX bot shares this same
+    // account) may already have the account close to its limit. Skip
+    // cleanly with a clear reason instead of wasting the order attempt (and
+    // the Gemini call that already ran to get `idea`) on a rejection that's
+    // knowable in advance.
+    if (d?.marginFactorPct !== undefined) {
+      const { available } = await fetchAccountFunds(session);
+      const requiredMargin = stake * currentLevel * (d.marginFactorPct / 100);
+      if (requiredMargin > available) {
+        addLog(mode, 'wait', name,
+          `Reversal flip skipped — would need £${requiredMargin.toFixed(0)} margin (stake £${stake}/pt, ${d.marginFactorPct}% factor), only £${available.toFixed(0)} available`);
+        return;
+      }
+    }
 
     const result = await placeMarketOrder(session, closedPos.epic, wantDirection, stake, stopDist, idea.takeProfitPoints, 'GBP');
     addLog(mode, 'enter', name, `Reversal flip — ${wantDirection} @ ${result.level.toFixed(2)} — ${idea.reason}`);

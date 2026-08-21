@@ -21,6 +21,7 @@ import {
 } from './igStrategyBot';
 import { IG_EPICS, RULE_BASED_ANALYSIS_CONFIRMED_EPICS, FX_EPICS } from './igStrategyScanner';
 import { getJournal } from './tradeJournal';
+import { computeTradeAttribution } from './tradeAttribution';
 import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } from './leaderboard';
 import { startGeminiWatch, getWatchedDealIds, getWatchNotes, addToWatch, setWatchNote, removeFromWatch, isWatchAiPaused, setWatchAiPaused } from './geminiWatch';
 import { fetchFullPositions, getSession } from './igApi';
@@ -404,6 +405,16 @@ app.get('/ig-strategy/:mode/journal', auth, (req: Request, res: Response) => {
   if (!mode) return;
   const limit = Math.min(parseInt(String(req.query.limit ?? '500'), 10) || 500, 2000);
   res.json(getJournal(mode === 'live' ? 'ig-live' : 'ig-demo', limit));
+});
+
+// GET /ig-strategy/:mode/attribution — bot-vs-manual P&L split via a fuzzy
+// join between IG's activity (real dealId+channel, but only ~2-3 days deep)
+// and transaction (real £P&L, no usable join key of its own) endpoints —
+// see tradeAttribution.ts for why this is fuzzy-matched rather than exact.
+app.get('/ig-strategy/:mode/attribution', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  void computeTradeAttribution(mode).then(result => res.json(result));
 });
 
 // Powers the "pin to Gemini instead" picker for rule_based_analysis on the

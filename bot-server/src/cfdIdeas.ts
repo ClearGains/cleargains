@@ -33,9 +33,24 @@
 // quote to rescale against — there's no equivalent reference price
 // available here, so real UK $ price levels can't be produced right now.
 import { getBars } from './alpacaApi';
-import { MIN_SWING_CONFIDENCE } from './alpacaStrategies';
+import { MIN_SWING_CONFIDENCE, MIN_DAILY_EFFICIENCY_RATIO, calcEfficiencyRatio } from './alpacaStrategies';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
 import { fetchAllHeadlines } from './newsFetch';
+import { RULE_BASED_ANALYSIS_CONFIRMED_EPICS } from './igStrategyScanner';
+import { EPIC_TO_ALPACA } from './yahooFetch';
+
+// Ticker -> epic, so a CFD idea can be checked against the same
+// backtest-confirmed universe the live IG bot restricts rule_based_analysis
+// to. Confirmed live this gap mattered: this panel surfaced a 9/10-
+// confidence Costco SHORT despite Costco already backtesting as a clear
+// loser under this exact engine (-12.22% return, PF 0.26) — this panel had
+// no equivalent restriction, unlike the IG bot. A symbol with no IG epic
+// mapping at all (never backtested there either) is excluded too, same
+// reasoning: "never verified" isn't a reason to trust it more than "verified
+// and failed."
+const ALPACA_TO_EPIC: Record<string, string> = Object.fromEntries(
+  Object.entries(EPIC_TO_ALPACA).map(([epic, ticker]) => [ticker, epic]),
+);
 
 const CFD_IDEAS_UNIVERSE: Array<{ symbol: string; name: string; sector: string }> = [
   { symbol: 'AAPL',  name: 'Apple Inc.',                sector: 'Technology' },
@@ -129,6 +144,15 @@ export type CfdIdea = {
   reason:      string;
   headlines:   string[]; // plain informational context — not fed to any model, just shown alongside the numbers
   computedAt:  string;
+  // Whether this exact symbol has already been walk-forward backtested
+  // under this exact rules engine and come back genuinely profitable (see
+  // RULE_BASED_ANALYSIS_CONFIRMED_EPICS) — most of this universe never has
+  // been (different, separately-built list), so false means "untested,"
+  // not "proven bad." Per explicit decision: flagged rather than filtered
+  // out, since excluding everything untested would have cut this universe
+  // from 77 names to 10 — shown so the user can weight it themselves
+  // instead of the panel silently deciding for them.
+  backtestConfirmed: boolean;
 };
 
 // Sequential with a short stagger — mirrors the same rate-limit courtesy
@@ -143,6 +167,9 @@ export async function scanCfdIdeas(
 
   for (const stock of CFD_IDEAS_UNIVERSE) {
     try {
+      const epic = ALPACA_TO_EPIC[stock.symbol];
+      const backtestConfirmed = !!epic && RULE_BASED_ANALYSIS_CONFIRMED_EPICS.has(epic);
+
       const barsBySymbol = await getBars([stock.symbol], '1Day', 250, 'paper');
       const bars = barsBySymbol[stock.symbol];
       if (!bars || bars.length < 60) continue;
@@ -151,14 +178,23 @@ export async function scanCfdIdeas(
       const analysis = ruleBasedAnalysis(stock.symbol, candles);
       const swing = analysis.swing;
 
-      // Sole filter — same bar rule_based_analysis/gemini_confirmed require
-      // on IG, no AI layer on top of it here.
+      // Same bars rule_based_analysis/gemini_confirmed require on IG, no AI
+      // layer on top of it here.
       if (swing.direction === 'FLAT' || swing.confidence < MIN_SWING_CONFIDENCE) continue;
+
+      // Same chop gate the IG bot now has — a stock that's moved a lot but
+      // gone nowhere over the last month can still fire a clean-looking
+      // RSI/MACD/BB signal.
+      const efficiencyRatio = calcEfficiencyRatio(bars, 20);
+      if (efficiencyRatio !== null && efficiencyRatio < MIN_DAILY_EFFICIENCY_RATIO) {
+        onProgress?.(`${stock.symbol}: skipped — too choppy over the last month (efficiency ratio ${efficiencyRatio.toFixed(2)} < ${MIN_DAILY_EFFICIENCY_RATIO})`);
+        continue;
+      }
 
       const last = bars[bars.length - 1].c;
       const headlines = await fetchAllHeadlines(stock.symbol, 8, stock.name);
 
-      onProgress?.(`${stock.symbol}: rules ${swing.direction} ${swing.confidence}/10 — qualified`);
+      onProgress?.(`${stock.symbol}: rules ${swing.direction} ${swing.confidence}/10 — qualified${backtestConfirmed ? ' (backtest-confirmed)' : ' (not yet backtested)'}`);
 
       ideas.push({
         symbol:         stock.symbol,
@@ -172,6 +208,7 @@ export async function scanCfdIdeas(
         reason:         swing.reasoning,
         headlines,
         computedAt:     new Date().toISOString(),
+        backtestConfirmed,
       });
     } catch (e) {
       onProgress?.(`${stock.symbol}: skipped — ${e instanceof Error ? e.message : String(e)}`);
