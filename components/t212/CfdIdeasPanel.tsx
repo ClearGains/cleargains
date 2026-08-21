@@ -33,6 +33,7 @@ type CfdIdea = {
   reason: string;
   headlines: string[];
   computedAt: string;
+  backtestConfirmed: boolean;
 };
 
 function fmtUSD(n: number) {
@@ -63,6 +64,17 @@ function IdeaCard({ idea }: { idea: CfdIdea }) {
             </span>
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-700/60 text-gray-400">
               {idea.sector}
+            </span>
+            <span
+              className={clsx(
+                'text-[10px] px-2 py-0.5 rounded-full font-medium',
+                idea.backtestConfirmed ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'
+              )}
+              title={idea.backtestConfirmed
+                ? 'This symbol has been walk-forward backtested under this rules engine and came back genuinely profitable'
+                : 'Not yet backtested under this rules engine — this idea is unverified, not proven either way'}
+            >
+              {idea.backtestConfirmed ? '✓ Backtest-confirmed' : '? Untested'}
             </span>
           </div>
           <div className="flex items-center gap-3 mt-1 text-xs text-gray-400 flex-wrap">
