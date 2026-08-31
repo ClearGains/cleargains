@@ -11,7 +11,7 @@ const T212_TICKERS: Record<string, string> = {
   'AMZN':  'AMZN_US_EQ',
   'TSLA':  'TSLA_US_EQ',
   'NVDA':  'NVDA_US_EQ',
-  'META':  'META_US_EQ',
+  'META':  'FB_US_EQ', // T212 still lists Meta under its legacy pre-rename ticker — confirmed against T212's own instrument list, 2026-08-31
   'NFLX':  'NFLX_US_EQ',
   'AMD':   'AMD_US_EQ',
   'INTC':  'INTC_US_EQ',
@@ -71,22 +71,27 @@ const T212_TICKERS: Record<string, string> = {
   'HD':    'HD_US_EQ',
   'TGT':   'TGT_US_EQ',
   'SBUX':  'SBUX_US_EQ',
-  // UK — LSE
-  'VOD':   'VOD_GB_EQ',
-  'BP':    'BP_GB_EQ',
-  'SHEL':  'SHEL_GB_EQ',
-  'BARC':  'BARC_GB_EQ',
-  'LLOY':  'LLOY_GB_EQ',
-  'AZN':   'AZN_GB_EQ',
-  'GSK':   'GSK_GB_EQ',
-  'RIO':   'RIO_GB_EQ',
-  'HSBA':  'HSBA_GB_EQ',
-  'DGE':   'DGE_GB_EQ',
-  'ULVR':  'ULVR_GB_EQ',
-  'RR':    'RR_GB_EQ',
-  'IAG':   'IAG_GB_EQ',
-  'NWG':   'NWG_GB_EQ',
-  'STAN':  'STAN_GB_EQ',
+  // UK stocks — T212 doesn't offer the native LSE listing for any of these
+  // (the "_GB_EQ" codes below were guessed and don't exist); corrected to
+  // each one's actual US-dollar ADR ticker, confirmed directly against
+  // T212's own instrument list 2026-08-31 — see lib/stockUniverse.ts's
+  // ADR_MAP for the full reasoning. IAG has no US-dollar ADR on T212 at all,
+  // so it's left out entirely — resolveTicker()'s own `${upper}_US_EQ`
+  // guess will cleanly fail for it rather than silently use a wrong ticker.
+  'VOD':   'VOD_US_EQ',
+  'BP':    'BP_US_EQ',
+  'SHEL':  'SHEL_US_EQ',
+  'BARC':  'BCS_US_EQ',
+  'LLOY':  'LYG_US_EQ',
+  'AZN':   'AZN_US_EQ',
+  'GSK':   'GSK_US_EQ',
+  'RIO':   'RIO_US_EQ',
+  'HSBA':  'HSBC_US_EQ',
+  'DGE':   'DEO_US_EQ',
+  'ULVR':  'UN_US_EQ',
+  'RR':    'RYCEY_US_EQ',
+  'NWG':   'NWG_US_EQ',
+  'STAN':  'SCBFY_US_EQ',
 };
 
 function resolveTicker(raw: string): string {

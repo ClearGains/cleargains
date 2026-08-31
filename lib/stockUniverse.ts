@@ -5,12 +5,19 @@
 
 export type UniverseStock = { symbol: string; name: string; t212: string; sector: string; isUK: boolean };
 
-/** ADR mapping: LSE ticker → US-listed ADR symbol, for UK quote fallback. */
+/** ADR mapping: LSE ticker → US-listed ADR symbol (Finnhub quote symbol —
+ * the same real instrument as the UNIVERSE entry's own `t212` ticker below,
+ * just without T212's own "_US_EQ" suffix). Unilever and Standard Chartered
+ * corrected 2026-08-31 to match what T212 actually lists (UN / SCBFY) — the
+ * previous symbols (UL / SCBFF) are real ADRs too, just a different listing
+ * of the same underlying than the one T212 trades. See
+ * bot-server/src/t212MomentumUniverse.ts's copy of this file for why quote
+ * and execution instrument must always match exactly for a UK stock. */
 export const ADR_MAP: Record<string, string> = {
   'VOD.L': 'VOD', 'BARC.L': 'BCS', 'LLOY.L': 'LYG', 'BP.L': 'BP',
   'SHEL.L': 'SHEL', 'AZN.L': 'AZN', 'GSK.L': 'GSK', 'RIO.L': 'RIO',
-  'HSBA.L': 'HSBC', 'DGE.L': 'DEO', 'ULVR.L': 'UL', 'RR.L': 'RYCEY',
-  'NWG.L': 'NWG', 'STAN.L': 'SCBFF', 'IAG.L': 'ICAGY',
+  'HSBA.L': 'HSBC', 'DGE.L': 'DEO', 'ULVR.L': 'UN', 'RR.L': 'RYCEY',
+  'NWG.L': 'NWG', 'STAN.L': 'SCBFY', 'IAG.L': 'ICAGY',
 };
 
 export const UNIVERSE: UniverseStock[] = [
@@ -19,7 +26,10 @@ export const UNIVERSE: UniverseStock[] = [
   { symbol: 'MSFT',  name: 'Microsoft Corp.',       t212: 'MSFT_US_EQ',  sector: 'Technology', isUK: false },
   { symbol: 'NVDA',  name: 'Nvidia Corp.',          t212: 'NVDA_US_EQ',  sector: 'Technology', isUK: false },
   { symbol: 'AMD',   name: 'Advanced Micro Devices',t212: 'AMD_US_EQ',   sector: 'Technology', isUK: false },
-  { symbol: 'META',  name: 'Meta Platforms',        t212: 'META_US_EQ',  sector: 'Technology', isUK: false },
+  // T212 still lists Meta under its legacy pre-rename ticker code — 'META_US_EQ'
+  // doesn't exist and 404'd on every entry attempt (confirmed directly
+  // against T212's own instrument list, 2026-08-31).
+  { symbol: 'META',  name: 'Meta Platforms',        t212: 'FB_US_EQ',    sector: 'Technology', isUK: false },
   { symbol: 'GOOGL', name: 'Alphabet Inc.',         t212: 'GOOGL_US_EQ', sector: 'Technology', isUK: false },
   { symbol: 'TSLA',  name: 'Tesla Inc.',            t212: 'TSLA_US_EQ',  sector: 'Technology', isUK: false },
   { symbol: 'INTC',  name: 'Intel Corp.',           t212: 'INTC_US_EQ',  sector: 'Technology', isUK: false },
@@ -46,7 +56,7 @@ export const UNIVERSE: UniverseStock[] = [
   { symbol: 'MRVL',  name: 'Marvell Technology',    t212: 'MRVL_US_EQ',  sector: 'Technology', isUK: false },
   { symbol: 'NOK',   name: 'Nokia Corp.',           t212: 'NOK_US_EQ',   sector: 'Technology', isUK: false },
   { symbol: 'WDC',   name: 'Western Digital',       t212: 'WDC_US_EQ',   sector: 'Technology', isUK: false },
-  { symbol: 'SNDK',  name: 'SanDisk Corp.',         t212: 'SNDK_US_EQ',  sector: 'Technology', isUK: false },
+  { symbol: 'SNDK',  name: 'SanDisk Corp.',         t212: 'SNDK1_US_EQ', sector: 'Technology', isUK: false },
   { symbol: 'DELL',  name: 'Dell Technologies',     t212: 'DELL_US_EQ',  sector: 'Technology', isUK: false },
   { symbol: 'STX',   name: 'Seagate Technology',    t212: 'STX_US_EQ',   sector: 'Technology', isUK: false },
   // Healthcare — US
@@ -104,19 +114,22 @@ export const UNIVERSE: UniverseStock[] = [
   // Utilities — US (previously absent entirely)
   { symbol: 'NEE',   name: 'NextEra Energy',        t212: 'NEE_US_EQ',   sector: 'Utilities', isUK: false },
   // UK — LSE
-  { symbol: 'VOD.L',  name: 'Vodafone Group',       t212: 'VOD_UK_EQ',   sector: 'Telecom',  isUK: true },
-  { symbol: 'BARC.L', name: 'Barclays PLC',         t212: 'BARC_UK_EQ',  sector: 'Finance',  isUK: true },
-  { symbol: 'LLOY.L', name: 'Lloyds Banking Group', t212: 'LLOY_UK_EQ',  sector: 'Finance',  isUK: true },
-  { symbol: 'BP.L',   name: 'BP PLC',               t212: 'BP_UK_EQ',    sector: 'Energy',   isUK: true },
-  { symbol: 'SHEL.L', name: 'Shell PLC',            t212: 'SHEL_UK_EQ',  sector: 'Energy',   isUK: true },
-  { symbol: 'AZN.L',  name: 'AstraZeneca PLC',      t212: 'AZN_UK_EQ',   sector: 'Healthcare',isUK: true },
-  { symbol: 'GSK.L',  name: 'GSK PLC',              t212: 'GSK_UK_EQ',   sector: 'Healthcare',isUK: true },
-  { symbol: 'RIO.L',  name: 'Rio Tinto PLC',        t212: 'RIO_UK_EQ',   sector: 'Materials', isUK: true },
-  { symbol: 'HSBA.L', name: 'HSBC Holdings',        t212: 'HSBA_UK_EQ',  sector: 'Finance',  isUK: true },
-  { symbol: 'DGE.L',  name: 'Diageo PLC',           t212: 'DGE_UK_EQ',   sector: 'Consumer', isUK: true },
-  { symbol: 'ULVR.L', name: 'Unilever PLC',         t212: 'ULVR_UK_EQ',  sector: 'Consumer', isUK: true },
-  { symbol: 'RR.L',   name: 'Rolls-Royce Holdings', t212: 'RR_UK_EQ',    sector: 'Industrials',isUK: true },
-  { symbol: 'IAG.L',  name: 'IAG (BA/Iberia)',      t212: 'IAG_UK_EQ',   sector: 'Transport', isUK: true },
-  { symbol: 'NWG.L',  name: 'NatWest Group',        t212: 'NWG_UK_EQ',   sector: 'Finance',  isUK: true },
-  { symbol: 'STAN.L', name: 'Standard Chartered',   t212: 'STAN_UK_EQ',  sector: 'Finance',  isUK: true },
+  // T212 doesn't list any of these under the "_UK_EQ" codes this file
+  // originally guessed — corrected to each stock's actual US-dollar ADR
+  // ticker 2026-08-31 (see ADR_MAP's own comment). IAG dropped entirely —
+  // no US-dollar-listed ADR exists for it on T212 at all.
+  { symbol: 'VOD.L',  name: 'Vodafone Group',       t212: 'VOD_US_EQ',   sector: 'Telecom',  isUK: true },
+  { symbol: 'BARC.L', name: 'Barclays PLC',         t212: 'BCS_US_EQ',   sector: 'Finance',  isUK: true },
+  { symbol: 'LLOY.L', name: 'Lloyds Banking Group', t212: 'LYG_US_EQ',   sector: 'Finance',  isUK: true },
+  { symbol: 'BP.L',   name: 'BP PLC',               t212: 'BP_US_EQ',    sector: 'Energy',   isUK: true },
+  { symbol: 'SHEL.L', name: 'Shell PLC',            t212: 'SHEL_US_EQ',  sector: 'Energy',   isUK: true },
+  { symbol: 'AZN.L',  name: 'AstraZeneca PLC',      t212: 'AZN_US_EQ',   sector: 'Healthcare',isUK: true },
+  { symbol: 'GSK.L',  name: 'GSK PLC',              t212: 'GSK_US_EQ',   sector: 'Healthcare',isUK: true },
+  { symbol: 'RIO.L',  name: 'Rio Tinto PLC',        t212: 'RIO_US_EQ',   sector: 'Materials', isUK: true },
+  { symbol: 'HSBA.L', name: 'HSBC Holdings',        t212: 'HSBC_US_EQ',  sector: 'Finance',  isUK: true },
+  { symbol: 'DGE.L',  name: 'Diageo PLC',           t212: 'DEO_US_EQ',   sector: 'Consumer', isUK: true },
+  { symbol: 'ULVR.L', name: 'Unilever PLC',         t212: 'UN_US_EQ',    sector: 'Consumer', isUK: true },
+  { symbol: 'RR.L',   name: 'Rolls-Royce Holdings', t212: 'RYCEY_US_EQ',sector: 'Industrials',isUK: true },
+  { symbol: 'NWG.L',  name: 'NatWest Group',        t212: 'NWG_US_EQ',   sector: 'Finance',  isUK: true },
+  { symbol: 'STAN.L', name: 'Standard Chartered',   t212: 'SCBFY_US_EQ',sector: 'Finance',  isUK: true },
 ];

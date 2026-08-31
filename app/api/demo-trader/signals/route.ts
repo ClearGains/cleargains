@@ -1,62 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { UNIVERSE, ADR_MAP as ADR_MAP_SIGNALS } from '@/lib/stockUniverse';
 
-// ── UK quote helpers (Yahoo Finance → ADR fallback) ───────────────────────────
+// ── UK quote helper (US ADR only — see ADR_MAP's own comment) ─────────────────
 // Imported inline to avoid HTTP round-trips between internal API routes.
-
-type QuoteSource = 'finnhub' | 'yahoo' | 'adr';
+//
+// Used to try Yahoo's LSE (pence-priced) quote first and fall back to the
+// ADR. Removed 2026-08-31: every UK stock in UNIVERSE trades on T212 via its
+// US ADR (T212 doesn't offer the native LSE listing for any of them at all —
+// see lib/stockUniverse.ts's own comment), so this route's own `currentPrice`
+// output feeds straight into calcQuantity(positionSize, price) in
+// app/demo-trader/page.tsx with no currency conversion at all. Returning the
+// LSE pence price there — a completely different number, for a differently
+// share-ratio'd instrument than the ADR that actually executes — would size
+// (and display) every UK trade off the wrong number, not a rounding
+// difference. The ADR quote is the only one that matches what's really
+// bought, so it's the only one this returns now.
+type QuoteSource = 'finnhub' | 'adr';
 
 async function fetchUKQuote(ticker: string, apiKey: string): Promise<{
   price: number; changePercent: number; open: number; high: number; low: number;
   volume: number; prevClose: number; source: QuoteSource; displayTicker: string; badge: string;
 } | null> {
-  // Stage 1 — Yahoo Finance (LSE, GBP prices, 15-min delay)
+  const adr = ADR_MAP_SIGNALS[ticker];
+  if (!adr || !apiKey) return null;
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClearGains/1.0)', Accept: 'application/json' },
-      signal: AbortSignal.timeout(6_000),
+    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${adr}&token=${apiKey}`, {
+      signal: AbortSignal.timeout(5_000),
     });
     if (res.ok) {
-      const data = await res.json() as {
-        chart?: { result?: Array<{ meta?: { regularMarketPrice?: number; regularMarketChangePercent?: number; previousClose?: number; regularMarketVolume?: number; regularMarketOpen?: number; regularMarketDayHigh?: number; regularMarketDayLow?: number } }> };
-      };
-      const meta = data?.chart?.result?.[0]?.meta;
-      if (meta?.regularMarketPrice && meta.regularMarketPrice > 0) {
+      const q = await res.json() as { c: number; dp: number; o: number; h: number; l: number; v: number; pc: number };
+      if (q.c > 0) {
         return {
-          price: meta.regularMarketPrice,
-          changePercent: meta.regularMarketChangePercent ?? 0,
-          open: meta.regularMarketOpen ?? meta.regularMarketPrice,
-          high: meta.regularMarketDayHigh ?? meta.regularMarketPrice,
-          low: meta.regularMarketDayLow ?? meta.regularMarketPrice,
-          volume: meta.regularMarketVolume ?? 0,
-          prevClose: meta.previousClose ?? meta.regularMarketPrice,
-          source: 'yahoo', displayTicker: ticker, badge: '🇬🇧 LSE · 15min delay',
+          price: q.c, changePercent: q.dp ?? 0, open: q.o ?? q.c, high: q.h ?? q.c,
+          low: q.l ?? q.c, volume: q.v ?? 0, prevClose: q.pc ?? q.c,
+          source: 'adr', displayTicker: adr, badge: `🇺🇸 ADR · USD (${adr})`,
         };
       }
     }
-  } catch { /* fall through to ADR */ }
-
-  // Stage 2 — US ADR via Finnhub
-  const adr = ADR_MAP_SIGNALS[ticker];
-  if (adr && apiKey) {
-    try {
-      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${adr}&token=${apiKey}`, {
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (res.ok) {
-        const q = await res.json() as { c: number; dp: number; o: number; h: number; l: number; v: number; pc: number };
-        if (q.c > 0) {
-          return {
-            price: q.c, changePercent: q.dp ?? 0, open: q.o ?? q.c, high: q.h ?? q.c,
-            low: q.l ?? q.c, volume: q.v ?? 0, prevClose: q.pc ?? q.c,
-            source: 'adr', displayTicker: adr, badge: `🇺🇸 ADR · USD (${adr})`,
-          };
-        }
-      }
-    } catch { /* give up */ }
-  }
-
+  } catch { /* give up */ }
   return null;
 }
 
@@ -212,7 +193,7 @@ export async function POST(request: NextRequest) {
 
     try {
       if (stock.isUK) {
-        // UK LSE stock → Yahoo Finance (15-min delay) or ADR fallback
+        // UK stock → always its US ADR (see fetchUKQuote's own comment)
         const ukQuote = await fetchUKQuote(stock.symbol, apiKey);
         if (!ukQuote) { skipped++; continue; }
         quotes.push({
@@ -223,7 +204,7 @@ export async function POST(request: NextRequest) {
           volume: ukQuote.volume, prevClose: ukQuote.prevClose,
           badge: ukQuote.badge,
         });
-        ukSourceLog.push(`${stock.symbol}: ${ukQuote.source === 'yahoo' ? '🇬🇧 Yahoo' : `🇺🇸 ADR (${ukQuote.displayTicker})`}`);
+        ukSourceLog.push(`${stock.symbol}: 🇺🇸 ADR (${ukQuote.displayTicker})`);
       } else {
         // US stock → Finnhub
         const res = await fetch(
