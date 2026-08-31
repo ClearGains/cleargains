@@ -3011,6 +3011,19 @@ async function runSevereLossGuard(mode: IgMode): Promise<void> {
 // the position regardless).
 const weakOpenTightenedOnce = new Set<string>();
 
+// Per-position "stuck loss" caution flag — added 2026-08-31 per explicit
+// request, distinct from the weak-open guard above: that one reacts to a
+// same-day move against a fresh position; this tracks a position sitting
+// underwater for a real stretch of time without recovering, well before it
+// reaches its own hard stop. Log-only — deliberately does not close or
+// tighten anything itself (the account already has enough mechanical
+// closers; this is purely a visibility flag for the human to act on).
+// In-memory only, same tradeoff as weakOpenTightenedOnce.
+const stuckLossFirstSeenAt = new Map<string, number>(); // dealId -> ms since epoch it first crossed the threshold
+const stuckLossFlagged     = new Set<string>();          // dealId -> already flagged, don't repeat every poll
+const STUCK_LOSS_GBP      = -10;   // caution threshold — below the account's own £15 hard stop, an early warning
+const STUCK_LOSS_PERSIST_MS = 20 * 60_000; // must stay unrecovered this long before flagging, not just a single bad tick
+
 async function poll(mode: IgMode) {
   const st = ms(mode);
   if (!st.running || !st.config || !st.session) return;
@@ -3301,6 +3314,8 @@ async function poll(mode: IgMode) {
     // each poll so this doesn't grow unbounded across the account's history.
     const openDealIds = new Set(positions.map(p => p.dealId));
     for (const id of weakOpenTightenedOnce) if (!openDealIds.has(id)) weakOpenTightenedOnce.delete(id);
+    for (const id of stuckLossFirstSeenAt.keys()) if (!openDealIds.has(id)) stuckLossFirstSeenAt.delete(id);
+    for (const id of stuckLossFlagged) if (!openDealIds.has(id)) stuckLossFlagged.delete(id);
     let referenceIndexPct: number | null | undefined; // undefined = not fetched yet this poll, null = fetch failed
     const getReferenceIndexPct = async (): Promise<number | null> => {
       if (referenceIndexPct !== undefined) return referenceIndexPct;
@@ -3350,6 +3365,30 @@ async function poll(mode: IgMode) {
         // FX_EPICS's own comment in igStrategyScanner.ts) — CC.* has no such
         // accidental protection.
         if (p.epic.startsWith('CC.')) continue;
+
+        // Stuck-loss caution flag — per explicit request 2026-08-31, applies
+        // to every position this loop reaches (i.e. stocks; FX/indices are
+        // already skipped above and owned by their own bots). Log-only,
+        // never closes or touches the stop — the account's own hard stop
+        // (currently £15/trade) still does that job.
+        {
+          const name = epicName(p.epic);
+          if (p.upl <= STUCK_LOSS_GBP) {
+            const firstSeen = stuckLossFirstSeenAt.get(p.dealId);
+            if (firstSeen === undefined) {
+              stuckLossFirstSeenAt.set(p.dealId, Date.now());
+            } else if (!stuckLossFlagged.has(p.dealId) && Date.now() - firstSeen >= STUCK_LOSS_PERSIST_MS) {
+              stuckLossFlagged.add(p.dealId);
+              addLog(mode, 'error', name, `🚨 Caution — sitting at £${p.upl.toFixed(2)} for over ${Math.round(STUCK_LOSS_PERSIST_MS / 60_000)}min without recovering to profit (hard stop caps the loss at £${cfg.maxRiskGbp})`);
+            }
+          } else if (p.upl >= 0) {
+            // Only a real recovery to profit clears the flag — matches the
+            // user's own framing ("doesn't come back to PROFIT"), not just
+            // ticking back above -£10.
+            stuckLossFirstSeenAt.delete(p.dealId);
+            stuckLossFlagged.delete(p.dealId);
+          }
+        }
 
         // No alpacaTimeframe passed here, so fetchBarsWithFallback's Alpaca
         // branch (used for every Alpaca-covered share — most of this bot's
