@@ -2755,7 +2755,27 @@ async function executeIgSignal(
   const STALE_DATA_MS = 5 * 60_000;
   const overnightDerate = is24hStrategy && barAgeMs > STALE_DATA_MS ? 0.5 : 1;
   const rawStake = calcStake(effectiveRiskGbp * overnightDerate, sizingStopDist, minDeal);
-  const stake    = Math.max(minDeal, rawStake);
+  let stake      = Math.max(minDeal, rawStake);
+
+  // Minimum £/pt floor — added 2026-08-31 per explicit, repeated request:
+  // raising maxRiskGbp alone only goes so far, since calcStake = risk ÷
+  // stopDist and a wide-ATR name (UnitedHealth's real stop is ~2300pt) eats
+  // most of that increase back into a wider stop rather than a bigger
+  // stake. This directly guarantees a real £/pt on every mean_reversion_swing
+  // trade regardless of how wide that particular name's stop is — real
+  // consequence, stated plainly: it overrides the risk-proportional sizing,
+  // so the ACTUAL max loss on a wide-stop name can exceed the nominal
+  // maxRiskGbp target. Confirmed against live data: UnitedHealth's own
+  // ~2300pt stop implies a £69 max loss at this floor, not £40 — the
+  // downstream loss-ceiling check below still applies on top of this and
+  // will skip anything that floor pushes past a sane multiple of target.
+  // Scoped to mean_reversion_swing only — this strategy's own tight-stake
+  // complaint prompted it, not a blanket change to every strategy's sizing.
+  const MIN_STAKE_PER_POINT = 0.03;
+  if (cfg.strategy === 'mean_reversion_swing' && stake < MIN_STAKE_PER_POINT) {
+    addLog(mode, 'info', name, `Stake raised to the £${MIN_STAKE_PER_POINT}/pt floor (was £${stake}/pt) — real max loss now £${(MIN_STAKE_PER_POINT * sizingStopDist).toFixed(2)}, above the £${effectiveRiskGbp.toFixed(0)} risk target`);
+    stake = MIN_STAKE_PER_POINT;
+  }
 
   // Any time the stake actually used ends up above what the target risk
   // would size — whether because IG's minDealSize forced it up, or because
