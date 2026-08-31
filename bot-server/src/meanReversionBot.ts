@@ -17,7 +17,8 @@ import {
   placeMarketOrder, closePosition as igClosePos, fetchMarketDetails, fetchClosedTransactions,
   type IGSession, type FullPosition,
 } from './igApi';
-import { getMeanReversionSignal, type MrBar, MAX_HOLD_DAYS } from './meanReversionStrategy';
+import { getMeanReversionSignal, type MrBar, type MrSignal, MAX_HOLD_DAYS } from './meanReversionStrategy';
+import { emaCrossoverSignal } from './alpacaStrategies';
 import { epicName } from './igStrategyScanner';
 import { resolveCredentials, calcStake, type IgMode } from './igStrategyBot';
 import { recordJournalEvent, type JournalMode } from './tradeJournal';
@@ -137,7 +138,13 @@ function addLog(instance: MrInstance, mode: IgMode, type: LogEntry['type'], epic
 }
 
 function journalMode(mode: IgMode): JournalMode { return mode === 'live' ? 'ig-live' : 'ig-demo'; }
-function strategyKey(instance: MrInstance): string { return `mean_reversion_${instance}`; }
+// japan225 switched from RSI(2)+EMA200 mean-reversion to a lighter EMA
+// crossover trend-follow 2026-08-31 (see scanEntries) — distinct key so
+// edgeSizing/EDGE_STATS_CUTOFF judge the new strategy on its own track
+// record rather than inheriting (or polluting) mean-reversion's.
+function strategyKey(instance: MrInstance): string {
+  return instance === 'japan225' ? 'ema_trend_japan225' : `mean_reversion_${instance}`;
+}
 
 // Shared session with every other IG bot in this account (igStrategyBot.ts,
 // fxScalperBot.ts, geminiWatch.ts all use the same 'igstrat:<mode>' key) —
@@ -270,6 +277,7 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
     const igMid = typeof d?.bid === 'number' && typeof d?.offer === 'number' ? (d.bid + d.offer) / 2 : undefined;
 
     let bars: MrBar[];
+    let raw: AlpacaBar[] | null = null;
     try {
       // Yahoo/Alpaca, not IG's own historical-data endpoint — confirmed
       // live 2026-08-28 that firing ~250-bar candle requests across every
@@ -293,7 +301,7 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       // path produced correctly-scaled stop/TP (exactly 2:1 as configured)
       // without any extra help.
       const isAlpacaCovered = epic in EPIC_TO_ALPACA;
-      const raw = await fetchBarsWithFallback(epic, '2y', {
+      raw = await fetchBarsWithFallback(epic, '2y', {
         alpacaTimeframe: '1Day', yahooInterval: '1d',
         liveReferenceLevel: !isAlpacaCovered ? igMid : undefined,
       });
@@ -304,8 +312,35 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       continue;
     }
 
-    const signal = getMeanReversionSignal(bars);
-    if (signal.action === 'HOLD') continue;
+    // Japan225 gets a lighter, more permissive trend-following signal
+    // instead of RSI(2)+EMA200 mean-reversion — per explicit request
+    // 2026-08-31: this index's trend tends to be unusually clean and
+    // sustained, and mean-reversion's narrow RSI(2)-extreme entry condition
+    // was producing far fewer setups than the instrument's own character
+    // supports. Reuses emaCrossoverSignal (alpacaStrategies.ts) as-is — the
+    // same validated EMA9/EMA21 crossover + ATR stop/TP already running
+    // elsewhere in this codebase (igStrategyBot.ts/alpacaBot.ts's own
+    // ema_crossover strategy) — rather than inventing new logic. Its
+    // stopPrice/takeProfitPrice are absolute levels, converted to point
+    // distances here to match MrSignal's shape, which everything downstream
+    // (calcStake, the conviction-scaled floor, journaling) already expects.
+    // Once open, the position is managed exactly like every other trade in
+    // this file — fixed broker-side stop/TP + MAX_HOLD_DAYS backstop — the
+    // crossed-back-the-other-way exit emaCrossoverSignal computes for an
+    // open position is never consulted here, same as mean-reversion's own
+    // signal is never re-checked once a position exists.
+    let signal: MrSignal;
+    if (instance === 'japan225') {
+      const emaSig = emaCrossoverSignal(raw!, false);
+      if (emaSig.action !== 'BUY' && emaSig.action !== 'SELL') continue;
+      const lastClose  = raw![raw!.length - 1].c;
+      const stopPoints = emaSig.stopPrice       !== undefined ? Math.abs(lastClose - emaSig.stopPrice)       : lastClose * 0.02;
+      const tpPoints   = emaSig.takeProfitPrice !== undefined ? Math.abs(emaSig.takeProfitPrice - lastClose) : lastClose * 0.05;
+      signal = { action: emaSig.action, reason: `[EMA trend] ${emaSig.reason}`, stopPoints, tpPoints, conviction: (emaSig.confidence ?? 50) / 100 };
+    } else {
+      signal = getMeanReversionSignal(bars);
+      if (signal.action === 'HOLD') continue;
+    }
 
     try {
       const minDeal = d?.minDealSize || 0.1;
@@ -465,7 +500,8 @@ export function startMeanReversionBot(instance: MrInstance, mode: IgMode): { ok:
   if (s.pollTimer) clearTimeout(s.pollTimer);
   s.running = true;
   saveRunningFlag(instance, mode, true);
-  addLog(instance, mode, 'info', '—', `Mean-reversion bot (${instance}) started — RSI(2)+EMA200, rules-only${AI_MONITORED[instance] ? ' + daily AI safety check on open positions' : ', no AI at all'} — £${MAX_RISK_GBP} risk/trade, max ${MAX_POSITIONS} positions, ${INSTANCE_EPICS[instance].length} epic(s) watched`);
+  const signalDesc = instance === 'japan225' ? 'EMA9/21 crossover trend-follow' : 'RSI(2)+EMA200 mean-reversion';
+  addLog(instance, mode, 'info', '—', `Mean-reversion bot (${instance}) started — ${signalDesc}, rules-only${AI_MONITORED[instance] ? ' + daily AI safety check on open positions' : ', no AI at all'} — £${MAX_RISK_GBP} risk/trade, max ${MAX_POSITIONS} positions, ${INSTANCE_EPICS[instance].length} epic(s) watched`);
   void poll(instance, mode);
   return { ok: true };
 }
