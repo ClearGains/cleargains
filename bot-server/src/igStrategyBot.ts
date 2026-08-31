@@ -764,6 +764,10 @@ type ModeState = {
   // unrelated restart happened to bring it back at 08-12 14:47, its gap-up
   // had already mostly played out.
   watchlistRefreshTimer: ReturnType<typeof setInterval> | null;
+  // Fast-interval exit-only check (self-heal, stuck-loss flag, weak-open
+  // tighten, profit-lock trail) — independent of the main poll cycle, same
+  // reasoning as severeLossTimer above. See manageSwingExits/swingExitMonitor.
+  swingExitMonitorTimer: ReturnType<typeof setTimeout> | null;
   nextRunMs:            number | null;
   lastPollTs:           string | null;
   orbState:             Record<string, OrbState>;
@@ -846,7 +850,7 @@ type ModeState = {
 function makeModeState(mode: IgMode): ModeState {
   return {
     running: false, paused: false, config: null, session: null,
-    log: [], pollTimer: null, severeLossTimer: null, watchlistRefreshTimer: null, nextRunMs: null, lastPollTs: null,
+    log: [], pollTimer: null, severeLossTimer: null, watchlistRefreshTimer: null, swingExitMonitorTimer: null, nextRunMs: null, lastPollTs: null,
     orbState: {}, authFailCount: 0, sessionRefreshTimer: null,
     marketDetails: new Map(),
     blockedEpics: new Map(),
@@ -3089,189 +3093,19 @@ const STUCK_LOSS_PERSIST_MS = 20 * 60_000; // must stay unrecovered this long be
 // not a safety gap; the position's own broker-side stop/TP still protects it).
 const profitPeakByDeal = new Map<string, number>();
 
-async function poll(mode: IgMode) {
+// Exit-only position management — self-heal naked stops, the stuck-loss
+// caution flag, the weak-open guard (tighten-only for mean_reversion_swing,
+// outright close for every other strategy), and the profit-lock peak-retrace
+// trail. Extracted 2026-08-31 out of poll() so it can run on its own fast
+// cadence via swingExitMonitor (2min) as well as inside the main poll cycle
+// (25min for mean_reversion_swing) — same split already proven on the
+// options bot: real intraday peaks/losses between infrequent checks were
+// otherwise invisible to the trackers above. Deliberately does NOT touch
+// anything entry-related (scanning, sizing, daily-profit-lock-on-new-entries)
+// — this only ever manages positions that are already open.
+async function manageSwingExits(mode: IgMode, cfg: IgStrategyConfig, positions: FullPosition[]): Promise<void> {
   const st = ms(mode);
-  if (!st.running || !st.config || !st.session) return;
-
-  const cfg   = st.config;
-  const meta  = STRATEGY_META[cfg.strategy];
-  const today = new Date().toISOString().slice(0, 10);
-  st.lastPollTs = new Date().toISOString();
-
-  // Sunday 22:00 UTC reopen, not Monday NYSE open — this bot's universe
-  // includes indices (UK 100/Germany 40 open Monday ~7am UTC, hours before
-  // NYSE) and IG's "24 Hours" share CFDs (near-continuously quoted, not
-  // NYSE-cash-hours-gated). Sleeping until NYSE open needlessly missed the
-  // entire Sunday-evening-through-Monday-morning window for those.
-  if (isScannerQuietWeekend()) {
-    const sleepMs = msUntilWeekendReopen();
-    addLog(mode, 'wait', '—', `Weekend — sleeping until reopen (~${Math.round(sleepMs / 3_600_000)}h)`);
-    st.nextRunMs = Date.now() + sleepMs;
-    st.pollTimer = setTimeout(() => { void poll(mode); }, sleepMs);
-    return;
-  }
-
-  // ── Weekend risk-window guard ─────────────────────────────────────────────
-  // Runs before the per-strategy timeframe gate below — weekly_momentum and
-  // ema_crossover only pass that gate a few minutes a day/week, so placed
-  // after it this would almost never fire for exactly the strategies most
-  // exposed to a weekend gap.
-  // Used to unconditionally close every position for "intraday" strategies
-  // regardless of P&L — changed after live review: closing purely because a
-  // position "can't be monitored" over the weekend crystallizes P&L at an
-  // arbitrary moment even when there's no real reason to exit, and Gemini
-  // Position Watch keeps reviewing gemini_opinion positions through the
-  // weekend anyway (separate mechanism, no weekend pause). Now: close only
-  // for an actual reason (a real loss or a profit worth banking), otherwise
-  // just tighten the stop to cap gap-risk downside and let it ride —
-  // uniformly for every strategy, not just swing/weekly ones.
-  if (isNearWeekendClose(120) && st.weekendGuardDate !== today) {
-    st.weekendGuardDate = today;
-    try {
-      const positions = await fetchFullPositions(st.session);
-      const severeLossCeiling = cfg.maxRiskGbp * 5;
-      const profitLockFloor   = cfg.maxRiskGbp * 1.5;
-      for (const p of positions) {
-        const name = epicName(p.epic);
-        if (p.upl <= -severeLossCeiling) {
-          const wkReason = `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing before the gap`;
-          addLog(mode, 'exit', name, wkReason);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, wkReason); journalExit(mode, cfg, p, wkReason); }
-          catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
-        } else if (p.upl >= profitLockFloor) {
-          const wkProfitReason = `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it before the gap`;
-          addLog(mode, 'exit', name, wkProfitReason);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); journalExit(mode, cfg, p, wkProfitReason); }
-          catch (e) { addLog(mode, 'error', name, `Weekend profit-lock failed: ${e instanceof Error ? e.message : String(e)}`); }
-        } else if (p.stopLevel !== undefined) {
-          const currentDist   = Math.abs(p.level - p.stopLevel);
-          const tightenedDist = currentDist * 0.5;
-          const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
-          const wouldTighten  = p.direction === 'BUY' ? newStop > p.stopLevel : newStop < p.stopLevel;
-          if (wouldTighten) {
-            try {
-              await updatePositionLevels(st.session, p.dealId, newStop, p.limitLevel ?? null);
-              addLog(mode, 'info', name, `Weekend risk guard — tightened stop ${currentDist.toFixed(2)}→${tightenedDist.toFixed(2)} pts ahead of the gap`);
-            } catch (e) {
-              addLog(mode, 'error', name, `Weekend stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
-        }
-      }
-      if (positions.length) addLog(mode, 'info', '—', `Weekend risk guard checked ${positions.length} position(s)`);
-    } catch (e) {
-      addLog(mode, 'error', '—', `Weekend risk guard failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  // VWAP and Gemini Opinion both trade IG's own individually-quoted
-  // "(24 Hours)" shares (confirmed live against the account —
-  // AAPL/AMD/QCOM/MU/WDC/Dell all show as TRADEABLE with live pricing well
-  // outside NYSE cash hours), not Alpaca's exchange-hours-only feed — so
-  // neither is gated on isNYSEOpen() the way ORB/RSI Mean Reversion still
-  // are (ORB specifically needs a defined session open to build an opening
-  // range from; that concept doesn't exist on a continuously-quoted
-  // product, and Gemini Opinion has no technical rule tied to a session at
-  // all). Per-epic real tradeability (marketStatus) and an overnight risk
-  // reduction are enforced instead, in executeIgSignal.
-  const is24hStrategy = cfg.strategy === 'vwap' || cfg.strategy === 'gemini_opinion';
-  if (meta.timeframe === 'intraday' && !is24hStrategy && !isNYSEOpen()) { schedule(mode, cfg); return; }
-  // 'daily' strategies no longer gate the whole poll on isDailyCheckTime() —
-  // they now run every pollIntervalFor() cycle (see IG_POLL_MS_OVERRIDE) and
-  // gate per-epic inside evaluateEpic via the free Yahoo pre-check instead,
-  // so a real signal doesn't have to wait for the once-a-day window.
-  if (meta.timeframe === 'weekly'   && !isWeeklyCheckTime()) { schedule(mode, cfg); return; }
-
-  if (cfg.strategy === 'orb' && isInOpeningRange()) {
-    await buildOrbRange(mode, st.session, cfg.epics);
-    schedule(mode, cfg);
-    return;
-  }
-
-  // Cheap — one batched request for cfg.epics (≤ ~10). Refreshed every poll so
-  // slot replacements (new epic swapped in) always get correct min size/stop.
-  st.marketDetails = await fetchMarketDetails(st.session, cfg.epics).catch(() => st.marketDetails);
-
-  let positions: FullPosition[] = [];
-  let balance = 0, available = 0;
-  try {
-    [positions, { balance, available }] = await Promise.all([
-      fetchFullPositions(st.session),
-      fetchAccountFunds(st.session),
-    ]);
-    if (Math.random() < 0.1) {
-      addLog(mode, 'info', '—', `Balance: £${balance.toFixed(2)} | Available: £${available.toFixed(2)} | Positions: ${positions.length}`);
-    }
-  } catch (e) {
-    addLog(mode, 'error', '—', `Account fetch failed: ${e instanceof Error ? e.message : String(e)}`);
-    schedule(mode, cfg);
-    return;
-  }
-
-  // Drop dealIds no longer open (closed by the bot, manually, or by any of
-  // the circuit breakers below) — otherwise botOpenedDeals/releasedDeals
-  // grow forever with stale IDs that can never matter again. Any bot-managed
-  // dealId disappearing here without having gone through journalExit first
-  // (checked via journaledDealIds) means IG closed it server-side — a real
-  // stop/limit hit, not any of this file's own close code — see
-  // journalSilentCloses's own comment for why that previously left zero
-  // record of it.
-  {
-    const openIds = new Set(positions.map(p => p.dealId));
-    let changed = false;
-    const silentlyClosed: string[] = [];
-    for (const id of st.botOpenedDeals) {
-      if (!openIds.has(id)) {
-        st.botOpenedDeals.delete(id);
-        changed = true;
-        if (!journaledDealIds.has(id)) silentlyClosed.push(id);
-      }
-    }
-    for (const id of st.releasedDeals)  if (!openIds.has(id)) { st.releasedDeals.delete(id);  changed = true; }
-    if (changed) { saveBotOpenedDeals(mode, st.botOpenedDeals); saveReleasedDeals(mode, st.releasedDeals); }
-    if (silentlyClosed.length) void journalSilentCloses(mode, st.session, silentlyClosed);
-    for (const p of positions) lastKnownPosition.set(p.dealId, { epic: p.epic, direction: p.direction, size: p.size, level: p.level, openedAt: p.openedAt });
-  }
-
-  // ── Daily-loss circuit breaker ────────────────────────────────────────────
-  // Mirrors alpacaBot.ts — without this, correlated positions moving against
-  // each other at once (or a fast/gapping move slipping past a non-guaranteed
-  // stop) can keep bleeding the account with nothing to stop new entries.
-  if (st.dayKey !== today) {
-    st.dayKey = today;
-    st.dayStartBalance = balance;
-    if (st.lossLock)   addLog(mode, 'info', '—', 'New trading day — daily-loss lock reset');
-    if (st.profitLock) addLog(mode, 'info', '—', 'New trading day — daily-profit lock reset');
-    st.lossLock = false;
-    st.profitLock = false;
-  }
-  const maxLossPct = cfg.maxDailyLossPct ?? 3;
-  if (!st.lossLock && st.dayStartBalance > 0 && balance > 0) {
-    const ddPct = (st.dayStartBalance - balance) / st.dayStartBalance * 100;
-    if (ddPct >= maxLossPct) {
-      st.lossLock = true;
-      addLog(mode, 'error', '—',
-        `🛑 Daily loss ${ddPct.toFixed(2)}% ≥ ${maxLossPct}% limit — no new entries today (exits/self-heal still managed)`);
-    }
-  }
-
-  // ── Daily-profit lock ─────────────────────────────────────────────────────
-  // Mirrors the loss circuit breaker above, on the upside: once today's
-  // banked gain clears the target, stop opening new positions for the rest
-  // of the day rather than letting a good win get ground back down by
-  // whatever the bot trades next. Doesn't cap or force-close a still-running
-  // winner — only blocks new entries (see the st.profitLock check in
-  // executeIgSignal) — so a position that's genuinely still working past the
-  // target is left to its own exit logic, not chopped off at exactly £40.
-  const profitTargetGbp = cfg.dailyProfitTargetGbp ?? 40;
-  if (!st.profitLock && st.dayStartBalance > 0 && balance > 0) {
-    const gainGbp = balance - st.dayStartBalance;
-    if (gainGbp >= profitTargetGbp) {
-      st.profitLock = true;
-      addLog(mode, 'info', '—',
-        `✅ Daily profit target hit — £${gainGbp.toFixed(2)} banked (≥ £${profitTargetGbp} target) — no new entries today, current position(s) left to run`);
-    }
-  }
+  if (!st.session) return;
 
   // Self-heal naked positions — a failed SL/TP attach (at entry, or on a prior
   // poll) otherwise leaves a position with no broker-side exit until the
@@ -3339,6 +3173,11 @@ async function poll(mode: IgMode) {
   // and validated on the options bot's identical peak-retrace design
   // today) of its own best-ever gain — protects against a real reversal
   // giving it all back, without capping a winner at a fixed small number.
+  // Checking this every 2min (swingExitMonitor) instead of only once per
+  // 25min poll cycle matters here specifically: the peak can only ever
+  // reflect what a check actually observed, so an infrequent check can miss
+  // the real intraday high entirely and trail from a lower, stale one —
+  // same gap already confirmed live on the options bot's identical design.
   const profitLockFloor = cfg.maxRiskGbp * 1.5;
   const PROFIT_RETRACE_TRIGGER = 0.3;
   for (const p of positions) {
@@ -3538,6 +3377,233 @@ async function poll(mode: IgMode) {
       } catch { /* best-effort — never let a data-source hiccup block the rest of the poll cycle */ }
     }
   }
+}
+
+// Fast, standalone exit-only cadence — entries/scanning stay on their own
+// pollIntervalFor() cadence (25min for mean_reversion_swing), but exit
+// management (self-heal, stuck-loss flag, weak-open tighten, profit-lock
+// trail) now also runs this often, independent of it. Confirmed live this
+// exact gap mattered on the options bot's identical peak-tracking design
+// (see manageSwingExits' own profit-lock comment) — a real intraday peak or
+// a stuck loss between infrequent checks was simply invisible until the
+// next slow poll caught up. Only ever fetches+manages currently-open
+// positions (1-4 typically), never the 72-name watchlist, so this stays
+// cheap enough to run often without adding to the entry-scan's own IG call
+// volume or rate-limit exposure.
+const SWING_EXIT_MONITOR_MS = 2 * 60_000;
+
+async function swingExitMonitor(mode: IgMode): Promise<void> {
+  const st = ms(mode);
+  if (!st.running) return;
+
+  if (st.session && st.config && !isScannerQuietWeekend()) {
+    try {
+      const positions = await fetchFullPositions(st.session);
+      if (positions.length) await manageSwingExits(mode, st.config, positions);
+    } catch (e) {
+      addLog(mode, 'error', '—', `Fast exit monitor failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  if (st.running) {
+    st.swingExitMonitorTimer = setTimeout(() => { void swingExitMonitor(mode); }, SWING_EXIT_MONITOR_MS);
+  }
+}
+
+async function poll(mode: IgMode) {
+  const st = ms(mode);
+  if (!st.running || !st.config || !st.session) return;
+
+  const cfg   = st.config;
+  const meta  = STRATEGY_META[cfg.strategy];
+  const today = new Date().toISOString().slice(0, 10);
+  st.lastPollTs = new Date().toISOString();
+
+  // Sunday 22:00 UTC reopen, not Monday NYSE open — this bot's universe
+  // includes indices (UK 100/Germany 40 open Monday ~7am UTC, hours before
+  // NYSE) and IG's "24 Hours" share CFDs (near-continuously quoted, not
+  // NYSE-cash-hours-gated). Sleeping until NYSE open needlessly missed the
+  // entire Sunday-evening-through-Monday-morning window for those.
+  if (isScannerQuietWeekend()) {
+    const sleepMs = msUntilWeekendReopen();
+    addLog(mode, 'wait', '—', `Weekend — sleeping until reopen (~${Math.round(sleepMs / 3_600_000)}h)`);
+    st.nextRunMs = Date.now() + sleepMs;
+    st.pollTimer = setTimeout(() => { void poll(mode); }, sleepMs);
+    return;
+  }
+
+  // ── Weekend risk-window guard ─────────────────────────────────────────────
+  // Runs before the per-strategy timeframe gate below — weekly_momentum and
+  // ema_crossover only pass that gate a few minutes a day/week, so placed
+  // after it this would almost never fire for exactly the strategies most
+  // exposed to a weekend gap.
+  // Used to unconditionally close every position for "intraday" strategies
+  // regardless of P&L — changed after live review: closing purely because a
+  // position "can't be monitored" over the weekend crystallizes P&L at an
+  // arbitrary moment even when there's no real reason to exit, and Gemini
+  // Position Watch keeps reviewing gemini_opinion positions through the
+  // weekend anyway (separate mechanism, no weekend pause). Now: close only
+  // for an actual reason (a real loss or a profit worth banking), otherwise
+  // just tighten the stop to cap gap-risk downside and let it ride —
+  // uniformly for every strategy, not just swing/weekly ones.
+  if (isNearWeekendClose(120) && st.weekendGuardDate !== today) {
+    st.weekendGuardDate = today;
+    try {
+      const positions = await fetchFullPositions(st.session);
+      const severeLossCeiling = cfg.maxRiskGbp * 5;
+      const profitLockFloor   = cfg.maxRiskGbp * 1.5;
+      for (const p of positions) {
+        const name = epicName(p.epic);
+        if (p.upl <= -severeLossCeiling) {
+          const wkReason = `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing before the gap`;
+          addLog(mode, 'exit', name, wkReason);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, wkReason); journalExit(mode, cfg, p, wkReason); }
+          catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
+        } else if (p.upl >= profitLockFloor) {
+          const wkProfitReason = `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it before the gap`;
+          addLog(mode, 'exit', name, wkProfitReason);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); journalExit(mode, cfg, p, wkProfitReason); }
+          catch (e) { addLog(mode, 'error', name, `Weekend profit-lock failed: ${e instanceof Error ? e.message : String(e)}`); }
+        } else if (p.stopLevel !== undefined) {
+          const currentDist   = Math.abs(p.level - p.stopLevel);
+          const tightenedDist = currentDist * 0.5;
+          const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
+          const wouldTighten  = p.direction === 'BUY' ? newStop > p.stopLevel : newStop < p.stopLevel;
+          if (wouldTighten) {
+            try {
+              await updatePositionLevels(st.session, p.dealId, newStop, p.limitLevel ?? null);
+              addLog(mode, 'info', name, `Weekend risk guard — tightened stop ${currentDist.toFixed(2)}→${tightenedDist.toFixed(2)} pts ahead of the gap`);
+            } catch (e) {
+              addLog(mode, 'error', name, `Weekend stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
+      }
+      if (positions.length) addLog(mode, 'info', '—', `Weekend risk guard checked ${positions.length} position(s)`);
+    } catch (e) {
+      addLog(mode, 'error', '—', `Weekend risk guard failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // VWAP and Gemini Opinion both trade IG's own individually-quoted
+  // "(24 Hours)" shares (confirmed live against the account —
+  // AAPL/AMD/QCOM/MU/WDC/Dell all show as TRADEABLE with live pricing well
+  // outside NYSE cash hours), not Alpaca's exchange-hours-only feed — so
+  // neither is gated on isNYSEOpen() the way ORB/RSI Mean Reversion still
+  // are (ORB specifically needs a defined session open to build an opening
+  // range from; that concept doesn't exist on a continuously-quoted
+  // product, and Gemini Opinion has no technical rule tied to a session at
+  // all). Per-epic real tradeability (marketStatus) and an overnight risk
+  // reduction are enforced instead, in executeIgSignal.
+  const is24hStrategy = cfg.strategy === 'vwap' || cfg.strategy === 'gemini_opinion';
+  if (meta.timeframe === 'intraday' && !is24hStrategy && !isNYSEOpen()) { schedule(mode, cfg); return; }
+  // 'daily' strategies no longer gate the whole poll on isDailyCheckTime() —
+  // they now run every pollIntervalFor() cycle (see IG_POLL_MS_OVERRIDE) and
+  // gate per-epic inside evaluateEpic via the free Yahoo pre-check instead,
+  // so a real signal doesn't have to wait for the once-a-day window.
+  if (meta.timeframe === 'weekly'   && !isWeeklyCheckTime()) { schedule(mode, cfg); return; }
+
+  if (cfg.strategy === 'orb' && isInOpeningRange()) {
+    await buildOrbRange(mode, st.session, cfg.epics);
+    schedule(mode, cfg);
+    return;
+  }
+
+  // Cheap — one batched request for cfg.epics (≤ ~10). Refreshed every poll so
+  // slot replacements (new epic swapped in) always get correct min size/stop.
+  st.marketDetails = await fetchMarketDetails(st.session, cfg.epics).catch(() => st.marketDetails);
+
+  let positions: FullPosition[] = [];
+  let balance = 0, available = 0;
+  try {
+    [positions, { balance, available }] = await Promise.all([
+      fetchFullPositions(st.session),
+      fetchAccountFunds(st.session),
+    ]);
+    if (Math.random() < 0.1) {
+      addLog(mode, 'info', '—', `Balance: £${balance.toFixed(2)} | Available: £${available.toFixed(2)} | Positions: ${positions.length}`);
+    }
+  } catch (e) {
+    addLog(mode, 'error', '—', `Account fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    schedule(mode, cfg);
+    return;
+  }
+
+  // Drop dealIds no longer open (closed by the bot, manually, or by any of
+  // the circuit breakers below) — otherwise botOpenedDeals/releasedDeals
+  // grow forever with stale IDs that can never matter again. Any bot-managed
+  // dealId disappearing here without having gone through journalExit first
+  // (checked via journaledDealIds) means IG closed it server-side — a real
+  // stop/limit hit, not any of this file's own close code — see
+  // journalSilentCloses's own comment for why that previously left zero
+  // record of it.
+  {
+    const openIds = new Set(positions.map(p => p.dealId));
+    let changed = false;
+    const silentlyClosed: string[] = [];
+    for (const id of st.botOpenedDeals) {
+      if (!openIds.has(id)) {
+        st.botOpenedDeals.delete(id);
+        changed = true;
+        if (!journaledDealIds.has(id)) silentlyClosed.push(id);
+      }
+    }
+    for (const id of st.releasedDeals)  if (!openIds.has(id)) { st.releasedDeals.delete(id);  changed = true; }
+    if (changed) { saveBotOpenedDeals(mode, st.botOpenedDeals); saveReleasedDeals(mode, st.releasedDeals); }
+    if (silentlyClosed.length) void journalSilentCloses(mode, st.session, silentlyClosed);
+    for (const p of positions) lastKnownPosition.set(p.dealId, { epic: p.epic, direction: p.direction, size: p.size, level: p.level, openedAt: p.openedAt });
+  }
+
+  // ── Daily-loss circuit breaker ────────────────────────────────────────────
+  // Mirrors alpacaBot.ts — without this, correlated positions moving against
+  // each other at once (or a fast/gapping move slipping past a non-guaranteed
+  // stop) can keep bleeding the account with nothing to stop new entries.
+  if (st.dayKey !== today) {
+    st.dayKey = today;
+    st.dayStartBalance = balance;
+    if (st.lossLock)   addLog(mode, 'info', '—', 'New trading day — daily-loss lock reset');
+    if (st.profitLock) addLog(mode, 'info', '—', 'New trading day — daily-profit lock reset');
+    st.lossLock = false;
+    st.profitLock = false;
+  }
+  const maxLossPct = cfg.maxDailyLossPct ?? 3;
+  if (!st.lossLock && st.dayStartBalance > 0 && balance > 0) {
+    const ddPct = (st.dayStartBalance - balance) / st.dayStartBalance * 100;
+    if (ddPct >= maxLossPct) {
+      st.lossLock = true;
+      addLog(mode, 'error', '—',
+        `🛑 Daily loss ${ddPct.toFixed(2)}% ≥ ${maxLossPct}% limit — no new entries today (exits/self-heal still managed)`);
+    }
+  }
+
+  // ── Daily-profit lock ─────────────────────────────────────────────────────
+  // Mirrors the loss circuit breaker above, on the upside: once today's
+  // banked gain clears the target, stop opening new positions for the rest
+  // of the day rather than letting a good win get ground back down by
+  // whatever the bot trades next. Doesn't cap or force-close a still-running
+  // winner — only blocks new entries (see the st.profitLock check in
+  // executeIgSignal) — so a position that's genuinely still working past the
+  // target is left to its own exit logic, not chopped off at exactly £40.
+  const profitTargetGbp = cfg.dailyProfitTargetGbp ?? 40;
+  if (!st.profitLock && st.dayStartBalance > 0 && balance > 0) {
+    const gainGbp = balance - st.dayStartBalance;
+    if (gainGbp >= profitTargetGbp) {
+      st.profitLock = true;
+      addLog(mode, 'info', '—',
+        `✅ Daily profit target hit — £${gainGbp.toFixed(2)} banked (≥ £${profitTargetGbp} target) — no new entries today, current position(s) left to run`);
+    }
+  }
+
+  // Exit-only position management (self-heal naked stops, stuck-loss flag,
+  // weak-open tighten, profit-lock trail) — extracted 2026-08-31 into its own
+  // function so it can also run on a fast standalone cadence (swingExitMonitor,
+  // 2min) independent of this poll's own 25min entry-scan cycle. Per explicit
+  // request: shrinking the whole 72-epic poll cycle to react faster would risk
+  // tripping IG's rate limit for no real benefit (the entry signal itself only
+  // changes once/day); splitting exit-checks out lets THOSE react fast without
+  // touching the entry-scan cadence at all. Still called here too as a
+  // backstop, same pattern as manageExits on the options bot.
+  await manageSwingExits(mode, cfg, positions);
 
   // Trailing stop (donchian_breakout only) — ratchets the stop toward price
   // at the same 3%-of-price distance used at entry, but only ever tightens,
@@ -3781,6 +3847,9 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
   // run. First refresh deliberately not immediate — the scan just run above
   // is already fresh.
   st.watchlistRefreshTimer = setInterval(() => { void refreshWatchlist(mode); }, WATCHLIST_REFRESH_MS);
+  // Independent of the above — see manageSwingExits/swingExitMonitor for why
+  // exit management needs its own faster cadence than the entry-scan poll.
+  st.swingExitMonitorTimer = setTimeout(() => { void swingExitMonitor(mode); }, SWING_EXIT_MONITOR_MS);
   return { ok: true };
 }
 
@@ -3792,6 +3861,7 @@ export function stopIgStrategyBot(mode: IgMode): void {
   if (st.pollTimer)             { clearTimeout(st.pollTimer);             st.pollTimer             = null; }
   if (st.severeLossTimer)       { clearInterval(st.severeLossTimer);      st.severeLossTimer       = null; }
   if (st.watchlistRefreshTimer) { clearInterval(st.watchlistRefreshTimer);st.watchlistRefreshTimer = null; }
+  if (st.swingExitMonitorTimer) { clearTimeout(st.swingExitMonitorTimer);  st.swingExitMonitorTimer = null; }
   if (st.sessionRefreshTimer)   { clearTimeout(st.sessionRefreshTimer);   st.sessionRefreshTimer   = null; }
   st.nextRunMs  = null;
   st.lastPollTs = null;
