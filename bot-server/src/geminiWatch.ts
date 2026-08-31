@@ -367,14 +367,20 @@ async function fetchIgOffHoursBars(epic: string): Promise<AlpacaBar[] | null> {
 async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Promise<void> {
   const name = p.instrumentName;
 
-  // Bought index options (igOptionsBot.ts, OP.D.* epics) are exempt from
-  // this entire pipeline, before even the stop self-heal below: their max
-  // loss is the premium already paid — attaching the 3%-of-price fallback
-  // stop to one is meaningless-to-harmful, and every review heuristic here
-  // (sharp-dip %, stall-tightening, hold/close on the instrument's own
-  // price) assumes a linear instrument, not a decaying premium whose exits
-  // igOptionsBot manages on its own P&L-on-premium lifecycle.
-  if (p.epic.startsWith('OP.')) return;
+  // Bought options (igOptionsBot.ts — OP.D.* monthly index options AND
+  // DO.D.* same-day index/stock dailies, both real IG epic prefixes) are
+  // exempt from this entire pipeline, before even the stop self-heal below:
+  // their max loss is the premium already paid — attaching the 3%-of-price
+  // fallback stop to one is not just meaningless, it's actively dangerous
+  // (a real stop that can force-close the position on an ordinary quote
+  // wobble, bypassing igOptionsBot's own premium-based exit lifecycle
+  // entirely), and every review heuristic here (sharp-dip %, stall-
+  // tightening, hold/close on the instrument's own price) assumes a linear
+  // instrument, not a decaying premium. Confirmed live 2026-08-31: the
+  // original OP.-only check missed DO.D.AAPL/DO.D.TSLA daily options
+  // entirely — this layer had already attached a naked-position fallback
+  // stop to both open positions and was running HOLD/CLOSE reviews on them.
+  if (p.epic.startsWith('OP.') || p.epic.startsWith('DO.')) return;
 
   const heldHours = p.openedAt ? (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000 : 0;
 
