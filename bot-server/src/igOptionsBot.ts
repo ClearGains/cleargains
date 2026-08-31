@@ -40,7 +40,7 @@ import { recordJournalEvent, type JournalMode } from './tradeJournal';
 import { askIgConfirmStockTrade, askMrSafety } from './openai';
 import { fetchAllHeadlines } from './newsFetch';
 import { fetchBarsWithFallback } from './yahooFetch';
-import { isScannerQuietWeekend, msUntilWeekendReopen } from './alpacaApi';
+import { isScannerQuietWeekend, msUntilWeekendReopen, isNYSEOpen, hoursUntilNYSEClose } from './alpacaApi';
 import { edgeSizing } from './quant';
 
 // Underlyings whose IG option chains this bot scans. optName is the exact
@@ -55,6 +55,32 @@ const UNDERLYINGS = [
   { epic: 'IX.D.DOW.DAILY.IP',    name: 'Wall Street', optName: 'Wall Street', newsTicker: 'DIA' as string | null },
   { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40', optName: 'Germany 40',  newsTicker: null  as string | null },
 ];
+
+// ── Daily STOCK options (second strategy, added same day per explicit
+// request — "part of the reason I wanted it setup on IG [was] to create
+// stock option positions"). Confirmed by live probe: IG's stock options
+// exist ONLY as same-day-expiry dailies (DO.D.AAPL.* etc., OPT_SHARES) —
+// no weekly/monthly chains at all — so the index strategy's weeks-long
+// trend thesis is structurally impossible here. Instead these run the
+// momentum+news idea already proven on the T212 momentum port: a real move
+// today, with news the AI judges supportive, expressed as a same-day
+// call/put whose premium is the whole risk. Entries only during the US
+// session with ≥2h of runway; always force-closed ~20min before the close
+// (a daily option not closed just settles at expiry — usually the worst
+// possible exit). Own journal key so /performance judges it separately.
+const STOCK_UNDERLYINGS = [
+  { shareEpic: 'UA.D.AAPL.CASH.IP',  name: 'Apple',  searchName: 'Daily Apple Inc',      finnhub: 'AAPL', strikeStep: 500 },
+  { shareEpic: 'UD.D.TSLA.DAILY.IP', name: 'Tesla',  searchName: 'Daily Tesla Motors Inc', finnhub: 'TSLA', strikeStep: 500 },
+  { shareEpic: 'UC.D.NVDA.DAILY.IP', name: 'NVIDIA', searchName: 'Daily NVIDIA Corp',    finnhub: 'NVDA', strikeStep: 500 },
+  { shareEpic: 'UA.D.AMZN.CASH.IP',  name: 'Amazon', searchName: 'Daily Amazon.com Inc', finnhub: 'AMZN', strikeStep: 500 },
+];
+const STOCK_STRATEGY = 'ig_options_daily_momentum';
+const STOCK_MAX_PREMIUM_GBP = 30;   // smaller than the index budget — same-day theta is the riskiest product in the fleet
+const STOCK_MAX_POSITIONS   = 2;
+const STOCK_MIN_MOVE_PCT    = 1.5;  // today's move must be a real one before the AI is even asked
+const STOCK_POLL_MS         = 15 * 60_000; // momentum is stale within hours — can't share the index loop's hourly cadence
+const STOCK_MIN_RUNWAY_H    = 2;    // don't open with less than this left in the session
+const STOCK_CLOSE_BUFFER_H  = 0.33; // force-close this close to the bell rather than let it settle
 
 // Premium budget per position — the literal maximum £ this trade can lose
 // (bought option, loss capped at premium × stake by construction). Sized in
@@ -76,12 +102,14 @@ const EXIT_DTE = 5;
 
 const STRATEGY = 'ig_options_directional';
 function journalMode(mode: IgMode): JournalMode { return mode === 'live' ? 'ig-live' : 'ig-demo'; }
+function strategyFor(tr: { kind?: 'index' | 'stock' }): string { return tr.kind === 'stock' ? STOCK_STRATEGY : STRATEGY; }
 
 type Tracked = {
   dealId: string; epic: string; underlyingEpic: string; name: string;
   optionType: 'call' | 'put'; strike: number; expiry: string; expiryMs: number;
   premium: number; size: number; enteredAt: number; peakPlPct: number;
   lastAiCheckAt?: number; // daily severe-news safety check — see manageExits
+  kind?: 'index' | 'stock'; // absent = index (positions tracked before the stock strategy existed)
 };
 
 type LogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'wait' | 'error'; epic: string; msg: string };
@@ -92,8 +120,14 @@ type BotState = {
   tracked: Record<string, Tracked>; // keyed by underlying epic — one option position per underlying
   log: LogEntry[];
   pollTimer: ReturnType<typeof setTimeout> | null;
+  stockPollTimer: ReturnType<typeof setTimeout> | null; // faster loop for the daily stock strategy
   nextRunMs: number | null;
   lastPollTs: string | null;
+  // One momentum entry per stock per day, even after that entry has closed —
+  // re-chasing the same move after banking/stopping it is how a daily-theta
+  // product churns premium away. In-memory only: worst case a restart allows
+  // one repeat entry, still AI-gated.
+  lastStockEntryDay: Record<string, string>;
 };
 
 const states = new Map<IgMode, BotState>();
@@ -119,7 +153,7 @@ function saveRunningFlag(mode: IgMode, running: boolean): void {
 function st(mode: IgMode): BotState {
   let s = states.get(mode);
   if (!s) {
-    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, nextRunMs: null, lastPollTs: null };
+    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, nextRunMs: null, lastPollTs: null, lastStockEntryDay: {} };
     states.set(mode, s);
   }
   return s;
@@ -241,7 +275,7 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
         const match = txns.find(t => t.instrumentName?.includes(String(tr.strike)));
         const plUsd = match?.profitAndLoss ?? -(tr.premium * tr.size); // worst case: expired worthless
         recordJournalEvent({
-          mode: journalMode(mode), event: 'exit', symbol: tr.name, strategy: STRATEGY,
+          mode: journalMode(mode), event: 'exit', symbol: tr.name, strategy: strategyFor(tr),
           side: 'long', qty: tr.size, price: match?.closeLevel ?? 0,
           reason: match ? 'Closed at IG (expiry or manual)' : 'Position gone — assumed expired worthless',
           plUsd, plPct: tr.premium > 0 ? (plUsd / (tr.premium * tr.size)) * 100 : 0,
@@ -268,7 +302,20 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     // here is only for that gate. DTE exit handled locally at the wider
     // EXIT_DTE (estimated monthly expiries — see its comment).
     let closeReason: string | null = null;
-    if (dte <= EXIT_DTE) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid settlement/theta endgame`;
+    if (tr.kind === 'stock') {
+      // Same-day option — timeline is hours, not weeks. Never allowed to
+      // reach settlement: force-closed near the bell regardless of P&L.
+      // null = outside NYSE hours, i.e. already past the bell somehow
+      // (restart gap) — close immediately rather than ride into settlement.
+      const runwayH = hoursUntilNYSEClose();
+      if (runwayH === null || runwayH <= STOCK_CLOSE_BUFFER_H) closeReason = `~${Math.round((runwayH ?? 0) * 60)}min to the close — closing rather than settling at expiry (${plPct >= 0 ? '+' : ''}${plPct.toFixed(1)}%)`;
+      else if (plPct >= 60) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
+      else if (tr.peakPlPct >= 25 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= 0.4) {
+        closeReason = `Momentum stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
+      }
+      else if (plPct <= -50) closeReason = `Premium stop hit: ${plPct.toFixed(1)}%`;
+    }
+    else if (dte <= EXIT_DTE) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid settlement/theta endgame`;
     else if (plPct >= 75) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
     else if (tr.peakPlPct >= 30 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= 0.4) {
       closeReason = `Stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
@@ -288,7 +335,10 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     // Wall Street → DIA) get real input; the rest skip — an empty headline
     // list can't detect anything, so the call isn't worth spending.
     if (!closeReason) {
-      const u = UNDERLYINGS.find(x => x.epic === tr.underlyingEpic);
+      // Index positions only — a same-day stock position's whole life is
+      // shorter than this check's cadence, and its entry already weighed
+      // today's news minutes-to-hours ago.
+      const u = tr.kind === 'stock' ? undefined : UNDERLYINGS.find(x => x.epic === tr.underlyingEpic);
       if (u?.newsTicker && Date.now() - (tr.lastAiCheckAt ?? 0) >= 20 * 3_600_000) {
         tr.lastAiCheckAt = Date.now();
         saveTracked(mode, s.tracked);
@@ -318,7 +368,7 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     try {
       await closePosition(session, p.dealId, p.direction, p.size);
       recordJournalEvent({
-        mode: journalMode(mode), event: 'exit', symbol: tr.name, strategy: STRATEGY,
+        mode: journalMode(mode), event: 'exit', symbol: tr.name, strategy: strategyFor(tr),
         side: 'long', qty: p.size, price: bid ?? 0, reason: closeReason,
         plUsd: p.upl, plPct,
       });
@@ -332,9 +382,13 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
 }
 
 // ── Entries ─────────────────────────────────────────────────────────────────
+function countKind(s: BotState, kind: 'index' | 'stock'): number {
+  return Object.values(s.tracked).filter(t => (t.kind ?? 'index') === kind).length;
+}
+
 async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
   const s = st(mode);
-  if (Object.keys(s.tracked).length >= MAX_POSITIONS) return;
+  if (countKind(s, 'index') >= MAX_POSITIONS) return;
 
   // One batched snapshot for all underlyings — spot for signal rescale +
   // strike selection. Snapshot endpoint isn't allowance-gated (see
@@ -342,7 +396,7 @@ async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
   const details = await fetchMarketDetails(session, UNDERLYINGS.map(u => u.epic));
 
   for (const u of UNDERLYINGS) {
-    if (Object.keys(s.tracked).length >= MAX_POSITIONS) break;
+    if (countKind(s, 'index') >= MAX_POSITIONS) break;
     if (s.tracked[u.epic]) continue; // one option position per underlying
 
     const d = details.get(u.epic);
@@ -429,7 +483,7 @@ async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
       s.tracked[u.epic] = {
         dealId: result.dealId, epic: opt.epic, underlyingEpic: u.epic, name: opt.name,
         optionType: side, strike: opt.strike, expiry: opt.expiry, expiryMs: opt.expiryMs,
-        premium, size: stake, enteredAt: Date.now(), peakPlPct: 0,
+        premium, size: stake, enteredAt: Date.now(), peakPlPct: 0, kind: 'index',
       };
       saveTracked(mode, s.tracked);
       recordJournalEvent({
@@ -441,6 +495,152 @@ async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
     } catch (e) {
       addLog(mode, 'error', opt.name, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+}
+
+// ── Daily stock options — momentum entries ──────────────────────────────────
+async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void> {
+  const s = st(mode);
+  if (countKind(s, 'stock') >= STOCK_MAX_POSITIONS) return;
+  const runwayH = hoursUntilNYSEClose();
+  if (!isNYSEOpen() || runwayH === null || runwayH < STOCK_MIN_RUNWAY_H) return;
+
+  const apiKey = process.env.FINNHUB_API_KEY;
+  if (!apiKey) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const details = await fetchMarketDetails(session, STOCK_UNDERLYINGS.map(u => u.shareEpic));
+
+  for (const u of STOCK_UNDERLYINGS) {
+    if (countKind(s, 'stock') >= STOCK_MAX_POSITIONS) break;
+    if (s.tracked[u.shareEpic]) continue;
+    if (s.lastStockEntryDay[u.finnhub] === today) continue; // one shot per stock per day
+
+    // Today's move from Finnhub (has day-change %; IG's snapshot doesn't
+    // carry one) — the qualifying bar before any AI call is spent.
+    let dp: number;
+    try {
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${u.finnhub}&token=${apiKey}`, { signal: AbortSignal.timeout(5_000) });
+      if (!res.ok) continue;
+      const q = await res.json() as { c: number; dp: number };
+      if (!q.c || q.dp === undefined || q.dp === null) continue;
+      dp = q.dp;
+    } catch { continue; }
+    if (Math.abs(dp) < STOCK_MIN_MOVE_PCT) continue;
+    const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
+
+    // Spot in IG points (matches the option strikes' own scale — Apple
+    // ~$260 quotes as ~26000, and its chain's strikes are 26000/26500/…).
+    const d = details.get(u.shareEpic);
+    const spot = typeof d?.bid === 'number' && typeof d?.offer === 'number' ? (d.bid + d.offer) / 2 : null;
+    if (!spot) continue;
+
+    let headlines: string[] = [];
+    try { headlines = await fetchAllHeadlines(u.finnhub, 8, u.name); } catch { /* prompt handles empty */ }
+    const verdict = await askIgConfirmStockTrade({
+      instrumentName: `${u.name} (same-day ${side.toUpperCase()} option expiring at today's close)`,
+      suggestedDir: side === 'call' ? 'BUY' : 'SELL',
+      ruleReasoning: `Moving ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today — momentum-continuation bet into the close, hours not weeks`,
+      ruleConfidence: Math.max(1, Math.min(10, Math.round(Math.abs(dp) * 2))),
+      price: spot, rsi: null, macdHist: null, lastCandles: [],
+      headlines, dayChangePercent: dp,
+    });
+    addLog(mode, 'info', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today → ${side.toUpperCase()} candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+    if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;
+
+    let premiumBudget = STOCK_MAX_PREMIUM_GBP;
+    const edge = edgeSizing(journalMode(mode), STOCK_STRATEGY);
+    if (edge.skip) { addLog(mode, 'wait', u.name, `[Daily] Skipped — ${edge.reason}`); continue; }
+    if (edge.multiplier !== 1) premiumBudget = Math.round(STOCK_MAX_PREMIUM_GBP * edge.multiplier);
+
+    // Chain discovery — same exact-name search as the index side, with the
+    // daily chain's own naming ("Daily Apple Inc 26000 CALL") and today's
+    // exact expiry.
+    const sideWord = side === 'call' ? 'CALL' : 'PUT';
+    const base = side === 'call' ? Math.ceil(spot / u.strikeStep) * u.strikeStep : Math.floor(spot / u.strikeStep) * u.strikeStep;
+    let opt: { epic: string; name: string; strike: number; expiry: string; expiryMs: number } | null = null;
+    for (const strike of [base, base + u.strikeStep * (side === 'call' ? 1 : -1)]) {
+      await new Promise(r => setTimeout(r, 350));
+      let results;
+      try { results = await searchMarkets(session, `${u.searchName} ${strike} ${sideWord}`); }
+      catch { continue; }
+      const nameRe = new RegExp(`^${u.searchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ${strike} ${sideWord}$`, 'i');
+      const m = results.find(r => r.instrumentType === 'OPT_SHARES' && nameRe.test(r.name));
+      if (m) {
+        const expiryMs = parseExpiryMs(m.expiry);
+        // Must genuinely be today's daily — a stale/next-session chain would
+        // break the whole force-close-before-the-bell exit model.
+        if (expiryMs !== null && expiryMs - Date.now() < 36 * 3_600_000) {
+          opt = { epic: m.epic, name: m.name, strike, expiry: m.expiry, expiryMs };
+          break;
+        }
+      }
+    }
+    if (!opt) { addLog(mode, 'wait', u.name, `[Daily] No same-day ${side} found near ${spot.toFixed(0)}`); continue; }
+
+    const optDetails = (await fetchMarketDetails(session, [opt.epic])).get(opt.epic);
+    const optBid   = typeof optDetails?.bid   === 'number' ? optDetails.bid   : null;
+    const optOffer = typeof optDetails?.offer === 'number' ? optDetails.offer : null;
+    if (!optDetails || optOffer === null || optOffer <= 0 || optDetails.marketStatus !== 'TRADEABLE') continue;
+    if (optBid !== null && (optOffer - optBid) / optOffer > 0.25) {
+      addLog(mode, 'wait', opt.name, `[Daily] Spread too wide (${optBid}/${optOffer}) — skipping`);
+      continue;
+    }
+
+    const minDeal = optDetails.minDealSize || 0.1;
+    let stake = Math.max(minDeal, Math.floor((premiumBudget / optOffer) * 100) / 100);
+    stake = Math.round(stake * 100) / 100;
+    if (optOffer * stake > premiumBudget * 1.25) {
+      addLog(mode, 'wait', opt.name, `[Daily] Minimum stake costs £${(optOffer * stake).toFixed(0)} premium — over budget, skipping`);
+      continue;
+    }
+
+    try {
+      const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'GBP', false, opt.expiry);
+      const premium = result.level || optOffer;
+      s.lastStockEntryDay[u.finnhub] = today;
+      s.tracked[u.shareEpic] = {
+        dealId: result.dealId, epic: opt.epic, underlyingEpic: u.shareEpic, name: opt.name,
+        optionType: side, strike: opt.strike, expiry: opt.expiry, expiryMs: opt.expiryMs,
+        premium, size: stake, enteredAt: Date.now(), peakPlPct: 0, kind: 'stock',
+      };
+      saveTracked(mode, s.tracked);
+      recordJournalEvent({
+        mode: journalMode(mode), event: 'entry', symbol: opt.name, strategy: STOCK_STRATEGY,
+        side: 'long', qty: stake, price: premium,
+        reason: `${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today, momentum continuation · AI ${verdict.confidence}%`, confidence: verdict.confidence,
+      });
+      addLog(mode, 'enter', opt.name, `[Daily] BUY ${side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${stake}/pt · max loss £${(premium * stake).toFixed(2)} · closes before today's bell — ${verdict.reason}`);
+    } catch (e) {
+      addLog(mode, 'error', opt.name, `[Daily] Order failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
+// Faster loop for the same-day strategy — momentum is stale within hours,
+// and the force-close-before-the-bell exit needs sub-hourly checks. Entries
+// AND exits for stock-kind positions both live here; the hourly poll()
+// below still covers everything as a backstop via the shared manageExits.
+async function stockPoll(mode: IgMode): Promise<void> {
+  const s = st(mode);
+  if (!s.running) return;
+
+  if (!isScannerQuietWeekend() && isNYSEOpen()) {
+    try {
+      const session = await getOrAuthSession(mode);
+      if (session) {
+        s.session = session;
+        const positions = await fetchFullPositions(session);
+        await manageExits(mode, session, positions);
+        await scanStockEntries(mode, session);
+      }
+    } catch (e) {
+      addLog(mode, 'error', '—', `[Daily] Poll failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  if (s.running) {
+    const delayMs = isScannerQuietWeekend() ? msUntilWeekendReopen() : STOCK_POLL_MS;
+    s.stockPollTimer = setTimeout(() => { void stockPoll(mode); }, delayMs);
   }
 }
 
@@ -481,11 +681,13 @@ export function startIgOptionsBot(mode: IgMode): { ok: boolean; error?: string }
   const creds = resolveCredentials(mode);
   if (!creds.apiKey) return { ok: false, error: `IG ${mode} credentials not configured` };
   const s = st(mode);
-  if (s.pollTimer) clearTimeout(s.pollTimer);
+  if (s.pollTimer)      clearTimeout(s.pollTimer);
+  if (s.stockPollTimer) clearTimeout(s.stockPollTimer);
   s.running = true;
   saveRunningFlag(mode, true);
-  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}), £${MAX_PREMIUM_GBP} premium budget/position, max ${MAX_POSITIONS} positions, AI-confirmed entries, ${MIN_DTE}-${MAX_DTE}d expiries`);
+  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${MAX_PREMIUM_GBP}/position, ${MIN_DTE}-${MAX_DTE}d) + same-day stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_MAX_PREMIUM_GBP}/position, closed before the bell) — AI-confirmed entries on both`);
   void poll(mode);
+  void stockPoll(mode);
   return { ok: true };
 }
 
@@ -493,7 +695,8 @@ export function stopIgOptionsBot(mode: IgMode): { ok: boolean } {
   const s = st(mode);
   s.running = false;
   saveRunningFlag(mode, false);
-  if (s.pollTimer) { clearTimeout(s.pollTimer); s.pollTimer = null; }
+  if (s.pollTimer)      { clearTimeout(s.pollTimer);      s.pollTimer      = null; }
+  if (s.stockPollTimer) { clearTimeout(s.stockPollTimer); s.stockPollTimer = null; }
   addLog(mode, 'info', '—', 'IG options bot stopped');
   return { ok: true };
 }
@@ -513,7 +716,8 @@ export async function getIgOptionsBotStatus(mode: IgMode): Promise<{
     } catch { /* best-effort */ }
   }
   return {
-    running: s.running, underlyings: UNDERLYINGS.map(u => u.name),
+    running: s.running,
+    underlyings: [...UNDERLYINGS.map(u => u.name), ...STOCK_UNDERLYINGS.map(u => `${u.name} (daily)`)],
     log: s.log, nextRunMs: s.nextRunMs, lastPollTs: s.lastPollTs, tracked: s.tracked, positions,
   };
 }
