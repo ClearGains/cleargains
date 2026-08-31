@@ -329,6 +329,48 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
         stake = Math.max(minDeal, Math.round(stake * edge.multiplier * 100) / 100);
       }
 
+      // Minimum £/pt floor, conviction-scaled — this bot (mr:stocks:live),
+      // not igStrategyBot.ts's mean_reversion_swing, turned out to be the one
+      // actually placing these trades (confirmed live 2026-08-31: UnitedHealth/
+      // NVIDIA/Netflix entries all logged under this file's own [mr:stocks:live]
+      // tag). calcStake = risk ÷ stopDist, so a wide-ATR name (UnitedHealth's
+      // real stop here is ~1460pt) eats most of the £20 risk budget into a
+      // wider stop rather than a bigger stake — confirmed live this produced a
+      // real 0.01/pt NVIDIA position, too small for even a real move to
+      // matter. Scaled by signal.conviction (0-1, meanReversionStrategy.ts's
+      // own mechanical RSI(2)-extremity + trend-strength score, not AI) rather
+      // than a flat number — same reasoning and same 0.02-0.06 range as the
+      // identical fix already deployed on igStrategyBot.ts's mean_reversion_swing.
+      // Scoped to 'stocks' only, matching where this was actually reported —
+      // fx/japan225 weren't part of this complaint and have different stop
+      // economics (FX stops are typically far tighter in £/pt terms).
+      if (instance === 'stocks') {
+        const MIN_STAKE_LOW = 0.02, MIN_STAKE_HIGH = 0.06;
+        const minStakePerPoint = MIN_STAKE_LOW + Math.max(0, Math.min(signal.conviction, 1)) * (MIN_STAKE_HIGH - MIN_STAKE_LOW);
+        if (stake < minStakePerPoint) {
+          addLog(instance, mode, 'info', epicName(epic),
+            `Stake raised to the £${minStakePerPoint.toFixed(3)}/pt floor for this ${(signal.conviction * 100).toFixed(0)}%-conviction setup (was £${stake}/pt) — real max loss now £${(minStakePerPoint * stopDist).toFixed(2)}, above the £${MAX_RISK_GBP} risk target`);
+          stake = minStakePerPoint;
+        }
+
+        // Same downstream safety check as igStrategyBot.ts's version — the
+        // floor above overrides risk-proportional sizing, so without a cap
+        // a genuinely extreme wide-stop name could produce a real loss many
+        // multiples of the nominal target with no bound at all. Ceiling
+        // scales with conviction (3x target at a routine setup, up to 6x at
+        // maximum conviction) rather than a flat number, same as the ig-bot
+        // version — skip rather than silently accept an outsized real risk.
+        const confidence  = signal.conviction * 100;
+        const ceilingMult = 3 + Math.max(0, Math.min(confidence, 100) - 60) / 40 * 3;
+        const actualMaxLoss = stake * stopDist;
+        const lossCeiling   = MAX_RISK_GBP * ceilingMult;
+        if (actualMaxLoss > lossCeiling) {
+          addLog(instance, mode, 'wait', epicName(epic),
+            `Skipped — sizing works out to £${actualMaxLoss.toFixed(0)} max loss (stake £${stake}/pt × ${stopDist.toFixed(0)}pt stop), above the £${lossCeiling.toFixed(0)} ceiling (${ceilingMult.toFixed(1)}× target)`);
+          continue;
+        }
+      }
+
       // IG's own live quote, not the free-source bar close — the latter can
       // be on a completely different scale for FX/shares (IG points-scales
       // these, Yahoo doesn't), which would make this margin estimate
