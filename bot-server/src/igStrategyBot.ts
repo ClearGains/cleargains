@@ -2794,6 +2794,31 @@ async function executeIgSignal(
       `Stake £${rawStake}/pt below IG minimum £${minDeal}/pt — using minimum (max loss £${actualMaxLoss.toFixed(0)}, within the £${lossCeiling.toFixed(0)} ceiling)`);
   }
 
+  // Minimum meaningful-move floor — added 2026-08-31 per explicit request
+  // ("its point per trade is really small"). £/pt = risk ÷ stop distance;
+  // a wide ATR-based stop on an expensive/volatile instrument (NVIDIA at
+  // this account's own risk figure is the case that prompted this) forces
+  // a stake so small that even a real, sizeable move in the underlying
+  // barely registers — confirmed live moves of several hundred points
+  // netting single-digit £ P&L. There's no fix that keeps the SAME risk
+  // cap and produces a bigger stake here — stopDist is what the
+  // instrument's own volatility actually is, tightening it artificially
+  // just means getting stopped out on ordinary noise, and raising the risk
+  // cap is the opposite of what was just asked for. So instead of forcing
+  // a bad trade-off, skip entries this unproductive entirely — the slot
+  // goes to a name where the same risk budget buys a real position, not to
+  // paying real spread/slippage cost for a trade that can only ever move
+  // by pennies. Threshold: what a realistic 1% move in the underlying
+  // would net in £ — below £3, the trade isn't worth having regardless of
+  // whether the thesis is right.
+  const MIN_MEANINGFUL_MOVE_GBP = 3;
+  const expectedMoveGbp = stake * currentPrice * 0.01;
+  if (expectedMoveGbp < MIN_MEANINGFUL_MOVE_GBP) {
+    addLog(mode, 'wait', name,
+      `Skipped — even a 1% move here only nets ~£${expectedMoveGbp.toFixed(2)} at this stake (£${stake}/pt on a ${sizingStopDist.toFixed(0)}pt stop) — not worth the trade at the current £${cfg.maxRiskGbp} risk target`);
+    return;
+  }
+
   // Margin affordability — confirmed live this matters: Western Digital and
   // Micron both got rejected with INSUFFICIENT_FUNDS at the IG minimum
   // stake, with zero other positions open and the full account balance
