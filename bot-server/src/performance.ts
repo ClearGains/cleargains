@@ -52,6 +52,36 @@ export type ModePerf = {
   strategies: StrategyRow[];
 };
 
+// Collapses repeated-close duplicates — a real, now-fixed bug (alpacaBot.ts,
+// options on a dead/no-bid contract re-journaled the identical exit on
+// every poll cycle while a resting close order sat unfilled, before a
+// stillPending guard was added) left 32 duplicate rows in the paper journal
+// alone, inflating options_directional's headline P&L by ~7x (-$71,145
+// shown vs -$9,643 real: PLTR logged 17x, GOOGL 10x, GLD 9x, always the
+// exact same symbol+qty+plUsd). Confirmed live journal for what it is
+// rather than edited/deleted — this collapses same (symbol, qty, plUsd)
+// exits within a strategy into one counted trade when they land within 14
+// days of each other, since a genuine second trade producing the exact
+// same P&L to the cent by coincidence is not realistic. Keeps the earliest
+// timestamp for the equity curve.
+function dedupeRepeatedCloses(exits: JournalEvent[]): JournalEvent[] {
+  const DUP_WINDOW_MS = 14 * 86_400_000;
+  const kept: JournalEvent[] = [];
+  const lastSeen = new Map<string, { ts: number; keptIdx: number }>();
+  for (const r of exits) {
+    const key = `${r.symbol}|${r.qty}|${r.plUsd}`;
+    const ts = new Date(r.ts).getTime();
+    const prev = lastSeen.get(key);
+    if (prev && ts - prev.ts <= DUP_WINDOW_MS) {
+      lastSeen.set(key, { ts, keptIdx: prev.keptIdx }); // extend the window from this occurrence, don't re-add
+      continue;
+    }
+    lastSeen.set(key, { ts, keptIdx: kept.length });
+    kept.push(r);
+  }
+  return kept;
+}
+
 function computePerf(exits: JournalEvent[]): StrategyPerf {
   const wins   = exits.filter(r => (r.plUsd ?? 0) > 0);
   const losses = exits.filter(r => (r.plUsd ?? 0) <= 0);
@@ -93,8 +123,9 @@ export function getPerformanceSummary(): { modes: ModePerf[] } {
     if (exitsByStrategy.size === 0) continue;
 
     const strategies: StrategyRow[] = [];
-    for (const [strategy, exits] of exitsByStrategy) {
-      exits.sort((a, b) => a.ts.localeCompare(b.ts));
+    for (const [strategy, rawExits] of exitsByStrategy) {
+      rawExits.sort((a, b) => a.ts.localeCompare(b.ts));
+      const exits = dedupeRepeatedCloses(rawExits);
       const row: StrategyRow = { strategy, lifetime: computePerf(exits) };
       const cutoff = EDGE_STATS_CUTOFF[strategy];
       if (cutoff) {
