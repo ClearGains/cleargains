@@ -3049,6 +3049,11 @@ const stuckLossFlagged     = new Set<string>();          // dealId -> already fl
 const STUCK_LOSS_GBP      = -10;   // caution threshold — below the account's own £15 hard stop, an early warning
 const STUCK_LOSS_PERSIST_MS = 20 * 60_000; // must stay unrecovered this long before flagging, not just a single bad tick
 
+// Peak tracking for the profit-lock trail below — same in-memory tradeoff
+// as the trackers above (worst case after a restart is one missed peak,
+// not a safety gap; the position's own broker-side stop/TP still protects it).
+const profitPeakByDeal = new Map<string, number>();
+
 async function poll(mode: IgMode) {
   const st = ms(mode);
   if (!st.running || !st.config || !st.session) return;
@@ -3283,22 +3288,36 @@ async function poll(mode: IgMode) {
   // run — confirmed live this is exactly how a £40-stop Seagate position
   // reached an £854.53 loss before anything caught it.
 
-  // Profit-lock circuit breaker — banks a healthy win outright once it's
-  // reached, rather than trusting the trailing stop / channel-exit to
-  // eventually catch it. Confirmed live this matters: visible gains have
-  // gone back to red because nothing closed the position in time. Doesn't
-  // need active monitoring — checked every poll alongside the loss guard
-  // above, same cadence. Threshold is a clear, worthwhile multiple of what
-  // was risked (not a token amount), so it's banking real wins, not just
-  // clipping tiny ones early.
+  // Profit-lock trail — rebuilt 2026-08-31 per explicit request ("find a
+  // better way to take profits whilst avoiding hefty losses... allowing
+  // positions to play out"). The original version banked the INSTANT upl
+  // crossed the floor, at whatever price happened to be showing that
+  // poll — confirmed this was cutting real trends short well before their
+  // own ATR-based take-profit (often several times bigger) had any chance
+  // to be reached, the mirror image of the AI-close/weak-open problems
+  // already fixed today, just via a third mechanism. Now: the floor below
+  // only ACTIVATES tracking (still "a clear, worthwhile multiple of what
+  // was risked, not a token amount" — same reasoning as before), then the
+  // position is left alone to keep running toward its real broker-side
+  // take-profit for as long as it's still working. Only closes early if it
+  // gives back a real chunk (30%, matching the same figure already tuned
+  // and validated on the options bot's identical peak-retrace design
+  // today) of its own best-ever gain — protects against a real reversal
+  // giving it all back, without capping a winner at a fixed small number.
   const profitLockFloor = cfg.maxRiskGbp * 1.5;
+  const PROFIT_RETRACE_TRIGGER = 0.3;
   for (const p of positions) {
-    if (p.upl < profitLockFloor) continue;
+    const peak = Math.max(profitPeakByDeal.get(p.dealId) ?? -Infinity, p.upl);
+    profitPeakByDeal.set(p.dealId, peak);
+    if (peak < profitLockFloor) continue; // never earned real protection yet — leave it to the broker-side stop/TP
+    const giveback = peak > 0 ? (peak - p.upl) / peak : 0;
+    if (giveback < PROFIT_RETRACE_TRIGGER) continue; // still running well (or just made a fresh peak) — let it play out
     const name = epicName(p.epic);
-    const plReason = `💰 Profit lock — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it`;
+    const plReason = `💰 Profit lock — gave back ${(giveback * 100).toFixed(0)}% of its £${peak.toFixed(2)} peak, banking £${p.upl.toFixed(2)} before it erodes further`;
     addLog(mode, 'exit', name, plReason);
     try {
       await igClosePos(st.session, p.dealId, p.direction, p.size);
+      profitPeakByDeal.delete(p.dealId);
       // Confirmed live this gap mattered: with no record of a win here,
       // the very next fresh evaluation of the same instrument had zero
       // memory that it had already delivered a gain — Dell got bought
@@ -3341,6 +3360,7 @@ async function poll(mode: IgMode) {
     for (const id of weakOpenTightenedOnce) if (!openDealIds.has(id)) weakOpenTightenedOnce.delete(id);
     for (const id of stuckLossFirstSeenAt.keys()) if (!openDealIds.has(id)) stuckLossFirstSeenAt.delete(id);
     for (const id of stuckLossFlagged) if (!openDealIds.has(id)) stuckLossFlagged.delete(id);
+    for (const id of profitPeakByDeal.keys()) if (!openDealIds.has(id)) profitPeakByDeal.delete(id);
     let referenceIndexPct: number | null | undefined; // undefined = not fetched yet this poll, null = fetch failed
     const getReferenceIndexPct = async (): Promise<number | null> => {
       if (referenceIndexPct !== undefined) return referenceIndexPct;
