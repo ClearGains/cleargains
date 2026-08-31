@@ -21,7 +21,23 @@
 export type MrBar = { time: string; open: number; high: number; low: number; close: number };
 
 export type MrSignal =
-  | { action: 'BUY' | 'SELL'; reason: string; stopPoints: number; tpPoints: number }
+  | {
+      action: 'BUY' | 'SELL'; reason: string; stopPoints: number; tpPoints: number;
+      // 0-1, real-time per-setup quality — NOT a strategy-level track-record
+      // figure (that's edgeSizing's job) and NOT an AI guess. Added
+      // 2026-08-31 per explicit request: "SB is not like normal stocks, one
+      // trade may go well and another badly... what's correct is based on
+      // the situation in realtime and how well-selected a position was."
+      // Built from two numbers the signal already computes and previously
+      // only used to cross a yes/no line: how extreme the RSI(2) reading is
+      // (0.0 = maximally oversold/overbought, just under the RSI_BUY/SELL
+      // threshold = barely qualifying) and how strong the established trend
+      // is (price's real % distance from EMA200). A signal firing at
+      // RSI(2)=0.0 deep in a strong trend IS mechanically a better-selected
+      // setup than one that barely scrapes the threshold in a weak one —
+      // real information, not invented conviction.
+      conviction: number;
+    }
   | { action: 'HOLD'; reason: string };
 
 const EMA_TREND      = 200;  // major trend filter — same period as bot_ig.py/backtest_ig.py
@@ -109,18 +125,27 @@ export function getMeanReversionSignal(bars: MrBar[]): MrSignal {
   const uptrend   = price > currentEma;
   const downtrend = price < currentEma;
 
+  // Trend-strength component — capped at 20% distance from EMA200 as "as
+  // strong as this needs to score"; further than that doesn't mean a
+  // better mean-reversion setup, just a more extended one.
+  const trendPct = Math.min(1, Math.abs(price - currentEma) / currentEma / 0.20);
+
   if (uptrend && rsi2 < RSI_BUY) {
+    const rsiExtremity = (RSI_BUY - rsi2) / RSI_BUY; // 0 at the threshold, 1 at rsi2=0
+    const conviction   = Math.max(0, Math.min(1, (rsiExtremity + trendPct) / 2));
     return {
       action: 'BUY',
       reason: `Uptrend (price ${price.toFixed(2)} > EMA200 ${currentEma.toFixed(2)}) + RSI(2)=${rsi2.toFixed(1)} oversold pullback`,
-      stopPoints: atr * ATR_STOP_MULT, tpPoints: atr * ATR_TP_MULT,
+      stopPoints: atr * ATR_STOP_MULT, tpPoints: atr * ATR_TP_MULT, conviction,
     };
   }
   if (downtrend && rsi2 > RSI_SELL) {
+    const rsiExtremity = (rsi2 - RSI_SELL) / (100 - RSI_SELL); // 0 at the threshold, 1 at rsi2=100
+    const conviction   = Math.max(0, Math.min(1, (rsiExtremity + trendPct) / 2));
     return {
       action: 'SELL',
       reason: `Downtrend (price ${price.toFixed(2)} < EMA200 ${currentEma.toFixed(2)}) + RSI(2)=${rsi2.toFixed(1)} overbought bounce`,
-      stopPoints: atr * ATR_STOP_MULT, tpPoints: atr * ATR_TP_MULT,
+      stopPoints: atr * ATR_STOP_MULT, tpPoints: atr * ATR_TP_MULT, conviction,
     };
   }
   return {

@@ -255,15 +255,20 @@ export function meanReversionSwingSignal(bars: AlpacaBar[]): StrategySignal {
   const signal = getMeanReversionSignal(mrBars);
   if (signal.action === 'HOLD') return { action: 'HOLD', reason: signal.reason };
   const last = bars[bars.length - 1].c;
+  // conviction (0-1, real-time per-setup quality — see MrSignal's own
+  // comment) carried through as confidence (0-100) so it reaches
+  // igStrategyBot.ts's existing sizing logic through the same channel
+  // gemini_opinion's real AI confidence already uses — no new plumbing.
+  const confidence = Math.round(signal.conviction * 100);
   return signal.action === 'BUY'
     ? {
-        action: 'BUY', reason: signal.reason,
+        action: 'BUY', reason: signal.reason, confidence,
         stopPrice: +(last - signal.stopPoints).toFixed(2),
         takeProfitPrice: +(last + signal.tpPoints).toFixed(2),
         orderType: 'market',
       }
     : {
-        action: 'SELL', reason: signal.reason,
+        action: 'SELL', reason: signal.reason, confidence,
         stopPrice: +(last + signal.stopPoints).toFixed(2),
         takeProfitPrice: +(last - signal.tpPoints).toFixed(2),
         orderType: 'market',

@@ -2765,16 +2765,30 @@ async function executeIgSignal(
   // trade regardless of how wide that particular name's stop is — real
   // consequence, stated plainly: it overrides the risk-proportional sizing,
   // so the ACTUAL max loss on a wide-stop name can exceed the nominal
-  // maxRiskGbp target. Confirmed against live data: UnitedHealth's own
-  // ~2300pt stop implies a £69 max loss at this floor, not £40 — the
-  // downstream loss-ceiling check below still applies on top of this and
-  // will skip anything that floor pushes past a sane multiple of target.
-  // Scoped to mean_reversion_swing only — this strategy's own tight-stake
-  // complaint prompted it, not a blanket change to every strategy's sizing.
-  const MIN_STAKE_PER_POINT = 0.03;
-  if (cfg.strategy === 'mean_reversion_swing' && stake < MIN_STAKE_PER_POINT) {
-    addLog(mode, 'info', name, `Stake raised to the £${MIN_STAKE_PER_POINT}/pt floor (was £${stake}/pt) — real max loss now £${(MIN_STAKE_PER_POINT * sizingStopDist).toFixed(2)}, above the £${effectiveRiskGbp.toFixed(0)} risk target`);
-    stake = MIN_STAKE_PER_POINT;
+  // maxRiskGbp target. The downstream loss-ceiling check below still applies
+  // on top of this and will skip anything that floor pushes past a sane
+  // multiple of target. Scoped to mean_reversion_swing only — this
+  // strategy's own tight-stake complaint prompted it, not a blanket change
+  // to every strategy's sizing.
+  //
+  // Conviction-scaled since 2026-08-31 rather than a flat number — per
+  // explicit follow-up ("SB is not like normal stocks... what's correct is
+  // based on the situation in realtime and how well-selected a position
+  // was"). signal.confidence now carries getMeanReversionSignal's own
+  // mechanical conviction score (RSI(2) extremity + trend strength, NOT an
+  // AI guess — see meanReversionStrategy.ts) threaded through
+  // meanReversionSwingSignal. A barely-qualifying setup gets the same 0.02
+  // floor as before the ceiling math tightened; a genuinely well-selected
+  // one (deep oversold pullback in a strong established trend) earns a
+  // real bigger stake, up to 0.06/pt — same reasoning as the confidence
+  // ceiling below, applied to the floor instead.
+  const confidence = signal.confidence ?? 60;
+  const MIN_STAKE_LOW  = 0.02;
+  const MIN_STAKE_HIGH = 0.06;
+  const minStakePerPoint = MIN_STAKE_LOW + Math.max(0, Math.min(confidence, 100)) / 100 * (MIN_STAKE_HIGH - MIN_STAKE_LOW);
+  if (cfg.strategy === 'mean_reversion_swing' && stake < minStakePerPoint) {
+    addLog(mode, 'info', name, `Stake raised to the £${minStakePerPoint.toFixed(3)}/pt floor for this ${confidence}%-conviction setup (was £${stake}/pt) — real max loss now £${(minStakePerPoint * sizingStopDist).toFixed(2)}, above the £${effectiveRiskGbp.toFixed(0)} risk target`);
+    stake = minStakePerPoint;
   }
 
   // Any time the stake actually used ends up above what the target risk
@@ -2800,7 +2814,8 @@ async function executeIgSignal(
   // undefined) fall back to 60 here, which resolves to the unchanged 3x —
   // this only ever gives gemini_opinion's real conviction more room, never
   // loosens anything for a strategy that has no conviction score to earn it.
-  const confidence  = signal.confidence ?? 60;
+  // (confidence itself is computed above, before the stake floor, so both
+  // this ceiling and that floor scale off the same number.)
   const ceilingMult = 3 + Math.max(0, Math.min(confidence, 100) - 60) / 40 * 3; // 3x @60% conviction → 6x @100%
   const actualMaxLoss = stake * sizingStopDist;
   const lossCeiling    = effectiveRiskGbp * ceilingMult;
