@@ -491,7 +491,7 @@ async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
     try {
       // No stop, no take-profit legs — the premium is the entire risk (see
       // header comment); exits are this bot's own premium-based lifecycle.
-      const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'GBP', false, opt.expiry);
+      const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'GBP', false, opt.expiry, optOffer);
       const premium = result.level || optOffer;
       s.tracked[u.epic] = {
         dealId: result.dealId, epic: opt.epic, underlyingEpic: u.epic, name: opt.name,
@@ -637,7 +637,7 @@ async function placeStockDailyOrder(
   confidence: number, aiReason: string, today: string,
 ): Promise<boolean> {
   try {
-    const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'GBP', false, opt.expiry);
+    const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'GBP', false, opt.expiry, optOffer);
     const premium = result.level || optOffer;
     s.lastStockEntryDay[u.finnhub] = today;
     s.tracked[u.shareEpic] = {

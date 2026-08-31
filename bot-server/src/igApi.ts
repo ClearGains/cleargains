@@ -435,6 +435,16 @@ export async function placeMarketOrder(
   // rejects the order as referencing a nonexistent market. Only
   // igOptionsBot.ts passes this; everything else keeps the default.
   expiry = 'DFB',
+  // Confirmed live 2026-08-31 (igOptionsBot.ts): a real subset of IG's own
+  // option epics reject MARKET orders outright with
+  // error.trading.otc.market-orders.not-supported-for-epic — not a
+  // liquidity/spread problem, an order-TYPE restriction some option
+  // contracts carry. When a caller knows it's dealing with an option and
+  // supplies the current offer, that specific rejection (only that one)
+  // retries once as a LIMIT order priced a small buffer past the offer —
+  // marketable in practice, but sent as the order type IG will actually
+  // accept for these epics.
+  optionFallbackOffer?: number,
 ): Promise<{ dealId: string; level: number; protectionOk: boolean; protectionError?: string; guaranteedStop: boolean }> {
   const base = BASE[session.env];
   // Guaranteed stops can only be requested at open time, as a *distance*
@@ -455,12 +465,18 @@ export async function placeMarketOrder(
   // be tried as a full submit-and-confirm cycle, not just checked against
   // the POST's own response.
   type Confirm = { dealId?: string; level?: number; dealStatus?: string; reason?: string } & Record<string, unknown>;
-  const submitAndConfirm = async (asGuaranteed: boolean): Promise<{ ok: boolean; confirm: Confirm }> => {
+  const submitAndConfirm = async (asGuaranteed: boolean, asLimitLevel?: number): Promise<{ ok: boolean; confirm: Confirm }> => {
     const payload: Record<string, unknown> = {
       epic, expiry, direction, size,
-      orderType: 'MARKET', trailingStop: false,
+      trailingStop: false,
       forceOpen: true, currencyCode,
     };
+    if (asLimitLevel !== undefined) {
+      payload.orderType = 'LIMIT';
+      payload.level     = Math.round(asLimitLevel * 100) / 100;
+    } else {
+      payload.orderType = 'MARKET';
+    }
     if (asGuaranteed) {
       payload.guaranteedStop = true;
       payload.stopDistance   = Math.round(stopDist! * 100) / 100;
@@ -500,6 +516,19 @@ export async function placeMarketOrder(
     console.warn(`[igApi] Guaranteed stop rejected for ${epic} (${confirm.reason ?? 'unknown'}) — retrying with a normal stop`);
     guaranteedApplied = false;
     ({ ok, confirm } = await submitAndConfirm(false));
+  }
+
+  // See optionFallbackOffer's own comment — this specific rejection means
+  // the epic simply doesn't accept MARKET orders, not that anything about
+  // the order itself was wrong. Retry as a marketable LIMIT: 2% past the
+  // live offer for a BUY (5% for a SELL, since IG spread-bet option premiums
+  // can move fast intraday) — comfortably inside typical bid/offer spreads
+  // on the illiquid strikes this actually fires for, so it fills like a
+  // market order in practice while satisfying IG's order-type requirement.
+  if (!ok && confirm.reason === 'error.trading.otc.market-orders.not-supported-for-epic' && optionFallbackOffer) {
+    const buffered = direction === 'BUY' ? optionFallbackOffer * 1.02 : optionFallbackOffer * 0.95;
+    console.warn(`[igApi] MARKET order not supported for ${epic} — retrying as LIMIT @ ${buffered.toFixed(2)}`);
+    ({ ok, confirm } = await submitAndConfirm(guaranteedApplied, buffered));
   }
 
   // Widened to capture whatever else IG's confirm response includes (IG's
