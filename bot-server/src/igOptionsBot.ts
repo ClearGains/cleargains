@@ -518,12 +518,16 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
     // Today's move from Finnhub (has day-change %; IG's snapshot doesn't
     // carry one) — the qualifying bar before any AI call is spent.
     let dp: number;
+    let usdPrice: number; // real $ price — what the AI prompt gets (IG's
+                          // ×100 points scale read as "$26130 Amazon" made
+                          // the AI veto on "impossible price", confirmed live)
     try {
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${u.finnhub}&token=${apiKey}`, { signal: AbortSignal.timeout(5_000) });
       if (!res.ok) continue;
       const q = await res.json() as { c: number; dp: number };
       if (!q.c || q.dp === undefined || q.dp === null) continue;
       dp = q.dp;
+      usdPrice = q.c;
     } catch { continue; }
     if (Math.abs(dp) < STOCK_MIN_MOVE_PCT) continue;
     const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
@@ -541,8 +545,9 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       suggestedDir: side === 'call' ? 'BUY' : 'SELL',
       ruleReasoning: `Moving ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today — momentum-continuation bet into the close, hours not weeks`,
       ruleConfidence: Math.max(1, Math.min(10, Math.round(Math.abs(dp) * 2))),
-      price: spot, rsi: null, macdHist: null, lastCandles: [],
+      price: usdPrice, rsi: null, macdHist: null, lastCandles: [],
       headlines, dayChangePercent: dp,
+      horizon: 'intraday',
     });
     addLog(mode, 'info', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today → ${side.toUpperCase()} candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
     if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;

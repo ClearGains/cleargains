@@ -1086,6 +1086,12 @@ export type StockConfirmSignal = {
   volumeSurgeMultiple?:    number;
   peerGroupChangePercent?: number;
   peerGroupLabel?:         string;
+  // 'swing' (default) = the original days-to-weeks framing. 'intraday' =
+  // same-day momentum (IG daily options): the position closes before
+  // today's bell, so the prompt must judge on an hours horizon — confirmed
+  // live 2026-08-31 that leaving the swing framing in place made the AI
+  // veto every same-day trade *for being same-day*, exactly as instructed.
+  horizon?: 'swing' | 'intraday';
 };
 
 export type StockConfirmVerdict = {
@@ -1098,8 +1104,14 @@ export type StockConfirmVerdict = {
 // Shared with xai.ts's askXaiConfirmStockTrade — same question must go to
 // every provider.
 export function buildConfirmStockTradePrompt(req: StockConfirmSignal): string {
+  const intraday = req.horizon === 'intraday';
+
+  const headlineLifespanGuidance = intraday
+    ? `A genuinely fresh, same-day catalyst is exactly what this trade runs on — today's price effect is the whole game, so a one-off story moving the stock right now is a perfectly valid basis, and week-old news matters only if it's still actively driving today's move.`
+    : `A genuinely fresh, same-day catalyst is a real reason for extra conviction of its own, not just something to check the rule signal against. But also weigh the catalyst's own likely lifespan, not just its age — this is a multi-day/week swing trade, so ask whether the news is the kind that can plausibly keep mattering that long (earnings, M&A, a real guidance change, a structural shift in the business or sector) versus a one-off story (a single analyst note, a passing headline, a rumor) whose price effect typically fades within a day or two — that kind of news being fresh doesn't make it a good basis for a week-long thesis, even though it might fully explain today's move.`;
+
   const headlineBlock = req.headlines.length
-    ? `\nRecent news (last 7 days, dated — weigh today's/yesterday's far more heavily than one from most of a week ago, likely already priced in by now. A genuinely fresh, same-day catalyst is a real reason for extra conviction of its own, not just something to check the rule signal against. But also weigh the catalyst's own likely lifespan, not just its age — this is a multi-day/week swing trade, so ask whether the news is the kind that can plausibly keep mattering that long (earnings, M&A, a real guidance change, a structural shift in the business or sector) versus a one-off story (a single analyst note, a passing headline, a rumor) whose price effect typically fades within a day or two — that kind of news being fresh doesn't make it a good basis for a week-long thesis, even though it might fully explain today's move):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    ? `\nRecent news (last 7 days, dated — weigh today's/yesterday's far more heavily than one from most of a week ago, likely already priced in by now. ${headlineLifespanGuidance}):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
     : '\nNo recent company-specific news found.\n';
 
   const candleBlock = req.lastCandles.length
@@ -1108,7 +1120,9 @@ export function buildConfirmStockTradePrompt(req: StockConfirmSignal): string {
       ).join('\n')}\n`
     : '';
 
-  return `A technical rule-based system (RSI/MACD/SMA/Bollinger Bands, daily bars) has already qualified the following setup — your job is to confirm or veto it with real-world context the rules can't see, not to invent a thesis of your own from nothing. This is a swing trade, typically held for days to weeks, not a scalp — keep that horizon in mind throughout.
+  return `A ${intraday ? 'momentum rule (a real move already underway today, on volume)' : 'technical rule-based system (RSI/MACD/SMA/Bollinger Bands, daily bars)'} has already qualified the following setup — your job is to confirm or veto it with real-world context the rules can't see, not to invent a thesis of your own from nothing. ${intraday
+    ? 'This is a SAME-DAY momentum trade: the position will be closed before today\'s market close, deliberately and always — the same-day expiry is the instrument working as designed, never a reason to veto. Judge purely on whether today\'s move is likely to keep pushing the same direction for the remaining hours of today\'s session.'
+    : 'This is a swing trade, typically held for days to weeks, not a scalp — keep that horizon in mind throughout.'}
 
 Instrument: ${req.instrumentName}
 Rule-based signal: ${req.suggestedDir} (${req.ruleConfidence}/10 conviction) — "${req.ruleReasoning}"
@@ -1121,7 +1135,9 @@ ${req.peerGroupChangePercent !== undefined ? `${req.peerGroupLabel ?? 'Correlate
 ${candleBlock}${headlineBlock}
 Your job: does the real-world context above support this signal, or is there a clear reason to override it — fresh contradicting news, this instrument already extended well past its peers on no real news of its own, or the recent candle shape actively reversing against the signal's own direction? The rules already did the technical qualifying; don't re-litigate RSI/MACD from scratch, weigh what they can't see instead.
 
-One thing the rules genuinely can't see, and you specifically need to: whether this setup is describing a move that's already happened versus one still likely to continue. RSI/MACD/SMA confirming a signal is backward-looking by construction — it tells you demand has been strong, not that it will stay strong. Before confirming, look at the news and context above for something forward-looking: a catalyst that hasn't fully played out, room before an obvious level, a story still developing — not just the absence of a reason to veto. Confirming because nothing technically contradicts the signal is not the same as confirming because you expect it to keep working over the next several days to weeks. If the honest picture is "the setup is intact but I don't see what specifically drives it further from here," that's a reason to lower confidence or veto, not confirm.
+One thing the rules genuinely can't see, and you specifically need to: whether this setup is describing a move that's already happened versus one still likely to continue. ${intraday
+    ? `Today's move having already started is a given — that's the qualifying signal. What you're judging is whether it has fuel left for the rest of TODAY's session: a catalyst still unfolding right now versus a completed one-time repricing (a fixed announcement fully absorbed at the open, with the stock now drifting). If the driver looks spent and the move is likely to fade or mean-revert into the close, veto; if the story is live and the move is still building, confirm.`
+    : `RSI/MACD/SMA confirming a signal is backward-looking by construction — it tells you demand has been strong, not that it will stay strong. Before confirming, look at the news and context above for something forward-looking: a catalyst that hasn't fully played out, room before an obvious level, a story still developing — not just the absence of a reason to veto. Confirming because nothing technically contradicts the signal is not the same as confirming because you expect it to keep working over the next several days to weeks. If the honest picture is "the setup is intact but I don't see what specifically drives it further from here," that's a reason to lower confidence or veto, not confirm.`}
 ${CONFIDENCE_CALIBRATION_ENTRY}
 
 Respond with JSON only, no markdown:
