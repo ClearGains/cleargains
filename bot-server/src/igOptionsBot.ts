@@ -141,6 +141,14 @@ type BotState = {
   // product churns premium away. In-memory only: worst case a restart allows
   // one repeat entry, still AI-gated.
   lastStockEntryDay: Record<string, string>;
+  // What the AI was actually shown last time this stock was evaluated —
+  // headline set + roughly-rounded day-change. See scanStockEntries' own
+  // comment: confirmed live the AI call re-asked on IDENTICAL facts every
+  // 15min oscillates HOLD/SKIP with no new information, and the trade that
+  // eventually fires is whichever side of that noise it happened to land on,
+  // not a real signal. In-memory only, resets on restart (worst case one
+  // extra AI call per stock, not a correctness issue).
+  lastStockEvalKey: Record<string, string>;
 };
 
 const states = new Map<IgMode, BotState>();
@@ -166,7 +174,7 @@ function saveRunningFlag(mode: IgMode, running: boolean): void {
 function st(mode: IgMode): BotState {
   let s = states.get(mode);
   if (!s) {
-    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, nextRunMs: null, lastPollTs: null, lastStockEntryDay: {} };
+    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, nextRunMs: null, lastPollTs: null, lastStockEntryDay: {}, lastStockEvalKey: {} };
     states.set(mode, s);
   }
   return s;
@@ -553,6 +561,20 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
 
     let headlines: string[] = [];
     try { headlines = await fetchAllHeadlines(u.finnhub, 8, u.name); } catch { /* prompt handles empty */ }
+
+    // Don't re-ask on facts the AI has already judged today. Confirmed live
+    // 2026-08-31 (Apple/Tim Cook, 8 calls on the exact same headline over
+    // 2 hours): with nothing new to weigh, the verdict just drifts —
+    // SKIP 15/BUY 70/BUY 70/SKIP 45/SKIP 35/SKIP 45/SKIP 35/SELL 82 — and
+    // the trade that actually fires is whichever side of that noise it
+    // happens to land on 15 minutes later, not a real re-read of anything.
+    // Key = today's rounded move (0.5% buckets — small wobbles shouldn't
+    // count as "new") + the exact headline set. A genuinely fresh headline
+    // or a further-extended move changes the key and gets a real fresh call.
+    const evalKey = `${Math.round(dp * 2) / 2}|${[...headlines].sort().join('~')}`;
+    if (s.lastStockEvalKey[u.finnhub] === evalKey) continue;
+    s.lastStockEvalKey[u.finnhub] = evalKey;
+
     const verdict = await askIgConfirmStockTrade({
       instrumentName: `${u.name} (same-day ${side.toUpperCase()} option expiring at today's close)`,
       suggestedDir: side === 'call' ? 'BUY' : 'SELL',
