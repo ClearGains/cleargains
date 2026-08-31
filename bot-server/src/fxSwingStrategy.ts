@@ -91,8 +91,29 @@ export const DEFAULT_SWING_CONFIG: SwingConfig = {
   emaSlowPeriod:     50,
   atrStopMult:       2.5,
   atrTpMult:         4,
-  minConfidence:     60,
-  maxHoldMs:          11 * 60 * 60_000,  // ~11h — the outer safety net, not a target
+  // Raised 60 -> 70 (2026-08-28) after reviewing every real trade in the
+  // last ~5 days: all 6 (5 losses, 1 still-open) were confirmed at 64-78%,
+  // and every single one of the AI's own reasons included a live hedge —
+  // "near-oversold RSI", "RSI extension", "mixed dollar breadth", "limited
+  // conviction" — i.e. the model's own text was already flagging doubt
+  // while still clearing the old 60 floor. A 100% loss rate across every
+  // completed trade in the sample is unlikely to be pure variance (even at
+  // a pessimistic 40% true win rate, 5 losses in a row is under 5% likely).
+  // 70 wouldn't have caught the one 78%-confidence loss, so this alone
+  // isn't the whole fix — paired with the bigger-picture trend filter below.
+  minConfidence:     70,
+  // Raised 11h -> 72h (2026-08-28), per explicit request: FX pairs don't
+  // swing as hard intraday as stocks do, so a hard same-day-ish ceiling was
+  // force-closing trades that were still structurally fine, well before a
+  // slower-moving FX trend had a real chance to pay off. Confirmed against
+  // real trade history first — most recent FX losses (EUR/USD, Germany 40,
+  // USD/JPY, all in the 2-6h range) were actually closed by the
+  // trend-reversal/stop checks below, not this backstop, so those checks
+  // (the real thesis-quality gates) are untouched; only the artificial
+  // clock ceiling moves. Still a real backstop, not indefinite — a trade
+  // that hasn't resolved in 3 days genuinely needs closing out regardless
+  // of thesis.
+  maxHoldMs:          72 * 60 * 60_000,
   // Pushed 4h->5h — 4h was less than half the 11h max hold, second-guessing
   // a trade before it's had a real chance to work.
   stallCheckAfterMs:  5  * 60 * 60_000,

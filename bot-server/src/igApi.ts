@@ -375,6 +375,51 @@ export async function fetchFullPositions(session: IGSession): Promise<FullPositi
   });
 }
 
+export type IgClosedTransaction = {
+  instrumentName: string;
+  openDateUtc?:   string;
+  closeDateUtc:   string;
+  openLevel?:     number;
+  closeLevel?:    number;
+  profitAndLoss:  number;  // parsed from IG's "£-3.15"-style string, sign preserved
+};
+
+// Recovers what actually happened to a position that vanished from
+// /positions without going through any of this codebase's own close paths —
+// confirmed live 2026-08-25: a broker-side stop-loss execution (IG closing
+// the position server-side once price touches the stop) never runs any of
+// our own igClosePos/journalExit code at all, so a position closed this way
+// previously just silently disappeared with zero record of what it closed
+// at or for how much. IG's own transaction history is the only source of
+// truth for that — this is a real network call (not cached), so callers
+// should use it sparingly (only for dealIds actually confirmed missing),
+// not on every poll.
+export async function fetchClosedTransactions(session: IGSession, sinceIso: string): Promise<IgClosedTransaction[]> {
+  const base = BASE[session.env];
+  const from = sinceIso.slice(0, 19);
+  const r = await fetch(`${base}/history/transactions?type=ALL_DEAL&from=${from}`, {
+    headers: headers(session, '2'), signal: AbortSignal.timeout(10_000),
+  });
+  if (!r.ok) return [];
+  const d = await r.json() as {
+    transactions?: Array<{
+      instrumentName?: string; openDateUtc?: string; dateUtc?: string;
+      openLevel?: string; closeLevel?: string; profitAndLoss?: string;
+    }>;
+  };
+  return (d.transactions ?? [])
+    .filter(t => t.instrumentName && t.dateUtc && t.profitAndLoss)
+    .map(t => ({
+      instrumentName: t.instrumentName!,
+      openDateUtc:    t.openDateUtc,
+      closeDateUtc:   t.dateUtc!,
+      openLevel:      t.openLevel  !== undefined ? Number(t.openLevel)  : undefined,
+      closeLevel:     t.closeLevel !== undefined ? Number(t.closeLevel) : undefined,
+      // IG returns this as a currency-prefixed string, e.g. "£-3.15" or "£12.40"
+      profitAndLoss:  Number((t.profitAndLoss ?? '0').replace(/[^0-9.-]/g, '')) || 0,
+    }));
+}
+
 export async function placeMarketOrder(
   session:      IGSession,
   epic:         string,
@@ -384,6 +429,12 @@ export async function placeMarketOrder(
   profitDist?:  number,
   currencyCode = 'GBP',
   wantGuaranteedStop = false,
+  // 'DFB' (daily funded bet, rolls forever) is right for every cash
+  // CFD/spread-bet epic this codebase trades — but an options epic has a
+  // real expiry ("SEP-26", "30-SEP-26") that MUST be sent as-is or IG
+  // rejects the order as referencing a nonexistent market. Only
+  // igOptionsBot.ts passes this; everything else keeps the default.
+  expiry = 'DFB',
 ): Promise<{ dealId: string; level: number; protectionOk: boolean; protectionError?: string; guaranteedStop: boolean }> {
   const base = BASE[session.env];
   // Guaranteed stops can only be requested at open time, as a *distance*
@@ -406,7 +457,7 @@ export async function placeMarketOrder(
   type Confirm = { dealId?: string; level?: number; dealStatus?: string; reason?: string } & Record<string, unknown>;
   const submitAndConfirm = async (asGuaranteed: boolean): Promise<{ ok: boolean; confirm: Confirm }> => {
     const payload: Record<string, unknown> = {
-      epic, expiry: 'DFB', direction, size,
+      epic, expiry, direction, size,
       orderType: 'MARKET', trailingStop: false,
       forceOpen: true, currencyCode,
     };
@@ -629,6 +680,26 @@ export async function fetchMarketDetails(
     }
   }
   return result;
+}
+
+// Market search — IG's only chain-discovery mechanism on this API (there's
+// no options-chain endpoint; /marketnavigation 404s on demo, confirmed by
+// direct probe 2026-08-31). Search matches instrument names token-wise, so
+// an exact option name ("FTSE 10300 Call") reliably finds that strike's
+// markets across expiries. Not allowance-gated (same class as the snapshot
+// endpoint above, not fetchCandleHistory).
+export type MarketSearchResult = { epic: string; name: string; instrumentType: string; expiry: string };
+
+export async function searchMarkets(session: IGSession, term: string): Promise<MarketSearchResult[]> {
+  const base = BASE[session.env];
+  const r = await fetch(`${base}/markets?searchTerm=${encodeURIComponent(term)}`, {
+    headers: headers(session, '1'), signal: AbortSignal.timeout(10_000),
+  });
+  if (!r.ok) throw new Error(`searchMarkets ${r.status}`);
+  const d = await r.json() as { markets?: Array<{ epic?: string; instrumentName?: string; instrumentType?: string; expiry?: string }> };
+  return (d.markets ?? [])
+    .filter(m => !!m.epic)
+    .map(m => ({ epic: m.epic!, name: m.instrumentName ?? '', instrumentType: m.instrumentType ?? '', expiry: m.expiry ?? '' }));
 }
 
 export async function fetchAccountFunds(session: IGSession): Promise<{ available: number; balance: number }> {

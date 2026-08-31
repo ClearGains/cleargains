@@ -3,21 +3,29 @@ import * as path from 'path';
 import {
   authenticate, getSession, fetchCandleHistory, fetchFullPositions,
   fetchAccountFunds, placeMarketOrder, closePosition as igClosePos,
-  fetchMarketDetails, updatePositionLevels,
+  fetchMarketDetails, updatePositionLevels, fetchClosedTransactions,
   type IGSession, type CandleBar, type FullPosition, type MarketDetail,
 } from './igApi';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal, pivotPointsSignal,
-  ruleBasedAnalysisSignal,
+  ruleBasedAnalysisSignal, meanReversionSwingSignal,
   calcRsi, calcMacdHist, calcAtr, calcEfficiencyRatio,
   STRATEGY_META, MIN_SWING_CONFIDENCE, MIN_DAILY_EFFICIENCY_RATIO,
   type StrategySignal,
 } from './alpacaStrategies';
+import { MAX_HOLD_DAYS as MR_SWING_MAX_HOLD_DAYS } from './meanReversionStrategy';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
 import { recordJournalEvent } from './tradeJournal';
-import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, isIndexEpic, SECTOR_MAP, RULE_BASED_ANALYSIS_CONFIRMED_EPICS } from './igStrategyScanner';
-import { askGeminiDailyVerdict, askGeminiTradeIdea, askGeminiConfirmStockTrade } from './gemini';
+import { edgeSizing } from './quant';
+import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE_EPICS, SECTOR_MAP, RULE_BASED_ANALYSIS_CONFIRMED_EPICS } from './igStrategyScanner';
+// OpenAI is the acting decision-maker for this bot as of 2026-08-25 (moved
+// from an earlier same-day Grok attempt — Grok proved too slow on the
+// longer prompts here for a scan evaluating up to ~64 epics), with Gemini
+// called only as a fallback when OpenAI's own attempt genuinely fails — see
+// openai.ts's askIg* wrappers for the failover logic. Not importing the
+// askGemini* functions directly here any more.
+import { askIgDailyVerdict, askIgTradeIdea, askIgConfirmStockTrade } from './openai';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchAllHeadlines } from './newsFetch';
 import { createStreamManager, type StreamManager } from './igStream';
@@ -43,15 +51,13 @@ function clearIgState(mode: IgMode): void {
 }
 export function loadSavedIgStrategyState(mode: IgMode): IgStrategyConfig | null {
   try {
-    const parsed = JSON.parse(fs.readFileSync(stateFile(mode), 'utf8')) as IgStrategyConfig & { maxPositions?: number };
-    // Migrate state files saved before maxPositions was split into separate
-    // stock/index caps — without this, an auto-resume loading an old file
-    // gets undefined for both new fields, which silently disables the
-    // position-cap check entirely (openCount >= undefined is always false).
-    if (parsed.maxStockPositions === undefined || parsed.maxIndexPositions === undefined) {
-      const legacy = parsed.maxPositions ?? 3;
-      parsed.maxStockPositions ??= legacy;
-      parsed.maxIndexPositions ??= legacy;
+    const parsed = JSON.parse(fs.readFileSync(stateFile(mode), 'utf8')) as IgStrategyConfig & { maxStockPositions?: number; maxIndexPositions?: number };
+    // Migrate state files saved during the brief stock/index-split era —
+    // without this, an auto-resume loading one of those files gets
+    // undefined for maxPositions, which silently disables the position-cap
+    // check entirely (openCount >= undefined is always false).
+    if (parsed.maxPositions === undefined) {
+      parsed.maxPositions = (parsed.maxStockPositions ?? 3) + (parsed.maxIndexPositions ?? 3);
     }
     return parsed;
   } catch { return null; }
@@ -115,6 +121,22 @@ export function setStrategyAiPaused(mode: IgMode, paused: boolean): void {
 // opportunities for the rest of the day. This doesn't touch the daily lock
 // itself — it just slows how fast one instrument can spend that budget.
 const LOSS_COOLDOWN_MS = 3 * 60 * 60_000;  // 3h — long enough to stop immediate flip-flopping, short enough a same-day different setup isn't locked out for good
+
+// Scales the cooldown by how many times in a row this exact instrument has
+// just been cut — confirmed live 2026-08-25 that a flat 3h wasn't enough on
+// its own: Visa got re-entered and re-closed twice more (02:24→02:39,
+// 06:21→08:35) even with getRecentExitContext's own streak warning in every
+// entry prompt ("2 losses in a row on this name... don't just repeat the
+// same thesis"), each time simply waiting out the fixed cooldown rather
+// than being deterred by the AI reading that warning. A prompt-level nudge
+// clearly isn't enough to stop a determined re-entry when the scanner keeps
+// re-flagging the same name as a top pick all day, so the cooldown duration
+// itself now escalates instead of relying on the AI to self-moderate.
+function cooldownDurationMs(streak: number): number {
+  if (streak >= 3) return 24 * 3600_000; // third+ same-day failure — effectively locked out for the rest of the day
+  if (streak >= 2) return 8  * 3600_000; // second in a row — well past any one intraday rally/pullback cycle
+  return LOSS_COOLDOWN_MS;               // first bad exit — unchanged
+}
 
 // Minimum gap between any two gemini_opinion entries, account-wide — not
 // per-epic. Confirmed live this matters: 15 entries in one session across
@@ -224,7 +246,31 @@ export function recordLossExit(mode: IgMode, epic: string, upl: number, reason: 
   if (wasWin) { st.lossStreak.set(epic, 0); return; }
   const streak = (st.lossStreak.get(epic) ?? 0) + 1;
   st.lossStreak.set(epic, streak);
-  st.lossCooldownEpics.set(epic, Date.now() + LOSS_COOLDOWN_MS);
+  st.lossCooldownEpics.set(epic, Date.now() + cooldownDurationMs(streak));
+  saveLossCooldownEpics(mode, st.lossCooldownEpics);
+}
+
+// Cooldown after ANY watch-triggered close, win or loss — distinct from
+// recordLossExit above, which only cools down on an actual loss. Built
+// 2026-08-25 after Visa got opened and closed 5 times in one day (net
+// -£9.24): the scanner kept re-flagging Visa as a fresh "best pick" the
+// moment price cooled slightly after each close, and two of those five
+// closes were technically small wins (so recordLossExit's own cooldown
+// never engaged), while a third loss got re-entered just 15 minutes later
+// because openRecommendation — the actual path that placed every one of
+// these — never checked lossCooldownEpics at all (only the scanner's
+// candidate-exclusion list did). A watch-triggered close, whichever way the
+// P&L landed, means the AI just judged that specific move exhausted right
+// now; re-entering the same name minutes later on a fresh signal is chasing
+// that same move, not an independently-justified new setup. Reuses
+// lossCooldownEpics/LOSS_COOLDOWN_MS rather than a parallel mechanism, so
+// every existing consumer of that cooldown (including openRecommendation's
+// new check below) picks this up automatically.
+export function recordWatchClose(mode: IgMode, epic: string): void {
+  const st = ms(mode);
+  const count = (st.watchCloseCount.get(epic) ?? 0) + 1;
+  st.watchCloseCount.set(epic, count);
+  st.lossCooldownEpics.set(epic, Date.now() + cooldownDurationMs(count));
   saveLossCooldownEpics(mode, st.lossCooldownEpics);
 }
 
@@ -253,7 +299,19 @@ function journalEntry(
   });
 }
 
+// Marked by every explicit close path (journalExit/recordWatchExit) so the
+// silent-close recovery below (see journalSilentCloses) can tell "already
+// journaled through a real close path" apart from "vanished without any of
+// our own code ever closing it" — only the latter needs recovering from IG's
+// own transaction history. Shared across modes — dealIds are globally
+// unique. In-memory only; worst case after a restart is one dealId that
+// closed in the last instant before the restart gets treated as silent and
+// re-journaled from transaction history — a harmless duplicate record, not
+// a gap, and rare in practice.
+const journaledDealIds = new Set<string>();
+
 function journalExit(mode: IgMode, cfg: IgStrategyConfig, p: FullPosition, reason: string): void {
+  journaledDealIds.add(p.dealId);
   const notional = p.level * p.size;
   recordJournalEvent({
     mode: journalMode(mode), event: 'exit',
@@ -263,6 +321,88 @@ function journalExit(mode: IgMode, cfg: IgStrategyConfig, p: FullPosition, reaso
     plUsd: p.upl,
     plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
   });
+}
+
+// Same as journalExit above, but callable from geminiWatch.ts, which closes
+// positions (including manually-opened ones the strategy bot never placed)
+// without necessarily having this bot's own IgStrategyConfig in hand.
+// Confirmed live 2026-08-25 this was a real, longstanding gap: neither
+// openRecommendation's manual-open path nor Position Watch's own close ever
+// called into the journal at all, despite both being real trading paths on
+// this account — the journal (trade-journal-ig-live.json) had essentially
+// nothing in it beyond the scanner's own auto-exits, making "does AI
+// confirmation actually help" unanswerable from real data. Falls back to a
+// 'gemini_watch' strategy label only when this mode has no config loaded at
+// all (bot not currently running) — otherwise attributes to whatever
+// strategy this epic is actually configured under, same as journalExit.
+export function recordWatchExit(mode: IgMode, p: FullPosition, reason: string): void {
+  journaledDealIds.add(p.dealId);
+  const cfg = ms(mode).config;
+  const notional = p.level * p.size;
+  recordJournalEvent({
+    mode: journalMode(mode), event: 'exit',
+    symbol: epicName(p.epic), strategy: cfg ? strategyFor(cfg, p.epic) : 'gemini_watch',
+    side: p.direction === 'BUY' ? 'long' : 'short',
+    qty: p.size, price: p.level, reason,
+    plUsd: p.upl,
+    plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
+  });
+}
+
+// Last-known snapshot of every open position this bot has seen, refreshed
+// every poll — the only way to know what a dealId WAS (epic/level/opened
+// time) after it's already vanished from /positions, which is exactly the
+// moment journalSilentCloses needs that context to match it against IG's
+// transaction history. Shared across modes (dealIds are globally unique),
+// in-memory only (same tradeoff as journaledDealIds above).
+const lastKnownPosition = new Map<string, { epic: string; direction: 'BUY' | 'SELL'; size: number; level: number; openedAt?: string }>();
+
+// Recovers any dealId that disappeared from /positions without ever going
+// through journalExit/recordWatchExit — i.e. closed by IG itself (a
+// stop-loss or take-profit actually triggering server-side) rather than by
+// any of this codebase's own close paths, which previously left zero record
+// of what happened. Confirmed live 2026-08-25: a Nike short's tightened stop
+// was hit this way, closing for a real -£3.15 with no journal entry, no log
+// line, nothing — only recoverable at all by querying IG's own transaction
+// history directly. Deliberately journal-only: doesn't touch
+// lossCooldownEpics/lastExitReason/lossStreak, since retroactively feeding
+// those could change live entry-gating behavior in ways nobody asked for —
+// this only closes the visibility gap.
+async function journalSilentCloses(mode: IgMode, session: IGSession, dealIds: string[]): Promise<void> {
+  if (!dealIds.length) return;
+  const cfg = ms(mode).config;
+  let transactions;
+  try {
+    // 24h back is comfortably more than any gap between polls could ever
+    // need — cheap enough to over-fetch here since this only runs when
+    // there's actually something to recover (rare), not every poll.
+    transactions = await fetchClosedTransactions(session, new Date(Date.now() - 24 * 3600_000).toISOString());
+  } catch { return; } // best-effort — next poll's pruning won't retry the same dealId (already dropped from botOpenedDeals), so a failure here just means this one stays unjournaled rather than blocking anything live
+
+  for (const dealId of dealIds) {
+    const last = lastKnownPosition.get(dealId);
+    if (!last) continue; // never actually seen it open (e.g. restart lost the cache) — nothing to match against
+    const name = epicName(last.epic);
+    // Match by instrument + closest opening level — IG's transaction
+    // history uses its own reference for the closing deal, which does NOT
+    // equal the dealId this bot tracked at open time, so dealId itself
+    // can't be used to look this up directly.
+    const candidates = transactions.filter(t => t.instrumentName === name);
+    const match = candidates.length === 1 ? candidates[0]
+      : candidates.filter(t => t.openLevel !== undefined && Math.abs(t.openLevel - last.level) < Math.max(1, last.level * 0.005))[0];
+    if (!match) continue; // couldn't confidently identify which transaction this was — skip rather than guess
+    recordJournalEvent({
+      mode: journalMode(mode), event: 'exit',
+      symbol: name, strategy: cfg ? strategyFor(cfg, last.epic) : 'unknown',
+      side: last.direction === 'BUY' ? 'long' : 'short',
+      qty: last.size, price: match.closeLevel ?? last.level,
+      reason: 'Closed outside the bot\'s own logic (broker-side stop/limit execution, or closed manually via IG\'s own app) — recovered from IG transaction history',
+      plUsd: match.profitAndLoss,
+      plPct: last.level > 0 ? (match.profitAndLoss / (last.level * last.size)) * 100 : 0,
+    });
+    journaledDealIds.add(dealId);
+    addLog(mode, 'info', name, `[Journal] Recovered a silent close — £${match.profitAndLoss.toFixed(2)} (${last.level.toFixed(2)} → ${(match.closeLevel ?? last.level).toFixed(2)}), no bot code path had closed or journaled it`);
+  }
 }
 
 // Short text for the entry prompt if this epic — or another name in the same
@@ -325,7 +465,19 @@ export function getRecentExitContext(mode: IgMode, epic: string): string {
 // this now uses its own longer window and fires on a single recent loss
 // rather than waiting for a second one to pile on top of it first.
 const SECTOR_BLOCK_LOOKBACK_MS = 24 * 60 * 60_000; // 24h
-function sectorCooldownBlock(mode: IgMode, epic: string): string | null {
+// direction, when the caller already knows it, changes what this actually
+// means: a sector selling off is a real reason to avoid ANOTHER long in that
+// sector (chasing the same weakness that already burned a peer), but it's
+// not a reason to avoid a short — sector-wide weakness is corroborating
+// evidence FOR a short, not against it. Per explicit request 2026-08-25 ("if
+// theres a sector wide sell of the way to deal with that is go short and
+// make a profit"): only block when direction is missing (caller doesn't
+// know it yet — stay conservative) or is itself a long. A short still has
+// to clear every other gate downstream (allowShorts, the rule engine's own
+// confidence bar, Gemini confirmation) — this only stops the sector check
+// itself from vetoing a short it should actually be supporting.
+function sectorCooldownBlock(mode: IgMode, epic: string, direction?: 'LONG' | 'SHORT'): string | null {
+  if (direction === 'SHORT') return null;
   const st = ms(mode);
   const sector = SECTOR_MAP[epic];
   if (!sector) return null;
@@ -336,6 +488,24 @@ function sectorCooldownBlock(mode: IgMode, epic: string): string | null {
   if (sectorLosses.length < 1) return null;
   const names = sectorLosses.map(([e]) => epicName(e)).join(', ');
   return `${sectorLosses.length} other ${sector} name(s) lost within the last 24h (${names}) — sector-wide weakness, skipping new entries here too`;
+}
+
+// Whole-bot pause (no new entries, existing positions still managed) —
+// added 2026-08-28: this was in-memory only (reset to false by
+// makeModeState on every restart), which silently undid a manual pause put
+// in place specifically so the mean-reversion bots could take priority —
+// confirmed live twice in one session (a routine pm2 restart for an
+// unrelated deploy quietly re-enabled entries both times). Same
+// load-once-at-startup / save-on-toggle pattern as pausedEpics below.
+function pausedFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-bot-paused-${mode}.json`);
+}
+function savePaused(mode: IgMode, paused: boolean): void {
+  try { fs.writeFileSync(pausedFile(mode), JSON.stringify({ paused }), 'utf8'); } catch {}
+}
+function loadPaused(mode: IgMode): boolean {
+  try { return (JSON.parse(fs.readFileSync(pausedFile(mode), 'utf8')) as { paused: boolean }).paused; }
+  catch { return false; }
 }
 
 // User-paused epics — manual only, no auto-expiry, survives restarts.
@@ -406,7 +576,30 @@ function loadReleasedDeals(mode: IgMode): Set<string> {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed';
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed' | 'mean_reversion_swing';
+
+// Fixed watchlist for mean_reversion_swing — deliberately NOT scan-and-score
+// picked the way every other strategy's watchlist is. The original strategy
+// (meanReversionBot.ts's 'stocks' instance, and bot_ig.py before it) never
+// scanned/ranked candidates at all; it always watched a fixed universe and
+// let the RSI(2)/EMA200 rule itself decide which of them actually has a
+// signal on a given day. Scan-and-score would rank by scoreMeanReversionSwing's
+// flat "signal fired or didn't" score, which doesn't reflect the original
+// design and would just narrow this back down to whatever handful happen to
+// be signalling at the exact moment the scan runs — the opposite of "watch
+// the same large list."
+//
+// Started as a hand-picked 26-name copy of meanReversionBot.ts's own
+// stocks universe, then widened per explicit follow-up request 2026-08-28
+// ("the 150 or whatever the gemini bots... were watching") to the FULL
+// IG_EPICS list instead — the same 72-name universe gemini_confirmed/
+// rule_based_analysis already scan on this exact bot (confirmed live there
+// is no real "150" on the IG side — IG epics have to be individually
+// verified as real dealable codes, unlike Alpaca's arbitrary-ticker
+// universe; 72 is the actual verified count, and the user's explicit choice
+// once told that was to use all of it rather than the smaller hand-picked
+// list or the Alpaca-side strategy instead).
+export const MEAN_REVERSION_WATCHLIST = IG_EPICS.map(e => e.epic);
 export type IgMode         = 'demo' | 'live';
 
 export type IgStrategyConfig = {
@@ -429,11 +622,13 @@ export type IgStrategyConfig = {
   // (works correctly for FX at ~1.3 with a 0.0001 point size, and indices at
   // ~10,000 with a 1.0 point size alike) unlike a price-based notional calc.
   maxRiskGbp:       number;
-  // Split so one category can't crowd out the other's allowance — stocks
-  // and indices are counted and capped independently, not against one
-  // shared pool.
-  maxStockPositions: number;
-  maxIndexPositions: number;
+  // Single shared cap across every open position regardless of asset class.
+  // Previously split into separate stock/index pools, but the "stock" pool
+  // was really "everything not IX.D.-prefixed" — FX pairs (EUR/GBP) and
+  // commodities (Silver) counted as "stock" and could fill that pool while
+  // the index pool sat empty with real stock candidates locked out. One
+  // pool is simpler and matches how the user actually thinks about it.
+  maxPositions: number;
   allowShorts:      boolean;
   maxDailyLossPct?: number;    // circuit breaker: no new entries after balance drops this % from day start (default 3)
   // Mirror of maxDailyLossPct on the upside — once today's banked gain
@@ -538,6 +733,10 @@ export type IgStrategyBotStatus = {
   // manually-opened position the bot is deliberately leaving alone.
   managedDeals: string[];
   aiPaused:   boolean;   // manual Gemini kill-switch for this bot's own entries — see isStrategyAiPaused
+  // Latest position-watch verdict per watched dealId, keyed by dealId — see
+  // geminiWatch.ts's getWatchVerdicts. Surfaces which provider actually
+  // answered (gemini/openai/xai/passthrough), not a fixed assumption.
+  positionWatch: Record<string, { action: string; confidence: number; reason: string; engine: string; at: number }>;
 };
 
 type OrbState  = { high: number; low: number; established: boolean };
@@ -585,6 +784,13 @@ type ModeState = {
   lastExitReason:       Map<string, { reason: string; at: number; wasWin: boolean }>;
   // Consecutive losses per epic, reset to 0 on a win — see recordLossExit.
   lossStreak:           Map<string, number>;
+  // Same-day watch-triggered close count per epic, win or loss — unlike
+  // lossStreak this does NOT reset on a win, since a win here still means
+  // the AI had to proactively bail out of an already-overextended position;
+  // interspersing small wins with losses (exactly what happened with Visa,
+  // 2026-08-25) doesn't mean the underlying "keeps getting bought back into
+  // the same exhausted move" problem has gone away. See recordWatchClose.
+  watchCloseCount:      Map<string, number>;
   // Epoch ms of the last gemini_opinion entry, account-wide (not per-epic) —
   // see GEMINI_ENTRY_SPACING_MS. Confirmed live this matters: 15 entries in
   // one session, several different names within the same hour, is far more
@@ -647,6 +853,7 @@ function makeModeState(mode: IgMode): ModeState {
     lossCooldownEpics: new Map(),
     lastExitReason: new Map(),
     lossStreak: new Map(),
+    watchCloseCount: new Map(),
     lastGeminiEntryAt: 0,
     recommendations: new Map(),
     dailyPick: null, dailyPickDate: '',
@@ -669,6 +876,7 @@ for (const [mode, st] of modeStates) {
   st.lossCooldownEpics = loadLossCooldownEpics(mode);
   st.lastExitReason  = loadLastExitReason(mode);
   st.pausedEpics     = loadPausedEpics(mode);
+  st.paused          = loadPaused(mode);
   st.lastEntryTrigger = loadLastEntryTrigger(mode);
   st.botOpenedDeals  = loadBotOpenedDeals(mode);
   st.releasedDeals   = loadReleasedDeals(mode);
@@ -756,6 +964,11 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   // Same daily/250-bar shape as rule_based_analysis — built on the exact
   // same underlying scoring, just with a Gemini confirmation layer on top.
   gemini_confirmed:    { resolution: 'DAY', count: 250 },
+  // 210 = meanReversionStrategy.ts's own MIN_BARS_NEEDED (200-day EMA + 10
+  // buffer) — same shape as rule_based_analysis/gemini_confirmed above,
+  // this strategy is Yahoo/Alpaca-covered in practice (see FREE_DATA_PARAMS
+  // below), so this IG-native path is a rare fallback too.
+  mean_reversion_swing: { resolution: 'DAY', count: 210 },
 };
 
 // Free-data params for strategies that need something other than the daily
@@ -791,6 +1004,10 @@ const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   // Same 2y/daily need as rule_based_analysis — same underlying scoring,
   // same SMA200 trend filter requirement.
   gemini_confirmed:    { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
+  // 2y daily bars — needs a real 200-day EMA read (meanReversionStrategy.ts's
+  // MIN_BARS_NEEDED=210), same reasoning as rule_based_analysis/gemini_confirmed
+  // above; the 6mo default (~126 trading days) would never be enough.
+  mean_reversion_swing: { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
 };
 
 // Daily-timeframe strategies poll far more often here than STRATEGY_META's
@@ -1363,6 +1580,52 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
     const livePositions = await fetchFullPositions(st.session);
     if (livePositions.some(p => p.epic === epic)) return { ok: false, error: 'Position already open on this epic' };
 
+    // Confirmed live 2026-08-25 this check was missing entirely — Visa got
+    // opened and closed 5 times in one day through this exact function
+    // (every one logged "Manually opened from recommendation"), because
+    // this was the one entry path in the whole file that never consulted
+    // lossCooldownEpics (the scanner's own candidate list already excludes
+    // cooling-down epics — see its exclude-list build — but a recommendation
+    // already sitting in st.recommendations bypasses that scan entirely).
+    const coolUntil = st.lossCooldownEpics.get(epic);
+    if (coolUntil && Date.now() < coolUntil) {
+      return { ok: false, error: `Recently closed on this instrument — cooling down until ${new Date(coolUntil).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} before re-entering` };
+    }
+
+    // The recommendations sweep deliberately skips Gemini confirmation per
+    // candidate (see refreshRecommendations' own comment — not worth a real
+    // call for every idea a wide scan considers), which means clicking
+    // "Open Position" was sending the raw rule signal straight to the
+    // broker with none of the news-aware check that automatic entries get
+    // — confirmed live this is exactly how a GOOGL SELL went through
+    // repeatedly while the stock was breaking out on genuinely bullish
+    // news. Run that same check here, once, only for the idea actually
+    // being acted on. Fails closed like every other Gemini gate in this
+    // file — an unconfirmed manual entry is worse than a blocked one.
+    if (isStrategyAiPaused(mode)) {
+      return { ok: false, error: 'AI paused for this bot — resume to open recommendations again' };
+    }
+    const ticker    = EPIC_TO_ALPACA[epic];
+    let headlines: string[] = [];
+    try { if (ticker) headlines = await fetchAllHeadlines(ticker, 5, name); } catch {}
+    const confirmVerdict = await askIgDailyVerdict({
+      instrumentName: name,
+      direction:      rec.action,
+      strength:       70,
+      price:          rec.level,
+      changePercent:  0,
+      stopPoints:     rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : rec.level * 0.02,
+      tpPoints:       rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : rec.level * 0.03,
+      headlines,
+    });
+    addLog(mode, 'info', name, `[AI] ${confirmVerdict.direction} ${confirmVerdict.confidence}% — ${confirmVerdict.reason} (${confirmVerdict.engine})`);
+    if (confirmVerdict.engine === 'passthrough') {
+      return { ok: false, error: `Gemini unavailable (${confirmVerdict.reason}) — not opening unconfirmed` };
+    }
+    if (confirmVerdict.direction !== rec.action || confirmVerdict.confidence < 50) {
+      return { ok: false, error: `Gemini vetoed — ${confirmVerdict.direction} ${confirmVerdict.confidence}%: ${confirmVerdict.reason}` };
+    }
+
     const details = await fetchMarketDetails(st.session, [epic]);
     const detail  = details.get(epic);
     // `||` not `??` — confirmed live a stake of 0.05 got through despite
@@ -1386,6 +1649,8 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
     if (!protectionOk) addLog(mode, 'error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
 
     registerBotOpenedDeal(mode, dealId);
+    journalEntry(mode, cfg, epic, rec.action === 'BUY' ? 'long' : 'short', stake, level,
+      'Manually opened from recommendation', confirmVerdict.confidence);
     try { const { addToWatch } = await import('./geminiWatch'); addToWatch(mode, dealId); } catch {}
     st.recommendations.delete(epic);
 
@@ -1401,13 +1666,13 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
 // same execution path (openRecommendation) the manual "Open Position"
 // button uses — re-priced against the live market, sized off maxRiskGbp,
 // enrolled in Gemini Position Watch same as any other entry. The one real
-// difference from a manual click: this respects the same stock/index
-// position caps the main watchlist obeys (a manual click deliberately
-// bypasses them, since a human clicking is itself the override) — without
-// that check here, an unattended loop could keep stacking positions off a
-// recommendation list that scans a much wider universe than cfg.epics.
+// difference from a manual click: this respects the same position cap
+// the main watchlist obeys (a manual click deliberately bypasses it, since
+// a human clicking is itself the override) — without that check here, an
+// unattended loop could keep stacking positions off a recommendation list
+// that scans a much wider universe than cfg.epics.
 // Runs on both demo and live — extended to live on explicit request after
-// running demo-only first. Still gated by the same position caps and
+// running demo-only first. Still gated by the same position cap and
 // maxRiskGbp sizing as everything else this bot does on live money.
 async function autoOpenRecommendations(mode: IgMode): Promise<void> {
   const st = ms(mode);
@@ -1416,19 +1681,21 @@ async function autoOpenRecommendations(mode: IgMode): Promise<void> {
 
   let livePositions;
   try { livePositions = await fetchFullPositions(st.session); } catch { return; }
-  let stockCount = livePositions.filter(p => !isIndexEpic(p.epic)).length;
-  let indexCount = livePositions.filter(p => isIndexEpic(p.epic)).length;
+  let count = livePositions.length;
 
-  for (const epic of [...st.recommendations.keys()]) {
+  // Ranked by score, best first — confirmed live this previously just took
+  // whatever order the recommendations happened to sit in (Map insertion
+  // order, i.e. essentially whichever epic's scan finished first), not
+  // which one was actually the strongest idea. With N free slots and more
+  // than N recommendations, that meant a mediocre-but-early idea could take
+  // a slot a stronger-but-later one deserved more.
+  const ranked = [...st.recommendations.values()].sort((a, b) => b.score - a.score);
+
+  for (const rec of ranked) {
     if (!st.running) break;
-    const epicIsIndex = isIndexEpic(epic);
-    const poolCount = epicIsIndex ? indexCount : stockCount;
-    const poolCap   = epicIsIndex ? cfg.maxIndexPositions : cfg.maxStockPositions;
-    if (poolCount >= poolCap) continue;
-    const result = await openRecommendation(mode, epic);
-    if (result.ok) {
-      if (epicIsIndex) indexCount++; else stockCount++;
-    }
+    if (count >= cfg.maxPositions) continue;
+    const result = await openRecommendation(mode, rec.epic);
+    if (result.ok) count++;
   }
 }
 
@@ -1789,7 +2056,11 @@ async function evaluateEpic(
         break;
       }
 
-      const sectorBlock = sectorCooldownBlock(mode, epic);
+      // swing.direction is already known here (unlike the other two call
+      // sites below, which decide direction only after this point) — pass
+      // it through so sector weakness only blocks another long, not a short
+      // the rule engine already independently wants to take.
+      const sectorBlock = sectorCooldownBlock(mode, epic, swing.direction);
       if (sectorBlock) { signal = { action: 'HOLD', reason: sectorBlock }; break; }
 
       const last  = candles[candles.length - 1].close;
@@ -1812,7 +2083,7 @@ async function evaluateEpic(
       const volumeSurgeMultiple = prior20.length >= 10 && avgPrior > 0 ? avgRecent / avgPrior : undefined;
       const peerGroup = getPeerGroupChange(epic);
 
-      const verdict = await askGeminiConfirmStockTrade({
+      const verdict = await askIgConfirmStockTrade({
         instrumentName: epicName(epic),
         suggestedDir:   swing.direction === 'LONG' ? 'BUY' : 'SELL',
         ruleReasoning:  swing.reasoning,
@@ -1909,7 +2180,7 @@ async function evaluateEpic(
           break;
         }
         const gapPrice = (live.bid + live.offer) / 2;
-        const gapIdea = await askGeminiTradeIdea({
+        const gapIdea = await askIgTradeIdea({
           instrumentName: epicName(epic), price: gapPrice, rsi: null, macdHist: null, atr: null,
           headlines: gapHeadlines, noTechnicalData: true,
         });
@@ -2030,7 +2301,7 @@ async function evaluateEpic(
       // nyseVolatilityRegime's own comment) — same US-listed-only gating.
       const volatilityRegime = ticker ? nyseVolatilityRegime() ?? undefined : undefined;
       const peerGroup = getPeerGroupChange(epic);
-      const idea = await askGeminiTradeIdea({
+      const idea = await askIgTradeIdea({
         instrumentName: epicName(epic), price: last, rsi, macdHist: macd?.hist ?? null, atr, headlines, dayChangePercent,
         multiDayTrendPercent, multiDayTrendSpanDays, gapPercent, volumeSurgeMultiple,
         recentExitContext, recentCandles, sessionHoursRemaining, volatilityRegime,
@@ -2046,7 +2317,7 @@ async function evaluateEpic(
       // trading on the lower bar while everything else here is being
       // tightened.
       if (idea.engine !== 'gemini' || idea.action === 'HOLD' || idea.confidence < 70) {
-        signal = { action: 'HOLD', reason: `[GEMINI] ${idea.action} ${idea.confidence}% — ${idea.reason} (${idea.engine})` };
+        signal = { action: 'HOLD', reason: `[AI] ${idea.action} ${idea.confidence}% — ${idea.reason} (${idea.engine})` };
         break;
       }
       // Price-confirmation gate for reversal/dip-buy theses specifically —
@@ -2064,7 +2335,7 @@ async function evaluateEpic(
         const lastBarConfirmsUp   = last > prevClose;
         const lastBarConfirmsDown = last < prevClose;
         if ((isReversalBuy && !lastBarConfirmsUp) || (isReversalSell && !lastBarConfirmsDown)) {
-          signal = { action: 'HOLD', reason: `[GEMINI] ${idea.action} ${idea.confidence}% called but RSI ${rsi.toFixed(0)} reversal isn't confirmed by the last bar yet (still moving the wrong way) — waiting for actual confirmation, not just the story` };
+          signal = { action: 'HOLD', reason: `[AI] ${idea.action} ${idea.confidence}% called but RSI ${rsi.toFixed(0)} reversal isn't confirmed by the last bar yet (still moving the wrong way) — waiting for actual confirmation, not just the story` };
           break;
         }
       }
@@ -2086,7 +2357,7 @@ async function evaluateEpic(
           const shape = decliningHighs
             ? `declining highs (${a.h.toFixed(2)} > ${b.h.toFixed(2)} > ${c.h.toFixed(2)})`
             : `rising lows (${a.l.toFixed(2)} < ${b.l.toFixed(2)} < ${c.l.toFixed(2)})`;
-          signal = { action: 'HOLD', reason: `[GEMINI] ${idea.action} ${idea.confidence}% called but the last 3 bars show ${shape} — that's an active short-term reversal against this direction, not confirmation; waiting for it to actually turn` };
+          signal = { action: 'HOLD', reason: `[AI] ${idea.action} ${idea.confidence}% called but the last 3 bars show ${shape} — that's an active short-term reversal against this direction, not confirmation; waiting for it to actually turn` };
           break;
         }
       }
@@ -2094,12 +2365,44 @@ async function evaluateEpic(
       // not here — see that assignment's own comment.
       signal = {
         action:           idea.action,
-        reason:           `[GEMINI] ${idea.reason}`,
+        reason:           `[AI] ${idea.reason}`,
         confidence:       idea.confidence,
         stopPrice:        idea.action === 'BUY' ? last - idea.stopPoints : last + idea.stopPoints,
         takeProfitPrice:  idea.action === 'BUY' ? last + idea.takeProfitPoints : last - idea.takeProfitPoints,
         orderType:        'market',
       };
+      break;
+    }
+
+    // RSI(2) + 200-day EMA trend filter — the same strategy already running
+    // as the standalone mean-reversion bot's 'stocks' instance
+    // (meanReversionBot.ts) and, since 2026-08-28, as an Alpaca strategy too
+    // (meanReversionSwingSignal in alpacaStrategies.ts, shared with that
+    // Alpaca case verbatim) — added here as a third venue per explicit
+    // request, so it can also run as a normal selectable strategy on this
+    // bot rather than only on the separate always-on instance. Exit is
+    // broker-side ATR stop/TP (stopPrice/takeProfitPrice below, handled
+    // generically by the shared tail same as every other strategy here) —
+    // the only thing this case needs to do itself is the original
+    // strategy's MAX_HOLD_DAYS backstop, which needs a position's entry
+    // time. Unlike the Alpaca port (which had to add its own persisted
+    // entry-time tracking, AlpacaPosition has no such field), IG's own
+    // FullPosition.openedAt already gives this directly — no extra state
+    // needed here at all.
+    case 'mean_reversion_swing': {
+      if (inPosition) {
+        const heldDays = openPos!.openedAt ? (Date.now() - new Date(openPos!.openedAt).getTime()) / 86_400_000 : 0;
+        if (openPos!.openedAt && heldDays >= MR_SWING_MAX_HOLD_DAYS) {
+          signal = {
+            action: side === 'long' ? 'CLOSE_LONG' : 'CLOSE_SHORT',
+            reason: `Max hold reached (${heldDays.toFixed(1)}d) — same backstop as the original strategy`,
+          };
+          break;
+        }
+        signal = { action: 'HOLD', reason: `Held ${heldDays.toFixed(1)}d — stop/TP live as broker-side bracket legs` };
+        break;
+      }
+      signal = meanReversionSwingSignal(bars);
       break;
     }
 
@@ -2282,17 +2585,15 @@ async function executeIgSignal(
   // clearly beats the weakest holding by a real margin — a fuzzy or too-
   // eager version of this would just churn out of decent positions chasing
   // slightly shinier ones, which is worse than holding steady.
-  const candidateIsIndex = isIndexEpic(epic);
-  const samePool          = positions.filter(p => isIndexEpic(p.epic) === candidateIsIndex);
-  const poolCap           = candidateIsIndex ? cfg.maxIndexPositions : cfg.maxStockPositions;
-  if (cfg.strategy === 'gemini_opinion' && samePool.length >= poolCap) {
+  const poolCap = cfg.maxPositions;
+  if (cfg.strategy === 'gemini_opinion' && positions.length >= poolCap) {
     const SWAP_MARGIN = 15;
     const { getWeakestConfidence } = await import('./geminiWatch');
-    const weakest       = getWeakestConfidence(samePool.map(p => p.dealId));
+    const weakest       = getWeakestConfidence(positions.map(p => p.dealId));
     const newConfidence = signal.confidence ?? 0;
     if (!weakest || newConfidence < weakest.confidence + SWAP_MARGIN) {
       addLog(mode, 'wait', name,
-        `Skipped — no room (${candidateIsIndex ? 'indices' : 'stocks'} ${samePool.length}/${poolCap})${weakest ? `, ${newConfidence}% doesn't clear the weakest held position (${weakest.confidence}%) by the ${SWAP_MARGIN}pt swap margin` : ''}`);
+        `Skipped — no room (${positions.length}/${poolCap})${weakest ? `, ${newConfidence}% doesn't clear the weakest held position (${weakest.confidence}%) by the ${SWAP_MARGIN}pt swap margin` : ''}`);
       return;
     }
     const weakPos = positions.find(p => p.dealId === weakest.dealId);
@@ -2427,6 +2728,22 @@ async function executeIgSignal(
     }
   }
 
+  // Real-track-record sizing — scales effectiveRiskGbp toward what this
+  // exact strategy's own closed-trade history actually supports, on top of
+  // the margin/loss-floor scaling above, rather than sizing purely off this
+  // one trade's Gemini confidence. Neutral (1x, no skip) until there's a
+  // real sample — see quant.ts for why the history has to be filtered to
+  // post-rewrite trades only.
+  const edge = edgeSizing(journalMode(mode), strategyFor(cfg, epic));
+  if (edge.skip) {
+    addLog(mode, 'wait', name, `Skipped — ${edge.reason}`);
+    return;
+  }
+  if (edge.multiplier !== 1) {
+    addLog(mode, 'info', name, edge.reason);
+    effectiveRiskGbp *= edge.multiplier;
+  }
+
   // Size off actual data freshness, not the wall clock — "is it NYSE hours"
   // was only ever a rough proxy for "is the free-data feed current right
   // now", and a genuinely fresh feed at 9am UK deserves full size same as
@@ -2534,7 +2851,7 @@ async function executeIgSignal(
       // Gemini still runs on technicals alone in that case (see prompt).
       const ticker    = EPIC_TO_ALPACA[epic];
       const headlines = ticker ? await fetchAllHeadlines(ticker, 5, name) : [];
-      const verdict = await askGeminiDailyVerdict({
+      const verdict = await askIgDailyVerdict({
         instrumentName: name,
         direction,
         strength:       70,  // no granular numeric score at this layer — fixed moderate default
@@ -2544,7 +2861,7 @@ async function executeIgSignal(
         tpPoints:       profitDist ?? sizingStopDist * 2.5,
         headlines,
       });
-      addLog(mode, 'info', name, `[GEMINI] ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+      addLog(mode, 'info', name, `[AI] ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
       // Fail closed, not open — confirmed live this matters: a Qualcomm BUY
       // went through unconfirmed purely because Gemini returned a 503 at
       // that exact moment, on a 6.54%-below-VWAP setup extreme enough that
@@ -2552,16 +2869,16 @@ async function executeIgSignal(
       // "Gemini unavailable" should skip the entry, not silently trade the
       // technical signal alone as if it had been reviewed and approved.
       if (verdict.engine === 'passthrough') {
-        addLog(mode, 'wait', name, `[GEMINI] Unavailable (${verdict.reason}) — skipping entry rather than trading unconfirmed`);
+        addLog(mode, 'wait', name, `[AI] Unavailable (${verdict.reason}) — skipping entry rather than trading unconfirmed`);
         return;
       }
       if (verdict.direction === 'SKIP' || verdict.confidence < 50) {
-        addLog(mode, 'wait', name, `[GEMINI] Skipped entry — ${verdict.direction} ${verdict.confidence}%`);
+        addLog(mode, 'wait', name, `[AI] Skipped entry — ${verdict.direction} ${verdict.confidence}%`);
         return;
       }
       if (verdict.direction === 'BUY' || verdict.direction === 'SELL') effectiveDirection = verdict.direction;
     } catch {
-      addLog(mode, 'wait', name, '[GEMINI] Call failed — skipping entry rather than trading unconfirmed');
+      addLog(mode, 'wait', name, '[AI] Call failed — skipping entry rather than trading unconfirmed');
       return;
     }
   }
@@ -2591,7 +2908,7 @@ async function executeIgSignal(
     // already imports from this file); safe here since it only runs well
     // after both modules have finished initializing.
     try {
-      const { addToWatch, recordEntryConfidence } = await import('./geminiWatch');
+      const { addToWatch, recordEntryConfidence, markNoAiClose } = await import('./geminiWatch');
       addToWatch(mode, dealId);
       // Seeds the position-rotation baseline with Gemini's own entry
       // confidence, so a fresh gemini_opinion position has something real
@@ -2599,6 +2916,11 @@ async function executeIgSignal(
       if (cfg.strategy === 'gemini_opinion' && signal.confidence !== undefined) {
         recordEntryConfidence(dealId, signal.confidence);
       }
+      // mean_reversion_swing already carries its own wide stop/TP built for
+      // a multi-day swing thesis — exempt from the discretionary AI close,
+      // same reasoning (and same live evidence) as meanReversionBot.ts's own
+      // fx/japan225 instances. See markNoAiClose's own comment.
+      if (cfg.strategy === 'mean_reversion_swing') markNoAiClose(mode, dealId);
     } catch {}
     if (signal.triggerLevel !== undefined) {
       st.lastEntryTrigger.set(epic, { level: signal.triggerLevel, direction: effectiveDirection });
@@ -2677,6 +2999,17 @@ async function runSevereLossGuard(mode: IgMode): Promise<void> {
 }
 
 // ── Poll loop ─────────────────────────────────────────────────────────────────
+
+// Shared across both modes deliberately — dealIds are globally unique (IG
+// issues them per-deal, not per-account-mode), and this only ever needs to
+// answer "has this exact position already had its one weak-open tighten,"
+// so there's no cross-mode collision risk worth a separate map per mode.
+// In-memory only, same tradeoff as this file's other per-position trackers
+// (lastStopTightenAt, peakUpl in geminiWatch.ts) — worst case after a
+// restart is one extra tighten on a position that already had one, not a
+// safety gap (the stop itself, wherever it currently sits, still protects
+// the position regardless).
+const weakOpenTightenedOnce = new Set<string>();
 
 async function poll(mode: IgMode) {
   const st = ms(mode);
@@ -2799,13 +3132,27 @@ async function poll(mode: IgMode) {
 
   // Drop dealIds no longer open (closed by the bot, manually, or by any of
   // the circuit breakers below) — otherwise botOpenedDeals/releasedDeals
-  // grow forever with stale IDs that can never matter again.
+  // grow forever with stale IDs that can never matter again. Any bot-managed
+  // dealId disappearing here without having gone through journalExit first
+  // (checked via journaledDealIds) means IG closed it server-side — a real
+  // stop/limit hit, not any of this file's own close code — see
+  // journalSilentCloses's own comment for why that previously left zero
+  // record of it.
   {
     const openIds = new Set(positions.map(p => p.dealId));
     let changed = false;
-    for (const id of st.botOpenedDeals) if (!openIds.has(id)) { st.botOpenedDeals.delete(id); changed = true; }
+    const silentlyClosed: string[] = [];
+    for (const id of st.botOpenedDeals) {
+      if (!openIds.has(id)) {
+        st.botOpenedDeals.delete(id);
+        changed = true;
+        if (!journaledDealIds.has(id)) silentlyClosed.push(id);
+      }
+    }
     for (const id of st.releasedDeals)  if (!openIds.has(id)) { st.releasedDeals.delete(id);  changed = true; }
     if (changed) { saveBotOpenedDeals(mode, st.botOpenedDeals); saveReleasedDeals(mode, st.releasedDeals); }
+    if (silentlyClosed.length) void journalSilentCloses(mode, st.session, silentlyClosed);
+    for (const p of positions) lastKnownPosition.set(p.dealId, { epic: p.epic, direction: p.direction, size: p.size, level: p.level, openedAt: p.openedAt });
   }
 
   // ── Daily-loss circuit breaker ────────────────────────────────────────────
@@ -2937,6 +3284,23 @@ async function poll(mode: IgMode) {
   // open compounds into a much bigger loss than a stop was sized for.
   {
     const WEAK_OPEN_PCT = 0.5; // % down/up from today's open before this counts as a real warning
+    // One tighten per position, not one per poll — confirmed live 2026-08-25
+    // this was compounding every ~5-15min poll while the weak-open condition
+    // persisted (40% of whatever the CURRENT distance was, repeatedly),
+    // collapsing a Nike short's stop from 129.5pt to ~21pt within under an
+    // hour on nothing more than ordinary intraday noise relative to today's
+    // open — it got stopped out on a 21pt move against a swing thesis built
+    // for a multi-day hold, well before the actual thesis had any chance to
+    // be wrong. Directly the "closed off at little losses" pattern the
+    // Position Watch prompt rewrite (same day) was built to stop — this is
+    // the same failure mode via a completely separate, non-AI code path.
+    // Capped to fire once per open position: still reacts to a genuinely
+    // weak open (the protective intent stays), just can't keep re-tightening
+    // an already-tightened stop into oblivion while the position sits
+    // through an ordinary intraday dip. Pruned to currently-open dealIds
+    // each poll so this doesn't grow unbounded across the account's history.
+    const openDealIds = new Set(positions.map(p => p.dealId));
+    for (const id of weakOpenTightenedOnce) if (!openDealIds.has(id)) weakOpenTightenedOnce.delete(id);
     let referenceIndexPct: number | null | undefined; // undefined = not fetched yet this poll, null = fetch failed
     const getReferenceIndexPct = async (): Promise<number | null> => {
       if (referenceIndexPct !== undefined) return referenceIndexPct;
@@ -3023,7 +3387,7 @@ async function poll(mode: IgMode) {
           addLog(mode, 'exit', name, `⚠️ ${woReason}`);
           try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, woReason); journalExit(mode, cfg, p, woReason); }
           catch (e) { addLog(mode, 'error', name, `Weak-open close failed: ${e instanceof Error ? e.message : String(e)}`); }
-        } else if (p.stopLevel !== undefined) {
+        } else if (p.stopLevel !== undefined && !weakOpenTightenedOnce.has(p.dealId)) {
           const currentDist   = Math.abs(p.level - p.stopLevel);
           const tightenedDist = currentDist * 0.4;
           const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
@@ -3031,7 +3395,8 @@ async function poll(mode: IgMode) {
           if (wouldTighten) {
             try {
               await updatePositionLevels(st.session, p.dealId, newStop, p.limitLevel ?? null);
-              addLog(mode, 'info', name, `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open — tightened stop as a precaution`);
+              weakOpenTightenedOnce.add(p.dealId);
+              addLog(mode, 'info', name, `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open — tightened stop as a precaution (won't re-tighten further on this position)`);
             } catch (e) {
               addLog(mode, 'error', name, `Weak-open stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
             }
@@ -3073,8 +3438,6 @@ async function poll(mode: IgMode) {
   // either entry happened. Re-checking fresh after each epic closes that
   // race instead of just narrowing it.
   let livePositions = positions;
-  let stockCount     = livePositions.filter(p => !isIndexEpic(p.epic)).length;
-  let indexCount     = livePositions.filter(p => isIndexEpic(p.epic)).length;
 
   for (const epic of cfg.epics) {
     if (!st.running) break;
@@ -3084,24 +3447,19 @@ async function poll(mode: IgMode) {
     // not necessarily what this particular epic is actually running under.
     const epicStrategy = cfg.epicStrategyOverrides?.[epic] ?? cfg.strategy;
     const inPos = livePositions.find(p => p.epic === epic);
-    const epicIsIndex = isIndexEpic(epic);
-    const poolCount    = epicIsIndex ? indexCount : stockCount;
-    const poolCap      = epicIsIndex ? cfg.maxIndexPositions : cfg.maxStockPositions;
     // gemini_opinion still evaluates flat candidates even when full — a
     // fresh idea here is what a full slot gets compared against for a
     // possible swap (see the position-rotation check in executeIgSignal).
     // Every other strategy keeps the original behaviour: skip entirely
     // when there's no room, since there's nothing to act on and no
     // comparison logic that would use the extra call anyway.
-    if (!inPos && poolCount >= poolCap && epicStrategy !== 'gemini_opinion') {
-      addLog(mode, 'wait', epicName(epic), `Max ${epicIsIndex ? 'index' : 'stock'} positions (${poolCap}) reached`);
+    if (!inPos && livePositions.length >= cfg.maxPositions && epicStrategy !== 'gemini_opinion') {
+      addLog(mode, 'wait', epicName(epic), `Max positions (${cfg.maxPositions}) reached`);
       continue;
     }
     await evaluateEpic(mode, epic, livePositions, cfg, st.session, available);
     try {
       livePositions = await fetchFullPositions(st.session);
-      stockCount    = livePositions.filter(p => !isIndexEpic(p.epic)).length;
-      indexCount    = livePositions.filter(p => isIndexEpic(p.epic)).length;
     } catch { /* keep the last known count on a fetch failure */ }
 
     // gemini_opinion makes one real Gemini call per epic here, with nothing
@@ -3166,16 +3524,23 @@ async function refreshWatchlist(mode: IgMode): Promise<void> {
   }
 
   let fresh: string[];
-  try {
-    fresh = await scanIgEpics(
-      cfg.strategy, st.session, [...st.pausedEpics],
-      cfg.maxStockPositions + cfg.maxIndexPositions + 2,
-      () => {}, // this scan's own progress lines aren't worth logging every 30min — only the resulting diff is
-      cfg.maxIndexPositions,
-    );
-  } catch (e) {
-    addLog(mode, 'info', '—', `Watchlist refresh scan failed, keeping current list: ${e instanceof Error ? e.message : String(e)}`);
-    return;
+  if (cfg.strategy === 'mean_reversion_swing') {
+    // Fixed universe, same reasoning as startIgStrategyBot's own comment —
+    // this "refresh" always converges back to the same 26 names, it's not
+    // meant to narrow down to whatever's currently signalling.
+    fresh = [...MEAN_REVERSION_WATCHLIST];
+  } else {
+    try {
+      fresh = await scanIgEpics(
+        cfg.strategy, st.session, [...st.pausedEpics],
+        cfg.maxPositions + 2,
+        () => {}, // this scan's own progress lines aren't worth logging every 30min — only the resulting diff is
+        Math.min(2, cfg.maxPositions), // keep a little index representation in the watchlist, not a hard pool anymore
+      );
+    } catch (e) {
+      addLog(mode, 'info', '—', `Watchlist refresh scan failed, keeping current list: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
   }
 
   // Override epics stay pinned regardless of how they'd score under the
@@ -3228,19 +3593,28 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
 
   st.config        = cfg;
   st.running       = true;
-  st.paused        = false;
+  // st.paused is deliberately NOT reset here — it's loaded from disk at
+  // module init (see loadPaused) and only ever changes via explicit
+  // pauseIgStrategyBot/resumeIgStrategyBot calls. This function runs on
+  // every start AND every auto-resume-after-restart; resetting paused here
+  // used to silently undo a manual pause on every routine deploy restart.
   st.authFailCount = 0;
 
   // Persist immediately — a crash mid-scan should still resume the bot
   saveIgState(mode, cfg);
 
-  addLog(mode, 'info', '—', 'Scanning for best instruments…');
-  try {
-    const best = await scanIgEpics(cfg.strategy, st.session, [...st.pausedEpics], cfg.maxStockPositions + cfg.maxIndexPositions + 2, msg => addLog(mode, 'info', '—', msg), cfg.maxIndexPositions);
-    cfg.epics = best;
-  } catch (e) {
-    addLog(mode, 'info', '—', `Scan failed — using default indices: ${e instanceof Error ? e.message : String(e)}`);
-    cfg.epics = ['IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.CASH.IP', 'IX.D.FTSE.DAILY.IP'];
+  if (cfg.strategy === 'mean_reversion_swing') {
+    cfg.epics = [...MEAN_REVERSION_WATCHLIST];
+    addLog(mode, 'info', '—', `Fixed watchlist (not scanned) — ${cfg.epics.length} instruments, same universe as the retired standalone stocks instance`);
+  } else {
+    addLog(mode, 'info', '—', 'Scanning for best instruments…');
+    try {
+      const best = await scanIgEpics(cfg.strategy, st.session, [...st.pausedEpics], cfg.maxPositions + 2, msg => addLog(mode, 'info', '—', msg), Math.min(2, cfg.maxPositions));
+      cfg.epics = best;
+    } catch (e) {
+      addLog(mode, 'info', '—', `Scan failed — using default indices: ${e instanceof Error ? e.message : String(e)}`);
+      cfg.epics = ['IX.D.DOW.DAILY.IP', 'IX.D.NASDAQ.CASH.IP', 'IX.D.FTSE.DAILY.IP'];
+    }
   }
   // Always fold in every epic pinned via epicStrategyOverrides — the scan
   // above only ever picks epics for cfg.strategy itself (e.g.
@@ -3258,7 +3632,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
     ? ` | overrides: ${overrideEpics.map(e => `${epicName(e)}→${STRATEGY_META[cfg.epicStrategyOverrides![e]!].label}`).join(', ')}`
     : '';
   addLog(mode, 'info', '—', `Bot started — ${STRATEGY_META[cfg.strategy].label} | ${mode} | ${cfg.epics.map(epicName).join(', ')}${overrideNote}`);
-  addLog(mode, 'info', '—', `Max risk/trade: £${cfg.maxRiskGbp} | Max positions: ${cfg.maxStockPositions} stocks + ${cfg.maxIndexPositions} indices | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
+  addLog(mode, 'info', '—', `Max risk/trade: £${cfg.maxRiskGbp} | Max positions: ${cfg.maxPositions} | Shorts: ${cfg.allowShorts ? 'yes' : 'no'}`);
 
   // Startup just fired a burst of IG calls (auth + balance + up to
   // maxPositions+2 sequential candle fetches while scanning for instruments).
@@ -3280,7 +3654,8 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
 export function stopIgStrategyBot(mode: IgMode): void {
   const st = ms(mode);
   st.running = false;
-  st.paused  = false;
+  // st.paused intentionally untouched — see startIgStrategyBot's own
+  // comment; stopping shouldn't silently clear a manual pause either.
   if (st.pollTimer)             { clearTimeout(st.pollTimer);             st.pollTimer             = null; }
   if (st.severeLossTimer)       { clearInterval(st.severeLossTimer);      st.severeLossTimer       = null; }
   if (st.watchlistRefreshTimer) { clearInterval(st.watchlistRefreshTimer);st.watchlistRefreshTimer = null; }
@@ -3296,6 +3671,7 @@ export function pauseIgStrategyBot(mode: IgMode): void {
   const st = ms(mode);
   if (!st.running) return;
   st.paused = true;
+  savePaused(mode, true);
   addLog(mode, 'info', '—', '⏸ Paused — monitoring positions, no new entries');
 }
 
@@ -3303,6 +3679,7 @@ export function resumeIgStrategyBot(mode: IgMode): void {
   const st = ms(mode);
   if (!st.running) return;
   st.paused = false;
+  savePaused(mode, false);
   addLog(mode, 'info', '—', '▶ Resumed');
 }
 
@@ -3330,6 +3707,8 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
       }));
     } catch {}
   }
+
+  const { getWatchVerdicts } = await import('./geminiWatch');
 
   return {
     running:    st.running,
@@ -3359,5 +3738,6 @@ export async function getIgStrategyBotStatus(mode: IgMode): Promise<IgStrategyBo
     pausedEpics: [...st.pausedEpics],
     managedDeals: [...new Set([...st.botOpenedDeals, ...st.releasedDeals])],
     aiPaused:   isStrategyAiPaused(mode),
+    positionWatch: getWatchVerdicts(mode),
   };
 }

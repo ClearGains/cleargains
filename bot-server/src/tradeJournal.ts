@@ -6,10 +6,11 @@ import fs from 'fs';
 import path from 'path';
 
 // 'paper'/'live' are the Alpaca auto-trader's own modes; 'ig-demo'/'ig-live'
-// are the IG strategy bot's — kept as distinct values (not reused generic
-// 'live') so the two systems' P&L never gets aggregated together in one
-// strategy's stats despite genuinely being different accounts/instruments.
-export type JournalMode = 'paper' | 'live' | 'ig-demo' | 'ig-live';
+// are the IG strategy bot's; 't212-demo'/'t212-live' are the ISA bot's —
+// kept as distinct values (not reused generic 'live') so the systems' P&L
+// never gets aggregated together in one strategy's stats despite genuinely
+// being different accounts/instruments.
+export type JournalMode = 'paper' | 'live' | 'ig-demo' | 'ig-live' | 't212-demo' | 't212-live';
 
 export type JournalEvent = {
   id:       string;

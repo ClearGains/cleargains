@@ -42,6 +42,12 @@ const UNIVERSE: string[] = [
   'NET','DDOG','MDB','SNOW','TEAM','HUBS','VEEV','WDAY','NOW','ADSK',
   // Biotech / pharma
   'MRNA','BNTX','REGN','VRTX','BIIB','ALNY','INCY','SGEN','EXAS','ILMN',
+  // Construction / homebuilders / materials — added 2026-08-25, previously
+  // absent entirely (CAT under Industrials is construction EQUIPMENT, not
+  // construction/homebuilding itself, and XLB was the only materials
+  // exposure with no individual names behind it).
+  'DHI','LEN','PHM','NVR','TOL','ITB','XHB',
+  'VMC','MLM','LIN','APD','NEM','FCX','SHW','ECL','NUE',
 ].filter((v, i, a) => a.indexOf(v) === i); // dedupe
 
 // Liquidity thresholds for snapshot pre-filter
@@ -160,19 +166,31 @@ function scoreWeeklyMomentum(barsMap: Record<string, AlpacaBar[]>): Scored[] {
   });
 }
 
+// Scoring rewritten alongside optionsDirectionalSignal's 2026-08-21
+// trend-following rebuild — the old version ranked by RSI *extremeness*
+// (further from 50 = better), which favoured exactly the exhausted-reversal
+// candidates the new entry signal no longer wants. This instead favours
+// symbols already showing real trend structure (price/EMA20 on the
+// confirming side of a sloping EMA50), ranked by how strong that trend is
+// plus enough volatility (ATR%) for the option premium to actually move.
 function scoreOptionsDirectional(barsMap: Record<string, AlpacaBar[]>): Scored[] {
   return Object.entries(barsMap).map(([symbol, bars]) => {
-    if (bars.length < 20) return { symbol, score: -1 };
-    const rsi = calcRsi(bars);
-    if (rsi === null) return { symbol, score: -1 };
-    // Score by how extreme RSI is — further from 50 = more likely to get an options signal
-    const extremeness = Math.abs(rsi - 50);
-    if (extremeness < 20) return { symbol, score: 0 }; // RSI 30–70: not extreme enough
+    if (bars.length < 55) return { symbol, score: -1 };
+    const closes = bars.map(b => b.c);
+    const price  = closes[closes.length - 1];
+    const ema20  = calcEma(closes, 20);
+    const ema50  = calcEma(closes, 50);
+    if (ema20.length < 2 || ema50.length < 2) return { symbol, score: -1 };
+    const lastEma20 = ema20[ema20.length - 1];
+    const lastEma50 = ema50[ema50.length - 1];
+    const prevEma50 = ema50[ema50.length - 2];
+    const trending = (price > lastEma50 && lastEma20 > lastEma50 && lastEma50 > prevEma50) ||
+                      (price < lastEma50 && lastEma20 < lastEma50 && lastEma50 < prevEma50);
+    if (!trending) return { symbol, score: 0 };
+    const spreadPct = Math.abs(lastEma20 - lastEma50) / lastEma50 * 100;
     const atr    = calcAtr(bars);
-    const price  = bars[bars.length - 1].c;
     const atrPct = atr && price > 0 ? (atr / price) * 100 : 0;
-    // Prefer liquid, volatile stocks where options have tighter spreads
-    return { symbol, score: extremeness * 2 + atrPct * 5 };
+    return { symbol, score: spreadPct * 10 + atrPct * 3 };
   });
 }
 
@@ -237,7 +255,7 @@ const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit
   orb:                 { tf: '5Min',  limit: 60 },
   vwap:                { tf: '1Min',  limit: 60 },
   weekly_momentum:     { tf: '1Week', limit: 16 },
-  options_directional: { tf: '5Min',  limit: 60 },
+  options_directional: { tf: '1Day',  limit: 70 },
   donchian_breakout:   { tf: '1Day',  limit: 30 },
   donchian_hourly:     { tf: '1Hour', limit: 40 },
   macd_crossover:      { tf: '1Day',  limit: 40 },
@@ -248,6 +266,10 @@ const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit
   // to satisfy StrategyName's exhaustiveness here, this Alpaca-side
   // scanner never actually offers it as a selectable strategy.
   gemini_confirmed:    { tf: '1Day',  limit: 260 },
+  // Unscored (see SCORED_STRATEGIES below) — candidates come straight from
+  // the shuffled liquid pool, this entry only exists to satisfy
+  // Record<StrategyName, ...>'s exhaustiveness.
+  mean_reversion_swing: { tf: '1Day', limit: 210 },
 };
 
 /**
@@ -255,6 +277,34 @@ const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit
  *  1. Snapshot filter — 3 API calls for 300 stocks → top 50 by dollar volume
  *  2. Bars + scoring  — 4 batched calls for 50 stocks → top `count` by strategy score
  */
+// Strategies below have a real per-symbol scorer (technical setup quality) —
+// everything else (notably rule_based_analysis, T212's only caller here)
+// falls through to the `default` branch, which has no scoring signal at
+// all and previously just returned the top `count` of the liquidity-sorted
+// list, always in the same descending-dollar-volume order. Confirmed live
+// 2026-08-25: with `count` (40) close to the liquid stage's own cutoff (50),
+// T212 was evaluating essentially the SAME ~40 mega-cap names — the biggest,
+// most-liquid, most-already-run stocks in the universe — every single 3h
+// cycle, no rotation, ever. That's exactly the population its own AI thesis
+// test (buy-and-hold, skeptical of "already priced in" moves) is built to
+// be hardest on, and it meant the newly-added construction/materials names
+// (lower dollar volume than SPY/AAPL/NVDA) would rarely if ever crack a
+// top-50 cut to even be considered. Unscored strategies now draw from a much
+// wider liquid pool and get shuffled before slicing, so genuinely different
+// candidates surface cycle to cycle instead of the same fixed list forever.
+const SCORED_STRATEGIES = new Set<StrategyName>([
+  'rsi_mean_reversion', 'ema_crossover', 'orb', 'vwap', 'weekly_momentum', 'options_directional',
+]);
+
+function shuffled<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 export async function scanForBestSymbols(
   strategy: StrategyName,
   mode:     AccountMode,
@@ -265,8 +315,25 @@ export async function scanForBestSymbols(
   const pool = UNIVERSE.filter(s => !exclude.includes(s));
   log(`[scanner] Stage 1: snapshot filter across ${pool.length} symbols…`);
 
-  const liquid = await liquidFilter(pool, mode, 50).catch(() => pool.slice(0, 50));
+  // Widened from 50 to 150 (2026-08-25, same fix as T212's unscored path
+  // just below) — Alpaca's own scan hit the identical issue: with the old
+  // 50-cutoff, its start-of-run watchlist scan (scanForBestSymbols called
+  // once in startAlpacaBot, plus the smaller per-slot replacement scans)
+  // only ever saw the ~50 most-liquid names in the universe, which never
+  // gave the newly-added construction/materials sector — or most of the
+  // universe beyond mega-caps — any real chance to be scored and picked.
+  // This scan only runs at bot start and on each individual slot
+  // replacement (not every poll), so the extra bar-fetch cost from a wider
+  // pool is a one-time/per-replacement cost, not a per-poll one.
+  const hasScorer  = SCORED_STRATEGIES.has(strategy);
+  const liquidKeep = 150;
+  const liquid = await liquidFilter(pool, mode, liquidKeep).catch(() => pool.slice(0, liquidKeep));
   log(`[scanner] Stage 2: scoring top ${liquid.length} liquid stocks for ${strategy}…`);
+
+  // Unscored strategies never touch barsMap below (they return straight from
+  // the shuffled liquid list) — skip the fetch entirely rather than pulling
+  // ~260 daily bars each for up to 150 symbols only to discard all of it.
+  if (!hasScorer) return shuffled(liquid).slice(0, count);
 
   const { tf, limit } = TIMEFRAME[strategy];
   const barsMap = await fetchBatched(liquid, tf, limit, mode);
@@ -279,7 +346,7 @@ export async function scanForBestSymbols(
     case 'vwap':                scored = scoreVwap(barsMap);              break;
     case 'weekly_momentum':     scored = scoreWeeklyMomentum(barsMap);    break;
     case 'options_directional': scored = scoreOptionsDirectional(barsMap); break;
-    default: return liquid.slice(0, count);
+    default: return shuffled(liquid).slice(0, count);
   }
 
   const ranked = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score);

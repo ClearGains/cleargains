@@ -13,7 +13,7 @@ import { clsx } from 'clsx';
 
 type PageTab     = 'alpaca' | 'ig' | 'fx' | 'cfd';
 type AccountMode = 'paper' | 'live';
-type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional';
+type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'mean_reversion_swing';
 
 type AlpacaPosition = {
   symbol:           string;
@@ -23,6 +23,7 @@ type AlpacaPosition = {
   unrealized_plpc:  string;
   current_price:    string;
   avg_entry_price:  string;
+  market_value:     string;
 };
 
 type LogEntry = {
@@ -46,6 +47,7 @@ type BotStatus = {
   nextRunMs:   number | null;
   lastPollTs:  string | null;
   lossLock?:   boolean;   // daily-loss circuit breaker engaged (no new entries today)
+  positionWatch?: Record<string, { enabled: boolean; lastVerdict?: { action: string; confidence: number; reason: string; engine: string; at: number } }>;
 };
 
 type ServerHealth = 'checking' | 'online' | 'offline' | 'misconfigured';
@@ -107,6 +109,12 @@ const STRATEGIES: { value: StrategyName; label: string; timeframe: string; descr
     timeframe:   'Intraday (5-min)',
     description: 'Buy calls when RSI < 30, buy puts when RSI > 70. Exit at +75% profit, −50% loss, or ≤2 DTE.',
   },
+  {
+    value:       'mean_reversion_swing',
+    label:       '🎯 Mean Reversion (RSI2+EMA200)',
+    timeframe:   'Swing (Daily, up to 10 days)',
+    description: 'Same strategy as the IG mean-reversion bot\'s stocks instance (ported from bot_ig.py — the one with a real evidence trail behind it), running here on Alpaca instead so it doesn\'t depend on the shared IG account\'s session/API allowance. Buy short-term RSI(2) oversold dips within a 200-day uptrend. Stop 2× ATR, target 4× ATR, 10-day max hold backstop.',
+  },
 ];
 
 const DEFAULT_SYMBOLS: Record<StrategyName, string> = {
@@ -116,6 +124,7 @@ const DEFAULT_SYMBOLS: Record<StrategyName, string> = {
   vwap:                'SPY,QQQ,AAPL,MSFT',
   weekly_momentum:     'XLK,XLF,XLE,XLV,XLY,SPY',
   options_directional: 'SPY,QQQ,AAPL,MSFT,NVDA',
+  mean_reversion_swing: 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,NFLX,JPM,V,UNH,XOM,AMD,AVGO,INTC,QCOM,MU,TSM,F,BCS,BP,HSBC,AZN,JNJ,PFE,LLY',
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -170,6 +179,7 @@ const STRATEGY_LABEL: Record<StrategyName, string> = {
   vwap:                'VWAP Reversion',
   weekly_momentum:     'Weekly Momentum',
   options_directional: 'Options Directional',
+  mean_reversion_swing: 'Mean Reversion (RSI2+EMA200)',
 };
 
 // ── Server health hook ────────────────────────────────────────────────────────
@@ -466,7 +476,7 @@ function RecommendationPanel({
 
 // ── IG Spread Bet tab ─────────────────────────────────────────────────────────
 
-type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed';
+type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed' | 'mean_reversion_swing';
 type IgMode         = 'demo' | 'live';
 
 type IgOpenPosition = {
@@ -516,6 +526,11 @@ type IgBotStatus = {
   // deliberately leaving alone.
   managedDeals?: string[];
   aiPaused?: boolean;   // manual Gemini kill-switch for this bot's own entries
+  // Latest position-watch verdict per watched dealId — which provider
+  // actually answered (gemini/openai/xai/passthrough) varies call to call
+  // now that this bot has a real failover chain, so this is read live from
+  // the backend rather than assumed.
+  positionWatch?: Record<string, { action: string; confidence: number; reason: string; engine: string; at: number }>;
 };
 
 // A signal computed off IG's own data for an epic the bot isn't acting on
@@ -565,6 +580,7 @@ const IG_STRATEGIES: { value: IgStrategyName; label: string; timeframe: string; 
   { value: 'gemini_opinion',     label: '🧪 Gemini Opinion (Experimental)', timeframe: 'Intraday (30-min)', description: 'No technical entry rule — Gemini decides BUY/SELL/HOLD from scratch off 30-min price shape, RSI/MACD context, and near-daily news, and sets its own stop/TP. Exits handled entirely by Gemini Position Watch. No track record yet — start small.' },
   { value: 'rule_based_analysis', label: '📊 Rule-Based Analysis (Daily Brief)', timeframe: 'Swing (Daily)', description: 'Same RSI/MACD/SMA/Bollinger engine the Daily Brief page uses, with an SMA200 trend filter, a same-day-extension dampener, and a 7/10 minimum-confidence floor before a signal actually trades. Restricted to 30 instruments individually backtest-confirmed profitable under this exact engine.' },
   { value: 'gemini_confirmed',   label: '🎯 Gemini Confirmed (Rules + AI)', timeframe: 'Swing (Daily)', description: 'Two-layer entry: the same rule engine as Rule-Based Analysis must qualify a real setup first (7/10+ confidence), then Gemini confirms or vetoes it with real news and sector-peer context — the stock-side version of how the FX Swing Bot already works. Unrestricted universe (not limited to the 30 confirmed names) since Gemini\'s own confirmation is the safety check here instead of a pre-vetted list. No track record yet — new strategy.' },
+  { value: 'mean_reversion_swing', label: '📈 Mean Reversion (RSI2+EMA200)', timeframe: 'Swing (Daily, up to 10 days)', description: 'The strategy behind the standalone mean-reversion bot\'s real evidence trail (ported from bot_ig.py) and now also running on Alpaca — added here too as a third venue. Buys a short-term RSI(2) oversold dip within an established 200-day uptrend. Stop 2x ATR, target 4x ATR, 10-day max-hold backstop.' },
 ];
 
 const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
@@ -580,14 +596,14 @@ const IG_STRATEGY_LABEL: Record<IgStrategyName, string> = {
   gemini_opinion:     'Gemini Opinion (Experimental)',
   rule_based_analysis: 'Rule-Based Analysis (Daily Brief)',
   gemini_confirmed:    'Gemini Confirmed (Rules + AI)',
+  mean_reversion_swing: 'Mean Reversion (RSI2+EMA200)',
 };
 
 function IgSpreadBetTab() {
   const [igMode, setIgMode]         = useState<IgMode>('demo');
   const [strategy, setStrategy]     = useState<IgStrategyName>('donchian_breakout');
   const [maxRisk, setMaxRisk]           = useState('20');
-  const [maxStockPos, setMaxStockPos]   = useState('3');
-  const [maxIndexPos, setMaxIndexPos]   = useState('3');
+  const [maxPositions, setMaxPositions] = useState('6');
   const [allowShorts, setAllowShorts] = useState(false);
   const [maxDailyLoss, setMaxDailyLoss] = useState('3');
   const lossPctInitialized = useRef(false);
@@ -880,8 +896,7 @@ function IgSpreadBetTab() {
       strategy,
       epicStrategyOverrides,
       maxRiskGbp:        parseFloat(maxRisk) || 20,
-      maxStockPositions: parseInt(maxStockPos, 10) || 3,
-      maxIndexPositions: parseInt(maxIndexPos, 10) || 3,
+      maxPositions:      parseInt(maxPositions, 10) || 6,
       allowShorts,
       maxDailyLossPct:   parseFloat(maxDailyLoss) || 3,
     });
@@ -1040,7 +1055,7 @@ function IgSpreadBetTab() {
             )}
 
             {/* Max risk & max positions */}
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-xs text-slate-400 mb-1.5">Max risk / trade (£)</label>
                 <input
@@ -1055,30 +1070,17 @@ function IgSpreadBetTab() {
                 <p className="text-[10px] text-slate-500 mt-1">Max £ lost if the stop is hit — stake auto-sizes to this, not a notional target</p>
               </div>
               <div>
-                <label className="block text-xs text-slate-400 mb-1.5">Max stock positions</label>
+                <label className="block text-xs text-slate-400 mb-1.5">Max positions</label>
                 <input
                   type="number"
-                  value={maxStockPos}
-                  onChange={e => setMaxStockPos(e.target.value)}
+                  value={maxPositions}
+                  onChange={e => setMaxPositions(e.target.value)}
                   disabled={isRunning}
                   min="0"
-                  max="10"
+                  max="20"
                   className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 disabled:opacity-50"
                 />
-                <p className="text-[10px] text-slate-500 mt-1">Separate cap — doesn't share room with indices</p>
-              </div>
-              <div>
-                <label className="block text-xs text-slate-400 mb-1.5">Max index positions</label>
-                <input
-                  type="number"
-                  value={maxIndexPos}
-                  onChange={e => setMaxIndexPos(e.target.value)}
-                  disabled={isRunning}
-                  min="0"
-                  max="10"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 disabled:opacity-50"
-                />
-                <p className="text-[10px] text-slate-500 mt-1">Separate cap — doesn't share room with stocks</p>
+                <p className="text-[10px] text-slate-500 mt-1">Shared cap across every open position — stocks, indices, FX, commodities alike</p>
               </div>
             </div>
 
@@ -1537,6 +1539,7 @@ function IgSpreadBetTab() {
                   const savedNote  = watchNotes[p.dealId] ?? '';
                   const noteDirty  = draft !== savedNote;
                   const isNoteBusy = noteBusy === p.dealId;
+                  const watchVerdict = status?.positionWatch?.[p.dealId];
                   return (
                     <div key={p.dealId} className="px-4 py-3">
                       <div className="flex items-center justify-between">
@@ -1550,6 +1553,17 @@ function IgSpreadBetTab() {
                               {p.direction} · £{p.size}/pt · entry {p.level.toFixed(2)}
                               {p.stopLevel === undefined && <span className="text-amber-400"> · no stop</span>}
                             </div>
+                            {watchVerdict && (
+                              <div
+                                className={clsx(
+                                  'text-[10px] mt-0.5 px-1.5 py-0.5 rounded inline-block',
+                                  watchVerdict.action === 'CLOSE' ? 'text-amber-300 bg-amber-500/10' : 'text-sky-300 bg-sky-500/10',
+                                )}
+                                title={watchVerdict.reason}
+                              >
+                                {watchVerdict.engine === 'passthrough' ? 'AI unavailable' : `${watchVerdict.engine}: ${watchVerdict.action} ${watchVerdict.confidence}%`}
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-3">
@@ -2757,6 +2771,14 @@ export default function AlpacaTraderPage() {
                     const pl  = parseFloat(p.unrealized_pl);
                     const pct = parseFloat(p.unrealized_plpc) * 100;
                     const pos = pl >= 0;
+                    const watch     = status.positionWatch?.[p.symbol];
+                    const isWatched = watch?.enabled ?? true; // not yet tracked = will be watched on the next poll, treat as on
+                    // Genuinely dead contract — $0 price and value, same
+                    // condition the backend itself uses to skip reviewing it
+                    // (see reviewOpenPositions in alpacaBot.ts). Nothing to
+                    // watch or toggle here, so don't show a button implying
+                    // otherwise; it'll settle to $0 automatically at expiry.
+                    const isDead = parseFloat(p.current_price) === 0 && parseFloat(p.market_value) === 0;
                     return (
                       <div key={p.symbol} className="px-4 py-3 flex items-center justify-between">
                         <div className="flex items-center gap-3">
@@ -2768,15 +2790,49 @@ export default function AlpacaTraderPage() {
                             <div className="text-xs text-slate-500">
                               {p.qty} shares · avg ${parseFloat(p.avg_entry_price).toFixed(2)}
                             </div>
+                            {watch?.lastVerdict && (
+                              <div
+                                className={clsx(
+                                  'text-[10px] mt-0.5 px-1.5 py-0.5 rounded inline-block',
+                                  watch.lastVerdict.action === 'CLOSE' ? 'text-amber-300 bg-amber-500/10' : 'text-sky-300 bg-sky-500/10',
+                                )}
+                                title={watch.lastVerdict.reason}
+                              >
+                                AI: {watch.lastVerdict.action} {watch.lastVerdict.confidence}%
+                              </div>
+                            )}
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div className="font-medium text-sm text-white">
-                            ${parseFloat(p.current_price).toFixed(2)}
+                        <div className="flex items-center gap-3">
+                          <div className="text-right">
+                            <div className="font-medium text-sm text-white">
+                              ${parseFloat(p.current_price).toFixed(2)}
+                            </div>
+                            <div className={clsx('text-xs font-medium', pos ? 'text-green-400' : 'text-red-400')}>
+                              {fmtPnl(p.unrealized_pl)} ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
+                            </div>
                           </div>
-                          <div className={clsx('text-xs font-medium', pos ? 'text-green-400' : 'text-red-400')}>
-                            {fmtPnl(p.unrealized_pl)} ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
-                          </div>
+                          {isDead ? (
+                            <span
+                              className="text-xs px-2.5 py-1 rounded font-medium text-slate-500 bg-slate-800/50 shrink-0"
+                              title="No live quote — nothing to watch. Settles automatically to $0 at expiry."
+                            >
+                              Dead
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => void post(isWatched ? 'watch-off' : 'watch-on', { symbol: p.symbol })}
+                              disabled={loading}
+                              className={clsx(
+                                'text-xs px-2.5 py-1 rounded font-medium transition-colors disabled:opacity-50 shrink-0',
+                                isWatched
+                                  ? 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/30'
+                                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700',
+                              )}
+                            >
+                              {isWatched ? '✦ Watching' : 'Watch'}
+                            </button>
+                          )}
                         </div>
                       </div>
                     );

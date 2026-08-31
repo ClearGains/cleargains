@@ -1,22 +1,31 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition,
+  getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition, getOrders,
   cancelAllOrders, cancelOrdersForSymbol, isNYSEOpen, isInOpeningRange, isNearClose,
   sessionStartUtcMs,
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
-  selectOptionsContract,
+  selectOptionsContract, getOptionQuote,
   type AccountMode, type AlpacaPosition, type AlpacaBar,
 } from './alpacaApi';
 import { scanForBestSymbols } from './alpacaScanner';
 import { recordJournalEvent } from './tradeJournal';
+import { edgeSizing } from './quant';
 import { hasImminentEarnings } from './earningsGuard';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal, optionsDirectionalSignal,
+  meanReversionSwingSignal,
   calcAtr, STRATEGY_META,
   type StrategyName, type StrategySignal,
 } from './alpacaStrategies';
+import { MAX_HOLD_DAYS as MR_SWING_MAX_HOLD_DAYS } from './meanReversionStrategy';
+// Grok (xAI) is a live test as the acting decision-maker here as of
+// 2026-08-25, paper-trading only (see xai.ts's own comment) — Gemini called
+// only as a fallback when Grok's own attempt genuinely fails.
+import { askAlpacaDailyVerdict, askAlpacaPositionVerdict } from './xai';
+import { fetchAllHeadlines } from './newsFetch';
+import { hasBreakingNews } from './alpacaNewsStream';
 
 // ── State persistence ─────────────────────────────────────────────────────────
 // Survives a PM2 restart / crash: without this, a bot running when the process
@@ -35,6 +44,89 @@ function clearAlpacaState(mode: AccountMode): void {
 export function loadSavedAlpacaState(mode: AccountMode): AlpacaBotConfig | null {
   try { return JSON.parse(fs.readFileSync(stateFile(mode), 'utf8')) as AlpacaBotConfig; } catch { return null; }
 }
+
+// ── High-conviction sizing (2026-08-24, explicit request) ──────────────────
+// A deliberate exception to the normal $positionSizeUsd budget: when the
+// *same* signal + Gemini pipeline every other entry already goes through
+// rates a setup at genuinely top-tier confidence (90%+, i.e. Gemini's own
+// "9-10/10"), size that one trade far larger — still through the exact same
+// live-quote sizing and capped-limit execution every entry uses, just with a
+// bigger budget when everything strongly agrees. Deliberately NOT a
+// separate/manual path — same automatic pipeline, just gated by an
+// unusually high bar, per explicit request ("guessing how it's picked now
+// but just with 9/10-10/10 conviction"). Capped at one concurrent
+// high-conviction position (across all symbols) so a good week can't
+// compound into several large bets stacking risk at once.
+const HIGH_CONVICTION_MIN_CONFIDENCE = 85;
+const HIGH_CONVICTION_SIZE_USD       = 5_000;
+// 45min/±$X-move throttle, same shape as geminiWatch.ts's own — a dedicated
+// ongoing watch beyond the standard -50%/+75%/DTE exit rule, per explicit
+// request ("gemini confirms and watches it"). Persisted so a PM2 restart
+// doesn't lose track of which position this is and silently stop watching
+// it — the position itself survives a restart fine either way (Alpaca is
+// the source of truth), but this file is what tells the bot to give it the
+// extra attention.
+type HighConvictionEntry = { enteredAt: number; lastReviewAt: number; lastUpl: number };
+function hcFile(mode: AccountMode): string {
+  return path.join(__dirname, '..', `alpaca-high-conviction-${mode}.json`);
+}
+function loadHc(mode: AccountMode): Map<string, HighConvictionEntry> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(hcFile(mode), 'utf8')) as Record<string, HighConvictionEntry>;
+    return new Map(Object.entries(raw));
+  } catch { return new Map(); }
+}
+function saveHc(mode: AccountMode, map: Map<string, HighConvictionEntry>): void {
+  try { fs.writeFileSync(hcFile(mode), JSON.stringify(Object.fromEntries(map)), 'utf8'); } catch {}
+}
+const highConviction = new Map<AccountMode, Map<string, HighConvictionEntry>>([
+  ['paper', loadHc('paper')],
+  ['live',  loadHc('live')],
+]);
+
+// Peak P/L% per option position — feeds optionsDirectionalSignal's
+// peak-and-retrace lock-in (see its own comment). Tracked separately from
+// positionWatch's throttled state since this needs to update every single
+// poll (the exit check runs on the main loop, before positionWatch's own
+// pass later in the same cycle — using that map here would read stale data).
+function peakFile(mode: AccountMode): string {
+  return path.join(__dirname, '..', `alpaca-option-peaks-${mode}.json`);
+}
+function loadPeaks(mode: AccountMode): Map<string, number> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(peakFile(mode), 'utf8')) as Record<string, number>;
+    return new Map(Object.entries(raw));
+  } catch { return new Map(); }
+}
+function savePeaks(mode: AccountMode, map: Map<string, number>): void {
+  try { fs.writeFileSync(peakFile(mode), JSON.stringify(Object.fromEntries(map)), 'utf8'); } catch {}
+}
+const optionPeaks = new Map<AccountMode, Map<string, number>>([
+  ['paper', loadPeaks('paper')],
+  ['live',  loadPeaks('live')],
+]);
+
+// Entry timestamp per symbol for the mean_reversion_swing strategy — the
+// pure meanReversionSwingSignal function isn't given a position's age (it
+// only sees bars), so this is what lets the original strategy's
+// MAX_HOLD_DAYS backstop actually work here. Same minimal
+// Map<symbol, timestamp>-persisted-as-JSON shape as optionPeaks above.
+function mrEnteredFile(mode: AccountMode): string {
+  return path.join(__dirname, '..', `alpaca-mr-entered-${mode}.json`);
+}
+function loadMrEntered(mode: AccountMode): Map<string, number> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(mrEnteredFile(mode), 'utf8')) as Record<string, number>;
+    return new Map(Object.entries(raw));
+  } catch { return new Map(); }
+}
+function saveMrEntered(mode: AccountMode, map: Map<string, number>): void {
+  try { fs.writeFileSync(mrEnteredFile(mode), JSON.stringify(Object.fromEntries(map)), 'utf8'); } catch {}
+}
+const mrEntered = new Map<AccountMode, Map<string, number>>([
+  ['paper', loadMrEntered('paper')],
+  ['live',  loadMrEntered('live')],
+]);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -71,6 +163,9 @@ export type AlpacaBotStatus = {
   orbState:    Record<string, OrbState>;
   lastPollTs:  string | null;
   lossLock:    boolean;   // daily-loss circuit breaker engaged
+  // Latest AI watch verdict per symbol currently held, if it's been
+  // reviewed at least once — see reviewOpenPositions/getPositionWatchStatus.
+  positionWatch: Record<string, { enabled: boolean; lastVerdict?: { action: string; confidence: number; reason: string; engine: string; at: number } }>;
 };
 
 // tradedLong/tradedShort: one breakout entry per direction per day — without
@@ -117,6 +212,202 @@ function s(mode: AccountMode): ModeState {
 function uid() { return Math.random().toString(36).slice(2, 8); }
 function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Europe/London' }); }
 function round2(v: number) { return Math.round(v * 100) / 100; }
+
+// OCC option symbol: underlying + YYMMDD + C/P + 8-digit strike, e.g.
+// GOOGL260828P00245000. Stocks never match this shape.
+const OCC_SYMBOL_RE = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
+function isOptionSymbol(sym: string): boolean { return OCC_SYMBOL_RE.test(sym); }
+
+// cfg.symbols holds underlying tickers ("PLTR"), but options_directional's
+// open positions live under the OCC contract symbol ("PLTR260828P00127000")
+// — an exact-match lookup never finds them. Confirmed live: this silently
+// broke the whole position-cap gate below once the account filled up, since
+// every held options underlying looked position-less and got skipped before
+// evaluateSymbol ever ran its exit check, leaving losing contracts stuck
+// open indefinitely with no further evaluation at all.
+function findPositionFor(positions: AlpacaPosition[], underlying: string): AlpacaPosition | undefined {
+  return positions.find(p => p.symbol === underlying || new RegExp(`^${underlying}\\d{6}[CP]`).test(p.symbol));
+}
+
+// Ongoing AI watch for every open position, not just the high-conviction
+// one — extended 2026-08-24 per explicit request ("is there a position
+// watch on these stocks... add it"). Same throttle shape as geminiWatch.ts's
+// IG-side watch ($X move or 45min silence, whichever first). Runs alongside,
+// not instead of, the normal -50%/+75%/DTE exit rule already checked every
+// poll — this can close a position earlier on a real thesis change; the
+// mechanical rule is still the hard backstop if this misses something or
+// Gemini's unavailable. Positions with a genuinely dead market (no live
+// price — see the GLD/PLTR/GOOGL saga) are skipped: there's no live level
+// for Gemini to reason about and nothing it could do differently from just
+// waiting for expiry anyway.
+const WATCH_MOVE_THRESHOLD_USD = 150;
+const WATCH_MAX_SILENCE_MS     = 45 * 60_000;
+type WatchEntry = {
+  enteredAt: number; lastReviewAt: number; lastUpl: number;
+  enabled:   boolean;  // per-position on/off toggle, mirroring the IG bot's own Watch button — defaults on, user can turn it off per symbol
+  lastVerdict?: { action: string; confidence: number; reason: string; engine: string; at: number };
+};
+function watchFile(mode: AccountMode): string {
+  return path.join(__dirname, '..', `alpaca-position-watch-${mode}.json`);
+}
+function loadWatch(mode: AccountMode): Map<string, WatchEntry> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(watchFile(mode), 'utf8')) as Record<string, WatchEntry>;
+    // `enabled` was added after this file format existed — a pre-existing
+    // entry saved before that has it as undefined, and `!tracked.enabled`
+    // in reviewOpenPositions reads that as "disabled", silently dropping an
+    // already-watched position out of review on the next restart. Default
+    // it to true (the field's own intended default) rather than let a
+    // missing key flip the meaning.
+    return new Map(Object.entries(raw).map(([symbol, entry]) => [symbol, { ...entry, enabled: entry.enabled ?? true }]));
+  } catch { return new Map(); }
+}
+function saveWatch(mode: AccountMode, map: Map<string, WatchEntry>): void {
+  try { fs.writeFileSync(watchFile(mode), JSON.stringify(Object.fromEntries(map)), 'utf8'); } catch {}
+}
+const positionWatch = new Map<AccountMode, Map<string, WatchEntry>>([
+  ['paper', loadWatch('paper')],
+  ['live',  loadWatch('live')],
+]);
+
+// UI-facing snapshot — see /alpaca/:mode/status in index.ts.
+export function getPositionWatchStatus(mode: AccountMode): Record<string, { enabled: boolean; lastVerdict?: WatchEntry['lastVerdict'] }> {
+  const out: Record<string, { enabled: boolean; lastVerdict?: WatchEntry['lastVerdict'] }> = {};
+  for (const [symbol, entry] of positionWatch.get(mode) ?? []) {
+    out[symbol] = { enabled: entry.enabled, lastVerdict: entry.lastVerdict };
+  }
+  return out;
+}
+
+// Per-position on/off — mirrors the IG bot's Watch button (POST enables,
+// DELETE disables). Alpaca defaults every position to watched (per explicit
+// request to cover everything, not just the rare high-conviction trade),
+// so this is a mute switch, not an opt-in — the position still keeps
+// getting created in the map (with enabled:true) the first time it's seen;
+// this only ever flips the flag on an already-known symbol.
+export function setPositionWatchEnabled(mode: AccountMode, symbol: string, enabled: boolean): { ok: boolean; error?: string } {
+  const map = positionWatch.get(mode)!;
+  const entry = map.get(symbol);
+  if (!entry) return { ok: false, error: 'Position not found or not yet tracked — it will be watched automatically once seen' };
+  entry.enabled = enabled;
+  saveWatch(mode, map);
+  return { ok: true };
+}
+
+async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, positions: AlpacaPosition[]): Promise<void> {
+  const watchMap = positionWatch.get(mode)!;
+  const hcMap    = highConviction.get(mode)!;
+  const liveSymbols = new Set(positions.map(p => p.symbol));
+
+  // Drop anything no longer held — closed elsewhere (normal exit rule).
+  let changed = false;
+  for (const symbol of [...watchMap.keys()]) {
+    if (!liveSymbols.has(symbol)) { watchMap.delete(symbol); changed = true; }
+  }
+
+  for (const pos of positions) {
+    const symbol = pos.symbol;
+    // Dead market — no live price to reason about (see isOptionSymbol's own
+    // GLD/PLTR/GOOGL history). Nothing actionable, so don't spend a call.
+    if (parseFloat(pos.current_price) === 0 && parseFloat(pos.market_value) === 0) continue;
+
+    let tracked = watchMap.get(symbol);
+    if (!tracked) {
+      tracked = { enteredAt: Date.now(), lastReviewAt: 0, lastUpl: 0, enabled: true };
+      watchMap.set(symbol, tracked);
+      changed = true;
+    }
+    if (!tracked.enabled) continue;
+
+    const upl = parseFloat(pos.unrealized_pl) || 0;
+    const moved = Math.abs(upl - tracked.lastUpl) >= WATCH_MOVE_THRESHOLD_USD;
+    const stale = Date.now() - tracked.lastReviewAt >= WATCH_MAX_SILENCE_MS;
+    if (!moved && !stale) continue;
+
+    tracked.lastUpl = upl;
+    tracked.lastReviewAt = Date.now();
+    changed = true;
+
+    const underlying = isOptionSymbol(symbol) ? symbol.replace(/\d{6}[CP]\d{8}$/, '') : symbol;
+    let headlines: string[] = [];
+    try { headlines = await fetchAllHeadlines(underlying, 5); } catch {}
+    const verdict = await askAlpacaPositionVerdict({
+      instrumentName:  symbol,
+      direction:       pos.side === 'long' ? 'BUY' : 'SELL',
+      entryLevel:      parseFloat(pos.avg_entry_price) || 0,
+      currentLevel:    parseFloat(pos.current_price) || 0,
+      uplGbp:          upl,
+      currency:        '$',
+      heldHours:       (Date.now() - tracked.enteredAt) / 3_600_000,
+      headlines,
+    });
+    const isHc = hcMap.has(symbol);
+    tracked.lastVerdict = { action: verdict.action, confidence: verdict.confidence, reason: verdict.reason, engine: verdict.engine, at: Date.now() };
+    addLog(mode, 'info', underlying, `${isHc ? '[HIGH CONVICTION WATCH]' : '[POSITION WATCH]'} ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+
+    if (verdict.action === 'CLOSE' && verdict.engine === 'gemini') {
+      await executeSignal(mode, symbol, { action: 'CLOSE_LONG', reason: `[Position watch] ${verdict.reason}` }, pos, cfg);
+      watchMap.delete(symbol);
+      if (isHc) { hcMap.delete(symbol); saveHc(mode, hcMap); }
+    }
+  }
+  if (changed) saveWatch(mode, watchMap);
+}
+
+// ── Pre-entry Gemini + news gate ────────────────────────────────────────────
+// Every strategy here (RSI mean-reversion, EMA crossover, ORB, VWAP, weekly
+// momentum, options directional) is pure price/indicator math — none of them
+// know a headline exists. Confirmed live this is a real gap, not a
+// theoretical one: the options bot bought a PUT on GOOGL (RSI-overbought +
+// MACD rolling over) at the exact moment GOOGL was breaking out on genuine
+// bullish news (a Google-Marvell AI chip deal) — the same blind spot that
+// separately caused repeat losing shorts on the IG side, fixed there by
+// requiring Gemini confirmation before entry. This is that same fix for the
+// Alpaca bot, applied to every entry rather than gated per-instrument, per
+// explicit request. Fails closed (skips the trade) on any Gemini outage or
+// missing key, same discipline as the IG bot's own gate — an unconfirmed
+// entry is worse than a missed one.
+async function confirmEntryWithNews(
+  mode:      AccountMode,
+  sym:       string,
+  direction: 'BUY' | 'SELL',   // BUY = bullish thesis (long call or long stock), SELL = bearish (long put or short stock)
+  price:     number,
+  strategyReason: string,
+  strength?: number,
+): Promise<{ ok: boolean; reason: string; confidence: number }> {
+  let headlines: string[] = [];
+  try { headlines = await fetchAllHeadlines(sym, 5); } catch {}
+  const breaking = hasBreakingNews(sym);
+
+  const verdict = await askAlpacaDailyVerdict({
+    instrumentName: sym,
+    direction,
+    strength:       strength ?? 60,
+    price,
+    changePercent:  0,  // not tracked at this layer — direction check doesn't depend on it
+    stopPoints:     price * 0.25,  // placeholder R:R framing only — real stop/TP for options is a % of premium, not points
+    tpPoints:       price * 0.5,
+    headlines: breaking ? [`[BREAKING — flagged by real-time news stream in the last 30min]`, ...headlines] : headlines,
+  });
+
+  addLog(mode, 'info', sym, `[AI] ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine}) | signal: ${strategyReason}`);
+
+  // Reason text below is user/log-facing, so it names the real engine that
+  // answered rather than a hardcoded "Gemini" — confirmed live 2026-08-25
+  // this file still said "Gemini vetoed"/"Gemini unavailable" even after
+  // Alpaca moved to Grok-acting (askAlpacaDailyVerdict, ./xai), which made
+  // every real Grok veto/outage look like a Gemini one in the UI.
+  if (verdict.engine === 'passthrough') {
+    return { ok: false, reason: `AI unavailable (${verdict.reason}) — skipping entry rather than trading unconfirmed`, confidence: 0 };
+  }
+  if (verdict.direction === 'SKIP' || verdict.confidence < 50) {
+    return { ok: false, reason: `${verdict.engine} vetoed — ${verdict.direction} ${verdict.confidence}%: ${verdict.reason}`, confidence: verdict.confidence };
+  }
+  if (verdict.direction !== direction) {
+    return { ok: false, reason: `${verdict.engine} disagreed on direction (wanted ${verdict.direction}, signal was ${direction}) — ${verdict.reason}`, confidence: verdict.confidence };
+  }
+  return { ok: true, reason: verdict.reason, confidence: verdict.confidence };
+}
 
 // Deterministic per-decision order ID. Stable across a retry of the *same*
 // poll's decision (so a resend dedupes at Alpaca instead of double-filling),
@@ -217,7 +508,22 @@ async function evaluateSymbol(
   // Approximate — computed on whatever bar resolution this strategy already
   // fetches for its own signal, so magnitude varies by strategy. Only used as
   // a soft ±50% adjustment around the configured position size, not a hard risk cap.
-  const sizeMult = sizeMultiplierFromAtr(bars);
+  let sizeMult = sizeMultiplierFromAtr(bars);
+
+  // Real-track-record sizing on top of the volatility adjustment above —
+  // scales toward what this exact strategy's own closed-trade history
+  // supports rather than sizing purely off this one trade's signal/Gemini
+  // confidence. Neutral until there's a real sample; see quant.ts for why
+  // the history is filtered to post-rewrite trades only.
+  const edge = edgeSizing(mode, cfg.strategy);
+  if (edge.skip) {
+    addLog(mode, 'wait', sym, `Skipped — ${edge.reason}`);
+    return false;
+  }
+  if (edge.multiplier !== 1) {
+    addLog(mode, 'info', sym, edge.reason);
+    sizeMult *= edge.multiplier;
+  }
 
   switch (cfg.strategy) {
     case 'rsi_mean_reversion':
@@ -269,6 +575,37 @@ async function evaluateSymbol(
       break;
     }
 
+    // Self-contained (like options_directional below), not a fall-through to
+    // the shared tail — needs to track/check position entry time for the
+    // MAX_HOLD_DAYS backstop (see mrEntered's own comment), which the shared
+    // tail below has no hook for.
+    case 'mean_reversion_swing': {
+      if (inPosition) {
+        const map = mrEntered.get(mode)!;
+        const entered = map.get(sym);
+        const heldDays = entered ? (Date.now() - entered) / 86_400_000 : 0;
+        if (entered && heldDays >= MR_SWING_MAX_HOLD_DAYS) {
+          const exitSig: StrategySignal = {
+            action: side === 'long' ? 'CLOSE_LONG' : 'CLOSE_SHORT',
+            reason: `Max hold reached (${heldDays.toFixed(1)}d) — same backstop as the original strategy`,
+          };
+          const closed = await executeSignal(mode, sym, exitSig, openPos ?? null, cfg);
+          if (closed) { map.delete(sym); saveMrEntered(mode, map); }
+          return false;
+        }
+        addLog(mode, 'wait', sym, entered ? `Held ${heldDays.toFixed(1)}d — stop/TP live as bracket legs` : 'In position — stop/TP live as bracket legs');
+        return false;
+      }
+      const mrSig = meanReversionSwingSignal(bars);
+      if (mrSig.action !== 'BUY' && mrSig.action !== 'SELL') { addLog(mode, 'wait', sym, mrSig.reason); return false; }
+      const entryPrice = bars[bars.length - 1].c;
+      const confirm = await confirmEntryWithNews(mode, sym, mrSig.action, entryPrice, mrSig.reason);
+      if (!confirm.ok) { addLog(mode, 'wait', sym, `[AI] ${confirm.reason}`); return false; }
+      const opened = await executeSignal(mode, sym, mrSig, null, cfg, entryPrice, sizeMult);
+      if (opened) { mrEntered.get(mode)!.set(sym, Date.now()); saveMrEntered(mode, mrEntered.get(mode)!); }
+      return opened;
+    }
+
     case 'options_directional': {
       // Check for an existing options position on this underlying (OCC symbols start with underlying ticker)
       const occRegex = new RegExp(`^${sym}\\d{6}[CP]`);
@@ -280,9 +617,17 @@ async function evaluateSymbol(
         const yymmdd = optPos.symbol.slice(sym.length, sym.length + 6);
         const expiry = new Date(`20${yymmdd.slice(0, 2)}-${yymmdd.slice(2, 4)}-${yymmdd.slice(4, 6)}`);
         const dte    = Math.ceil((expiry.getTime() - Date.now()) / 86_400_000);
-        const exitSig = optionsDirectionalSignal(bars, true, plPct, dte);
+
+        const peaks = optionPeaks.get(mode)!;
+        const peak  = Math.max(peaks.get(optPos.symbol) ?? plPct, plPct);
+        peaks.set(optPos.symbol, peak);
+        savePeaks(mode, peaks);
+
+        const exitSig = optionsDirectionalSignal(bars, true, plPct, dte, peak);
         if (exitSig.action !== 'HOLD') {
           await executeSignal(mode, optPos.symbol, exitSig, optPos, cfg);
+          peaks.delete(optPos.symbol);
+          savePeaks(mode, peaks);
         } else {
           addLog(mode, 'wait', sym, exitSig.reason);
         }
@@ -294,16 +639,46 @@ async function evaluateSymbol(
       if (entrySig.action === 'BUY') {
         const currentPrice = bars[bars.length - 1].c;
         const optType      = entrySig.optionType ?? 'call';
+
+        const confirm = await confirmEntryWithNews(mode, sym, optType === 'call' ? 'BUY' : 'SELL', currentPrice, entrySig.reason);
+        if (!confirm.ok) {
+          addLog(mode, 'wait', sym, `[AI] ${confirm.reason}`);
+          return false;
+        }
+
         const contract     = await selectOptionsContract(sym, optType, currentPrice, mode);
         if (!contract) {
           addLog(mode, 'wait', sym, `No tradable ATM ${optType} contract found`);
           return false;
         }
-        const contractPrice = parseFloat(contract.close_price ?? '2');
-        const qty = Math.max(1, Math.floor((cfg.positionSizeUsd * sizeMult) / (contractPrice * 100)));
+        // contract.close_price is yesterday's close — sizing off it on an
+        // illiquid contract that's since moved badly undershoots the real
+        // cost (confirmed live: a $500 budget filled at $4,000+ once actual
+        // fill price came in far above that stale number). No live quote
+        // means no reliable way to size or bound the fill, so skip rather
+        // than guess — same liquidity gap that also makes these contracts
+        // hard to close later.
+        const quote = await getOptionQuote(contract.symbol, mode);
+        if (!quote) {
+          addLog(mode, 'wait', sym, `No live quote for ${contract.symbol} — skipping (too illiquid to size safely)`);
+          return false;
+        }
+        const contractPrice = quote.ask;
+        const hcMap = highConviction.get(mode)!;
+        const isHighConviction = confirm.confidence >= HIGH_CONVICTION_MIN_CONFIDENCE && hcMap.size === 0;
+        const budgetUsd = isHighConviction ? HIGH_CONVICTION_SIZE_USD : cfg.positionSizeUsd;
+        const qty = Math.max(1, Math.floor((budgetUsd * sizeMult) / (contractPrice * 100)));
         entrySig.optionContract = contract.symbol;
         entrySig.optionQty      = qty;
-        return executeSignal(mode, sym, entrySig, null, cfg, contractPrice);
+        if (isHighConviction) {
+          addLog(mode, 'enter', sym, `🌟 HIGH CONVICTION (AI ${confirm.confidence}%) — sizing to $${budgetUsd} instead of the usual $${cfg.positionSizeUsd}`);
+        }
+        const opened = await executeSignal(mode, sym, entrySig, null, cfg, contractPrice);
+        if (opened && isHighConviction) {
+          hcMap.set(contract.symbol, { enteredAt: Date.now(), lastReviewAt: 0, lastUpl: 0 });
+          saveHc(mode, hcMap);
+        }
+        return opened;
       }
       addLog(mode, 'wait', sym, entrySig.reason);
       return false;
@@ -313,7 +688,15 @@ async function evaluateSymbol(
       return false;
   }
 
-  return executeSignal(mode, sym, signal, openPos ?? null, cfg, bars[bars.length - 1].c, sizeMult);
+  const entryPrice = bars[bars.length - 1].c;
+  if (signal.action === 'BUY' || signal.action === 'SELL') {
+    const confirm = await confirmEntryWithNews(mode, sym, signal.action, entryPrice, signal.reason, signal.confidence);
+    if (!confirm.ok) {
+      addLog(mode, 'wait', sym, `[AI] ${confirm.reason}`);
+      return false;
+    }
+  }
+  return executeSignal(mode, sym, signal, openPos ?? null, cfg, entryPrice, sizeMult);
 }
 
 // ── Order execution ───────────────────────────────────────────────────────────
@@ -338,6 +721,28 @@ async function executeSignal(
 
   if (action === 'CLOSE_LONG' || action === 'CLOSE_SHORT') {
     if (!openPos) return false;
+
+    // Options on a dead/no-bid contract: confirmed live this was looping
+    // forever — cancel the resting $0.01 close order, place an identical
+    // one, repeat every ~5min, because nothing ever bids even a cent for
+    // a contract nobody's quoting. Checked *before* the "Closing position"
+    // log line below, not after — confirmed live that ordering was its own
+    // separate confusion: even once the actual re-submit was skipped, this
+    // path still printed a fresh "Closing position — Stop loss hit" every
+    // cycle, which reads as a new close attempt happening when nothing new
+    // is happening at all. If an order from an earlier attempt is still
+    // resting, skip the whole sequence — including this log line and the
+    // journal write — rather than re-announcing the same unresolved state
+    // every 5 minutes. It'll fill if a real bid ever shows up, or the
+    // contract just expires worthless on its own, which costs nothing extra.
+    if (isOptionSymbol(sym)) {
+      const stillPending = await getOrders(mode, 'open').then(os => os.some(o => o.symbol === sym)).catch(() => false);
+      if (stillPending) {
+        addLog(mode, 'wait', sym, 'Close order already pending from an earlier attempt — leaving it, not re-submitting');
+        return false;
+      }
+    }
+
     addLog(mode, 'exit', sym, `Closing position — ${reason}`);
     try {
       // Cancel bracket legs / stops first — Alpaca rejects a close while
@@ -345,8 +750,26 @@ async function executeSignal(
       // fill into an unwanted reverse position.
       const cancelled = await cancelOrdersForSymbol(mode, sym).catch(() => 0);
       if (cancelled) addLog(mode, 'info', sym, `Cancelled ${cancelled} open order(s) before close`);
-      await closePosition(mode, sym);
-      addLog(mode, 'exit', sym, 'Position closed');
+      // Options: closePosition's market-order liquidation gets rejected on
+      // thin/illiquid contracts ("no available quote for symbol, please
+      // reenter with a limit") — confirmed live this leaves losing positions
+      // stuck open with no way to exit. A marketable limit (well under the
+      // last known price, so it fills against whatever bid actually exists
+      // rather than requiring one at market) sidesteps that rejection; a
+      // plain stock close still uses the simpler market DELETE.
+      if (isOptionSymbol(sym)) {
+        const qty         = Math.abs(parseFloat(openPos.qty)) || 0;
+        const lastPrice   = parseFloat(openPos.current_price) || 0;
+        const limitPrice  = Math.max(0.01, round2(lastPrice * 0.5));
+        await placeOrder(mode, {
+          symbol: sym, qty, side: 'sell', type: 'limit',
+          time_in_force: 'day', limit_price: limitPrice,
+        });
+        addLog(mode, 'exit', sym, `Close order placed — limit sell @ ${limitPrice} (last known ${lastPrice})`);
+      } else {
+        await closePosition(mode, sym);
+        addLog(mode, 'exit', sym, 'Position closed');
+      }
 
       recordJournalEvent({
         mode, event: 'exit', symbol: sym, strategy: cfg.strategy,
@@ -422,14 +845,22 @@ async function executeSignal(
     const qty         = signal.optionQty ?? 1;
     const optionType  = signal.optionType ?? 'call';
     addLog(mode, 'enter', sym, `${reason}`);
-    addLog(mode, 'info',  sym, `Ordering ${qty}x ${signal.optionContract} (${optionType}) — $${cfg.positionSizeUsd} budget`);
+    // A raw market buy on an illiquid contract can fill far above the ask
+    // that qty was sized against — confirmed live this is exactly how a
+    // $500 budget turned into a $4,000+ fill. currentPrice here is that
+    // live ask (see evaluateSymbol's options_directional branch), so a
+    // limit a little above it still fills promptly against a real quote
+    // while capping how far a bad print can blow past the intended budget.
+    const limitPrice = currentPrice ? round2(Math.max(currentPrice * 1.1, currentPrice + 0.02)) : undefined;
+    addLog(mode, 'info',  sym, `Ordering ${qty}x ${signal.optionContract} (${optionType}) — $${cfg.positionSizeUsd} budget, limit ${limitPrice ?? 'n/a'}`);
     try {
       const order = await placeOrder(mode, {
         symbol:           signal.optionContract,
         qty,
         side:             'buy',
-        type:             'market',
+        type:             limitPrice !== undefined ? 'limit' : 'market',
         time_in_force:    'day',
+        limit_price:      limitPrice,
         client_order_id:  makeClientOrderId(mode, sym, 'opt_buy', st.lastPollTs),
       });
       addLog(mode, 'enter', sym, `Options order placed — ${signal.optionContract} id ${order.id}`);
@@ -444,19 +875,57 @@ async function executeSignal(
       const entryPx = parseFloat(order.filled_avg_price ?? '') || currentPrice || 0;
       if (entryPx > 0) {
         const stopPx = round2(entryPx * 0.5); // matches optionsDirectionalSignal's -50% exit rule
+        const attachStop = () => placeOrder(mode, {
+          symbol:        signal.optionContract!,
+          qty,
+          side:          'sell',
+          type:          'stop',
+          time_in_force: 'gtc',
+          stop_price:    stopPx,
+        });
+        // The market buy above can report back before Alpaca's own book has
+        // settled it — an opposite-side order placed immediately after
+        // regularly gets rejected as a "potential wash trade" (existing_order_id
+        // pointing at the still-settling buy), confirmed live across several
+        // contracts. A short settle delay before the first attempt, plus one
+        // retry, mirrors the trailing-stop pattern below and clears it in
+        // practice — this was previously a single unretried attempt.
+        await new Promise(r => setTimeout(r, 2_000));
         try {
-          await placeOrder(mode, {
-            symbol:        signal.optionContract,
-            qty,
-            side:          'sell',
-            type:          'stop',
-            time_in_force: 'gtc',
-            stop_price:    stopPx,
-          });
+          await attachStop();
           addLog(mode, 'info', sym, `Protective stop attached — sell at ${stopPx} (-50%)`);
-        } catch (e) {
-          addLog(mode, 'error', sym,
-            `🚨 UNPROTECTED — stop order failed for ${signal.optionContract}: ${e instanceof Error ? e.message : String(e)}. Exit relies on the next poll only.`);
+        } catch (e1) {
+          const msg1 = e1 instanceof Error ? e1.message : String(e1);
+          // "stop price must be less than current price" means the contract
+          // already crashed through the -50% level in the couple of seconds
+          // between the buy and this attempt — confirmed live (a far-OTM
+          // contract went to near-zero that fast). Retrying with the same
+          // stopPx would just fail identically, so exit immediately instead
+          // of leaving it open and naked waiting for the next poll.
+          if (msg1.includes('stop price must be less than current price')) {
+            addLog(mode, 'error', sym, `⚠️ Already through -50% before the stop could attach — closing now: ${msg1}`);
+            try {
+              const limitPrice = Math.max(0.01, round2(entryPx * 0.1));
+              await placeOrder(mode, {
+                symbol: signal.optionContract!, qty, side: 'sell', type: 'limit',
+                time_in_force: 'day', limit_price: limitPrice,
+              });
+              addLog(mode, 'exit', sym, `Close order placed — limit sell @ ${limitPrice}`);
+            } catch (eClose) {
+              addLog(mode, 'error', sym,
+                `🚨 UNPROTECTED — emergency close also failed for ${signal.optionContract}: ${eClose instanceof Error ? eClose.message : String(eClose)}. Exit relies on the next poll only.`);
+            }
+          } else {
+            addLog(mode, 'error', sym, `Stop order failed (retrying): ${msg1}`);
+            await new Promise(r => setTimeout(r, 3_000));
+            try {
+              await attachStop();
+              addLog(mode, 'info', sym, `Protective stop attached on retry — sell at ${stopPx} (-50%)`);
+            } catch (e2) {
+              addLog(mode, 'error', sym,
+                `🚨 UNPROTECTED — stop order failed twice for ${signal.optionContract}: ${e2 instanceof Error ? e2.message : String(e2)}. Exit relies on the next poll only.`);
+            }
+          }
         }
       }
       return true;
@@ -667,13 +1136,20 @@ async function poll(mode: AccountMode) {
 
   for (const sym of cfg.symbols) {
     if (!st.running) break;
-    const inPos = positions.find(p => p.symbol === sym);
+    const inPos = findPositionFor(positions, sym);
     if (!inPos && openCount >= cfg.maxPositions) {
       addLog(mode, 'wait', sym, `Max positions (${cfg.maxPositions}) reached — skipping`);
       continue;
     }
     const opened = await evaluateSymbol(mode, sym, positions, cfg);
     if (opened) openCount++;
+  }
+
+  try {
+    const freshPositions = await getPositions(mode);
+    await reviewOpenPositions(mode, cfg, freshPositions);
+  } catch (e) {
+    addLog(mode, 'error', '—', `High-conviction watch failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   schedule(mode, cfg);
@@ -796,6 +1272,7 @@ export async function getAlpacaBotStatus(mode: AccountMode): Promise<AlpacaBotSt
     orbState:  { ...st.orbState },
     lastPollTs: st.lastPollTs,
     lossLock:  st.lossLock,
+    positionWatch: getPositionWatchStatus(mode),
   };
 }
 

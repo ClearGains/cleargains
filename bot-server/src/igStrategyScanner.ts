@@ -5,6 +5,7 @@ import type { IgStrategyName } from './igStrategyBot';
 import { fetchBarsWithFallback, EPIC_TO_ALPACA } from './yahooFetch';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
 import type { LWCandle } from './chartIndicators';
+import { getMeanReversionSignal, type MrBar } from './meanReversionStrategy';
 
 // ── Curated liquid IG epic universe ───────────────────────────────────────────
 // Indices, major US/UK stocks, and FX majors. Stake sizing is risk-based
@@ -417,6 +418,9 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   rule_based_analysis: { resolution: 'DAY', count: 250 },
   // Also not used at runtime — same reason as rule_based_analysis above.
   gemini_confirmed:    { resolution: 'DAY', count: 250 },
+  // Also not used at runtime — in YAHOO_SCAN_STRATEGIES below. 210 =
+  // meanReversionStrategy.ts's own MIN_BARS_NEEDED.
+  mean_reversion_swing: { resolution: 'DAY', count: 210 },
 };
 
 // ── Bar conversion ────────────────────────────────────────────────────────────
@@ -441,6 +445,18 @@ function scoreRsi(bars: AlpacaBar[], epic: string, name: string): Scored {
   const rsi = calcRsi(bars);
   if (rsi === null) return { epic, name, score: -1 };
   return { epic, name, score: Math.abs(rsi - 50) };
+}
+
+// Binary-ish by nature (this strategy's entry condition — RSI(2) past an
+// extreme within an established 200-day trend — is a rare, fairly discrete
+// event, not a continuous "closer to X is better" read the way RSI-distance-
+// from-50 is above) — a flat score whenever a real signal fires is enough to
+// rank it above every non-signalling epic, which is all that actually matters
+// for picking scan winners.
+function scoreMeanReversionSwing(bars: AlpacaBar[], epic: string, name: string): Scored {
+  const mrBars: MrBar[] = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
+  const signal = getMeanReversionSignal(mrBars);
+  return { epic, name, score: signal.action === 'HOLD' ? -1 : 50 };
 }
 
 function scoreEma(bars: AlpacaBar[], epic: string, name: string): Scored {
@@ -572,7 +588,7 @@ function scoreRuleBasedAnalysis(bars: AlpacaBar[], epic: string, name: string): 
 const YAHOO_SCAN_STRATEGIES = new Set<IgStrategyName>([
   'donchian_breakout', 'donchian_hourly', 'ema_crossover', 'macd_crossover',
   'rsi_mean_reversion', 'orb', 'vwap', 'weekly_momentum', 'gemini_opinion',
-  'rule_based_analysis', 'gemini_confirmed',
+  'rule_based_analysis', 'gemini_confirmed', 'mean_reversion_swing',
 ]);
 
 // orb/rsi_mean_reversion are timeframe 'intraday' — igStrategyBot.ts's poll()
@@ -615,6 +631,7 @@ const SCAN_FREE_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTi
   gemini_opinion:     { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m' },
   rule_based_analysis: { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
   gemini_confirmed:    { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
+  mean_reversion_swing: { range: '2y', alpacaTimeframe: '1Day', yahooInterval: '1d' },
 };
 
 // Volatility-matched routing — a fast (hourly) strategy wants instruments
@@ -674,6 +691,7 @@ export function scoreForStrategy(strategy: IgStrategyName, bars: AlpacaBar[], ep
       // only applies at actual entry time (evaluateEpic), not the ranking
       // phase, so there's no separate signal to score by here.
       case 'gemini_confirmed':   return scoreRuleBasedAnalysis(bars, epic, name).score;
+      case 'mean_reversion_swing': return scoreMeanReversionSwing(bars, epic, name).score;
       default:                   return -1;
     }
   })();

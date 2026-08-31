@@ -36,6 +36,32 @@ import * as path from 'path';
 // default — it has consistently been the least reliable one.
 const GEMINI_MODEL = 'gemini-3.5-flash';
 
+// Confidence calibration — appended to every prompt below that asks for a
+// confidence number. Added 2026-08-24 per explicit request/observation:
+// none of these prompts previously said what a confidence number was
+// supposed to *mean*, and an LLM asked for a bare 0-100 score with no
+// anchoring tends to cluster in a "sounds reasonably confident" band
+// (~70-90) regardless of whether the setup is actually exceptional or just
+// unremarkable — confirmed live across dozens of real verdicts this
+// session. That's fine for a rough gut-check, but it stopped being fine the
+// moment a specific number (85%+) started gating a real 10x-larger position
+// size — at that point the score needs to actually discriminate, not just
+// sound assured. Two variants: entry-type prompts (BUY/SELL/SKIP) and
+// position-review prompts (HOLD/CLOSE) get slightly different framing for
+// what "acting" means, same underlying bands.
+const CONFIDENCE_CALIBRATION_ENTRY = `
+Calibrate the confidence number honestly — don't default to a comfortable 70-85 just because the setup looks reasonable. Use the full range:
+- 90-100: every factor genuinely aligns with no real counter-argument you can point to. This should be rare, not your normal answer for a decent setup.
+- 70-89: a solid setup, but with at least one real caveat, uncertainty, or mixed signal.
+- 50-69: a genuinely mixed picture — could go either way.
+- Below 50: real, specific reasons to doubt this — lean toward SKIP.`;
+const CONFIDENCE_CALIBRATION_REVIEW = `
+Calibrate the confidence number honestly — don't default to a comfortable 80-90 just because nothing looks obviously wrong. Use the full range:
+- 90-100: an overwhelming, unambiguous case for this verdict. Should be rare, not your normal answer for an unremarkable "nothing's changed" review.
+- 70-89: a reasonably clear call, but with some genuine uncertainty.
+- 50-69: a real toss-up either way.
+- Below 50: you're genuinely unsure — say so rather than rounding up.`;
+
 async function fetchGeminiWithRetry(url: string, options: RequestInit): Promise<Response> {
   // AbortSignal.timeout() starts counting at creation, not per fetch() call —
   // reusing the caller's signal on a retry would mean a request that failed
@@ -232,6 +258,7 @@ Guidelines:
 - stopPoints: stop distance in SAME price units as current price (e.g. price=8000 → stopPoints=40; price=1.08 → stopPoints=0.0012; price=0.84 → stopPoints=0.0008)
 - takeProfitPoints: same price units, aim for ≥1.3:1 reward/risk vs stop
 - betSize: £/pt stake — use 0.5 if volatile (ATR% > 0.5%), 1.0 if moderate, 1.5 if calm and high confidence
+${CONFIDENCE_CALIBRATION_ENTRY}
 
 Respond with JSON only, no markdown:
 {"direction":"BUY","confidence":72,"reason":"max 12 words","stopPoints":0.0012,"takeProfitPoints":0.0018,"betSize":0.5}`;
@@ -358,8 +385,58 @@ export type FxSwingVerdict = {
   direction:  'BUY' | 'SELL' | 'SKIP';
   confidence: number;
   reason:     string;
-  engine:     'gemini' | 'passthrough';
+  engine:     'gemini' | 'openai' | 'xai' | 'passthrough';
 };
+
+// Shared with xai.ts's askXaiFxSwing — same question must go to every
+// provider.
+export function buildFxSwingPrompt(signal: FxSwingEntrySignal): string {
+  const candleStr = signal.lastCandles.map((c, i) =>
+    `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
+  ).join('\n');
+
+  const usdLabel = (t: 'UP' | 'DOWN' | 'FLAT') => t === 'UP' ? 'strengthening' : t === 'DOWN' ? 'weakening' : 'flat';
+  const usdContextBlock = signal.usdContext?.length
+    ? `\nWhat the dollar is doing elsewhere right now, per this bot's other watched USD pairs (use this to tell a genuine broad-dollar move apart from something isolated to just this one pair — if every USD pair agrees, that's a real macro move; if they disagree, this pair's move may be idiosyncratic to it alone):\n${signal.usdContext.map(c => `- ${c.pair}: implies USD ${usdLabel(c.usdTrend)}`).join('\n')}\n`
+    : '';
+  const equityContextBlock = signal.equityContext?.length
+    ? `\nEquity-market context for the currencies actually in this pair (current hourly trend of each currency's own index proxy — equities and a currency don't always move together, so treat this as one more input on risk appetite, not a rule that should mechanically decide the trade):\n${signal.equityContext.map(c => `- ${c.currency} (${c.indexLabel}): ${c.trend}`).join('\n')}\n`
+    : '';
+  const macroBlock = signal.macroEvents?.length
+    ? `\nReal macro/rate events for the currencies in this pair — "past" already happened and may already explain recent price action; "upcoming" hasn't happened yet and is a real risk to any position still open when it lands (this is what actually drives FX medium-term, more than the chart alone):\n${signal.macroEvents.map(e => `- ${e}`).join('\n')}\n`
+    : '';
+
+  return `You are a second-opinion filter for an hourly-bar FX/index swing trade — NOT a scalp. Positions here are typically held for several hours (up to ~11h) while a trend plays out, and are managed by their own stop/take-profit and a stall-detection exit, not closed on the next tick.
+
+A trend-following rules engine already qualified a ${signal.suggestedDir} setup here: price is trading with the ${signal.trend === 'UP' ? 'uptrend (EMA20>EMA50), above EMA20' : 'downtrend (EMA20<EMA50), below EMA20'}, with RSI and MACD both already confirming that direction. Your job is not to re-derive the setup — it's to judge whether this trend genuinely has enough room left to keep running for the next several hours, or whether it's already largely played out.
+
+Instrument: ${signal.instrumentName}
+
+Last ${signal.lastCandles.length} closed 1-hour candles (oldest first — use this to judge the actual shape of the move: still accelerating, or already stalling?):
+${candleStr}
+RSI(14): ${signal.rsi?.toFixed(1) ?? 'N/A'}
+MACD histogram: ${signal.macd !== null ? (signal.macd > 0 ? '+' : '') + signal.macd.toFixed(5) : 'N/A'} (positive=bullish)
+ATR(14): ${signal.atr?.toFixed(2) ?? 'N/A'} pts — hourly volatility measure
+${usdContextBlock}${equityContextBlock}${macroBlock}
+Confirm, override to the other direction, or SKIP if this trend looks exhausted rather than continuing. RSI/MACD confirming this setup describes what's already happened, not what happens next — treat "RSI overbought/oversold" as information about how much of the move has already played out, not a green light on its own. A high reading can genuinely coexist with real continuation, but only when there's a specific, still-live reason for it (an unresolved macro theme, a real move still building in usdContext/equityContext above) — not merely because the candle shape hasn't technically stalled yet. If your honest read is "the move looks intact but I don't see what specifically pushes it further from here," lower confidence or SKIP rather than confirm. If a genuinely major event (rate decision, CPI) is listed as "upcoming" and could land while this position is still open, weigh that as real event risk — lower confidence or SKIP rather than ignoring it, even if the technical setup itself looks clean.
+${CONFIDENCE_CALIBRATION_ENTRY}
+
+Respond with JSON only, no markdown:
+{"direction":"BUY","confidence":72,"reason":"max 15 words"}`;
+}
+
+// Shared with openai.ts/xai.ts — same response shape every provider is asked for.
+export function parseFxSwingResponse(text: string, engine: 'gemini' | 'openai' | 'xai'): FxSwingVerdict {
+  const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+  const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
+  const dir = (['BUY', 'SELL', 'SKIP'].includes(parsed.direction)) ? parsed.direction as FxSwingVerdict['direction'] : 'SKIP';
+  return {
+    direction:  dir,
+    confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
+    reason:     parsed.reason ?? '',
+    engine,
+  };
+}
 
 export async function askGeminiFxSwing(signal: FxSwingEntrySignal): Promise<FxSwingVerdict> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -376,37 +453,7 @@ export async function askGeminiFxSwing(signal: FxSwingEntrySignal): Promise<FxSw
   if (!apiKey) return passthrough('No Gemini key configured — trading on the technical signal alone');
   if (!reserveGeminiCall()) return passthrough('Daily Gemini call cap reached — trading on the technical signal alone');
 
-  const candleStr = signal.lastCandles.map((c, i) =>
-    `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
-  ).join('\n');
-
-  const usdLabel = (t: 'UP' | 'DOWN' | 'FLAT') => t === 'UP' ? 'strengthening' : t === 'DOWN' ? 'weakening' : 'flat';
-  const usdContextBlock = signal.usdContext?.length
-    ? `\nWhat the dollar is doing elsewhere right now, per this bot's other watched USD pairs (use this to tell a genuine broad-dollar move apart from something isolated to just this one pair — if every USD pair agrees, that's a real macro move; if they disagree, this pair's move may be idiosyncratic to it alone):\n${signal.usdContext.map(c => `- ${c.pair}: implies USD ${usdLabel(c.usdTrend)}`).join('\n')}\n`
-    : '';
-  const equityContextBlock = signal.equityContext?.length
-    ? `\nEquity-market context for the currencies actually in this pair (current hourly trend of each currency's own index proxy — equities and a currency don't always move together, so treat this as one more input on risk appetite, not a rule that should mechanically decide the trade):\n${signal.equityContext.map(c => `- ${c.currency} (${c.indexLabel}): ${c.trend}`).join('\n')}\n`
-    : '';
-  const macroBlock = signal.macroEvents?.length
-    ? `\nReal macro/rate events for the currencies in this pair — "past" already happened and may already explain recent price action; "upcoming" hasn't happened yet and is a real risk to any position still open when it lands (this is what actually drives FX medium-term, more than the chart alone):\n${signal.macroEvents.map(e => `- ${e}`).join('\n')}\n`
-    : '';
-
-  const prompt = `You are a second-opinion filter for an hourly-bar FX/index swing trade — NOT a scalp. Positions here are typically held for several hours (up to ~11h) while a trend plays out, and are managed by their own stop/take-profit and a stall-detection exit, not closed on the next tick.
-
-A trend-following rules engine already qualified a ${signal.suggestedDir} setup here: price is trading with the ${signal.trend === 'UP' ? 'uptrend (EMA20>EMA50), above EMA20' : 'downtrend (EMA20<EMA50), below EMA20'}, with RSI and MACD both already confirming that direction. Your job is not to re-derive the setup — it's to judge whether this trend genuinely has enough room left to keep running for the next several hours, or whether it's already largely played out.
-
-Instrument: ${signal.instrumentName}
-
-Last ${signal.lastCandles.length} closed 1-hour candles (oldest first — use this to judge the actual shape of the move: still accelerating, or already stalling?):
-${candleStr}
-RSI(14): ${signal.rsi?.toFixed(1) ?? 'N/A'}
-MACD histogram: ${signal.macd !== null ? (signal.macd > 0 ? '+' : '') + signal.macd.toFixed(5) : 'N/A'} (positive=bullish)
-ATR(14): ${signal.atr?.toFixed(2) ?? 'N/A'} pts — hourly volatility measure
-${usdContextBlock}${equityContextBlock}${macroBlock}
-Confirm, override to the other direction, or SKIP if this trend looks exhausted rather than continuing. Treat "RSI overbought/oversold" the same way you would any other momentum reading in an intact trend — strong recent demand often keeps pushing price further in the near term rather than reversing immediately; only let it count against the trade if the candle shape above is already showing real stalling (small bodies, failed pushes, reversal wicks), not just an extended reading in an otherwise clean trend. If a genuinely major event (rate decision, CPI) is listed as "upcoming" and could land while this position is still open, weigh that as real event risk — lower confidence or SKIP rather than ignoring it, even if the technical setup itself looks clean.
-
-Respond with JSON only, no markdown:
-{"direction":"BUY","confidence":72,"reason":"max 15 words"}`;
+  const prompt = buildFxSwingPrompt(signal);
 
   try {
     const res = await fetchGeminiWithRetry(
@@ -427,19 +474,8 @@ Respond with JSON only, no markdown:
     const data = await res.json() as {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
     };
-
-    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
-
-    const dir = (['BUY', 'SELL', 'SKIP'].includes(parsed.direction)) ? parsed.direction as FxSwingVerdict['direction'] : 'SKIP';
-
-    return {
-      direction:  dir,
-      confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
-      reason:     parsed.reason ?? '',
-      engine:     'gemini',
-    };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parseFxSwingResponse(text, 'gemini');
   } catch (e) {
     return passthrough(`Gemini failed — trading on the technical signal alone (${e instanceof Error ? e.message : String(e)})`);
   }
@@ -465,8 +501,47 @@ export type DailyVerdict = {
   direction:  'BUY' | 'SELL' | 'SKIP';
   confidence: number;
   reason:     string;
-  engine:     'gemini' | 'passthrough';
+  engine:     'gemini' | 'openai' | 'xai' | 'passthrough';
 };
+
+// Shared with xai.ts's askXaiDailyVerdict — same question must go to every
+// provider so a comparison or a fallback is actually testing/covering the
+// same thing, not a different prompt entirely.
+export function buildDailyVerdictPrompt(req: DailyVerdictRequest): string {
+  const rrRatio = req.stopPoints > 0 ? (req.tpPoints / req.stopPoints).toFixed(1) : '?';
+  const pctStr  = `${req.changePercent >= 0 ? '+' : ''}${req.changePercent.toFixed(2)}%`;
+  const headlineBlock = req.headlines?.length
+    ? `\nRecent news (last 7 days, dated — weigh today's/yesterday's far more heavily than one from most of a week ago, which is likely already priced in and won't explain a fresh move. A genuinely same-day catalyst is a real reason for extra conviction on its own, not just a contradiction-check against the technical signal. Also weigh how long this catalyst is actually likely to keep mattering, not just how fresh it is — a durable one (earnings, M&A, a real guidance/structural change) can support a position held for a while, but a one-off story (a single analyst note, a passing headline) typically fades within a day or two and is a weak basis for conviction beyond that, even if it's what's moving the price right now):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '';
+
+  return `You are a second-opinion filter for a spread betting strategy.
+Signal: ${req.direction} ${req.instrumentName}
+Price: ${req.price.toFixed(2)}, Daily change: ${pctStr}
+Signal strength: ${req.strength}%
+Stop: ${req.stopPoints}pts, TP: ${req.tpPoints}pts (${rrRatio}:1 R:R)
+${headlineBlock}
+The price above is live, verified market data pulled directly from the broker feed moments ago — treat it as ground truth even if it looks far outside the range you'd expect this instrument to trade at from your own training data. A stock can move a long way (a rally, a crash, a split) after your knowledge cutoff; that's not a data error. Never SKIP or veto solely because the price seems implausible to you — only judge the trade itself (does the technical signal make sense, does the news support or contradict it).
+
+Critically: the technical signal describes what price has ALREADY done — it is not, by itself, a forecast of what happens next. Confirming a trade because "the trend looks strong" is agreeing with the past, not predicting the future. Before confirming, be able to point to a genuine reason to expect the move to continue from HERE: an unresolved catalyst still developing, a fresh angle the market hasn't fully absorbed yet, real room left before an obvious ceiling — not just "the signal fired and nothing's technically reversed yet." A high daily change or an already-extended move isn't automatically a reason to decline, but it raises the bar: the more of the move that's already happened, the more specific and forward-looking your reason for the rest of it needs to be. If your honest reasoning is "this has already run and I'm hoping it keeps going," that's weak — SKIP or lower confidence, don't confirm.
+Should we take this trade? Confirm, override, or SKIP if the setup looks poor.
+${CONFIDENCE_CALIBRATION_ENTRY}
+
+Respond with JSON only, no markdown:
+{"direction":"BUY","confidence":72,"reason":"max 15 words"}`;
+}
+
+// Shared with xai.ts — same response shape both providers are asked for.
+export function parseDailyVerdictResponse(text: string, req: DailyVerdictRequest, engine: 'gemini' | 'openai' | 'xai'): DailyVerdict {
+  const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+  const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
+  const dir = (['BUY', 'SELL', 'SKIP'].includes(parsed.direction)) ? parsed.direction as DailyVerdict['direction'] : 'SKIP';
+  return {
+    direction:  dir,
+    confidence: Math.max(0, Math.min(100, parsed.confidence ?? req.strength)),
+    reason:     parsed.reason ?? '',
+    engine,
+  };
+}
 
 export async function askGeminiDailyVerdict(req: DailyVerdictRequest): Promise<DailyVerdict> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -477,21 +552,7 @@ export async function askGeminiDailyVerdict(req: DailyVerdictRequest): Promise<D
     return { direction: req.direction, confidence: req.strength, reason: 'Daily Gemini call cap reached — using signal strength', engine: 'passthrough' };
   }
 
-  const rrRatio = req.stopPoints > 0 ? (req.tpPoints / req.stopPoints).toFixed(1) : '?';
-  const pctStr  = `${req.changePercent >= 0 ? '+' : ''}${req.changePercent.toFixed(2)}%`;
-  const headlineBlock = req.headlines?.length
-    ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
-    : '';
-
-  const prompt = `You are a second-opinion filter for a spread betting strategy.
-Signal: ${req.direction} ${req.instrumentName}
-Price: ${req.price.toFixed(2)}, Daily change: ${pctStr}
-Signal strength: ${req.strength}%
-Stop: ${req.stopPoints}pts, TP: ${req.tpPoints}pts (${rrRatio}:1 R:R)
-${headlineBlock}
-Should we take this trade? Consider the technical signal AND whether the recent news supports or contradicts it (e.g. don't confirm a SELL right after clearly positive news, or a BUY right after clearly negative news) — if no news is listed above, judge on the technicals alone. Confirm, override, or SKIP if the setup looks poor.
-Respond with JSON only, no markdown:
-{"direction":"BUY","confidence":72,"reason":"max 15 words"}`;
+  const prompt = buildDailyVerdictPrompt(req);
 
   try {
     const res = await fetchGeminiWithRetry(
@@ -513,19 +574,9 @@ Respond with JSON only, no markdown:
       return { direction: req.direction, confidence: req.strength, reason: `Gemini ${res.status}`, engine: 'passthrough' };
     }
 
-    const data    = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
-
-    const dir = (['BUY', 'SELL', 'SKIP'].includes(parsed.direction)) ? parsed.direction as DailyVerdict['direction'] : 'SKIP';
-
-    return {
-      direction:  dir,
-      confidence: Math.max(0, Math.min(100, parsed.confidence ?? req.strength)),
-      reason:     parsed.reason ?? '',
-      engine:     'gemini',
-    };
+    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parseDailyVerdictResponse(text, req, 'gemini');
   } catch {
     return { direction: req.direction, confidence: req.strength, reason: 'Gemini failed — using signal', engine: 'passthrough' };
   }
@@ -543,7 +594,7 @@ export type PositionVerdict = {
   action:     'HOLD' | 'CLOSE';
   confidence: number;
   reason:     string;
-  engine:     'gemini' | 'passthrough';
+  engine:     'gemini' | 'openai' | 'xai' | 'passthrough';
 };
 
 export type PositionReviewRequest = {
@@ -552,6 +603,7 @@ export type PositionReviewRequest = {
   entryLevel:     number;
   currentLevel:   number;
   uplGbp:         number;
+  currency?:      string;  // defaults to '£' (this fn's original IG-only use) — pass '$' for a USD account like Alpaca
   heldHours:      number;
   stopLevel?:     number;
   limitLevel?:    number;
@@ -604,6 +656,16 @@ export type PositionReviewRequest = {
   volumeSurgeMultiple?:     number;
   peerGroupChangePercent?:  number;
   peerGroupLabel?:          string;
+  // Net move over the last ~2-3 days of hourly bars, divided by the total
+  // distance actually traveled getting there — 1.0 means it moved in a
+  // straight line, near 0 means it whipsawed back and forth and went
+  // nowhere net. Same "moved a lot, went nowhere" metric this codebase
+  // already trusts for entry-side chop filtering (igStrategyBot.ts,
+  // alpacaStrategies.ts) — added here 2026-08-28 per explicit request: not
+  // every instrument deserves the same multi-day patience a steady trend
+  // does. null when there isn't enough held history yet to judge (too few
+  // bars) — genuinely unknown, not evidence of chop either way.
+  multiDayEfficiencyRatio?: number | null;
   // Free-text note the user attached when adding this position to Gemini
   // Position Watch — their own stated intent/plan for it (e.g. "opened
   // expecting a bounce off support, close if it breaks below X"), not
@@ -612,6 +674,69 @@ export type PositionReviewRequest = {
   // weigh, not a standing override — see the prompt's own framing below.
   userNote?: string;
 };
+
+// Shared with xai.ts's askXaiPositionVerdict — same question must go to
+// every provider. Can throw (e.g. a null currentLevel reaching .toFixed())
+// — callers must build this inside their own try/catch, same discipline
+// askGeminiPositionVerdict already needed (see its own comment, kept below).
+export function buildPositionVerdictPrompt(req: PositionReviewRequest): string {
+  const pctMove = req.entryLevel > 0 ? (req.currentLevel - req.entryLevel) / req.entryLevel * 100 : 0;
+  const signedPct = req.direction === 'BUY' ? pctMove : -pctMove;  // positive = favorable regardless of side
+
+  const headlineBlock = req.headlines?.length
+    ? `\nRecent news (last 7 days, dated — weigh today's/yesterday's far more heavily than one from most of a week ago, which is likely already priced in by now and doesn't explain a move happening today):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '';
+
+  const candleBlock = req.recentCandles?.length
+    ? `\nLast ${req.recentCandles.length} closed hourly candles (oldest first, so you can see the actual recent shape of the move, not just where price ended up):\n${req.recentCandles.map((c, i) =>
+        `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
+      ).join('\n')}\n`
+    : '';
+
+  return `You are reviewing an already-open spread bet position to decide whether to close it now or keep holding.
+
+Instrument: ${req.instrumentName}
+Direction: ${req.direction}
+Entry level: ${req.entryLevel.toFixed(2)}
+Current level: ${req.currentLevel.toFixed(2)} (${signedPct >= 0 ? '+' : ''}${signedPct.toFixed(2)}% favorable move)
+Unrealized P/L: ${req.currency ?? '£'}${req.uplGbp.toFixed(2)}
+Held for: ${req.heldHours.toFixed(1)} hours
+${req.userNote ? `\nNote from the user who's holding this position: "${req.userNote}"\nThis is their own stated intent or plan for the trade — weigh it alongside everything below, but it's one more input to your judgment, not a standing instruction to follow regardless of what the price/technicals/news actually show. If they said to close on a condition that hasn't happened yet, don't close just because they mentioned it.\n` : ''}
+${req.rsi != null ? `RSI (14h lookback): ${req.rsi.toFixed(1)}` : ''}
+${req.macdHist != null ? `MACD histogram (12h/26h/9h): ${req.macdHist > 0 ? '+' : ''}${req.macdHist.toFixed(5)}` : ''}
+${candleBlock}${req.dayChangePercent !== undefined ? `Instrument's overall move today (independent of this position's own entry): ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
+${req.sharpDipPercent !== undefined ? `⚠ SUDDEN MOVE: ${req.sharpDipPercent.toFixed(2)}% against this position in just the last few hours, measured from its own recent local high (independent of the day's overall move above). Worth a genuine look, but don't treat this alone as a verdict: a position that's up ${signedPct.toFixed(2)}% since entry can pull back several percent from its own most recent high and still just be normal give-back/consolidation within a trend that's still intact — that's completely different from the trend itself breaking down. Weigh this against the bigger picture (the move since entry above, the candles below): is the broader move still up, with this just a dip inside it, or has the character of the move actually changed?` : ''}
+${req.reversedToRed ? `⚠ REVERSAL: this position was meaningfully in profit at an earlier point and has now swung into an actual loss relative to entry (not just off its peak — currently below where it opened). That's a more concrete signal than the sharp-move flag above since it means the position itself, not just its recent high, is now underwater. Still weigh how large the original gain being erased was — a small, marginal peak swinging slightly negative is closer to ordinary noise around breakeven than a real reversal — and whether anything below (news, volume, the candle shape) actually corroborates a genuine change in direction rather than just this one data point.` : ''}
+${req.isFx ? `Note: this is an FX pair. Currency pairs oscillate more within what's still ordinary short-term noise than a stock does — a move under roughly 2-3% is often just normal chop, not a genuine reversal. Apply a higher bar of evidence than you would for a stock before leaning toward closing over any sharp-move or reversal signal above: look for a clearly larger and/or sustained move, or real corroborating news, rather than the move alone.` : ''}
+${req.nearEndOfDay ? `⏰ END OF DAY: this position is already in real profit and the trading day is about to close. Specifically weigh: is this profit worth banking now before an unreviewed overnight/next-day gap, or does the trend/momentum above look genuinely set to continue, in which case holding through the close has a real case? Being profitable and near the close isn't automatically a reason to close — only close if you'd actually expect this to give some of it back, not out of a blanket rule that a winner should never be held overnight.` : ''}
+${req.multiDayEfficiencyRatio != null ? (req.multiDayEfficiencyRatio < 0.25
+  ? `📊 CHOPPY: over the last few days this instrument has covered a lot of ground (efficiency ${req.multiDayEfficiencyRatio.toFixed(2)}/1.0) but gone almost nowhere net — it's whipsawing, not trending. This is exactly the kind of instrument that doesn't reward multi-day patience: lean toward resolving this one same-day (bank a real gain, or cut a real loss) rather than assuming a "give it room" default — holding a choppy name through more of the same chop just risks giving back whatever edge showed up intraday.`
+  : req.multiDayEfficiencyRatio > 0.45
+    ? `📊 TRENDING: over the last few days this instrument has moved efficiently in one direction (efficiency ${req.multiDayEfficiencyRatio.toFixed(2)}/1.0) rather than whipsawing — this is exactly the kind of instrument that's earned real multi-day patience. A pullback within a move this clean is much more likely to be noise than a reversal; don't rush to close just because a session or two hasn't gone its way.`
+    : `Efficiency over the last few days: ${req.multiDayEfficiencyRatio.toFixed(2)}/1.0 (mid-range — neither clearly trending nor clearly choppy, no strong lean either way from this alone).`) : ''}
+${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation right now, which lends more weight to whatever the price action above is currently doing, favorable or not.` : ''}
+${req.peerGroupChangePercent !== undefined ? `${req.peerGroupLabel ?? 'Correlated peers'} average move today: ${req.peerGroupChangePercent >= 0 ? '+' : ''}${req.peerGroupChangePercent.toFixed(1)}% — compare against this instrument's own move above. A similar-sized move across the group means whatever's happening is sector-wide, not specific to this position — weigh that differently than an isolated move (this instrument moving meaningfully more or less than its peers), which is more likely to be driven by something specific to this name.` : ''}
+${req.stopLevel !== undefined ? `Stop-loss already attached at: ${req.stopLevel.toFixed(2)}` : 'No stop currently attached'}
+${req.limitLevel !== undefined ? `Take-profit already attached at: ${req.limitLevel.toFixed(2)}` : 'No take-profit currently set'}
+${headlineBlock}
+A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss, and a real take-profit only pays off if the position is actually left open long enough to reach it. Give the position real room to work — but how much room depends on what kind of mover this actually is (see the efficiency read above, when available): a trend that's genuinely moving in its intended direction needs to be allowed to breathe — pull back, consolidate, get given back a little — without being cut on every wobble; a choppy, directionless mover doesn't earn that same patience and is better resolved same-day than held through more of the same back-and-forth. The question isn't "has this dipped" (almost every position dips at some point), it's "has the actual thesis broken" — has price genuinely reversed structure (not just ticked down from a local high), has real news or volume confirmed something changed, or is the stop/take-profit still a perfectly reasonable pair of outcomes to just let play out. Decide only: is there a clear, concrete reason to close now — lock in a healthy gain, cut a loss because something has genuinely deteriorated, real news/volatility that could reverse this position's favorability, or the instrument already being significantly extended today (large % move already behind it, limited further room) — or is holding for the stop/take-profit to do its job still reasonable? A sharp-move or reversal flag above is a prompt to look closer, not a verdict by itself, and neither is a small giveback from a recent peak when the position (or the broader trend it's part of) is still intact — HOLD is the right default unless you can point to something concrete beyond the move itself (real news, volume-confirmed sell-off, momentum genuinely turning, structure actually broken). Closing on noise alone only guarantees giving up the take-profit without actually avoiding the loss the stop would have capped anyway. If no news is listed above, judge on price action and technicals alone.
+${CONFIDENCE_CALIBRATION_REVIEW}
+
+Respond with JSON only, no markdown:
+{"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
+}
+
+// Shared with xai.ts — same response shape both providers are asked for.
+export function parsePositionVerdictResponse(text: string, engine: 'gemini' | 'openai' | 'xai'): PositionVerdict {
+  const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+  const parsed  = JSON.parse(cleaned) as { action: string; confidence: number; reason: string };
+  return {
+    action:     parsed.action === 'CLOSE' ? 'CLOSE' : 'HOLD',
+    confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
+    reason:     parsed.reason ?? '',
+    engine,
+  };
+}
 
 export async function askGeminiPositionVerdict(req: PositionReviewRequest): Promise<PositionVerdict> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -625,51 +750,13 @@ export async function askGeminiPositionVerdict(req: PositionReviewRequest): Prom
   // try starts here rather than just around the fetch below — confirmed
   // live this matters: a null currentLevel (IG's own position feed
   // returning bid/offer as null mid-gap) crashed the prompt-building
-  // .toFixed() calls below, which sat outside the try/catch, defeating this
+  // .toFixed() calls, which sat outside the try/catch, defeating this
   // function's own documented "always defaults to HOLD on any failure"
   // guarantee at exactly the moment (a volatile, fast-moving market) it
   // mattered most. Now any unexpected input here fails the same safe way a
   // Gemini API error already does.
   try {
-  const pctMove = req.entryLevel > 0 ? (req.currentLevel - req.entryLevel) / req.entryLevel * 100 : 0;
-  const signedPct = req.direction === 'BUY' ? pctMove : -pctMove;  // positive = favorable regardless of side
-
-  const headlineBlock = req.headlines?.length
-    ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
-    : '';
-
-  const candleBlock = req.recentCandles?.length
-    ? `\nLast ${req.recentCandles.length} closed hourly candles (oldest first, so you can see the actual recent shape of the move, not just where price ended up):\n${req.recentCandles.map((c, i) =>
-        `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
-      ).join('\n')}\n`
-    : '';
-
-  const prompt = `You are reviewing an already-open spread bet position to decide whether to close it now or keep holding.
-
-Instrument: ${req.instrumentName}
-Direction: ${req.direction}
-Entry level: ${req.entryLevel.toFixed(2)}
-Current level: ${req.currentLevel.toFixed(2)} (${signedPct >= 0 ? '+' : ''}${signedPct.toFixed(2)}% favorable move)
-Unrealized P/L: £${req.uplGbp.toFixed(2)}
-Held for: ${req.heldHours.toFixed(1)} hours
-${req.userNote ? `\nNote from the user who's holding this position: "${req.userNote}"\nThis is their own stated intent or plan for the trade — weigh it alongside everything below, but it's one more input to your judgment, not a standing instruction to follow regardless of what the price/technicals/news actually show. If they said to close on a condition that hasn't happened yet, don't close just because they mentioned it.\n` : ''}
-${req.rsi != null ? `RSI (14h lookback): ${req.rsi.toFixed(1)}` : ''}
-${req.macdHist != null ? `MACD histogram (12h/26h/9h): ${req.macdHist > 0 ? '+' : ''}${req.macdHist.toFixed(5)}` : ''}
-${candleBlock}${req.dayChangePercent !== undefined ? `Instrument's overall move today (independent of this position's own entry): ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
-${req.sharpDipPercent !== undefined ? `⚠ SUDDEN MOVE: ${req.sharpDipPercent.toFixed(2)}% against this position in just the last few hours (independent of the day's overall move above). Treat a fast, sharp move against the position as a meaningful warning sign in its own right, not noise to smooth over — a real reversal often starts exactly like this, before news or the wider day's figures catch up to it.` : ''}
-${req.reversedToRed ? `⚠ REVERSAL: this position was meaningfully in profit at an earlier point and has now swung into a loss. Even if the news below looks positive or is silent, a green-to-red reversal like this can mean a sell-off is already underway that hasn't been reported yet — weigh the reversal itself as a real reason to lean toward closing rather than assuming the fundamentals still hold just because nothing bad has been printed about it.` : ''}
-${req.isFx ? `Note: this is an FX pair. Currency pairs oscillate more within what's still ordinary short-term noise than a stock does — a move under roughly 2-3% is often just normal chop, not a genuine reversal. Apply a higher bar of evidence than you would for a stock before leaning toward closing over any sharp-move or reversal signal above: look for a clearly larger and/or sustained move, or real corroborating news, rather than the move alone.` : ''}
-${req.nearEndOfDay ? `⏰ END OF DAY: this position is already in real profit and the trading day is about to close. Specifically weigh: is this profit worth banking now before an unreviewed overnight/next-day gap, or does the trend/momentum above look genuinely set to continue, in which case holding through the close has a real case? Being profitable and near the close isn't automatically a reason to close — only close if you'd actually expect this to give some of it back, not out of a blanket rule that a winner should never be held overnight.` : ''}
-${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation right now, which lends more weight to whatever the price action above is currently doing, favorable or not.` : ''}
-${req.peerGroupChangePercent !== undefined ? `${req.peerGroupLabel ?? 'Correlated peers'} average move today: ${req.peerGroupChangePercent >= 0 ? '+' : ''}${req.peerGroupChangePercent.toFixed(1)}% — compare against this instrument's own move above. A similar-sized move across the group means whatever's happening is sector-wide, not specific to this position — weigh that differently than an isolated move (this instrument moving meaningfully more or less than its peers), which is more likely to be driven by something specific to this name.` : ''}
-${req.stopLevel !== undefined ? `Stop-loss already attached at: ${req.stopLevel.toFixed(2)}` : 'No stop currently attached'}
-${req.limitLevel !== undefined ? `Take-profit already attached at: ${req.limitLevel.toFixed(2)}` : 'No take-profit currently set'}
-${headlineBlock}
-A hard stop-loss protects this position independent of your decision — you are not the only thing standing between this trade and a loss, and a real take-profit only pays off if the position is actually left open long enough to reach it. Decide only: is there a clear reason to close now — lock in a healthy gain, cut a loss before it likely gets worse, genuine news/volatility that could reverse this position's favorability, or the instrument already being significantly extended today (e.g. a large % move already behind it, meaning limited further room and real pullback risk even if the entry thesis was sound) — or is holding for the stop/take-profit to do its job still reasonable? A sharp-move or green-to-red-reversal flag above is a prompt to look closer, not a verdict by itself — HOLD is still the right call if the move has no independent thesis behind it (no real news, no MACD/momentum actually turning, nothing beyond "it moved"). Only close on one of these flags when you'd also point to something concrete beyond the move itself — otherwise it's just the ordinary noise a stop-loss already exists to catch, and cutting it early only guarantees giving up the take-profit without actually avoiding the loss the stop would have capped anyway. If no news is listed above, judge on price action and technicals alone.
-
-Respond with JSON only, no markdown:
-{"action":"HOLD","confidence":72,"reason":"max 15 words"}`;
-
+    const prompt = buildPositionVerdictPrompt(req);
     const res = await fetchGeminiWithRetry(
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
       {
@@ -687,17 +774,9 @@ Respond with JSON only, no markdown:
       return { action: 'HOLD', confidence: 0, reason: `Gemini ${res.status} — holding, stop still protects the position`, engine: 'passthrough' };
     }
 
-    const data    = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed  = JSON.parse(cleaned) as { action: string; confidence: number; reason: string };
-
-    return {
-      action:     parsed.action === 'CLOSE' ? 'CLOSE' : 'HOLD',
-      confidence: Math.max(0, Math.min(100, parsed.confidence ?? 50)),
-      reason:     parsed.reason ?? '',
-      engine:     'gemini',
-    };
+    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parsePositionVerdictResponse(text, 'gemini');
   } catch (e) {
     return {
       action:     'HOLD',
@@ -801,20 +880,88 @@ export type TradeIdeaVerdict = {
   reason:           string;
   stopPoints:       number;
   takeProfitPoints: number;
-  engine:           'gemini' | 'passthrough';
+  engine:           'gemini' | 'openai' | 'xai' | 'passthrough';
 };
 
-export async function askGeminiTradeIdea(req: TradeIdeaRequest): Promise<TradeIdeaVerdict> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return { action: 'HOLD', confidence: 0, reason: 'No Gemini key configured', stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough' };
-  }
-  if (!reserveGeminiCall()) {
-    return { action: 'HOLD', confidence: 0, reason: 'Daily Gemini call cap reached', stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough' };
-  }
+// ── Mean-reversion "stocks" instance — light-touch safety net, NOT an entry
+// gate ────────────────────────────────────────────────────────────────────
+// Deliberately separate from buildPositionVerdictPrompt above and much
+// simpler. That prompt is tuned for momentum strategies — skeptical of
+// "this has already moved, is it too late" — which is exactly backwards for
+// a mean-reversion position that was deliberately bought BECAUSE a short
+// pullback happened. Reusing it here would risk talking the AI into closing
+// out the very setups this strategy exists to hold. This asks a much
+// narrower, low-frequency question instead: not "is this a good position"
+// (the rules already decided that), just "has something genuinely gone
+// wrong that the rules can't see" — real bad news, not ordinary price noise.
+// Runs once/day per open position at most (see meanReversionBot.ts), and
+// never gates entries at all — see that file's own comment on why.
+export type MrSafetyRequest = {
+  instrumentName: string;
+  direction:      'BUY' | 'SELL';
+  entryLevel:     number;
+  currentLevel:   number;
+  uplGbp:         number;
+  heldDays:       number;
+  headlines?:     string[];
+};
 
+export type MrSafetyVerdict = {
+  severe: boolean;   // true only for a genuine emergency worth overriding the stop/TP for
+  reason: string;
+  engine: 'gemini' | 'openai' | 'xai' | 'passthrough';
+};
+
+export function buildMrSafetyPrompt(req: MrSafetyRequest): string {
+  const headlineBlock = req.headlines?.length
+    ? `\nRecent headlines:\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '\nNo notable recent headlines.\n';
+  return `A rules-based mean-reversion system holds a ${req.direction} position on ${req.instrumentName}, entered at ${req.entryLevel.toFixed(2)}, now at ${req.currentLevel.toFixed(2)} (${req.uplGbp >= 0 ? '+' : ''}£${req.uplGbp.toFixed(2)}), held ${req.heldDays.toFixed(1)} days. It already has a real stop-loss and take-profit attached, and is designed to be held through ordinary price noise and pullbacks — that is expected and normal, NOT a reason for concern.
+
+Your only job: flag whether something has gone genuinely, seriously wrong — a real emergency the stop/take-profit wouldn't itself handle well (e.g. trading halted, delisting, fraud/accounting scandal, bankruptcy filing, a change so severe the position should be pulled now rather than left to its stop). Ordinary bad news, a rough day, a downgrade, normal volatility — none of that qualifies; the stop already covers it. Only flag severe=true for something a reasonable person would call an emergency, not routine noise.
+${headlineBlock}
+Respond with JSON only, no markdown:
+{"severe":false,"reason":"max 15 words"}`;
+}
+
+export function parseMrSafetyResponse(text: string, engine: MrSafetyVerdict['engine']): MrSafetyVerdict {
+  const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+  const parsed  = JSON.parse(cleaned) as { severe?: boolean; reason?: string };
+  return { severe: !!parsed.severe, reason: parsed.reason ?? '', engine };
+}
+
+export async function askGeminiMrSafety(req: MrSafetyRequest): Promise<MrSafetyVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return { severe: false, reason: 'No Gemini key configured', engine: 'passthrough' };
+  if (!reserveGeminiCall()) return { severe: false, reason: 'Daily Gemini call cap reached', engine: 'passthrough' };
+  try {
+    const prompt = buildMrSafetyPrompt(req);
+    const res = await fetchGeminiWithRetry(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          contents:         [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 500, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+    if (!res.ok) return { severe: false, reason: `Gemini ${res.status}`, engine: 'passthrough' };
+    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parseMrSafetyResponse(text, 'gemini');
+  } catch (e) {
+    return { severe: false, reason: `Gemini failed (${e instanceof Error ? e.message : String(e)})`, engine: 'passthrough' };
+  }
+}
+
+// Shared with xai.ts's askXaiTradeIdea — same question must go to every
+// provider.
+export function buildTradeIdeaPrompt(req: TradeIdeaRequest): string {
   const headlineBlock = req.headlines.length
-    ? `\nRecent news (last 7 days, dated — use the dates to judge how a story has developed, not just whether it exists; weigh today's/yesterday's headlines far more heavily than one from 5-6 days ago, which is likely already priced in):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    ? `\nRecent news (last 7 days, dated — weigh today's/yesterday's headlines far more heavily than one from 5-6 days ago, which is likely already priced in. A genuinely fresh, same-day catalyst is a real reason for extra conviction on its own, not just a check against the technical direction):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
     : '\nNo recent company-specific news found.\n';
 
   const candleBlock = req.recentCandles?.length
@@ -823,7 +970,7 @@ export async function askGeminiTradeIdea(req: TradeIdeaRequest): Promise<TradeId
       ).join('\n')}\n`
     : '';
 
-  const prompt = `You are deciding, entirely on your own judgment, whether to open a spread bet position on this instrument right now — there is no pre-existing technical signal to confirm or veto, you are the primary decision-maker.
+  return `You are deciding, entirely on your own judgment, whether to open a spread bet position on this instrument right now — there is no pre-existing technical signal to confirm or veto, you are the primary decision-maker.
 
 This is leveraged spread betting, not a long-term investment — positions here are opened and typically resolved within the same day or so, not held for weeks. That means two things should weigh heavily on your decision: (1) genuinely fresh, near-daily news — a headline from today or yesterday matters far more than one from most of a week ago, which the market has likely already absorbed — and (2) the instrument's actual recent movement at a fine (30-minute) resolution, not just a single indicator snapshot summarizing a much longer window. Use the candle sequence below to judge whether the move is accelerating, stalling, or reversing right now, not only whether an indicator crossed some threshold.
 
@@ -844,15 +991,46 @@ ${candleBlock}${headlineBlock}
 ${req.recentExitContext ? `⚠ Recent history on this instrument/sector: ${req.recentExitContext}\n` : ''}
 So what matters most isn't just what already happened, it's your own expectation of where this goes from here: given the setup, the recent candle-by-candle shape, the news, and the trend context above, do you actually expect this instrument to keep moving in your chosen direction for the rest of today (and into the next day or so if held), or is the move already largely played out? Your confidence score should reflect how strongly you believe that expected forward move will actually happen — not a mechanical pass/fail on the indicators. A technically clean setup you have no real view on what happens next should score low confidence or HOLD; a setup with a clear, specific reason to expect continued movement deserves genuine conviction even if one indicator looks mixed.
 
-Decide BUY, SELL, or HOLD. Only pick BUY/SELL if you have genuine conviction — HOLD is the right answer most of the time when the picture is mixed or unclear. Consider both the technicals and the news together; don't recommend a direction the news directly contradicts. If the instrument has already moved significantly today, that is NOT by itself a reason to hold off — a big move already behind it is only one input, and real conviction (a strong, still-intact catalyst, technicals still confirming, news that hasn't fully played out) can absolutely justify entering after a large move. Only let the day's move count against the trade when your actual reasoning would be pure momentum-chasing — i.e. "it's up a lot so I'll follow it" with no independent thesis of its own. Don't default to HOLD just because the move is large; default to HOLD when the conviction itself is weak.
+Decide BUY, SELL, or HOLD. Only pick BUY/SELL if you have genuine conviction — HOLD is the right answer most of the time when the picture is mixed or unclear. Consider both the technicals and the news together; don't recommend a direction the news directly contradicts. If the instrument has already moved significantly today, weigh that honestly rather than waving it away — a big move already behind it means part or most of the opportunity may already be captured. Only proceed if you can point to a specific, still-unresolved reason more room remains: a catalyst that hasn't fully played out, news still developing, a real level ahead that hasn't been tested — not just "it's been going up." If your actual reasoning amounts to "it's up a lot and might keep going," that's momentum-chasing, not conviction — HOLD instead.
 
-Treat "overbought"/"oversold" RSI the same way, not as an automatic reversal signal. A high RSI means strong recent demand — that demand often keeps pushing price further in the short term rather than reversing immediately, especially while the catalyst behind it is still fresh and unresolved. Don't SELL (or avoid a BUY) on "RSI is overbought" alone with no other reasoning — that's betting against the trend with no real thesis for why it stops now. Only let RSI extension count against a trade when you also see the catalyst genuinely exhausted (news fully priced in, momentum actually turning on MACD, no fresh reason left to keep buying) — extension alone, in an otherwise intact setup, is not a sell signal.
+Treat "overbought"/"oversold" RSI as information about how much of the move has already happened, not a green light on its own. A high RSI can genuinely coexist with real continuation — but only when there's still a live, specific reason for it, not merely because nothing has technically reversed yet. Don't confirm a BUY on "RSI is high and it hasn't reversed" alone — that's the same backward-looking trap as chasing the day's move, just described differently. Only lean toward continuation when you can say what's still ahead, not just what's already happened; if the honest answer is "the catalyst has already played out and I'm hoping demand carries it further," that's a reason to lower confidence or HOLD, not confirm.
 
 stopPoints: stop distance in the SAME price units as current price (e.g. price=15000 → stopPoints=150 for a 1% stop; price=1.08 → stopPoints=0.01)
 takeProfitPoints: same units, aim for at least 1.5:1 reward/risk vs your stop
+${CONFIDENCE_CALIBRATION_ENTRY}
 
 Respond with JSON only, no markdown:
 {"action":"BUY","confidence":70,"reason":"max 20 words","stopPoints":150,"takeProfitPoints":300}`;
+}
+
+// Shared with xai.ts — same response shape both providers are asked for.
+export function parseTradeIdeaResponse(text: string, engine: 'gemini' | 'openai' | 'xai'): TradeIdeaVerdict {
+  const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+  const parsed  = JSON.parse(cleaned) as {
+    action: string; confidence: number; reason: string;
+    stopPoints: number; takeProfitPoints: number;
+  };
+  const action = (['BUY', 'SELL', 'HOLD'].includes(parsed.action)) ? parsed.action as TradeIdeaVerdict['action'] : 'HOLD';
+  return {
+    action,
+    confidence:       Math.max(0, Math.min(100, parsed.confidence ?? 0)),
+    reason:           parsed.reason ?? '',
+    stopPoints:       Math.max(0, parsed.stopPoints ?? 0),
+    takeProfitPoints: Math.max(0, parsed.takeProfitPoints ?? 0),
+    engine,
+  };
+}
+
+export async function askGeminiTradeIdea(req: TradeIdeaRequest): Promise<TradeIdeaVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return { action: 'HOLD', confidence: 0, reason: 'No Gemini key configured', stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough' };
+  }
+  if (!reserveGeminiCall()) {
+    return { action: 'HOLD', confidence: 0, reason: 'Daily Gemini call cap reached', stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough' };
+  }
+
+  const prompt = buildTradeIdeaPrompt(req);
 
   try {
     const res = await fetchGeminiWithRetry(
@@ -872,24 +1050,9 @@ Respond with JSON only, no markdown:
       return { action: 'HOLD', confidence: 0, reason: `Gemini ${res.status}`, stopPoints: 0, takeProfitPoints: 0, engine: 'passthrough' };
     }
 
-    const data    = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed  = JSON.parse(cleaned) as {
-      action: string; confidence: number; reason: string;
-      stopPoints: number; takeProfitPoints: number;
-    };
-
-    const action = (['BUY', 'SELL', 'HOLD'].includes(parsed.action)) ? parsed.action as TradeIdeaVerdict['action'] : 'HOLD';
-
-    return {
-      action,
-      confidence:       Math.max(0, Math.min(100, parsed.confidence ?? 0)),
-      reason:           parsed.reason ?? '',
-      stopPoints:       Math.max(0, parsed.stopPoints ?? 0),
-      takeProfitPoints: Math.max(0, parsed.takeProfitPoints ?? 0),
-      engine:           'gemini',
-    };
+    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parseTradeIdeaResponse(text, 'gemini');
   } catch (e) {
     return {
       action: 'HOLD', confidence: 0,
@@ -929,8 +1092,58 @@ export type StockConfirmVerdict = {
   direction:  'BUY' | 'SELL' | 'SKIP';
   confidence: number;
   reason:     string;
-  engine:     'gemini' | 'passthrough';
+  engine:     'gemini' | 'openai' | 'xai' | 'passthrough';
 };
+
+// Shared with xai.ts's askXaiConfirmStockTrade — same question must go to
+// every provider.
+export function buildConfirmStockTradePrompt(req: StockConfirmSignal): string {
+  const headlineBlock = req.headlines.length
+    ? `\nRecent news (last 7 days, dated — weigh today's/yesterday's far more heavily than one from most of a week ago, likely already priced in by now. A genuinely fresh, same-day catalyst is a real reason for extra conviction of its own, not just something to check the rule signal against. But also weigh the catalyst's own likely lifespan, not just its age — this is a multi-day/week swing trade, so ask whether the news is the kind that can plausibly keep mattering that long (earnings, M&A, a real guidance change, a structural shift in the business or sector) versus a one-off story (a single analyst note, a passing headline, a rumor) whose price effect typically fades within a day or two — that kind of news being fresh doesn't make it a good basis for a week-long thesis, even though it might fully explain today's move):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '\nNo recent company-specific news found.\n';
+
+  const candleBlock = req.lastCandles.length
+    ? `\nLast ${req.lastCandles.length} closed daily candles (oldest first):\n${req.lastCandles.map((c, i) =>
+        `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
+      ).join('\n')}\n`
+    : '';
+
+  return `A technical rule-based system (RSI/MACD/SMA/Bollinger Bands, daily bars) has already qualified the following setup — your job is to confirm or veto it with real-world context the rules can't see, not to invent a thesis of your own from nothing. This is a swing trade, typically held for days to weeks, not a scalp — keep that horizon in mind throughout.
+
+Instrument: ${req.instrumentName}
+Rule-based signal: ${req.suggestedDir} (${req.ruleConfidence}/10 conviction) — "${req.ruleReasoning}"
+Current price: ${req.price.toFixed(2)}
+${req.rsi != null ? `RSI (14d): ${req.rsi.toFixed(1)}` : ''}
+${req.macdHist != null ? `MACD histogram: ${req.macdHist > 0 ? '+' : ''}${req.macdHist.toFixed(5)}` : ''}
+${req.dayChangePercent !== undefined ? `Move today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
+${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation right now.` : ''}
+${req.peerGroupChangePercent !== undefined ? `${req.peerGroupLabel ?? 'Correlated peers'} average move today: ${req.peerGroupChangePercent >= 0 ? '+' : ''}${req.peerGroupChangePercent.toFixed(1)}% — a similar-sized move across the group means this is sector-wide, not stock-specific, a weaker basis for the rule signal than an isolated move.` : ''}
+${candleBlock}${headlineBlock}
+Your job: does the real-world context above support this signal, or is there a clear reason to override it — fresh contradicting news, this instrument already extended well past its peers on no real news of its own, or the recent candle shape actively reversing against the signal's own direction? The rules already did the technical qualifying; don't re-litigate RSI/MACD from scratch, weigh what they can't see instead.
+
+One thing the rules genuinely can't see, and you specifically need to: whether this setup is describing a move that's already happened versus one still likely to continue. RSI/MACD/SMA confirming a signal is backward-looking by construction — it tells you demand has been strong, not that it will stay strong. Before confirming, look at the news and context above for something forward-looking: a catalyst that hasn't fully played out, room before an obvious level, a story still developing — not just the absence of a reason to veto. Confirming because nothing technically contradicts the signal is not the same as confirming because you expect it to keep working over the next several days to weeks. If the honest picture is "the setup is intact but I don't see what specifically drives it further from here," that's a reason to lower confidence or veto, not confirm.
+${CONFIDENCE_CALIBRATION_ENTRY}
+
+Respond with JSON only, no markdown:
+{"direction":"BUY","confidence":75,"reason":"max 20 words"}
+(direction must be "${req.suggestedDir}" to confirm, or "SKIP" to veto — never the opposite direction, this is confirm-or-veto, not a second opinion on direction)`;
+}
+
+// Shared with xai.ts — same response shape both providers are asked for.
+export function parseConfirmStockTradeResponse(text: string, req: StockConfirmSignal, engine: 'gemini' | 'openai' | 'xai'): StockConfirmVerdict {
+  const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+  const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
+  // Enforce confirm-or-veto even if the model didn't follow instructions —
+  // any direction other than the exact one asked to confirm is a veto, not
+  // a silent flip to trading the opposite way.
+  const direction: StockConfirmVerdict['direction'] = parsed.direction === req.suggestedDir ? req.suggestedDir : 'SKIP';
+  return {
+    direction,
+    confidence: Math.max(0, Math.min(100, parsed.confidence ?? 0)),
+    reason:     parsed.reason ?? '',
+    engine,
+  };
+}
 
 export async function askGeminiConfirmStockTrade(req: StockConfirmSignal): Promise<StockConfirmVerdict> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -950,32 +1163,7 @@ export async function askGeminiConfirmStockTrade(req: StockConfirmSignal): Promi
     return { direction: 'SKIP', confidence: 0, reason: 'Daily Gemini call cap reached', engine: 'passthrough' };
   }
 
-  const headlineBlock = req.headlines.length
-    ? `\nRecent news (last 7 days, dated — weigh today's/yesterday's far more heavily than one from most of a week ago, likely already priced in):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
-    : '\nNo recent company-specific news found.\n';
-
-  const candleBlock = req.lastCandles.length
-    ? `\nLast ${req.lastCandles.length} closed daily candles (oldest first):\n${req.lastCandles.map((c, i) =>
-        `  [${i + 1}] O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)} ${c.close >= c.open ? '▲' : '▼'}`
-      ).join('\n')}\n`
-    : '';
-
-  const prompt = `A technical rule-based system (RSI/MACD/SMA/Bollinger Bands, daily bars) has already qualified the following setup — your job is to confirm or veto it with real-world context the rules can't see, not to invent a thesis of your own from nothing.
-
-Instrument: ${req.instrumentName}
-Rule-based signal: ${req.suggestedDir} (${req.ruleConfidence}/10 conviction) — "${req.ruleReasoning}"
-Current price: ${req.price.toFixed(2)}
-${req.rsi != null ? `RSI (14d): ${req.rsi.toFixed(1)}` : ''}
-${req.macdHist != null ? `MACD histogram: ${req.macdHist > 0 ? '+' : ''}${req.macdHist.toFixed(5)}` : ''}
-${req.dayChangePercent !== undefined ? `Move today: ${req.dayChangePercent >= 0 ? '+' : ''}${req.dayChangePercent.toFixed(1)}%` : ''}
-${req.volumeSurgeMultiple !== undefined && req.volumeSurgeMultiple >= 2.5 ? `Volume running ~${req.volumeSurgeMultiple.toFixed(1)}x the recent average — unusually high participation right now.` : ''}
-${req.peerGroupChangePercent !== undefined ? `${req.peerGroupLabel ?? 'Correlated peers'} average move today: ${req.peerGroupChangePercent >= 0 ? '+' : ''}${req.peerGroupChangePercent.toFixed(1)}% — a similar-sized move across the group means this is sector-wide, not stock-specific, a weaker basis for the rule signal than an isolated move.` : ''}
-${candleBlock}${headlineBlock}
-Your job: does the real-world context above support this signal, or is there a clear reason to override it — fresh contradicting news, this instrument already extended well past its peers on no real news of its own, or the recent candle shape actively reversing against the signal's own direction? The rules already did the technical qualifying; don't re-litigate RSI/MACD from scratch, weigh what they can't see instead.
-
-Respond with JSON only, no markdown:
-{"direction":"BUY","confidence":75,"reason":"max 20 words"}
-(direction must be "${req.suggestedDir}" to confirm, or "SKIP" to veto — never the opposite direction, this is confirm-or-veto, not a second opinion on direction)`;
+  const prompt = buildConfirmStockTradePrompt(req);
 
   try {
     const res = await fetchGeminiWithRetry(
@@ -995,27 +1183,129 @@ Respond with JSON only, no markdown:
       return { direction: 'SKIP', confidence: 0, reason: `Gemini ${res.status}`, engine: 'passthrough' };
     }
 
-    const data    = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    const text    = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed  = JSON.parse(cleaned) as { direction: string; confidence: number; reason: string };
-
-    // Enforce confirm-or-veto even if the model didn't follow instructions —
-    // any direction other than the exact one asked to confirm is a veto,
-    // not a silent flip to trading the opposite way.
-    const direction: StockConfirmVerdict['direction'] = parsed.direction === req.suggestedDir ? req.suggestedDir : 'SKIP';
-
-    return {
-      direction,
-      confidence: Math.max(0, Math.min(100, parsed.confidence ?? 0)),
-      reason:     parsed.reason ?? '',
-      engine:     'gemini',
-    };
+    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parseConfirmStockTradeResponse(text, req, 'gemini');
   } catch (e) {
     return {
       direction: 'SKIP', confidence: 0,
       reason: `Gemini failed (${e instanceof Error ? e.message : String(e)})`,
       engine: 'passthrough',
     };
+  }
+}
+
+// ── T212 Stocks ISA — long-horizon buy/hold thesis ──────────────────────────
+// Deliberately separate from every swing/scalp prompt above, not a shared
+// call with different params — this account is buy-and-hold (months to
+// years), and every other prompt in this file explicitly tells Gemini it's
+// judging a days-to-weeks trade. Reusing one of those here would leave that
+// framing contradicting the real horizon. Fed multi-week/month trend (not
+// RSI/MACD — those time entries/exits over days, meaningless at this
+// horizon) and a 30-day news window (not "today vs yesterday" recency —
+// a single day's headline matters far less here than whether the broader
+// narrative over the last month is actually supportive).
+export type IsaThesisRequest = {
+  instrumentName: string;
+  action:         'BUY' | 'SELL';  // BUY = considering adding this to the ISA; SELL = considering exiting a position the bot itself opened
+  price:          number;
+  trend4w:        number | null;   // % change
+  trend12w:       number | null;
+  trend52w:       number | null;   // full-year change — is the 12w move part of a longer sustained trend, a recovery within a longer downtrend, or already very extended over the full year?
+  pctBelowHigh:   number | null;   // % below the 52-week high right now — 0 = sitting at the high, i.e. the move is fully realized and priced in already
+  newsSentiment:  number;          // -1..1, bearish..bullish keyword balance over the last 30 days
+  headlines:      string[];        // dated, up to 30 days back
+  heldWeeks?:     number;          // SELL only
+  unrealizedPlPct?: number;        // SELL only
+};
+
+export type IsaThesisVerdict = {
+  action:     'BUY' | 'HOLD' | 'SELL' | 'SKIP';
+  confidence: number;
+  reason:     string;
+  engine:     'gemini' | 'openai' | 'xai' | 'passthrough';
+};
+
+// Shared with openai.ts's askOpenAiIsaThesis — the whole point of that
+// comparison path is to see whether a different provider's judgment holds
+// up on the IDENTICAL question, so the prompt must not drift between the
+// two call sites. Only the HTTP call and response parsing differ per
+// provider; this function owns the actual reasoning task.
+export function buildIsaThesisPrompt(req: IsaThesisRequest): { prompt: string; fallbackAction: 'HOLD' | 'SKIP' } {
+  const fallbackAction = req.action === 'BUY' ? 'SKIP' : 'HOLD'; // fail closed either direction — no key/cap/error means "don't act"
+
+  const headlineBlock = req.headlines.length
+    ? `\nNews over the last 30 days (dated, oldest relevance aside — this is about the overall narrative building up, not just today's print):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : '\nNo notable company-specific news in the last 30 days.\n';
+
+  const trendBlock = `4-week trend: ${req.trend4w !== null ? `${req.trend4w >= 0 ? '+' : ''}${req.trend4w.toFixed(1)}%` : 'unavailable'}\n12-week trend: ${req.trend12w !== null ? `${req.trend12w >= 0 ? '+' : ''}${req.trend12w.toFixed(1)}%` : 'unavailable'}\n52-week (full year) trend: ${req.trend52w !== null ? `${req.trend52w >= 0 ? '+' : ''}${req.trend52w.toFixed(1)}%` : 'unavailable'}\nCurrently ${req.pctBelowHigh !== null ? `${req.pctBelowHigh.toFixed(1)}% below its 52-week high` : 'unavailable vs its 52-week high'}`;
+
+  const holdContext = req.action === 'SELL'
+    ? `\nThis position was opened by the bot ${req.heldWeeks?.toFixed(1) ?? '?'} weeks ago and is currently ${(req.unrealizedPlPct ?? 0) >= 0 ? '+' : ''}${(req.unrealizedPlPct ?? 0).toFixed(1)}%.\nThe question is whether to exit now, or whether the long-term thesis is still intact and this is just ordinary noise a buy-and-hold position should sit through.`
+    : `\nThe question is whether this is worth adding to the ISA as a new long-term holding right now.`;
+
+  const prompt = `You are evaluating a Stocks & Shares ISA holding — a long-term, buy-and-hold, tax-advantaged account. Positions here are intended to be held for months to years, not days or weeks. You are NOT timing a short-term trade, and short-term technicals (RSI, MACD, a single day's move) are not relevant at this horizon — judge the durability of the trend and whether the broader news narrative genuinely supports (or undermines) this being a good long-term holding, not whether today looks like a good entry/exit tick.
+
+A large price move is not itself a red flag or a green flag — what matters is understanding who's actually buying and selling here, and whether that balance still favors the position going forward. Read through the headlines below and explicitly distinguish: (a) genuine fundamental catalysts — an earnings beat, a guidance raise, a new contract/deal, a real revenue or margin data point, a structural demand shift in the business — versus (b) narrative/momentum coverage — "could this stock double", chart buy-point articles, whale/13F-tracker chatter, hedge-fund-bought-this pieces, generic "story stock" comparisons. Don't treat (b) as automatically worthless — narrative and momentum are real forces that genuinely move prices and can run for a long time, not noise to be dismissed just because it isn't an earnings print. The real question about a (b)-heavy move is which side the crowd is actually on right now: is the story still fresh and building, with more buyers plausibly still to arrive, or is it late and widely known already, priced in by everyone who was going to act on it, more likely to have sellers than buyers from here. The former is a legitimate tailwind worth backing; the latter is the "already played out" case worth real caution on, regardless of how bullish the headline count still looks. A move backed by real (a) evidence remains the strongest case, but (b) alone can be enough when the narrative genuinely still looks early rather than exhausted. Note any credible skeptical voices in the mix too (a well-known bearish investor's public call, not just retail sentiment) — that's a real signal the crowd may be turning, separate from the hype-vs-fundamentals question itself.
+
+Instrument: ${req.instrumentName}
+Current price: ${req.price.toFixed(2)}
+${trendBlock}
+News sentiment (30-day, keyword-based, -1 bearish to +1 bullish): ${req.newsSentiment.toFixed(2)}
+${headlineBlock}${holdContext}
+
+Default to caution: a single bad month or a handful of negative headlines is normal noise for a long-term holding, not a reason to act — only recommend ${req.action === 'BUY' ? 'BUY' : 'SELL'} when there's a real, corroborated case over a real timeframe (weeks, not days). That corroboration does NOT require active news either way — a durable trend with no notable news at all (nothing bullish, nothing bearish, just a steady, unremarkable business quietly compounding) is a perfectly legitimate buy-and-hold case on the trend alone, arguably a safer one than a headline-driven mover, not a case that fails for lack of a story. What genuinely needs a second, corroborating signal beyond the trend is the opposite kind of case: one where the news is actively fighting the trend (bullish headlines against a falling price, or bearish ones against a rising price) — that disagreement is what should make you want confirmation before acting, not the mere absence of news.
+${req.action === 'BUY' ? `Critically: a big trailing trend is a move that has already happened, not a guarantee it continues — the market has likely already priced in whatever drove it. Explicitly weigh: (a) how much has this already moved — is the 12-week number modest or a huge re-rating; (b) is there real reason to expect it moves further from here — either fresh fundamental catalysts still to come, or a narrative/momentum story that's still genuinely early rather than already fully known and acted on; (c) how does the 12-week move sit inside the full-year trend — is this the latest leg of a longer sustained climb (more durable), a sharp bounce within a year that's still net-down or flat (less proven), or already a massive full-year move on top of a massive 12-week move (very extended); (d) is the buying pressure that's driven this still plausibly intact, or does the news/positioning picture suggest the obvious buyers have already bought and it's now more exposed to sellers than fresh demand. Sitting at or near a 52-week high is NOT itself a reason to pass — plenty of genuinely strong, well-backed moves (fundamental OR narrative) spend long stretches at their highs precisely because the underlying demand keeps being proven right, and a real long-term holding should be judged on whether the buying case is earned, not on the number itself. The actual risk is a rapid, parabolic run where the story is already stale/widely known with the obvious catalyst (or the obvious buyers) already spent — that's a different situation from a stock at its high on a still-building case, fundamental or narrative, which is a perfectly good long-term entry. Don't penalize proximity to the high on its own, and don't penalize hype/narrative on its own either — penalize a case that's actually run out of road.` : `This is a long-term buy-and-hold position, not a spread bet — it needs to be given real time to work, and this review should default hard to KEEP unless something concrete points to genuine, real downside from here (a real deterioration in the business/story, or something that looks like the start of an actual crash/breakdown), not routine noise. Being at or near its 52-week high is not, by itself, a reason to trim: a slight pullback, a stretch of sideways consolidation, or the price simply pausing while the underlying story is still intact is completely normal and exactly the kind of thing a buy-and-hold position should be allowed to sit through, not be reactively trimmed over. Only lean toward SELL here if you'd point to something concrete: the fundamental or narrative case has genuinely broken (not just paused), the trend/momentum shows the actual start of a real breakdown rather than a wobble, or credible skeptical evidence has emerged suggesting the buyers who drove this are gone or turning to sellers — not "it's at a high" or "it's stalled for now" on their own.`}
+Calibrate confidence honestly — 90+ should be rare (trend and news both clearly, unambiguously aligned), 70-89 is a reasonably solid case with some caveat, below 70 means real uncertainty and should lean ${fallbackAction}.
+
+Respond with JSON only, no markdown:
+{"action":"${req.action === 'BUY' ? 'BUY' : 'SELL'}","confidence":75,"reason":"max 25 words"}
+(action must be "${req.action === 'BUY' ? 'BUY' : 'SELL'}" to confirm, or "${fallbackAction}" to decline — never invent a third option)`;
+
+  return { prompt, fallbackAction };
+}
+
+// Shared JSON-parsing shape both providers respond in — same prompt asks
+// for the same structure, so one parser covers both.
+export function parseIsaThesisResponse(
+  text: string, confirmAction: 'BUY' | 'SELL', fallbackAction: 'HOLD' | 'SKIP', engine: IsaThesisVerdict['engine'],
+): IsaThesisVerdict {
+  const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+  const parsed  = JSON.parse(cleaned) as { action: string; confidence: number; reason: string };
+  const action: IsaThesisVerdict['action'] = parsed.action === confirmAction ? confirmAction : fallbackAction;
+  return {
+    action,
+    confidence: Math.max(0, Math.min(100, parsed.confidence ?? 0)),
+    reason:     parsed.reason ?? '',
+    engine,
+  };
+}
+
+export async function askGeminiIsaThesis(req: IsaThesisRequest): Promise<IsaThesisVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const { prompt, fallbackAction } = buildIsaThesisPrompt(req);
+  if (!apiKey) return { action: fallbackAction, confidence: 0, reason: 'No Gemini key configured', engine: 'passthrough' };
+  if (!reserveGeminiCall()) return { action: fallbackAction, confidence: 0, reason: 'Daily Gemini call cap reached', engine: 'passthrough' };
+
+  try {
+    const res = await fetchGeminiWithRetry(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents:         [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1500, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+    if (!res.ok) return { action: fallbackAction, confidence: 0, reason: `Gemini ${res.status}`, engine: 'passthrough' };
+
+    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parseIsaThesisResponse(text, req.action, fallbackAction, 'gemini');
+  } catch (e) {
+    return { action: fallbackAction, confidence: 0, reason: `Gemini failed (${e instanceof Error ? e.message : String(e)})`, engine: 'passthrough' };
   }
 }

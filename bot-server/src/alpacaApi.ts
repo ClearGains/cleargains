@@ -331,9 +331,13 @@ export async function getOptionsContracts(
   type:       'call' | 'put',
   mode:       AccountMode,
 ): Promise<AlpacaOptionsContract[]> {
+  // Widened from 7-21d to 21-45d alongside optionsDirectionalSignal's
+  // 2026-08-21 rewrite to trend-following — a multi-week trend thesis needs
+  // real time to play out, not a contract already a third of the way to
+  // expiry (and its theta decay) before the position is even a day old.
   const today  = new Date();
-  const minExp = new Date(today.getTime() +  7 * 86_400_000).toISOString().split('T')[0];
-  const maxExp = new Date(today.getTime() + 21 * 86_400_000).toISOString().split('T')[0];
+  const minExp = new Date(today.getTime() + 21 * 86_400_000).toISOString().split('T')[0];
+  const maxExp = new Date(today.getTime() + 45 * 86_400_000).toISOString().split('T')[0];
 
   // Previously .catch(() => []) — any real problem (auth failure, options
   // not enabled on this account, a bad request) was indistinguishable from
@@ -369,6 +373,34 @@ export async function selectOptionsContract(
   );
 
   return tradable[0] ?? null;
+}
+
+// contract.close_price is yesterday's close, not a live price — confirmed
+// live this caused entry sizing to badly undershoot the real cost on an
+// illiquid contract whose price had since moved a long way from that stale
+// number (a $500 budget filled well over $1,000 more than intended, an
+// underlying position everywhere else in this file assumes stays capped by
+// cfg.positionSizeUsd). Ask price is what a buy actually pays, so size and
+// the limit cap in executeSignal both need this, not the contract record's
+// own field.
+export async function getOptionQuote(symbol: string, mode: AccountMode): Promise<{ ask: number; bid: number } | null> {
+  const { key, secret } = getKeys(mode);
+  if (!key || !secret) throw new Error('Alpaca credentials not configured');
+
+  const url = `https://data.alpaca.markets/v1beta1/options/snapshots/${symbol}?feed=indicative`;
+  try {
+    const res = await fetch(url, {
+      headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret },
+      signal:  AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { latestQuote?: { ap?: number; bp?: number } };
+    const ask = data.latestQuote?.ap ?? 0;
+    const bid = data.latestQuote?.bp ?? 0;
+    return ask > 0 ? { ask, bid } : null;
+  } catch {
+    return null;
+  }
 }
 
 export type AlpacaSnapshot = {

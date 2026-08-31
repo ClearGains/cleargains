@@ -7,7 +7,7 @@ import { getStockBot, type StockBotStartParams } from './stockBot';
 import { calcRsi, calcMacdHist, calcAtr } from './scalperStrategy';
 import {
   startAlpacaBot, stopAlpacaBot, pauseAlpacaBot, resumeAlpacaBot,
-  getAlpacaBotStatus, emergencyStop, loadSavedAlpacaState,
+  getAlpacaBotStatus, emergencyStop, loadSavedAlpacaState, setPositionWatchEnabled,
   type AlpacaBotConfig,
 } from './alpacaBot';
 import {
@@ -28,6 +28,10 @@ import { fetchFullPositions, getSession } from './igApi';
 import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
 import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot';
 import { startAlpacaNewsStream, isNewsStreamEnabled, setNewsStreamEnabled } from './alpacaNewsStream';
+import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212AiPaused, setT212PositionAiPaused, isMomentumAiGateEnabled, setMomentumAiGateEnabled } from './t212Bot';
+import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
+import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning } from './igOptionsBot';
+import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
 
 const app    = express();
@@ -304,6 +308,108 @@ app.get('/alpaca/:mode/status', auth, (req: Request, res: Response) => {
   void getAlpacaBotStatus(mode).then(status => res.json(status));
 });
 
+// Per-position AI watch on/off — mirrors the IG bot's own Watch button.
+app.post('/alpaca/:mode/watch/:symbol', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  res.json(setPositionWatchEnabled(mode, decodeURIComponent(req.params.symbol), true));
+});
+app.delete('/alpaca/:mode/watch/:symbol', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  res.json(setPositionWatchEnabled(mode, decodeURIComponent(req.params.symbol), false));
+});
+
+// ── T212 Stocks ISA bot ──────────────────────────────────────────────────
+function resolveT212Mode(req: Request, res: Response): T212Mode | null {
+  const mode = (req.params.mode ?? req.query.mode) as string;
+  if (mode !== 'live' && mode !== 'demo') {
+    res.status(400).json({ ok: false, error: 'mode must be "live" or "demo"' });
+    return null;
+  }
+  return mode;
+}
+app.post('/t212/:mode/start', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  void startT212Bot(mode).then(r => res.json(r));
+});
+app.post('/t212/:mode/stop', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  res.json(stopT212Bot(mode));
+});
+app.get('/t212/:mode/status', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  void getT212BotStatus(mode).then(status => res.json(status));
+});
+app.post('/t212/:mode/ai-pause', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  setT212AiPaused(mode, !!req.body?.paused);
+  res.json({ ok: true });
+});
+app.post('/t212/:mode/positions/:ticker/ai-pause', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  res.json(setT212PositionAiPaused(mode, req.params.ticker, !!req.body?.paused));
+});
+// Momentum-strategy-only fallback — see isMomentumAiGateEnabled's own
+// comment in t212Bot.ts. Independent of the ai-pause routes above (those
+// stop entries on both strategies entirely; this one keeps momentum
+// entries running, just without the AI confirm step).
+app.get('/t212/:mode/momentum/ai-gate', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  res.json({ enabled: isMomentumAiGateEnabled(mode) });
+});
+app.post('/t212/:mode/momentum/ai-gate', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  setMomentumAiGateEnabled(mode, !!req.body?.enabled);
+  res.json({ ok: true });
+});
+
+// ── Mean-reversion bot (RSI(2)+EMA200) — three independent instances ───────
+function resolveMrInstance(req: Request, res: Response): MrInstance | null {
+  const instance = req.params.instance;
+  if (instance !== 'fx' && instance !== 'stocks' && instance !== 'japan225') {
+    res.status(400).json({ ok: false, error: 'instance must be "fx", "stocks", or "japan225"' });
+    return null;
+  }
+  return instance;
+}
+app.post('/mean-reversion/:instance/:mode/start', auth, (req: Request, res: Response) => {
+  const instance = resolveMrInstance(req, res); if (!instance) return;
+  const mode = resolveIgMode(req, res); if (!mode) return;
+  res.json(startMeanReversionBot(instance, mode));
+});
+app.post('/mean-reversion/:instance/:mode/stop', auth, (req: Request, res: Response) => {
+  const instance = resolveMrInstance(req, res); if (!instance) return;
+  const mode = resolveIgMode(req, res); if (!mode) return;
+  res.json(stopMeanReversionBot(instance, mode));
+});
+app.get('/mean-reversion/:instance/:mode/status', auth, (req: Request, res: Response) => {
+  const instance = resolveMrInstance(req, res); if (!instance) return;
+  const mode = resolveIgMode(req, res); if (!mode) return;
+  void getMeanReversionBotStatus(instance, mode).then(status => res.json(status));
+});
+
+// ── IG index-options bot (trend-following monthly options) ─────────────────
+app.post('/ig-options/:mode/start', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res); if (!mode) return;
+  res.json(startIgOptionsBot(mode));
+});
+app.post('/ig-options/:mode/stop', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res); if (!mode) return;
+  res.json(stopIgOptionsBot(mode));
+});
+app.get('/ig-options/:mode/status', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res); if (!mode) return;
+  void getIgOptionsBotStatus(mode).then(status => res.json(status));
+});
+
 // POST /alpaca/:mode/start
 app.post('/alpaca/:mode/start', auth, (req: Request, res: Response) => {
   const mode = resolveAlpacaMode(req, res);
@@ -440,8 +546,7 @@ app.post('/ig-strategy/:mode/start', auth, (req: Request, res: Response) => {
     epics:                  [],                // filled by scanner
     epicStrategyOverrides:  body.epicStrategyOverrides,
     maxRiskGbp:             body.maxRiskGbp             ?? 20,
-    maxStockPositions:      body.maxStockPositions      ?? 3,
-    maxIndexPositions:      body.maxIndexPositions      ?? 3,
+    maxPositions:           body.maxPositions           ?? 6,
     allowShorts:            body.allowShorts            ?? false,
     maxDailyLossPct:        body.maxDailyLossPct        ?? 3,
   };
@@ -827,6 +932,39 @@ app.listen(PORT, '0.0.0.0', () => {
       if (r.ok) console.log(`[bot-server] FX scalper ${mode} auto-resume successful`);
       else console.error(`[bot-server] FX scalper ${mode} auto-resume failed: ${r.error}`);
     });
+  }
+
+  // Auto-resume the T212 ISA bot (demo/live) if it was running before
+  // restart — same rationale as every other bot's auto-resume.
+  for (const mode of ['demo', 'live'] as const) {
+    if (!wasT212BotRunning(mode)) continue;
+    console.log(`[bot-server] Auto-resuming T212 ${mode} bot...`);
+    void startT212Bot(mode).then(r => {
+      if (r.ok) console.log(`[bot-server] T212 ${mode} auto-resume successful`);
+      else console.error(`[bot-server] T212 ${mode} auto-resume failed: ${r.error}`);
+    });
+  }
+
+  // Auto-resume the mean-reversion bot's three instances (demo/live each) —
+  // same rationale as every other bot's auto-resume.
+  for (const instance of ['fx', 'stocks', 'japan225'] as const) {
+    for (const mode of ['demo', 'live'] as const) {
+      if (!wasMeanReversionBotRunning(instance, mode)) continue;
+      console.log(`[bot-server] Auto-resuming mean-reversion ${instance} ${mode} bot...`);
+      const r = startMeanReversionBot(instance, mode);
+      if (r.ok) console.log(`[bot-server] Mean-reversion ${instance} ${mode} auto-resume successful`);
+      else console.error(`[bot-server] Mean-reversion ${instance} ${mode} auto-resume failed: ${r.error}`);
+    }
+  }
+
+  // Auto-resume the IG options bot (demo/live) if it was running before
+  // restart — same rationale as every other bot's auto-resume.
+  for (const mode of ['demo', 'live'] as const) {
+    if (!wasIgOptionsBotRunning(mode)) continue;
+    console.log(`[bot-server] Auto-resuming IG options ${mode} bot...`);
+    const r = startIgOptionsBot(mode);
+    if (r.ok) console.log(`[bot-server] IG options ${mode} auto-resume successful`);
+    else console.error(`[bot-server] IG options ${mode} auto-resume failed: ${r.error}`);
   }
 
   // Auto-resume the IG CFD bot (demo/live) if it was running before restart —

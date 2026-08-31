@@ -6,16 +6,18 @@ import {
   type FullPosition, type IGSession, type CandleBar,
 } from './igApi';
 import {
-  resolveCredentials, addLog, recordLossExit, calcStake, isLossLocked, isProfitLocked, getMaxRiskGbp,
-  registerBotOpenedDeal, getPeerGroupChange, type IgMode,
+  resolveCredentials, addLog, recordLossExit, recordWatchClose, calcStake, isLossLocked, isProfitLocked, getMaxRiskGbp,
+  registerBotOpenedDeal, getPeerGroupChange, recordWatchExit, type IgMode,
 } from './igStrategyBot';
-import { askGeminiPositionVerdict, askGeminiTradeIdea } from './gemini';
+// OpenAI is the acting decision-maker here as of 2026-08-25, with Gemini
+// called only as a fallback when OpenAI's own attempt genuinely fails — see
+// openai.ts's askIg* wrappers.
+import { askIgPositionVerdict, askIgTradeIdea } from './openai';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
-import { calcRsi, calcMacdHist } from './alpacaStrategies';
+import { calcRsi, calcMacdHist, calcEfficiencyRatio } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
 import { hasBreakingNews } from './alpacaNewsStream';
-import { isNYSEOpen, isNearClose, type AlpacaBar } from './alpacaApi';
-import { FX_EPICS, isIndexEpic } from './igStrategyScanner';
+import { isNYSEOpen, isNearClose, isWeekend, type AlpacaBar } from './alpacaApi';
 
 // Manual kill-switch for this watcher's own Gemini usage, independent of
 // which positions are flagged — same purpose as igStrategyBot.ts's own
@@ -117,9 +119,11 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
   map.delete(dealId);
   saveWatch(mode, map);
   lastReview.delete(dealId);
+  lastVerdictDisplay.delete(dealId);
   peakUpl.delete(dealId);
   lastStopTightenAt.delete(dealId);
-  lastEarlyLossTightenAt.delete(dealId);
+  const noAiSet = noAiCloseDeals.get(mode)!;
+  if (noAiSet.delete(dealId)) saveNoAiClose(mode, noAiSet);
 }
 
 // ── Auto-watch every open position, including manually-opened ones ─────────
@@ -186,6 +190,75 @@ const lastReview = new Map<string, { upl: number; at: number; confidence: number
 const MOVE_THRESHOLD_GBP = 3;          // re-ask once P&L has moved at least this much since the last call
 const MAX_SILENCE_MS     = 45 * 60_000; // ...or at least this long has passed, even if flat
 
+// Confirmed live 2026-08-28 (ExxonMobil, live account): a CLOSE verdict had
+// no confidence floor at all — a 68% "CLOSE" fired exactly as readily as a
+// 95% one would, and that 68% wasn't even higher than several HOLD verdicts
+// on the same position minutes earlier (64%, 67%, 68%), i.e. it was noise in
+// a boundary-line MACD read, not real conviction, and it closed the position
+// for a small loss ~90 minutes before the same setup (AI review switched off
+// on the demo side) went on to profit. Entries elsewhere in this codebase
+// already require 70%+ before acting; exits had no equivalent bar. HOLD is
+// the safe/reversible default (the stop-loss still protects the position
+// either way) so a CLOSE that doesn't clear this bar just logs and holds
+// instead of executing on a coin-flip.
+const MIN_CLOSE_CONFIDENCE = 70;
+
+// ── No-AI-close exemption ────────────────────────────────────────────────
+// A rules-based mean-reversion swing entry (igStrategyBot's
+// mean_reversion_swing strategy, meanReversionBot.ts's fx/stocks/japan225
+// instances) already carries its own deliberately wide stop/take-profit
+// built for a multi-day swing thesis to play out — meanReversionBot.ts's own
+// header comment already made fx/japan225 entries rules-only, no AI, for
+// exactly this reason. Confirmed live this same discretionary watch layer
+// undermines that thesis from the exit side even with MIN_CLOSE_CONFIDENCE
+// in place: Spot Silver got HOLD 68-85% ("extremely oversold, hold for
+// rebound") for 8 straight hours on 2026-08-31, then a single CLOSE 75% on
+// vague "choppy, lock in gains" reasoning banked £0.54 nine hours into a
+// position whose own stop/TP (592pt/1185pt) was built to run for days. A
+// higher confidence floor alone doesn't fix a model that rates a
+// self-contradicting call just as "confidently" as a real one — so these
+// positions skip this AI review entirely (see reviewOne's own check) and
+// live or die by their own mechanical stop/take-profit only, same as
+// mean_reversion_fx/japan225 already do at entry.
+function noAiCloseFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-watch-no-ai-close-${mode}.json`);
+}
+function loadNoAiClose(mode: IgMode): Set<string> {
+  try { return new Set(JSON.parse(fs.readFileSync(noAiCloseFile(mode), 'utf8')) as string[]); }
+  catch { return new Set(); }
+}
+function saveNoAiClose(mode: IgMode, set: Set<string>): void {
+  try { fs.writeFileSync(noAiCloseFile(mode), JSON.stringify([...set]), 'utf8'); } catch {}
+}
+const noAiCloseDeals = new Map<IgMode, Set<string>>([
+  ['demo', loadNoAiClose('demo')],
+  ['live', loadNoAiClose('live')],
+]);
+export function markNoAiClose(mode: IgMode, dealId: string): void {
+  const set = noAiCloseDeals.get(mode)!;
+  set.add(dealId);
+  saveNoAiClose(mode, set);
+}
+function isNoAiCloseExempt(mode: IgMode, dealId: string): boolean {
+  return noAiCloseDeals.get(mode)?.has(dealId) ?? false;
+}
+
+// Full last verdict per watched deal, for UI display — separate from
+// lastReview above (which only tracks confidence, for the throttle/rotation
+// logic and must not change shape). Which provider actually answered
+// (gemini/openai/xai/passthrough) varies call to call now that this bot has
+// a real failover chain (see openai.ts's askIg* wrappers) — surfacing the
+// real engine per review is the whole point of this, not a fixed label.
+const lastVerdictDisplay = new Map<string, { action: string; confidence: number; reason: string; engine: string; at: number }>();
+export function getWatchVerdicts(mode: IgMode): Record<string, { action: string; confidence: number; reason: string; engine: string; at: number }> {
+  const watchedIds = new Set(getWatchedDealIds(mode));
+  const result: Record<string, { action: string; confidence: number; reason: string; engine: string; at: number }> = {};
+  for (const [dealId, v] of lastVerdictDisplay) {
+    if (watchedIds.has(dealId)) result[dealId] = v;
+  }
+  return result;
+}
+
 // High-water mark of unrealized P&L per watched position, updated every poll
 // regardless of throttle — lets a swing from meaningfully-in-profit to
 // in-loss be recognized as a distinct "reversedToRed" risk signal (see
@@ -213,23 +286,6 @@ const lastStopTightenAt = new Map<string, number>();
 
 // Real company shares only — excludes FX, indices, and the commodities/
 // crypto that share the same 'CS.'/'CC.' epic prefixes FX and indices use
-// (Silver and Bitcoin are both 'CS.'-prefixed but aren't FX_EPICS members;
-// Brent Crude/Natural Gas are 'CC.'-prefixed). Used to scope the two
-// mechanical rules below to what the user actually asked about ("in
-// particular stocks"), not FX/commodities where the same day-close/
-// early-loss intuition wasn't what was being tested.
-const NON_STOCK_EPICS = new Set(['CC.D.LCO.USS.IP', 'CC.D.NG.USS.IP', 'CS.D.USCSI.TODAY.IP', 'CS.D.BITCOIN.TODAY.IP']);
-function isStockEpic(epic: string): boolean {
-  return !FX_EPICS.has(epic) && !isIndexEpic(epic) && !NON_STOCK_EPICS.has(epic);
-}
-
-// Mechanical stop-tightening for a stock that's never gone meaningfully
-// green and is still red after a real amount of time open — see its own
-// use below for the reasoning (user's own trading intuition, checked first
-// against real trade history and found directionally plausible but on too
-// small a sample to statistically confirm; implemented anyway on explicit
-// request, moderately rather than as a hard close).
-const lastEarlyLossTightenAt = new Map<string, number>();
 
 // Seeds a freshly-opened gemini_opinion position with its entry confidence,
 // so there's an immediate baseline to compare against rather than an
@@ -310,6 +366,15 @@ async function fetchIgOffHoursBars(epic: string): Promise<AlpacaBar[] | null> {
 
 async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Promise<void> {
   const name = p.instrumentName;
+
+  // Bought index options (igOptionsBot.ts, OP.D.* epics) are exempt from
+  // this entire pipeline, before even the stop self-heal below: their max
+  // loss is the premium already paid — attaching the 3%-of-price fallback
+  // stop to one is meaningless-to-harmful, and every review heuristic here
+  // (sharp-dip %, stall-tightening, hold/close on the instrument's own
+  // price) assumes a linear instrument, not a decaying premium whose exits
+  // igOptionsBot manages on its own P&L-on-premium lifecycle.
+  if (p.epic.startsWith('OP.')) return;
 
   const heldHours = p.openedAt ? (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000 : 0;
 
@@ -436,40 +501,16 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   const EOD_PROFIT_MIN_AGE_HOURS = 0.5; // comfortably past the 15min close buffer itself
   const nearEndOfDayProfit = isNearClose(15) && heldHours >= EOD_PROFIT_MIN_AGE_HOURS && p.upl >= EOD_PROFIT_MIN_GBP;
 
-  // ── Early-loss escalation tightening (stocks only) ─────────────────────
-  // Same user intuition, other direction: a stock position that's never
-  // gone meaningfully green and is still red after a real amount of time
-  // open is treated as more likely to keep escalating than recover —
-  // tighten the stop partway rather than wait for the original full
-  // distance. Same "lock in a fraction, not all/none" caution as the
-  // stall-tightening block above, applied to remaining risk instead of
-  // banked profit since there's no real peak to speak of here. Own
-  // cooldown map so it only fires once per position, same pattern.
-  const EARLY_LOSS_MIN_AGE_HOURS   = 20 / 60; // 20min — past pure entry noise
-  const EARLY_LOSS_NEVER_GREEN_GBP = 1;       // "never really went green" bar
-  const EARLY_LOSS_TIGHTEN_FRAC    = 0.5;     // halve the remaining stop distance
-  if (isStockEpic(p.epic) && heldHours >= EARLY_LOSS_MIN_AGE_HOURS && peak < EARLY_LOSS_NEVER_GREEN_GBP && p.upl < 0 && p.stopLevel !== undefined) {
-    const lastTightened = lastEarlyLossTightenAt.get(p.dealId) ?? 0;
-    if (Date.now() - lastTightened > 30 * 60_000) {
-      const isLong = p.direction === 'BUY';
-      const remainingDist = isLong ? currentLevel - p.stopLevel : p.stopLevel - currentLevel;
-      if (remainingDist > 0) {
-        const newStop = isLong
-          ? p.stopLevel + remainingDist * EARLY_LOSS_TIGHTEN_FRAC
-          : p.stopLevel - remainingDist * EARLY_LOSS_TIGHTEN_FRAC;
-        const stopIsValid = isLong ? newStop < currentLevel : newStop > currentLevel;
-        if (stopIsValid) {
-          try {
-            await updatePositionLevels(session, p.dealId, newStop, p.limitLevel ?? null);
-            lastEarlyLossTightenAt.set(p.dealId, Date.now());
-            addLog(mode, 'info', name, `[Early-loss] Never went green after ${(heldHours * 60).toFixed(0)}min, still red — tightened stop to cut further downside`);
-          } catch (e) {
-            addLog(mode, 'error', name, `[Early-loss] Stop tighten failed: ${e instanceof Error ? e.message : String(e)}`);
-          }
-        }
-      }
-    }
-  }
+  // Early-loss escalation tightening (a blind timer that halved a stock's
+  // remaining stop distance if it hadn't gone green within 20min) removed
+  // 2026-08-24 per explicit request/observation: this had nothing to do
+  // with Gemini's own judgment — it was a mechanical rule shrinking a
+  // trade's room to recover before the AI review below ever got a say,
+  // exactly the "cut before it had room to become a real winner" pattern
+  // behind a run of losing trades. The position's real stop-loss (set at
+  // entry by the rule engine, untouched by this) is still the hard
+  // backstop; Gemini's own periodic HOLD/CLOSE judgment below is now the
+  // only thing that can end a trade earlier than that, not a countdown.
 
   // Best-effort — [] if no Alpaca ticker mapping or Finnhub unavailable,
   // same pattern as the entry-confirmation flow. Lets Gemini weigh whether
@@ -508,6 +549,7 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   let recentCandles: Array<{ open: number; high: number; low: number; close: number }> | undefined;
   let rsi:      number | null = null;
   let macdHist: number | null = null;
+  let multiDayEfficiencyRatio: number | null = null;
   if (hasBarSource) {
     try {
       let bars = await fetchBarsWithFallback(p.epic, '5d', { alpacaTimeframe: '1Hour', yahooInterval: '1h' });
@@ -598,6 +640,21 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
           const avgVolPrior = bars.slice(0, -20).reduce((s, b) => s + b.v, 0) / Math.max(bars.length - 20, 1);
           const recentVol   = recent20.reduce((s, b) => s + b.v, 0) / recent20.length;
           volumeSurgeMultiple = avgVolPrior > 0 ? recentVol / avgVolPrior : undefined;
+
+          // Multi-day choppiness read — reuses the exact same "moved a lot,
+          // went nowhere" metric this codebase already trusts elsewhere
+          // (igStrategyBot.ts's MIN_EFFICIENCY_RATIO, alpacaStrategies.ts),
+          // just computed over the last ~2-3 days of hourly bars already
+          // fetched above (no extra call) instead of intraday ones. Added
+          // 2026-08-28 per explicit request: not every instrument deserves
+          // the same multi-day patience — a name that's genuinely just
+          // grinding sideways/choppy (net move small relative to how much
+          // it's actually traveled — semiconductors were the live example
+          // called out) is a real candidate for banking/cutting same-day,
+          // while one with a real net directional move over the same window
+          // has earned the room a swing thesis needs. Low bar count (few
+          // hours held) legitimately returns null — no read yet, not "choppy".
+          multiDayEfficiencyRatio = calcEfficiencyRatio(bars, Math.min(60, bars.length - 1));
         }
       }
     } catch { /* best-effort — proceed without it */ }
@@ -619,7 +676,17 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   const sharpDip = sharpDipPercent !== undefined && sharpDipPercent >= SHARP_DIP_THRESHOLD_PCT;
 
   const moved = !last || Math.abs(p.upl - last.upl) >= MOVE_THRESHOLD_GBP;
-  const stale = !last || (Date.now() - last.at) >= MAX_SILENCE_MS;
+  // Weekend-gated, not removed — confirmed live this was burning a real
+  // Gemini call roughly every hour, 24/7, straight through the entire
+  // weekend for names like a DAX index position and Spot Silver, producing
+  // near-identical "HOLD, nothing's changed" verdicts each time. Most IG
+  // instruments don't even deal over the weekend, so there was nothing
+  // actionable to review and nothing genuinely new for Gemini to weigh in
+  // on. This only suppresses the routine "it's been 45min, ask anyway"
+  // trigger — `moved`/sharpDip/justTurnedRed/breakingNews below still force
+  // a real review regardless of day, for the rare instrument that does
+  // trade over the weekend and something actually happens.
+  const stale = !isWeekend() && (!last || (Date.now() - last.at) >= MAX_SILENCE_MS);
   // A real headline just hit for this instrument (Alpaca's real-time news
   // stream, opt-in — see alpacaNewsStream.ts) — same bypass category as a
   // sharp dip: price hasn't necessarily moved yet, but that's exactly the
@@ -638,12 +705,16 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // here, so the hard stop-loss and every price-only protection still work
   // normally while paused.
   if (isWatchAiPaused(mode)) return;
+  // Rules-based mean-reversion swing entries opt out of this whole AI
+  // review, not just the CLOSE decision — see markNoAiClose's own comment.
+  // No point spending the call just to always ignore its verdict.
+  if (isNoAiCloseExempt(mode, p.dealId)) return;
 
   const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
   const peerGroup = getPeerGroupChange(p.epic);
   const userNote  = getWatchNote(mode, p.dealId);
 
-  const verdict = await askGeminiPositionVerdict({
+  const verdict = await askIgPositionVerdict({
     instrumentName: name,
     headlines,
     userNote: userNote || undefined,
@@ -663,18 +734,24 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     macdHist,
     nearEndOfDay: nearEndOfDayProfit,
     volumeSurgeMultiple,
+    multiDayEfficiencyRatio,
     peerGroupChangePercent: peerGroup?.changePercent,
     peerGroupLabel: peerGroup?.label,
   });
 
   addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
 
-  // Only update the tracked confidence on a real verdict — a Gemini outage
-  // (passthrough) shouldn't silently make a healthy position look weak in
-  // the rotation comparison, so it keeps whatever the last real reading was.
+  // Only update the tracked confidence on a real verdict — a provider outage
+  // (passthrough — OpenAI failed AND its Gemini fallback also failed)
+  // shouldn't silently make a healthy position look weak in the rotation
+  // comparison, so it keeps whatever the last real reading was. Any
+  // non-passthrough engine (whichever provider actually answered) counts as real.
   lastReview.set(p.dealId, {
     upl: p.upl, at: Date.now(),
-    confidence: verdict.engine === 'gemini' ? verdict.confidence : (last?.confidence ?? 60),
+    confidence: verdict.engine !== 'passthrough' ? verdict.confidence : (last?.confidence ?? 60),
+  });
+  lastVerdictDisplay.set(p.dealId, {
+    action: verdict.action, confidence: verdict.confidence, reason: verdict.reason, engine: verdict.engine, at: Date.now(),
   });
 
   // Passthrough always returns HOLD (see askGeminiPositionVerdict's own
@@ -691,11 +768,21 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     ? `[EOD] +£${p.upl.toFixed(2)} near end of day, Gemini unavailable to weigh trend continuation — closing rather than holding unreviewed`
     : verdict.reason;
 
+  // A CLOSE that doesn't clear MIN_CLOSE_CONFIDENCE isn't real conviction —
+  // see that constant's own comment. Doesn't apply to eodFallbackClose,
+  // which is a deliberate mechanical rule, not this AI verdict.
+  if (verdict.action === 'CLOSE' && verdict.confidence < MIN_CLOSE_CONFIDENCE && !eodFallbackClose) {
+    addLog(mode, 'info', name, `[Gemini watch] CLOSE ${verdict.confidence}% below the ${MIN_CLOSE_CONFIDENCE}% bar to act on — holding instead: ${verdict.reason}`);
+    return;
+  }
+
   if (verdict.action === 'CLOSE' || eodFallbackClose) {
     try {
       await closePosition(session, p.dealId, p.direction, p.size);
       addLog(mode, 'exit', name, `[Gemini watch] Closed — ${closeReason}`);
       recordLossExit(mode, p.epic, p.upl, closeReason);
+      recordWatchClose(mode, p.epic);
+      recordWatchExit(mode, p, closeReason);
       removeFromWatch(mode, p.dealId);
 
       // Reversal flip — closing on a genuine, price-confirmed reversal is
@@ -747,7 +834,7 @@ async function maybeReverseFlip(
 
   let idea;
   try {
-    idea = await askGeminiTradeIdea({
+    idea = await askIgTradeIdea({
       instrumentName: name, price: currentLevel,
       rsi: null, macdHist: null, atr: null, headlines,
       recentCandles: recentCandles?.slice(-3) ?? [],

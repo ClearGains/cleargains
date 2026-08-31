@@ -1,6 +1,7 @@
 import type { AlpacaBar } from './alpacaApi';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
 import type { LWCandle } from './chartIndicators';
+import { getMeanReversionSignal, type MrBar } from './meanReversionStrategy';
 
 // ── Indicators ────────────────────────────────────────────────────────────────
 
@@ -236,6 +237,39 @@ export function emaCrossoverSignal(
   return { action: 'HOLD', reason: `EMA9=${e9curr.toFixed(2)} EMA21=${e21curr.toFixed(2)} — no crossover` };
 }
 
+// ── Mean Reversion (RSI2 + 200-day trend) — swing, days to ~10 days ─────────
+// Thin wrapper around meanReversionStrategy.ts's getMeanReversionSignal — the
+// exact same pure engine (ported from bot_ig.py) already running as the IG
+// mean-reversion bot's 'stocks' instance. Added here 2026-08-28 per explicit
+// request so the identical strategy can also run on Alpaca, sidestepping
+// IG's shared-account session/API-allowance fragility for the stocks side
+// specifically (a restart-triggered allowance exhaustion on the IG account
+// is what prompted this). Exit is broker-side ATR stop/TP, same as
+// rsiMeanReversionSignal/emaCrossoverSignal above — the original strategy's
+// MAX_HOLD_DAYS backstop needs a position's entry time, which this pure
+// function isn't given, so that check lives in the caller (alpacaBot.ts),
+// which already tracks entry times for other strategies the same way
+// (optionPeaks/highConviction).
+export function meanReversionSwingSignal(bars: AlpacaBar[]): StrategySignal {
+  const mrBars: MrBar[] = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
+  const signal = getMeanReversionSignal(mrBars);
+  if (signal.action === 'HOLD') return { action: 'HOLD', reason: signal.reason };
+  const last = bars[bars.length - 1].c;
+  return signal.action === 'BUY'
+    ? {
+        action: 'BUY', reason: signal.reason,
+        stopPrice: +(last - signal.stopPoints).toFixed(2),
+        takeProfitPrice: +(last + signal.tpPoints).toFixed(2),
+        orderType: 'market',
+      }
+    : {
+        action: 'SELL', reason: signal.reason,
+        stopPrice: +(last + signal.stopPoints).toFixed(2),
+        takeProfitPrice: +(last - signal.tpPoints).toFixed(2),
+        orderType: 'market',
+      };
+}
+
 // ── 3. Opening Range Breakout (ORB — daily intraday) ─────────────────────────
 // During first 30 min: track high/low. After that: trade breakouts.
 // Exit: EOD, or stop at 50% retracement of range
@@ -395,16 +429,33 @@ export function weeklyMomentumSignal(
   return { action: 'HOLD', reason: `Weekly: mom=${momentum4w.toFixed(2)}% sma=${sma12w?.toFixed(2) ?? 'N/A'} rsi=${rsi?.toFixed(1) ?? 'N/A'}` };
 }
 
-// ── 6. Options Directional (5-min intraday) ────────────────────────────────────
-// Entry: RSI extreme → buy call (oversold) or put (overbought)
-// Exit:  +75% profit, −50% loss, or ≤2 DTE
+// ── 6. Options Directional (daily bars — trend-following, not mean-reversion) ──
+// Rewritten 2026-08-21 — the old version ran on 5-minute bars (5h of
+// lookback) and bought puts on "RSI>70 + MACD hist not still rising", which
+// is satisfied by almost any flat-or-falling histogram reading, including
+// when MACD couldn't even be computed. Confirmed live this bought a put on
+// GOOGL at the exact moment it was breaking out on real bullish news — RSI
+// overbought during a genuine trend just means "trending," not "about to
+// reverse," and the old signal had no way to tell the difference. This
+// version requires an actual multi-day trend structure (price above/below a
+// rising/falling 50-day EMA, with the 20-day EMA confirming) plus momentum
+// that's genuinely accelerating in that same direction, not just "not
+// falling as much." Entries are meant to be rarer and higher-conviction —
+// giving each one weeks (see the wider expiry window in
+// getOptionsContracts) to play out instead of hours.
+// Entry: confirmed trend (EMA20 vs EMA50, price vs EMA50, EMA50 sloping the
+//        right way) + RSI in a healthy continuation zone (not exhausted) +
+//        MACD histogram actually rising (calls) or falling (puts), not flat.
+// Exit:  +75% profit, −50% loss, or ≤2 DTE (unchanged — still the right
+//        asymmetric target for a decayed, leveraged premium).
 export function optionsDirectionalSignal(
   bars:         AlpacaBar[],
   inPosition:   boolean,
   currentPlPct?: number,   // unrealized P/L % on the options position (0–100 scale)
   dte?:          number,    // days to expiry
+  peakPlPct?:    number,    // highest P/L % this position has reached since entry — see alpacaBot.ts's peak tracking
 ): StrategySignal {
-  if (bars.length < 20) return { action: 'HOLD', reason: 'insufficient bars' };
+  if (bars.length < 55) return { action: 'HOLD', reason: 'insufficient bars for a trend read (need ~55 daily bars)' };
 
   const rsi  = calcRsi(bars);
   const macd = calcMacdHist(bars);
@@ -418,43 +469,76 @@ export function optionsDirectionalSignal(
     if (currentPlPct !== undefined && currentPlPct >= 75) {
       return { action: 'CLOSE_LONG', reason: `Profit target hit: +${currentPlPct.toFixed(1)}%` };
     }
+    // Peak-and-retrace lock-in — without this, a contract that ran up to
+    // (say) +60% and then reversed just rides the whole round trip back
+    // down to the -50% stop before anything happens, since the only other
+    // exit is the fixed +75% target it never reached. Once a position has
+    // been meaningfully profitable at some point (peak ≥30%) and has since
+    // given back a real chunk of that gain, bank what's left rather than
+    // risk it decaying all the way to a loss on a leveraged, time-decaying
+    // instrument. Mirrors the IG bot's own stall-tightening logic
+    // (STALL_RETRACE_FRAC in geminiWatch.ts) — same idea, applied here as a
+    // full close since an option can't have its stop partially tightened
+    // the same granular way a CFD's can.
+    const PEAK_LOCK_IN_MIN_PCT   = 30;
+    const PEAK_LOCK_IN_RETRACE   = 0.4;
+    if (peakPlPct !== undefined && peakPlPct >= PEAK_LOCK_IN_MIN_PCT && currentPlPct !== undefined && currentPlPct > 0) {
+      const retracedFrac = (peakPlPct - currentPlPct) / peakPlPct;
+      if (retracedFrac >= PEAK_LOCK_IN_RETRACE) {
+        return { action: 'CLOSE_LONG', reason: `Stalling — gave back ${(retracedFrac * 100).toFixed(0)}% of its +${peakPlPct.toFixed(1)}% peak, locking in +${currentPlPct.toFixed(1)}% before it erodes further` };
+      }
+    }
     if (currentPlPct !== undefined && currentPlPct <= -50) {
       return { action: 'CLOSE_LONG', reason: `Stop loss hit: ${currentPlPct.toFixed(1)}%` };
     }
-    return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} | P/L ${currentPlPct?.toFixed(1) ?? '?'}% | ${dte ?? '?'}d to expiry` };
+    return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} | P/L ${currentPlPct?.toFixed(1) ?? '?'}% (peak +${peakPlPct?.toFixed(1) ?? '0'}%) | ${dte ?? '?'}d to expiry` };
   }
 
-  // Buy calls when oversold and downside momentum is easing (hist turning up
-  // or already positive); mirrored for puts
-  const lastClose = bars[bars.length - 1].c;
-  const eps = lastClose * 1e-9;
-  const histTurningUp   = macd === null || macd.hist >= macd.prevHist - eps || macd.hist > 0;
-  const histTurningDown = macd === null || macd.hist <= macd.prevHist + eps || macd.hist < 0;
+  if (macd === null) return { action: 'HOLD', reason: 'MACD not ready' };
 
-  if (rsi < 30 && histTurningUp) {
+  const closes    = bars.map(b => b.c);
+  const price     = closes[closes.length - 1];
+  const ema20Arr  = calcEma(closes, 20);
+  const ema50Arr  = calcEma(closes, 50);
+  if (ema20Arr.length < 2 || ema50Arr.length < 2) return { action: 'HOLD', reason: 'EMA not ready' };
+
+  const ema20     = ema20Arr[ema20Arr.length - 1];
+  const ema50     = ema50Arr[ema50Arr.length - 1];
+  const ema50Prev = ema50Arr[ema50Arr.length - 2];
+  const ema50Rising  = ema50 > ema50Prev;
+  const ema50Falling = ema50 < ema50Prev;
+
+  // Real trend structure — price and the faster EMA both need to be on the
+  // same side of a sloping EMA50, not just a single crossed line.
+  const uptrend   = price > ema50 && ema20 > ema50 && ema50Rising;
+  const downtrend = price < ema50 && ema20 < ema50 && ema50Falling;
+
+  // RSI 50-70 (calls) / 30-50 (puts): trending with room left to run, not
+  // fresh-off-a-bottom noise and not already exhausted at the extreme —
+  // the old signal's >70/<30 thresholds are where a *reversal* bet belongs,
+  // the opposite of what a trend-following entry wants.
+  const macdBullish = macd.hist > 0 && macd.hist > macd.prevHist;
+  const macdBearish = macd.hist < 0 && macd.hist < macd.prevHist;
+
+  if (uptrend && rsi >= 50 && rsi <= 70 && macdBullish) {
     return {
       action:     'BUY',
-      reason:     `RSI oversold ${rsi.toFixed(1)} + MACD hist turning up — buying call (mean reversion up)`,
+      reason:     `Confirmed uptrend — price/EMA20 above rising EMA50, RSI ${rsi.toFixed(1)}, MACD hist accelerating up — buying call`,
       optionType: 'call',
     };
   }
 
-  // Buy puts when overbought and upside momentum is fading (hist turning down)
-  if (rsi > 70 && histTurningDown) {
+  if (downtrend && rsi <= 50 && rsi >= 30 && macdBearish) {
     return {
       action:     'BUY',
-      reason:     `RSI overbought ${rsi.toFixed(1)} + MACD hist turning down — buying put (mean reversion down)`,
+      reason:     `Confirmed downtrend — price/EMA20 below falling EMA50, RSI ${rsi.toFixed(1)}, MACD hist accelerating down — buying put`,
       optionType: 'put',
     };
   }
 
-  // Confirmed live this message was misleading: RSI 3.6/89.3 (genuinely
-  // extreme) both landed here because the MACD confirmation didn't line up
-  // — "not extreme enough" reads as if RSI itself was the blocker even when
-  // it clearly wasn't. Distinguish the two cases instead of collapsing them.
-  if (rsi < 30)  return { action: 'HOLD', reason: `RSI oversold ${rsi.toFixed(1)} but MACD hist still falling — waiting for momentum to turn before buying the call` };
-  if (rsi > 70)  return { action: 'HOLD', reason: `RSI overbought ${rsi.toFixed(1)} but MACD hist still rising — waiting for momentum to turn before buying the put` };
-  return { action: 'HOLD', reason: `RSI ${rsi.toFixed(1)} — not extreme enough for options entry` };
+  if (uptrend)   return { action: 'HOLD', reason: `Uptrend intact (price/EMA20 > rising EMA50) but RSI ${rsi.toFixed(1)} or MACD momentum not confirming yet` };
+  if (downtrend) return { action: 'HOLD', reason: `Downtrend intact (price/EMA20 < falling EMA50) but RSI ${rsi.toFixed(1)} or MACD momentum not confirming yet` };
+  return { action: 'HOLD', reason: `No confirmed trend — price ${price.toFixed(2)} vs EMA50 ${ema50.toFixed(2)}, RSI ${rsi.toFixed(1)}` };
 }
 
 // ── 7. Donchian / Turtle-style Breakout (daily bars — hold days to weeks) ─────
@@ -712,6 +796,20 @@ export function ruleBasedAnalysisSignal(
     if (efficiencyRatio !== null && efficiencyRatio < MIN_DAILY_EFFICIENCY_RATIO) {
       return { action: 'HOLD', reason: `${swing.direction} bias but too choppy over the last month — efficiency ratio ${efficiencyRatio.toFixed(2)} < ${MIN_DAILY_EFFICIENCY_RATIO} (moved a lot, went nowhere)` };
     }
+    // Minimum reward:risk filter — added 2026-08-24 per explicit request
+    // ("gains too small to cover losses"). At a real ~27% win rate (see IG
+    // live's own recent trade attribution), the average winner needs to be
+    // meaningfully bigger than the average loser just to break even, let
+    // alone turn a profit — a setup where makeSwing's own S/R-derived
+    // target sits too close to the stop is exactly the kind of trade that
+    // keeps this a losing game even when the direction call is right more
+    // than it's wrong. Doesn't touch the stop/target levels themselves
+    // (still the same backtested S/R + ATR logic) — just declines to take
+    // a setup whose own numbers don't clear a reasonable bar.
+    const MIN_REWARD_RISK = 1.5;
+    if (swing.riskReward < MIN_REWARD_RISK) {
+      return { action: 'HOLD', reason: `${swing.direction} bias but reward:risk only ${swing.riskReward.toFixed(2)}:1 — below the ${MIN_REWARD_RISK}:1 bar to be worth the trade` };
+    }
     return {
       action:           swing.direction === 'LONG' ? 'BUY' : 'SELL',
       reason:           swing.reasoning,
@@ -726,7 +824,7 @@ export function ruleBasedAnalysisSignal(
 
 // ── Strategy metadata ─────────────────────────────────────────────────────────
 
-export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed';
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed' | 'mean_reversion_swing';
 
 export const STRATEGY_META: Record<StrategyName, {
   label:     string;
@@ -740,7 +838,14 @@ export const STRATEGY_META: Record<StrategyName, {
   orb:                 { label: 'Opening Range Breakout', timeframe: 'intraday', pollMs: 60_000,      barPeriod: '1Min',  barsNeeded: 60  },
   vwap:                { label: 'VWAP Reversion',         timeframe: 'intraday', pollMs: 60_000,      barPeriod: '1Min',  barsNeeded: 60  },
   weekly_momentum:     { label: 'Weekly Momentum',        timeframe: 'weekly',   pollMs: 60 * 60_000, barPeriod: '1Week', barsNeeded: 20  },
-  options_directional: { label: 'Options Directional',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '5Min',  barsNeeded: 60  },
+  // Daily *bars*, not 5-min — trend-following needs multi-week structure,
+  // not intraday noise. 70 bars covers the EMA50 read plus a little buffer.
+  // timeframe stays 'intraday' (not 'daily') deliberately — that field
+  // gates how often the whole poll runs at all, and 'daily' would only let
+  // it check ONCE a day, including the stop-loss/profit-target/DTE exit
+  // checks on positions already held. Those need to keep running every 5min
+  // regardless of how coarse the entry signal's own bar resolution is.
+  options_directional: { label: 'Options Directional',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '1Day',  barsNeeded: 70  },
   donchian_breakout:   { label: 'Donchian Breakout',       timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
   // Same Donchian logic, hourly bars instead of daily — holds across hours to
   // ~1-2 days instead of days-to-weeks. Uses the exact same donchianBreakoutSignal
@@ -799,4 +904,11 @@ export const STRATEGY_META: Record<StrategyName, {
   // and evaluateEpic's own 'gemini_confirmed' case in igStrategyBot.ts.
   // pollMs matches rule_based_analysis's own 15min, same reasoning.
   gemini_confirmed:    { label: 'Gemini Confirmed (Rules + AI)', timeframe: 'daily', pollMs: 15 * 60_000, barPeriod: '1Day', barsNeeded: 250 },
+  // RSI(2) + 200-day EMA trend filter — needs a full 210 daily bars (200 for
+  // the EMA trend read + 10 buffer, matching meanReversionStrategy.ts's own
+  // MIN_BARS_NEEDED). timeframe 'daily' is correct here (not 'intraday' like
+  // options_directional) — exits are broker-side bracket legs, not a code
+  // path that needs re-checking every 5min; only the max-hold-days backstop
+  // needs periodic checking, and that only needs once/day.
+  mean_reversion_swing: { label: 'Mean Reversion (RSI2+EMA200)', timeframe: 'daily', pollMs: 60 * 60_000, barPeriod: '1Day', barsNeeded: 210 },
 };

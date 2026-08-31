@@ -218,6 +218,44 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
       if (dir === 'LONG'  && price < ind.sma200 - band) { dir = 'FLAT'; trendFiltered = true; }
     }
 
+    // Near-high extension veto — a HARD block, not the same-day-only
+    // extensionNote dampener above (which only knocks 2 points off the
+    // score, letting a "confident enough" setup still clear the bar and
+    // trade anyway). Confirmed live 2026-08-25: Visa and Ford got bought
+    // and closed for a loss repeatedly. First attempt at this fix used a
+    // cumulative % move threshold (8% over 5 trading days) — checked
+    // against Visa's real price history and it would NOT have fired: its
+    // 5/10/15/20/30-day moves were all under 7%. What was actually true is
+    // sharper: Visa was sitting exactly AT its 3-month high (0.0% below
+    // it) from a long, steady, low-volatility grind, with RSI pinned in
+    // elevated-to-extreme territory precisely because there'd been so few
+    // down days to reset it. A raw % move threshold misses a slow grind to
+    // a fresh high entirely — proximity to a real recent high, combined
+    // with RSI already elevated, is the actual signal. Distinct from the
+    // SMA200 trend filter above too: that one stops the bot fighting an
+    // established trend; this one stops it CHASING one that's already
+    // sitting at the top of its own recent range, even in the "right"
+    // direction. There's no "let it play out" theory that holds for an
+    // entry made at the high with RSI already elevated.
+    const NEAR_HIGH_LOOKBACK_DAYS = 60; // ~3 months of daily bars
+    const NEAR_HIGH_PCT           = 3;  // within 3% of that lookback's high/low counts as "sitting at it"
+    const EXTENDED_RSI            = 65; // "elevated" — matches this codebase's own existing "RSI elevated above 60" bar, not full textbook-overbought 70+
+    let multiDayExtended = false;
+    if (!trendFiltered && dir !== 'FLAT' && candles.length >= 10 && ind.rsi !== null) {
+      const lookback     = candles.slice(-Math.min(NEAR_HIGH_LOOKBACK_DAYS, candles.length));
+      const recentHigh   = Math.max(...lookback.map(c => Number(c.high)));
+      const recentLow    = Math.min(...lookback.map(c => Number(c.low)));
+      const pctBelowHigh = recentHigh > 0 ? ((recentHigh - price) / recentHigh) * 100 : 100;
+      const pctAboveLow  = recentLow  > 0 ? ((price - recentLow) / recentLow) * 100 : 100;
+      if (
+        (dir === 'LONG'  && pctBelowHigh <= NEAR_HIGH_PCT && ind.rsi >= EXTENDED_RSI) ||
+        (dir === 'SHORT' && pctAboveLow  <= NEAR_HIGH_PCT && ind.rsi <= (100 - EXTENDED_RSI))
+      ) {
+        dir = 'FLAT';
+        multiDayExtended = true;
+      }
+    }
+
     let entry: number, sl: number, tp1: number, tp2: number;
 
     if (dir === 'LONG') {
@@ -247,14 +285,18 @@ export function ruleBasedAnalysis(ticker: string, candles: LWCandle[]): Analysis
       confidence: confidence(false),
       reasoning: trendFiltered
         ? `${bias} bias from RSI/MACD/BB, but this would be a ${bias === 'BULLISH' ? 'LONG' : 'SHORT'} against price still well ${bias === 'BULLISH' ? 'below' : 'above'} its own SMA200 — standing aside rather than fighting the established trend.`
-        : `Swing trade targets ${dir === 'LONG' ? 'upper S/R cluster' : 'lower S/R cluster'} over days–weeks. ${signals[0] ?? 'Mixed signals'} supports the ${bias.toLowerCase()} bias.`,
+        : multiDayExtended
+          ? `${bias} bias from RSI/MACD/BB, but the instrument is already sitting within ${NEAR_HIGH_PCT}% of its own ${NEAR_HIGH_LOOKBACK_DAYS}-day ${dir === 'LONG' ? 'high' : 'low'} with RSI already elevated — standing aside rather than chasing a move that's already largely played out.`
+          : `Swing trade targets ${dir === 'LONG' ? 'upper S/R cluster' : 'lower S/R cluster'} over days–weeks. ${signals[0] ?? 'Mixed signals'} supports the ${bias.toLowerCase()} bias.`,
       invalidation: dir === 'LONG'
         ? `Daily close below ${sl} and loss of SMA20 invalidates.`
         : dir === 'SHORT'
           ? `Daily close above ${sl} invalidates.`
           : trendFiltered
             ? 'Would need price to reclaim the SMA200 trend before this setup is worth taking.'
-            : 'No clear structure — wait for breakout confirmation.',
+            : multiDayExtended
+              ? `Would need a real pullback off the recent extreme and RSI to reset before this is a fresh setup rather than a chase.`
+              : 'No clear structure — wait for breakout confirmation.',
     };
   }
 

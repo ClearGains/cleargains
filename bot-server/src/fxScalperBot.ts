@@ -12,7 +12,13 @@ import {
   type SwingEpicState, type SwingConfig, type Trend,
 } from './fxSwingStrategy';
 import { isMarketOpen, isClosingSoon } from './marketHours';
-import { askGeminiFxSwing, askGeminiPositionVerdict, type FxSwingEntrySignal } from './gemini';
+import { type FxSwingEntrySignal } from './gemini';
+// OpenAI is the acting decision-maker for this bot as of 2026-08-25, with
+// Gemini called only as a fallback when OpenAI's own attempt genuinely
+// fails — see openai.ts's askFxSwing/askIgPositionVerdict for the failover
+// logic (the position-review question is identical to the IG bot's own, so
+// it reuses that same wrapper rather than a separate one).
+import { askFxSwing, askIgPositionVerdict } from './openai';
 import { fetchMacroEvents } from './macroCalendar';
 import { resolveCredentials, isLossLocked, registerBotOpenedDeal, type IgMode } from './igStrategyBot';
 import { FX_EPICS, SCALPER_INDEX_EPICS } from './igStrategyScanner';
@@ -128,6 +134,20 @@ type PersistedStartParams = { epics: string[]; maxRiskGbp: number; maxConcurrent
 
 function stateFile(mode: FxMode): string { return path.join(__dirname, '..', `fx-scalper-state-${mode}.json`); }
 function epicsFile(mode: FxMode): string { return path.join(__dirname, '..', `fx-scalper-epics-${mode}.json`); }
+// Whole-bot pause — was in-memory only (a bare closure variable, reset to
+// false on every restart), which silently undid a manual pause put in place
+// specifically so the mean-reversion bots could take priority — confirmed
+// live twice in one session (a routine pm2 restart for an unrelated deploy
+// quietly re-enabled entries both times). Same file-per-mode pattern as
+// stateFile/epicsFile above.
+function pausedFile(mode: FxMode): string { return path.join(__dirname, '..', `fx-scalper-paused-${mode}.json`); }
+function saveFxPaused(mode: FxMode, paused: boolean): void {
+  try { fs.writeFileSync(pausedFile(mode), JSON.stringify({ paused }), 'utf8'); } catch {}
+}
+function loadFxPaused(mode: FxMode): boolean {
+  try { return (JSON.parse(fs.readFileSync(pausedFile(mode), 'utf8')) as { paused: boolean }).paused; }
+  catch { return false; }
+}
 
 function saveStartState(mode: FxMode, params: PersistedStartParams): void {
   try { fs.writeFileSync(stateFile(mode), JSON.stringify(params), 'utf8'); } catch {}
@@ -286,7 +306,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   let session:       IGSession | null = null; // execution — live creds for the live instance, places/closes real orders
   let dataSession:   IGSession | null = null; // data — ALWAYS demo creds, sources candle history + live snapshots
   let running        = false;
-  let paused         = false;
+  let paused         = loadFxPaused(mode);
   let currentEpics:  string[] = [];
   let maxRiskGbp     = 5;
   let maxConcurrentPositions = 2;
@@ -464,7 +484,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         const ind = getIndicators(st.closedCandles, currentConfig);
         const recentCandles = st.closedCandles.slice(-8).map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close }));
         const currentLevel = st.closedCandles[st.closedCandles.length - 1]?.close ?? st.entryPrice;
-        const verdict = await askGeminiPositionVerdict({
+        const verdict = await askIgPositionVerdict({
           instrumentName: name,
           direction:      st.direction,
           entryLevel:     st.entryPrice,
@@ -605,7 +625,7 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           macroEvents,
         };
 
-        const verdict = await askGeminiFxSwing(entrySignal);
+        const verdict = await askFxSwing(entrySignal);
         addLog('info', name, `Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
 
         if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {
@@ -1061,7 +1081,10 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
 
   function stop(): void {
     running = false;
-    paused  = false;
+    // paused intentionally untouched — see the pause()/resume() persistence
+    // comment near loadFxPaused. start() calls stop() first on every start
+    // AND every auto-resume-after-restart; resetting paused here used to
+    // silently undo a manual pause on every routine deploy restart.
     if (sessionRefreshTimer) { clearTimeout(sessionRefreshTimer); sessionRefreshTimer = null; }
     if (pollTimer)           { clearInterval(pollTimer);          pollTimer = null; }
     stream.disconnect();
@@ -1074,12 +1097,14 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
   function pause(): void {
     if (!running) return;
     paused = true;
+    saveFxPaused(mode, true);
     addLog('info', '—', '⏸ Paused — monitoring open positions, no new entries');
   }
 
   function resume(): void {
     if (!running) return;
     paused = false;
+    saveFxPaused(mode, false);
     addLog('info', '—', '▶ Resumed — will enter on next qualifying signal');
   }
 
