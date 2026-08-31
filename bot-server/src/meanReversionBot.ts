@@ -341,10 +341,13 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       // own mechanical RSI(2)-extremity + trend-strength score, not AI) rather
       // than a flat number — same reasoning and same 0.02-0.06 range as the
       // identical fix already deployed on igStrategyBot.ts's mean_reversion_swing.
-      // Scoped to 'stocks' only, matching where this was actually reported —
-      // fx/japan225 weren't part of this complaint and have different stop
-      // economics (FX stops are typically far tighter in £/pt terms).
-      if (instance === 'stocks') {
+      // Extended to fx/japan225 too, 2026-08-31, per explicit request — applies
+      // uniformly to all three instances now rather than 'stocks' only. FX
+      // stops are typically tight enough that calcStake already clears this
+      // floor unaided most of the time (so it rarely changes anything there),
+      // but japan225's single-index stop is wide in the same way a stock's is,
+      // so the same reasoning applies there for real.
+      {
         const MIN_STAKE_LOW = 0.02, MIN_STAKE_HIGH = 0.06;
         const minStakePerPoint = MIN_STAKE_LOW + Math.max(0, Math.min(signal.conviction, 1)) * (MIN_STAKE_HIGH - MIN_STAKE_LOW);
         if (stake < minStakePerPoint) {
