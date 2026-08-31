@@ -75,7 +75,13 @@ const STOCK_UNDERLYINGS = [
   { shareEpic: 'UA.D.AMZN.CASH.IP',  name: 'Amazon', searchName: 'Daily Amazon.com Inc', finnhub: 'AMZN', strikeStep: 500 },
 ];
 const STOCK_STRATEGY = 'ig_options_daily_momentum';
-const STOCK_MAX_PREMIUM_GBP = 30;   // smaller than the index budget — same-day theta is the riskiest product in the fleet
+// Per-mode premium budgets — demo runs big deliberately (per explicit
+// request 2026-08-31, "its running on demo for now so put more on the
+// line": demo money exists to generate meaningful P&L data, and tiny
+// positions make even a good run look like noise). Live keeps the
+// conservative figures automatically — going live must never inherit demo
+// sizing by accident.
+const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 150, live: 30 }; // smaller than the index budget — same-day theta is the riskiest product in the fleet
 const STOCK_MAX_POSITIONS   = 2;
 const STOCK_MIN_MOVE_PCT    = 1.5;  // today's move must be a real one before the AI is even asked
 const STOCK_POLL_MS         = 15 * 60_000; // momentum is stale within hours — can't share the index loop's hourly cadence
@@ -83,10 +89,11 @@ const STOCK_MIN_RUNWAY_H    = 2;    // don't open with less than this left in th
 const STOCK_CLOSE_BUFFER_H  = 0.33; // force-close this close to the bell rather than let it settle
 
 // Premium budget per position — the literal maximum £ this trade can lose
-// (bought option, loss capped at premium × stake by construction). Sized in
-// the same league as the CFD bots' £20 risk/trade but slightly higher since,
-// unlike a CFD stop, this cap physically cannot slip or gap.
-const MAX_PREMIUM_GBP = 60;
+// (bought option, loss capped at premium × stake by construction). Live is
+// sized in the same league as the CFD bots' £20 risk/trade but slightly
+// higher since, unlike a CFD stop, this cap physically cannot slip or gap.
+// Demo runs bigger — see STOCK_PREMIUM_GBP's comment above.
+const INDEX_PREMIUM_GBP: Record<IgMode, number> = { demo: 250, live: 60 };
 const MAX_POSITIONS   = 2;        // across all underlyings; one per underlying enforced separately
 const MIN_CONFIRM_CONFIDENCE = 70; // same AI bar as every other confirmed entry in this codebase
 const POLL_MS = 60 * 60_000;       // hourly — the signal only changes on daily bars
@@ -440,12 +447,12 @@ async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
     if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;
 
     // Track-record sizing/gate — same quant layer as T212/mean-reversion.
-    let premiumBudget = MAX_PREMIUM_GBP;
+    let premiumBudget = INDEX_PREMIUM_GBP[mode];
     const edge = edgeSizing(journalMode(mode), STRATEGY);
     if (edge.skip) { addLog(mode, 'wait', u.name, `Skipped — ${edge.reason}`); continue; }
     if (edge.multiplier !== 1) {
       addLog(mode, 'info', u.name, edge.reason);
-      premiumBudget = Math.round(MAX_PREMIUM_GBP * edge.multiplier);
+      premiumBudget = Math.round(INDEX_PREMIUM_GBP[mode] * edge.multiplier);
     }
 
     const opt = await findOptionEpic(mode, session, u.optName, side, spot);
@@ -552,10 +559,10 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
     addLog(mode, 'info', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today → ${side.toUpperCase()} candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
     if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;
 
-    let premiumBudget = STOCK_MAX_PREMIUM_GBP;
+    let premiumBudget = STOCK_PREMIUM_GBP[mode];
     const edge = edgeSizing(journalMode(mode), STOCK_STRATEGY);
     if (edge.skip) { addLog(mode, 'wait', u.name, `[Daily] Skipped — ${edge.reason}`); continue; }
-    if (edge.multiplier !== 1) premiumBudget = Math.round(STOCK_MAX_PREMIUM_GBP * edge.multiplier);
+    if (edge.multiplier !== 1) premiumBudget = Math.round(STOCK_PREMIUM_GBP[mode] * edge.multiplier);
 
     // Chain discovery — same exact-name search as the index side, with the
     // daily chain's own naming ("Daily Apple Inc 26000 CALL") and today's
@@ -690,7 +697,7 @@ export function startIgOptionsBot(mode: IgMode): { ok: boolean; error?: string }
   if (s.stockPollTimer) clearTimeout(s.stockPollTimer);
   s.running = true;
   saveRunningFlag(mode, true);
-  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${MAX_PREMIUM_GBP}/position, ${MIN_DTE}-${MAX_DTE}d) + same-day stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_MAX_PREMIUM_GBP}/position, closed before the bell) — AI-confirmed entries on both`);
+  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d) + same-day stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_PREMIUM_GBP[mode]}/position, closed before the bell) — AI-confirmed entries on both`);
   void poll(mode);
   void stockPoll(mode);
   return { ok: true };
