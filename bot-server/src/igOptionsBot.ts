@@ -75,15 +75,33 @@ const UNDERLYINGS = [
 // no live weekly listing right now (its only "weekly" search hit was an
 // expired 2025 contract) so it's dropped rather than forced.
 //
+// Universe widened same day after the user pointed out IG's own "24 Hours"
+// share list has ~30 names, not just these 3 — checked every one with a
+// real weekly-chain + live-spread probe rather than adding names blind.
+// Meta/AMD/Palantir cleared the same liquidity bar as Apple/NVIDIA/Amazon
+// (5-8% spreads). Explicitly tried and rejected: Microsoft, Netflix,
+// Broadcom, Micron, Super Micro — no ON.D weekly chain exists for these at
+// all on IG right now, not a liquidity issue, just not offered. Also
+// rejected on liquidity despite a chain existing: Robinhood (39% spread),
+// GameStop (86%), MARA Holdings (92%), SoFi (100%, i.e. a dead market) —
+// same illiquid-meme-stock pattern that broke the original same-day
+// strategy; adding these would reintroduce the exact problem this
+// migration fixed. Alphabet/Coinbase/Salesforce/ARM sit in a borderline
+// 10-13% tier — left out for now to keep the universe at the same quality
+// bar as the rest, not a hard no if the user wants more breadth later.
+//
 // This still runs the same momentum+news idea proven on the T212 momentum
 // port — a real move today, AI-confirmed with real headlines — just
 // expressed with several days of runway instead of hours, which is a far
 // better match for "the news needs a bit of time to keep mattering" anyway.
 // Own journal key so /performance judges it separately.
 const STOCK_UNDERLYINGS = [
-  { shareEpic: 'UA.D.AAPL.CASH.IP',  name: 'Apple',  searchName: 'Weekly Apple Inc',      finnhub: 'AAPL', strikeStep: 250 },
-  { shareEpic: 'UC.D.NVDA.DAILY.IP', name: 'NVIDIA', searchName: 'Weekly NVIDIA Corp',    finnhub: 'NVDA', strikeStep: 250 },
-  { shareEpic: 'UA.D.AMZN.CASH.IP',  name: 'Amazon', searchName: 'Weekly Amazon.com Inc', finnhub: 'AMZN', strikeStep: 250 },
+  { shareEpic: 'UA.D.AAPL.CASH.IP',  name: 'Apple',    searchName: 'Weekly Apple Inc',                  finnhub: 'AAPL', strikeStep: 250 },
+  { shareEpic: 'UC.D.NVDA.DAILY.IP', name: 'NVIDIA',   searchName: 'Weekly NVIDIA Corp',                finnhub: 'NVDA', strikeStep: 250 },
+  { shareEpic: 'UA.D.AMZN.CASH.IP',  name: 'Amazon',   searchName: 'Weekly Amazon.com Inc',             finnhub: 'AMZN', strikeStep: 250 },
+  { shareEpic: 'UB.D.FB.DAILY.IP',   name: 'Meta',     searchName: 'Weekly Meta Platforms Inc',         finnhub: 'META', strikeStep: 250 },
+  { shareEpic: 'SA.D.AMD.DAILY.IP',  name: 'AMD',      searchName: 'Weekly Advanced Micro Devices Inc', finnhub: 'AMD',  strikeStep: 250 },
+  { shareEpic: 'SE.D.PLTRUS.DAILY.IP', name: 'Palantir', searchName: 'Weekly Palantir Technologies Inc', finnhub: 'PLTR', strikeStep: 250 },
 ];
 const STOCK_STRATEGY = 'ig_options_weekly_momentum';
 // Per-mode premium budgets — demo runs big deliberately (per explicit
@@ -142,6 +160,7 @@ type BotState = {
   log: LogEntry[];
   pollTimer: ReturnType<typeof setTimeout> | null;
   stockPollTimer: ReturnType<typeof setTimeout> | null; // faster loop for the weekly stock strategy's entries
+  fastMonitorTimer: ReturnType<typeof setTimeout> | null; // exits-only loop, both kinds — see fastPositionMonitor's own comment
   nextRunMs: number | null;
   lastPollTs: string | null;
   // One momentum entry per stock per day, even after that entry has closed —
@@ -186,7 +205,7 @@ function saveRunningFlag(mode: IgMode, running: boolean): void {
 function st(mode: IgMode): BotState {
   let s = states.get(mode);
   if (!s) {
-    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, nextRunMs: null, lastPollTs: null, lastStockEntryDay: {}, lastOptionEvalKey: {} };
+    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, fastMonitorTimer: null, nextRunMs: null, lastPollTs: null, lastStockEntryDay: {}, lastOptionEvalKey: {} };
     states.set(mode, s);
   }
   return s;
@@ -334,21 +353,39 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     // beyond the minimum-length gate, so reuse of the underlying's daily bars
     // here is only for that gate. DTE exit handled locally at the wider
     // EXIT_DTE (estimated monthly expiries — see its comment).
+    // Peak-retrace tuning — tightened 2026-08-31 per explicit request after
+    // positions that had shown real profit closed for far less than that:
+    // two things compounded. (1) This whole check used to only run every
+    // 15min (stock) / hourly (index) — a real intraday peak between checks
+    // was invisible to peakPlPct entirely, so lock-in couldn't react to a
+    // move it never saw (fixed by fastPositionMonitor's own faster loop,
+    // see its comment). (2) The retrace tolerance itself was loose — 40%
+    // giveback before acting meant a position that peaked +80% could
+    // legitimately ride to +48% before anything happened. Tightened to 30%
+    // and paired with more frequent checks so lock-in both sees the real
+    // peak and reacts closer to it. Fixed profit targets also raised
+    // (stock 60%->120%, index 75%->150%) — they're now a generous backstop
+    // for a genuine runaway winner, not the primary profit-protection
+    // mechanism; that job now belongs to the tighter trailing lock-in,
+    // matching this account's own donchianBreakoutSignal philosophy
+    // ("no fixed target by design — let winners run").
+    const RETRACE_TRIGGER_FRAC = 0.3;
+
     let closeReason: string | null = null;
     if (tr.kind === 'stock') {
       // Weekly option — a few days of runway, not hours. Same shape as the
       // index side's exit lifecycle, just a tighter DTE trigger since the
       // whole chain only spans about a week to begin with.
       if (dte <= STOCK_EXIT_DTE_DAYS) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid the weekly's own settlement/theta endgame`;
-      else if (plPct >= 60) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
-      else if (tr.peakPlPct >= 25 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= 0.4) {
+      else if (plPct >= 120) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
+      else if (tr.peakPlPct >= 25 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= RETRACE_TRIGGER_FRAC) {
         closeReason = `Momentum stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
       }
       else if (plPct <= -50) closeReason = `Premium stop hit: ${plPct.toFixed(1)}%`;
     }
     else if (dte <= EXIT_DTE) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid settlement/theta endgame`;
-    else if (plPct >= 75) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
-    else if (tr.peakPlPct >= 30 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= 0.4) {
+    else if (plPct >= 150) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
+    else if (tr.peakPlPct >= 30 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= RETRACE_TRIGGER_FRAC) {
       closeReason = `Stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
     }
     else if (plPct <= -50) closeReason = `Premium stop hit: ${plPct.toFixed(1)}%`;
@@ -768,17 +805,52 @@ async function poll(mode: IgMode): Promise<void> {
   }
 }
 
+// Fast exits-only loop — entries/scanning stay on their own cadences
+// (hourly index, 15min stock), but exit management (peak tracking, the
+// retrace lock-in, profit target, DTE, premium stop) now runs far more
+// often than either. Confirmed live 2026-08-31 this mattered: peakPlPct can
+// only reflect what a check actually observed, and a real intraday peak
+// between 15min/hourly checks was simply invisible to it — positions that
+// had shown real profit closed for far less because the lock-in never saw
+// the real high to trail from. No AI, one shared fetchFullPositions call
+// (covers every tracked position at once) — cheap enough to run this often.
+const FAST_MONITOR_MS = 2 * 60_000;
+
+async function fastPositionMonitor(mode: IgMode): Promise<void> {
+  const s = st(mode);
+  if (!s.running) return;
+
+  if (Object.keys(s.tracked).length > 0 && !isScannerQuietWeekend()) {
+    try {
+      const session = await getOrAuthSession(mode);
+      if (session) {
+        s.session = session;
+        const positions = await fetchFullPositions(session);
+        await manageExits(mode, session, positions);
+      }
+    } catch (e) {
+      addLog(mode, 'error', '—', `Fast monitor failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  if (s.running) {
+    s.fastMonitorTimer = setTimeout(() => { void fastPositionMonitor(mode); }, FAST_MONITOR_MS);
+  }
+}
+
 export function startIgOptionsBot(mode: IgMode): { ok: boolean; error?: string } {
   const creds = resolveCredentials(mode);
   if (!creds.apiKey) return { ok: false, error: `IG ${mode} credentials not configured` };
   const s = st(mode);
-  if (s.pollTimer)      clearTimeout(s.pollTimer);
-  if (s.stockPollTimer) clearTimeout(s.stockPollTimer);
+  if (s.pollTimer)        clearTimeout(s.pollTimer);
+  if (s.stockPollTimer)   clearTimeout(s.stockPollTimer);
+  if (s.fastMonitorTimer) clearTimeout(s.fastMonitorTimer);
   s.running = true;
   saveRunningFlag(mode, true);
-  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d) + weekly stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_PREMIUM_GBP[mode]}/position, closed ~1 day before expiry) — AI-confirmed entries on both`);
+  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d) + weekly stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_PREMIUM_GBP[mode]}/position, closed ~1 day before expiry) — AI-confirmed entries on both, exits monitored every ${FAST_MONITOR_MS / 60_000}min`);
   void poll(mode);
   void stockPoll(mode);
+  void fastPositionMonitor(mode);
   return { ok: true };
 }
 
@@ -786,8 +858,9 @@ export function stopIgOptionsBot(mode: IgMode): { ok: boolean } {
   const s = st(mode);
   s.running = false;
   saveRunningFlag(mode, false);
-  if (s.pollTimer)      { clearTimeout(s.pollTimer);      s.pollTimer      = null; }
-  if (s.stockPollTimer) { clearTimeout(s.stockPollTimer); s.stockPollTimer = null; }
+  if (s.pollTimer)        { clearTimeout(s.pollTimer);        s.pollTimer        = null; }
+  if (s.stockPollTimer)   { clearTimeout(s.stockPollTimer);   s.stockPollTimer   = null; }
+  if (s.fastMonitorTimer) { clearTimeout(s.fastMonitorTimer); s.fastMonitorTimer = null; }
   addLog(mode, 'info', '—', 'IG options bot stopped');
   return { ok: true };
 }
