@@ -912,8 +912,23 @@ export const STRATEGY_META: Record<StrategyName, {
   // RSI(2) + 200-day EMA trend filter — needs a full 210 daily bars (200 for
   // the EMA trend read + 10 buffer, matching meanReversionStrategy.ts's own
   // MIN_BARS_NEEDED). timeframe 'daily' is correct here (not 'intraday' like
-  // options_directional) — exits are broker-side bracket legs, not a code
-  // path that needs re-checking every 5min; only the max-hold-days backstop
-  // needs periodic checking, and that only needs once/day.
-  mean_reversion_swing: { label: 'Mean Reversion (RSI2+EMA200)', timeframe: 'daily', pollMs: 60 * 60_000, barPeriod: '1Day', barsNeeded: 210 },
+  // options_directional) — the entry signal itself only genuinely changes
+  // once/day (a new closed daily bar), and IG's allowance-limited candle API
+  // is never touched more than needed regardless of pollMs (evaluateEpic's
+  // free Yahoo pre-check gate absorbs the extra cycles). What DOES benefit
+  // from a shorter interval on the IG side specifically: igStrategyBot.ts's
+  // own profit-lock trailing-stop peak-tracking and stuck-loss caution flag,
+  // which only recompute once per poll cycle — same root-cause gap already
+  // found and fixed on the options bot (real intraday peaks between checks
+  // were invisible at 15min/hourly there too; fixed with a dedicated fast
+  // exits-only loop). Dropped 60→25min 2026-08-31 per explicit request as a
+  // simpler partial fix, short of that same fast-loop split. Not pushed
+  // lower than this: each cycle walks the full 72-epic mean_reversion_swing
+  // watchlist and re-fetches live IG positions after EVERY epic (deliberate,
+  // closes a same-cycle double-entry race — see the poll() loop's own
+  // comment), so 72+ IG calls back-to-back is a real per-cycle floor
+  // regardless of pollMs; VM logs already show sporadic fetchMarketDetails
+  // 403s (rate-limit-shaped) at the old 60min cadence, so tightening this a
+  // lot further raises those, not the entry signal's own quality.
+  mean_reversion_swing: { label: 'Mean Reversion (RSI2+EMA200)', timeframe: 'daily', pollMs: 25 * 60_000, barPeriod: '1Day', barsNeeded: 210 },
 };
