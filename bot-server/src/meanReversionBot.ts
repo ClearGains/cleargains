@@ -64,7 +64,15 @@ const AI_MONITORED: Record<MrInstance, boolean> = { fx: false, stocks: true, jap
 // scaling on top of this base.
 const MAX_RISK_GBP  = 20;  // £ risked per trade (base, before edgeSizing scales it)
 const MAX_POSITIONS = 3;   // per instance, not shared across instances
-const POLL_MS        = 60 * 60_000; // hourly — plenty for a strategy whose signal only changes once/day
+// Lowered from hourly to 15min per explicit request 2026-08-31 — the daily-
+// bar signal itself still only changes once a real day closes, so this
+// doesn't create new signals faster; what it does buy is reacting sooner
+// once a signal is already valid (previously could sit unentered for up to
+// an hour after qualifying) and catching a position needing management
+// sooner. Cheap to run this often: rules-only, no AI call in the loop
+// (AI_MONITORED gates only the once-daily safety check on 'stocks'), so this
+// is just more frequent Yahoo/IG market-detail fetches, not more AI spend.
+const POLL_MS        = 15 * 60_000;
 const AI_CHECK_EVERY_MS = 20 * 3_600_000; // ~once/day per open position, deliberately low-frequency
 
 type Tracked = {
