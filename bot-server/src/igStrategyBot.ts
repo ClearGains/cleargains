@@ -3382,7 +3382,21 @@ async function poll(mode: IgMode) {
         const idxPct = await getReferenceIndexPct();
         const corroborated = idxPct !== null && (isBuy ? idxPct <= -WEAK_OPEN_PCT * 0.6 : idxPct >= WEAK_OPEN_PCT * 0.6);
 
-        if (corroborated) {
+        // mean_reversion_swing's own thesis is built for a multi-day hold
+        // (buys AFTER a dip, MAX_HOLD_DAYS backstop is 10 days) — a same-day
+        // 0.5%/0.3%-corroborated move against it is exactly the ordinary
+        // noise the strategy is designed to sit through, not a reason to
+        // force-close within the first hour. Confirmed live 2026-08-31:
+        // UnitedHealth and Intel both got closed here for pennies (+£0.13,
+        // -£0.66) under two hours after opening, on nothing more than a
+        // routine red afternoon — the exact "closed off at little losses"
+        // pattern this guard's own header comment already names as the
+        // failure mode it exists to prevent, just reached via this same
+        // mechanism instead. Same fix already applied to the AI-close side
+        // today: mean-reversion positions keep the softer once-only
+        // stop-tighten below (still real protection) but are exempt from
+        // this guard's outright close.
+        if (corroborated && cfg.strategy !== 'mean_reversion_swing') {
           const woReason = `Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, market broadly weak too (${idxPct?.toFixed(2)}%) — closing before it compounds`;
           addLog(mode, 'exit', name, `⚠️ ${woReason}`);
           try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, woReason); journalExit(mode, cfg, p, woReason); }
