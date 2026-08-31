@@ -141,14 +141,18 @@ type BotState = {
   // product churns premium away. In-memory only: worst case a restart allows
   // one repeat entry, still AI-gated.
   lastStockEntryDay: Record<string, string>;
-  // What the AI was actually shown last time this stock was evaluated —
-  // headline set + roughly-rounded day-change. See scanStockEntries' own
-  // comment: confirmed live the AI call re-asked on IDENTICAL facts every
-  // 15min oscillates HOLD/SKIP with no new information, and the trade that
+  // What the AI was actually shown last time this underlying was evaluated
+  // — shared by both the daily stock strategy (keyed by finnhub symbol:
+  // headline set + rounded day-change) and the monthly index strategy
+  // (keyed by underlying epic: headline set + side only — the index side's
+  // technical numbers genuinely refresh every hourly bar, so only the news
+  // component needs this guard). See scanStockEntries' own comment:
+  // confirmed live the AI call re-asked on IDENTICAL facts every 15min
+  // oscillates HOLD/SKIP with no new information, and the trade that
   // eventually fires is whichever side of that noise it happened to land on,
   // not a real signal. In-memory only, resets on restart (worst case one
-  // extra AI call per stock, not a correctness issue).
-  lastStockEvalKey: Record<string, string>;
+  // extra AI call per underlying, not a correctness issue).
+  lastOptionEvalKey: Record<string, string>;
 };
 
 const states = new Map<IgMode, BotState>();
@@ -174,7 +178,7 @@ function saveRunningFlag(mode: IgMode, running: boolean): void {
 function st(mode: IgMode): BotState {
   let s = states.get(mode);
   if (!s) {
-    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, nextRunMs: null, lastPollTs: null, lastStockEntryDay: {}, lastStockEvalKey: {} };
+    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, nextRunMs: null, lastPollTs: null, lastStockEntryDay: {}, lastOptionEvalKey: {} };
     states.set(mode, s);
   }
   return s;
@@ -449,6 +453,15 @@ async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
     // underlying is SELL.
     let headlines: string[] = [];
     try { if (u.newsTicker) headlines = await fetchAllHeadlines(u.newsTicker, 8, u.name); } catch { /* prompt handles empty */ }
+
+    // Guard the news component the same way the daily stock strategy does
+    // (see lastOptionEvalKey's own comment) — the technical side (signal.reason)
+    // deliberately isn't in this key since it genuinely refreshes every
+    // hourly bar; only "same side, same headlines" gets skipped.
+    const evalKey = `${side}|${[...headlines].sort().join('~')}`;
+    if (s.lastOptionEvalKey[u.epic] === evalKey) continue;
+    s.lastOptionEvalKey[u.epic] = evalKey;
+
     const verdict = await askIgConfirmStockTrade({
       instrumentName: `${u.name} index (buying a ${side.toUpperCase()} option, ~1 month to expiry)`,
       suggestedDir: side === 'call' ? 'BUY' : 'SELL',
@@ -572,8 +585,8 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
     // count as "new") + the exact headline set. A genuinely fresh headline
     // or a further-extended move changes the key and gets a real fresh call.
     const evalKey = `${Math.round(dp * 2) / 2}|${[...headlines].sort().join('~')}`;
-    if (s.lastStockEvalKey[u.finnhub] === evalKey) continue;
-    s.lastStockEvalKey[u.finnhub] = evalKey;
+    if (s.lastOptionEvalKey[u.finnhub] === evalKey) continue;
+    s.lastOptionEvalKey[u.finnhub] = evalKey;
 
     const verdict = await askIgConfirmStockTrade({
       instrumentName: `${u.name} (same-day ${side.toUpperCase()} option expiring at today's close)`,
