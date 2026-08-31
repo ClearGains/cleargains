@@ -22,11 +22,14 @@
 // stop-loss could protect that isn't already capped by construction. This is
 // structurally safer than any CFD position this account runs.
 //
-// Daily (DO.D.*) same-day-expiry options exist too and are deliberately NOT
-// traded — a same-day expiry is nearly all theta with no room for a
-// multi-day trend thesis to play out, the exact mistake the 2026-08-21
-// Alpaca rebuild removed (its expiry window was widened 7-21d → 21-45d for
-// this reason; same numbers reused here).
+// Same-day (DO.D.*) options exist too and are deliberately NOT traded —
+// tried first for the stock strategy below, corrected same day after
+// hitting exactly the failure mode the 2026-08-21 Alpaca options rebuild
+// already taught this codebase to avoid (its own expiry window was widened
+// 7-21d → 21-45d for the identical reason): almost no time for a thesis to
+// play out, dead OTM/ATM liquidity, and theta bleeding a stalled-but-not-
+// wrong trade to zero within hours. See STOCK_UNDERLYINGS' own comment for
+// the full story and what it trades instead (a real weekly chain).
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -40,7 +43,7 @@ import { recordJournalEvent, type JournalMode } from './tradeJournal';
 import { askIgConfirmStockTrade, askMrSafety } from './openai';
 import { fetchAllHeadlines } from './newsFetch';
 import { fetchBarsWithFallback } from './yahooFetch';
-import { isScannerQuietWeekend, msUntilWeekendReopen, isNYSEOpen, hoursUntilNYSEClose } from './alpacaApi';
+import { isScannerQuietWeekend, msUntilWeekendReopen, isNYSEOpen } from './alpacaApi';
 import { edgeSizing } from './quant';
 
 // Underlyings whose IG option chains this bot scans. optName is the exact
@@ -56,43 +59,48 @@ const UNDERLYINGS = [
   { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40', optName: 'Germany 40',  newsTicker: null  as string | null },
 ];
 
-// ── Daily STOCK options (second strategy, added same day per explicit
+// ── WEEKLY stock options (second strategy, added same day per explicit
 // request — "part of the reason I wanted it setup on IG [was] to create
-// stock option positions"). Confirmed by live probe: IG's stock options
-// exist ONLY as same-day-expiry dailies (DO.D.AAPL.* etc., OPT_SHARES) —
-// no weekly/monthly chains at all — so the index strategy's weeks-long
-// trend thesis is structurally impossible here. Instead these run the
-// momentum+news idea already proven on the T212 momentum port: a real move
-// today, with news the AI judges supportive, expressed as a same-day
-// call/put whose premium is the whole risk. Entries only during the US
-// session with ≥2h of runway; always force-closed ~20min before the close
-// (a daily option not closed just settles at expiry — usually the worst
-// possible exit). Own journal key so /performance judges it separately.
+// stock option positions"). Originally built against IG's same-day dailies
+// (DO.D.AAPL.* etc.) — corrected same day after the user directly checked
+// IG's own UI and found a weekly chain the API search hadn't surfaced (a
+// plain "Apple Call" search's 50-result cap was entirely consumed by the
+// ~45-strike daily chain, silently hiding the much shorter weekly one from
+// every earlier probe). Confirmed directly against IG: the weekly chain
+// (ON.D.*, "Weekly Apple Inc 29000 CALL" etc.) exists for Apple/Amazon/
+// NVIDIA with real liquidity (1-6% spreads, vs 13-100%+ on the dailies —
+// same-day options were structurally the wrong product: dead OTM/ATM
+// markets, some strikes rejecting MARKET orders outright, and theta
+// bleeding a stalled-but-not-wrong thesis to zero within hours). Tesla has
+// no live weekly listing right now (its only "weekly" search hit was an
+// expired 2025 contract) so it's dropped rather than forced.
+//
+// This still runs the same momentum+news idea proven on the T212 momentum
+// port — a real move today, AI-confirmed with real headlines — just
+// expressed with several days of runway instead of hours, which is a far
+// better match for "the news needs a bit of time to keep mattering" anyway.
+// Own journal key so /performance judges it separately.
 const STOCK_UNDERLYINGS = [
-  { shareEpic: 'UA.D.AAPL.CASH.IP',  name: 'Apple',  searchName: 'Daily Apple Inc',      finnhub: 'AAPL', strikeStep: 500 },
-  { shareEpic: 'UD.D.TSLA.DAILY.IP', name: 'Tesla',  searchName: 'Daily Tesla Motors Inc', finnhub: 'TSLA', strikeStep: 500 },
-  { shareEpic: 'UC.D.NVDA.DAILY.IP', name: 'NVIDIA', searchName: 'Daily NVIDIA Corp',    finnhub: 'NVDA', strikeStep: 500 },
-  { shareEpic: 'UA.D.AMZN.CASH.IP',  name: 'Amazon', searchName: 'Daily Amazon.com Inc', finnhub: 'AMZN', strikeStep: 500 },
+  { shareEpic: 'UA.D.AAPL.CASH.IP',  name: 'Apple',  searchName: 'Weekly Apple Inc',      finnhub: 'AAPL', strikeStep: 250 },
+  { shareEpic: 'UC.D.NVDA.DAILY.IP', name: 'NVIDIA', searchName: 'Weekly NVIDIA Corp',    finnhub: 'NVDA', strikeStep: 250 },
+  { shareEpic: 'UA.D.AMZN.CASH.IP',  name: 'Amazon', searchName: 'Weekly Amazon.com Inc', finnhub: 'AMZN', strikeStep: 250 },
 ];
-const STOCK_STRATEGY = 'ig_options_daily_momentum';
+const STOCK_STRATEGY = 'ig_options_weekly_momentum';
 // Per-mode premium budgets — demo runs big deliberately (per explicit
 // request 2026-08-31, "its running on demo for now so put more on the
 // line": demo money exists to generate meaningful P&L data, and tiny
 // positions make even a good run look like noise). Live keeps the
 // conservative figures automatically — going live must never inherit demo
-// sizing by accident.
-// Demo raised again same day: confirmed live the ITM strikes (where the real
-// liquidity actually is — ATM/OTM dailies quoted a flat 0 bid, a dead
-// market, not just a wide one) cost £350-450 minimum at IG's own minimum
-// deal size, comfortably over the original £150 budget. Every rejection
-// logged as "over budget", never as illiquid, once ITM-first ordering was
-// in place — the budget itself was the last blocker to real fills.
-const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 600, live: 30 }; // smaller than the index budget — same-day theta is the riskiest product in the fleet
+// sizing by accident. Demo figure carried over from the daily-options era
+// (found by trial there: real liquidity sits at ITM strikes, which cost
+// more at IG's own minimum deal size than a small budget can afford) —
+// the weekly chain's premiums are in the same range, so the same budget
+// still applies.
+const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 600, live: 30 };
 const STOCK_MAX_POSITIONS   = 2;
 const STOCK_MIN_MOVE_PCT    = 1.5;  // today's move must be a real one before the AI is even asked
-const STOCK_POLL_MS         = 15 * 60_000; // momentum is stale within hours — can't share the index loop's hourly cadence
-const STOCK_MIN_RUNWAY_H    = 2;    // don't open with less than this left in the session
-const STOCK_CLOSE_BUFFER_H  = 0.33; // force-close this close to the bell rather than let it settle
+const STOCK_POLL_MS         = 15 * 60_000; // entries still want to catch intraday momentum promptly
+const STOCK_EXIT_DTE_DAYS   = 1;    // close with ~1 day left rather than ride into the weekly's own theta/settlement endgame
 
 // Premium budget per position — the literal maximum £ this trade can lose
 // (bought option, loss capped at premium × stake by construction). Live is
@@ -133,7 +141,7 @@ type BotState = {
   tracked: Record<string, Tracked>; // keyed by underlying epic — one option position per underlying
   log: LogEntry[];
   pollTimer: ReturnType<typeof setTimeout> | null;
-  stockPollTimer: ReturnType<typeof setTimeout> | null; // faster loop for the daily stock strategy
+  stockPollTimer: ReturnType<typeof setTimeout> | null; // faster loop for the weekly stock strategy's entries
   nextRunMs: number | null;
   lastPollTs: string | null;
   // One momentum entry per stock per day, even after that entry has closed —
@@ -328,12 +336,10 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     // EXIT_DTE (estimated monthly expiries — see its comment).
     let closeReason: string | null = null;
     if (tr.kind === 'stock') {
-      // Same-day option — timeline is hours, not weeks. Never allowed to
-      // reach settlement: force-closed near the bell regardless of P&L.
-      // null = outside NYSE hours, i.e. already past the bell somehow
-      // (restart gap) — close immediately rather than ride into settlement.
-      const runwayH = hoursUntilNYSEClose();
-      if (runwayH === null || runwayH <= STOCK_CLOSE_BUFFER_H) closeReason = `~${Math.round((runwayH ?? 0) * 60)}min to the close — closing rather than settling at expiry (${plPct >= 0 ? '+' : ''}${plPct.toFixed(1)}%)`;
+      // Weekly option — a few days of runway, not hours. Same shape as the
+      // index side's exit lifecycle, just a tighter DTE trigger since the
+      // whole chain only spans about a week to begin with.
+      if (dte <= STOCK_EXIT_DTE_DAYS) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid the weekly's own settlement/theta endgame`;
       else if (plPct >= 60) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
       else if (tr.peakPlPct >= 25 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= 0.4) {
         closeReason = `Momentum stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
@@ -360,18 +366,21 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     // Wall Street → DIA) get real input; the rest skip — an empty headline
     // list can't detect anything, so the call isn't worth spending.
     if (!closeReason) {
-      // Index positions only — a same-day stock position's whole life is
-      // shorter than this check's cadence, and its entry already weighed
-      // today's news minutes-to-hours ago.
-      const u = tr.kind === 'stock' ? undefined : UNDERLYINGS.find(x => x.epic === tr.underlyingEpic);
-      if (u?.newsTicker && Date.now() - (tr.lastAiCheckAt ?? 0) >= 20 * 3_600_000) {
+      // Now applies to both kinds — weekly stock positions (like index ones)
+      // can run several days, plenty of room for real news to break mid-hold.
+      const idxU   = tr.kind === 'stock' ? undefined : UNDERLYINGS.find(x => x.epic === tr.underlyingEpic);
+      const stockU = tr.kind === 'stock' ? STOCK_UNDERLYINGS.find(x => x.shareEpic === tr.underlyingEpic) : undefined;
+      const label      = idxU?.name ?? stockU?.name;
+      const newsTicker = idxU?.newsTicker ?? stockU?.finnhub;
+      const kindWord   = tr.kind === 'stock' ? '' : ' index';
+      if (label && newsTicker && Date.now() - (tr.lastAiCheckAt ?? 0) >= 20 * 3_600_000) {
         tr.lastAiCheckAt = Date.now();
         saveTracked(mode, s.tracked);
         try {
-          const headlines = await fetchAllHeadlines(u.newsTicker, 8, u.name);
+          const headlines = await fetchAllHeadlines(newsTicker, 8, label);
           if (headlines.length) {
             const verdict = await askMrSafety({
-              instrumentName: `${u.name} index (holding a bought ${tr.optionType.toUpperCase()} option)`,
+              instrumentName: `${label}${kindWord} (holding a bought ${tr.optionType.toUpperCase()} option)`,
               direction: tr.optionType === 'call' ? 'BUY' : 'SELL',
               entryLevel: tr.premium, currentLevel: bid ?? tr.premium,
               uplGbp: p.upl, heldDays: (Date.now() - tr.enteredAt) / 86_400_000, headlines,
@@ -532,12 +541,14 @@ async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
   }
 }
 
-// ── Daily stock options — momentum entries ──────────────────────────────────
+// ── Weekly stock options — momentum entries ─────────────────────────────────
 async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void> {
   const s = st(mode);
   if (countKind(s, 'stock') >= STOCK_MAX_POSITIONS) return;
-  const runwayH = hoursUntilNYSEClose();
-  if (!isNYSEOpen() || runwayH === null || runwayH < STOCK_MIN_RUNWAY_H) return;
+  // Still gated to NYSE hours — "today's move" only means something fresh
+  // while the market's actually open; no runway requirement anymore since
+  // the position isn't forced flat same-day (see STOCK_EXIT_DTE_DAYS).
+  if (!isNYSEOpen()) return;
 
   const apiKey = process.env.FINNHUB_API_KEY;
   if (!apiKey) return;
@@ -589,20 +600,22 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
     s.lastOptionEvalKey[u.finnhub] = evalKey;
 
     const verdict = await askIgConfirmStockTrade({
-      instrumentName: `${u.name} (same-day ${side.toUpperCase()} option expiring at today's close)`,
+      instrumentName: `${u.name} (buying a ${side.toUpperCase()} option, this week's expiry — a few trading days, not months)`,
       suggestedDir: side === 'call' ? 'BUY' : 'SELL',
-      ruleReasoning: `Moving ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today — momentum-continuation bet into the close, hours not weeks`,
+      ruleReasoning: `Moving ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today — momentum-continuation bet over the rest of this week`,
       ruleConfidence: Math.max(1, Math.min(10, Math.round(Math.abs(dp) * 2))),
       price: usdPrice, rsi: null, macdHist: null, lastCandles: [],
       headlines, dayChangePercent: dp,
-      horizon: 'intraday',
+      // Default 'swing' framing ("days to weeks") fits a several-day weekly
+      // option far better than 'intraday' did when this traded same-day
+      // dailies — see STOCK_UNDERLYINGS' own comment for why that changed.
     });
-    addLog(mode, 'info', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today → ${side.toUpperCase()} candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+    addLog(mode, 'info', u.name, `[Weekly] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today → ${side.toUpperCase()} candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
     if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;
 
     let premiumBudget = STOCK_PREMIUM_GBP[mode];
     const edge = edgeSizing(journalMode(mode), STOCK_STRATEGY);
-    if (edge.skip) { addLog(mode, 'wait', u.name, `[Daily] Skipped — ${edge.reason}`); continue; }
+    if (edge.skip) { addLog(mode, 'wait', u.name, `[Weekly] Skipped — ${edge.reason}`); continue; }
     if (edge.multiplier !== 1) premiumBudget = Math.round(STOCK_PREMIUM_GBP[mode] * edge.multiplier);
 
     // Chain discovery — same exact-name search as the index side, with the
@@ -645,7 +658,7 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       const optOffer = typeof optDetails?.offer === 'number' ? optDetails.offer : null;
       if (!optDetails || optOffer === null || optOffer <= 0 || optDetails.marketStatus !== 'TRADEABLE') continue;
       if (optBid !== null && (optOffer - optBid) / optOffer > STOCK_SPREAD_CAP) {
-        addLog(mode, 'wait', opt.name, `[Daily] Spread too wide (${optBid}/${optOffer}) — trying next strike`);
+        addLog(mode, 'wait', opt.name, `[Weekly] Spread too wide (${optBid}/${optOffer}) — trying next strike`);
         continue;
       }
 
@@ -653,14 +666,14 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       let stake = Math.max(minDeal, Math.floor((premiumBudget / optOffer) * 100) / 100);
       stake = Math.round(stake * 100) / 100;
       if (optOffer * stake > premiumBudget * 1.25) {
-        addLog(mode, 'wait', opt.name, `[Daily] Minimum stake costs £${(optOffer * stake).toFixed(0)} premium — over budget, trying next strike`);
+        addLog(mode, 'wait', opt.name, `[Weekly] Minimum stake costs £${(optOffer * stake).toFixed(0)} premium — over budget, trying next strike`);
         continue;
       }
 
       entered = await placeStockDailyOrder(mode, session, s, u, opt, side, stake, optOffer, dp, verdict.confidence, verdict.reason, today);
       if (entered) break;
     }
-    if (!entered && !anyFound) addLog(mode, 'wait', u.name, `[Daily] No same-day ${side} found near ${spot.toFixed(0)}`);
+    if (!entered && !anyFound) addLog(mode, 'wait', u.name, `[Weekly] No ${side} found near ${spot.toFixed(0)} in this week's chain`);
   }
 }
 
@@ -686,18 +699,18 @@ async function placeStockDailyOrder(
       side: 'long', qty: stake, price: premium,
       reason: `${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today, momentum continuation · AI ${confidence}%`, confidence,
     });
-    addLog(mode, 'enter', opt.name, `[Daily] BUY ${side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${stake}/pt · max loss £${(premium * stake).toFixed(2)} · closes before today's bell — ${aiReason}`);
+    addLog(mode, 'enter', opt.name, `[Weekly] BUY ${side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${stake}/pt · max loss £${(premium * stake).toFixed(2)} · expiry ${opt.expiry} — ${aiReason}`);
     return true;
   } catch (e) {
-    addLog(mode, 'error', opt.name, `[Daily] Order failed: ${e instanceof Error ? e.message : String(e)}`);
+    addLog(mode, 'error', opt.name, `[Weekly] Order failed: ${e instanceof Error ? e.message : String(e)}`);
     return false;
   }
 }
 
-// Faster loop for the same-day strategy — momentum is stale within hours,
-// and the force-close-before-the-bell exit needs sub-hourly checks. Entries
-// AND exits for stock-kind positions both live here; the hourly poll()
-// below still covers everything as a backstop via the shared manageExits.
+// Faster loop for the weekly stock strategy — momentum entries are stale
+// within hours even though the position itself can run several days.
+// Entries AND exits for stock-kind positions both live here; the hourly
+// poll() below still covers everything as a backstop via the shared manageExits.
 async function stockPoll(mode: IgMode): Promise<void> {
   const s = st(mode);
   if (!s.running) return;
@@ -712,7 +725,7 @@ async function stockPoll(mode: IgMode): Promise<void> {
         await scanStockEntries(mode, session);
       }
     } catch (e) {
-      addLog(mode, 'error', '—', `[Daily] Poll failed: ${e instanceof Error ? e.message : String(e)}`);
+      addLog(mode, 'error', '—', `[Weekly] Poll failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -763,7 +776,7 @@ export function startIgOptionsBot(mode: IgMode): { ok: boolean; error?: string }
   if (s.stockPollTimer) clearTimeout(s.stockPollTimer);
   s.running = true;
   saveRunningFlag(mode, true);
-  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d) + same-day stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_PREMIUM_GBP[mode]}/position, closed before the bell) — AI-confirmed entries on both`);
+  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d) + weekly stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_PREMIUM_GBP[mode]}/position, closed ~1 day before expiry) — AI-confirmed entries on both`);
   void poll(mode);
   void stockPoll(mode);
   return { ok: true };

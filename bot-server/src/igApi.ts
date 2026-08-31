@@ -255,6 +255,48 @@ export async function closePosition(
       // below settle it.
       break;
     }
+    // Same order-type restriction placeMarketOrder's optionFallbackOffer
+    // works around on the OPEN side — confirmed live 2026-08-31 it blocks
+    // CLOSING these option epics too, not just opening them (two demo
+    // positions got stuck unable to exit at all until this was added).
+    // Fetch the position's own live bid/offer and retry once as a
+    // marketable LIMIT — but NOT via the plain DELETE-with-body endpoint
+    // (attempt.url/attempt.method here): confirmed live that combination
+    // 404s outright for a LIMIT payload specifically (works fine for
+    // MARKET), most likely an infrastructure quirk with bodies on DELETE
+    // requests rather than anything IG's application layer would explain.
+    // The POST /positions/otc + _method:DELETE override variant handles a
+    // LIMIT close correctly — verified live, confirms CLOSED with a real
+    // fill — so the retry always targets that endpoint specifically,
+    // regardless of which attempt variant hit this error first.
+    if (d.errorCode === 'error.trading.otc.market-orders.not-supported-for-epic') {
+      const live = (await fetchFullPositions(session)).find(p => p.dealId === dealId);
+      const quote = closeDirection === 'SELL' ? live?.bid : live?.offer;
+      if (typeof quote === 'number' && quote > 0) {
+        const buffered = closeDirection === 'SELL' ? quote * 0.95 : quote * 1.05;
+        console.warn(`[igApi] MARKET close not supported for dealId=${dealId} — retrying as LIMIT @ ${buffered.toFixed(2)} via /positions/otc`);
+        // timeInForce: null is only valid for MARKET orders — IG rejected
+        // the first attempt at this with a generic "invalid request" until
+        // this was set. EXECUTE_AND_ELIMINATE = fill immediately at this
+        // price or better, or cancel outright — never leaves a resting
+        // order behind, matching what a "marketable limit" is supposed to do.
+        const limitPayload = { ...overridePayload, orderType: 'LIMIT', level: Math.round(buffered * 100) / 100, timeInForce: 'EXECUTE_AND_ELIMINATE' };
+        const limitHdrs: Record<string, string> = { ...headers(session, '1'), _method: 'DELETE' };
+        const lr = await fetch(`${base}/positions/otc`, {
+          method: 'POST', headers: limitHdrs,
+          body: JSON.stringify(limitPayload), signal: AbortSignal.timeout(10_000),
+        });
+        const ld = await lr.json().catch(() => ({} as { dealReference?: string; errorCode?: string })) as { dealReference?: string; errorCode?: string };
+        if (lr.ok) {
+          if (!ld.dealReference) return;
+          const confirm = await confirmClose(ld.dealReference);
+          if (confirm.dealStatus === 'ACCEPTED') return;
+          if (confirm.dealStatus === 'REJECTED') throw new Error(`closePosition LIMIT confirm REJECTED: ${confirm.reason ?? confirm.errorCode ?? 'unknown'}`);
+          break;
+        }
+        throw new Error(`closePosition LIMIT retry failed ${lr.status}: ${ld.errorCode ?? attempt.url}`);
+      }
+    }
     // 404 = endpoint doesn't exist, 405 = method not allowed — try next
     if (r.status !== 404 && r.status !== 405) throw new Error(`closePosition failed ${r.status}: ${d.errorCode ?? attempt.url}`);
     // otherwise fall through to next attempt
@@ -472,8 +514,14 @@ export async function placeMarketOrder(
       forceOpen: true, currencyCode,
     };
     if (asLimitLevel !== undefined) {
-      payload.orderType = 'LIMIT';
-      payload.level     = Math.round(asLimitLevel * 100) / 100;
+      payload.orderType   = 'LIMIT';
+      payload.level       = Math.round(asLimitLevel * 100) / 100;
+      // Required for non-MARKET orders — confirmed live on the close side
+      // (closePosition) that IG rejects a LIMIT order with a generic
+      // "invalid request" when this is left unset. EXECUTE_AND_ELIMINATE =
+      // fill immediately at this price or better, or cancel outright —
+      // matches what a "marketable limit" standing in for MARKET should do.
+      payload.timeInForce = 'EXECUTE_AND_ELIMINATE';
     } else {
       payload.orderType = 'MARKET';
     }
