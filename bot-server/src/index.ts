@@ -31,6 +31,7 @@ import { startAlpacaNewsStream, isNewsStreamEnabled, setNewsStreamEnabled } from
 import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212AiPaused, setT212PositionAiPaused, isMomentumAiGateEnabled, setMomentumAiGateEnabled } from './t212Bot';
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning } from './igOptionsBot';
+import { getPerformanceSummary } from './performance';
 import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
 
@@ -394,6 +395,11 @@ app.get('/mean-reversion/:instance/:mode/status', auth, (req: Request, res: Resp
   const instance = resolveMrInstance(req, res); if (!instance) return;
   const mode = resolveIgMode(req, res); if (!mode) return;
   void getMeanReversionBotStatus(instance, mode).then(status => res.json(status));
+});
+
+// ── Cross-bot performance summary (all journals rolled up) ──────────────────
+app.get('/performance', auth, (_req: Request, res: Response) => {
+  res.json(getPerformanceSummary());
 });
 
 // ── IG index-options bot (trend-following monthly options) ─────────────────

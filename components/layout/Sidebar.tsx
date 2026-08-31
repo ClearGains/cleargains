@@ -93,6 +93,7 @@ const navLinks = [
   { href: '/ig-options',       label: 'IG Options Bot',    icon: Bot         },
   { href: '/backtest',         label: 'Backtest Lab',      icon: FlaskConical },
   { href: '/bot-journal',      label: 'Bot Journal',       icon: NotebookPen },
+  { href: '/performance',      label: 'Bot Performance',   icon: BarChart3   },
   { href: '/reputable-stocks', label: 'Reputable Stocks',  icon: Star        },
   { href: '/future-leaders',   label: 'Future Leaders',    icon: Rocket      },
   { href: '/trade-log',        label: 'Trade Log',        icon: FileText    },
