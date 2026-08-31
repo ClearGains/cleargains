@@ -29,8 +29,19 @@ const RSI_PERIOD_WIN = 20;   // window fed into calcRsi2 (matches bot_ig.py's cl
 const RSI_BUY        = 10;   // buy when RSI(2) drops below this (oversold dip in an uptrend)
 const RSI_SELL       = 90;   // sell when RSI(2) rises above this (overbought bounce in a downtrend)
 const ATR_PERIOD     = 14;
-export const ATR_STOP_MULT = 2;
-export const ATR_TP_MULT   = 4;   // 1:2 reward:risk — needs only ~33% win rate to break even
+// Widened 2026-08-31 per explicit request — a 2×ATR stop sits close enough
+// to entry that ordinary intraday noise (a wick, a brief dip) can touch it
+// and lock in a loss on a position that would otherwise have recovered;
+// this strategy already expects a real pullback right after entry (it buys
+// an oversold dip), so a tight stop is fighting its own thesis. 3×ATR
+// gives real room for that to happen before treating it as genuinely
+// wrong. TP widened to keep the same 1:2 reward:risk ratio intact rather
+// than let the win/loss math drift. Note this is NOT the fix for small
+// stakes — calcStake = risk ÷ stopDist, so a WIDER stop actually shrinks
+// the resulting £/pt for the same risk budget. That's a separate,
+// deliberate lever: maxRiskGbp itself, raised where each bot configures it.
+export const ATR_STOP_MULT = 3;
+export const ATR_TP_MULT   = 6;   // 1:2 reward:risk — needs only ~33% win rate to break even
 export const MAX_HOLD_DAYS = 10;  // backstop, not a target — matches backtest_ig.py
 export const MIN_BARS_NEEDED = EMA_TREND + 10;
 
