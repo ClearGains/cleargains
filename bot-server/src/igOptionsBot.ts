@@ -81,7 +81,13 @@ const STOCK_STRATEGY = 'ig_options_daily_momentum';
 // positions make even a good run look like noise). Live keeps the
 // conservative figures automatically — going live must never inherit demo
 // sizing by accident.
-const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 150, live: 30 }; // smaller than the index budget — same-day theta is the riskiest product in the fleet
+// Demo raised again same day: confirmed live the ITM strikes (where the real
+// liquidity actually is — ATM/OTM dailies quoted a flat 0 bid, a dead
+// market, not just a wide one) cost £350-450 minimum at IG's own minimum
+// deal size, comfortably over the original £150 budget. Every rejection
+// logged as "over budget", never as illiquid, once ITM-first ordering was
+// in place — the budget itself was the last blocker to real fills.
+const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 600, live: 30 }; // smaller than the index budget — same-day theta is the riskiest product in the fleet
 const STOCK_MAX_POSITIONS   = 2;
 const STOCK_MIN_MOVE_PCT    = 1.5;  // today's move must be a real one before the AI is even asked
 const STOCK_POLL_MS         = 15 * 60_000; // momentum is stale within hours — can't share the index loop's hourly cadence
