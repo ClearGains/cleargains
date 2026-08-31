@@ -566,65 +566,90 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
 
     // Chain discovery — same exact-name search as the index side, with the
     // daily chain's own naming ("Daily Apple Inc 26000 CALL") and today's
-    // exact expiry.
+    // exact expiry. Strike order is ITM first, then ATM-adjacent, then one
+    // OTM — confirmed live (Amazon, first qualifying signal this strategy
+    // ever produced, AI 85%): the nearest-OTM daily quoted 22.7/34.7, a
+    // ~35% spread that means the option must gain ~50% just to break even.
+    // Wide percentage spreads are structural on these tiny-premium dailies,
+    // and the OTM strike is where they're at their worst; one step ITM the
+    // premium is several times larger, the same absolute spread is a far
+    // smaller percentage, and the higher delta actually suits a
+    // momentum-continuation bet better anyway. Each candidate is priced and
+    // the first one passing the spread/budget checks is taken, instead of
+    // hard-failing the whole stock on the single worst strike's quote.
     const sideWord = side === 'call' ? 'CALL' : 'PUT';
+    const dir = side === 'call' ? 1 : -1;
     const base = side === 'call' ? Math.ceil(spot / u.strikeStep) * u.strikeStep : Math.floor(spot / u.strikeStep) * u.strikeStep;
-    let opt: { epic: string; name: string; strike: number; expiry: string; expiryMs: number } | null = null;
-    for (const strike of [base, base + u.strikeStep * (side === 'call' ? 1 : -1)]) {
+    const STOCK_SPREAD_CAP = 0.35; // wider than the index cap — structural on dailies, see above
+    let entered = false;
+    let anyFound = false;
+
+    for (const strike of [base - u.strikeStep * dir, base, base + u.strikeStep * dir]) {
       await new Promise(r => setTimeout(r, 350));
       let results;
       try { results = await searchMarkets(session, `${u.searchName} ${strike} ${sideWord}`); }
       catch { continue; }
       const nameRe = new RegExp(`^${u.searchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ${strike} ${sideWord}$`, 'i');
       const m = results.find(r => r.instrumentType === 'OPT_SHARES' && nameRe.test(r.name));
-      if (m) {
-        const expiryMs = parseExpiryMs(m.expiry);
-        // Must genuinely be today's daily — a stale/next-session chain would
-        // break the whole force-close-before-the-bell exit model.
-        if (expiryMs !== null && expiryMs - Date.now() < 36 * 3_600_000) {
-          opt = { epic: m.epic, name: m.name, strike, expiry: m.expiry, expiryMs };
-          break;
-        }
+      if (!m) continue;
+      const expiryMs = parseExpiryMs(m.expiry);
+      // Must genuinely be today's daily — a stale/next-session chain would
+      // break the whole force-close-before-the-bell exit model.
+      if (expiryMs === null || expiryMs - Date.now() >= 36 * 3_600_000) continue;
+      anyFound = true;
+      const opt = { epic: m.epic, name: m.name, strike, expiry: m.expiry, expiryMs };
+
+      const optDetails = (await fetchMarketDetails(session, [opt.epic])).get(opt.epic);
+      const optBid   = typeof optDetails?.bid   === 'number' ? optDetails.bid   : null;
+      const optOffer = typeof optDetails?.offer === 'number' ? optDetails.offer : null;
+      if (!optDetails || optOffer === null || optOffer <= 0 || optDetails.marketStatus !== 'TRADEABLE') continue;
+      if (optBid !== null && (optOffer - optBid) / optOffer > STOCK_SPREAD_CAP) {
+        addLog(mode, 'wait', opt.name, `[Daily] Spread too wide (${optBid}/${optOffer}) — trying next strike`);
+        continue;
       }
-    }
-    if (!opt) { addLog(mode, 'wait', u.name, `[Daily] No same-day ${side} found near ${spot.toFixed(0)}`); continue; }
 
-    const optDetails = (await fetchMarketDetails(session, [opt.epic])).get(opt.epic);
-    const optBid   = typeof optDetails?.bid   === 'number' ? optDetails.bid   : null;
-    const optOffer = typeof optDetails?.offer === 'number' ? optDetails.offer : null;
-    if (!optDetails || optOffer === null || optOffer <= 0 || optDetails.marketStatus !== 'TRADEABLE') continue;
-    if (optBid !== null && (optOffer - optBid) / optOffer > 0.25) {
-      addLog(mode, 'wait', opt.name, `[Daily] Spread too wide (${optBid}/${optOffer}) — skipping`);
-      continue;
-    }
+      const minDeal = optDetails.minDealSize || 0.1;
+      let stake = Math.max(minDeal, Math.floor((premiumBudget / optOffer) * 100) / 100);
+      stake = Math.round(stake * 100) / 100;
+      if (optOffer * stake > premiumBudget * 1.25) {
+        addLog(mode, 'wait', opt.name, `[Daily] Minimum stake costs £${(optOffer * stake).toFixed(0)} premium — over budget, trying next strike`);
+        continue;
+      }
 
-    const minDeal = optDetails.minDealSize || 0.1;
-    let stake = Math.max(minDeal, Math.floor((premiumBudget / optOffer) * 100) / 100);
-    stake = Math.round(stake * 100) / 100;
-    if (optOffer * stake > premiumBudget * 1.25) {
-      addLog(mode, 'wait', opt.name, `[Daily] Minimum stake costs £${(optOffer * stake).toFixed(0)} premium — over budget, skipping`);
-      continue;
+      entered = await placeStockDailyOrder(mode, session, s, u, opt, side, stake, optOffer, dp, verdict.confidence, verdict.reason, today);
+      if (entered) break;
     }
+    if (!entered && !anyFound) addLog(mode, 'wait', u.name, `[Daily] No same-day ${side} found near ${spot.toFixed(0)}`);
+  }
+}
 
-    try {
-      const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'GBP', false, opt.expiry);
-      const premium = result.level || optOffer;
-      s.lastStockEntryDay[u.finnhub] = today;
-      s.tracked[u.shareEpic] = {
-        dealId: result.dealId, epic: opt.epic, underlyingEpic: u.shareEpic, name: opt.name,
-        optionType: side, strike: opt.strike, expiry: opt.expiry, expiryMs: opt.expiryMs,
-        premium, size: stake, enteredAt: Date.now(), peakPlPct: 0, kind: 'stock',
-      };
-      saveTracked(mode, s.tracked);
-      recordJournalEvent({
-        mode: journalMode(mode), event: 'entry', symbol: opt.name, strategy: STOCK_STRATEGY,
-        side: 'long', qty: stake, price: premium,
-        reason: `${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today, momentum continuation · AI ${verdict.confidence}%`, confidence: verdict.confidence,
-      });
-      addLog(mode, 'enter', opt.name, `[Daily] BUY ${side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${stake}/pt · max loss £${(premium * stake).toFixed(2)} · closes before today's bell — ${verdict.reason}`);
-    } catch (e) {
-      addLog(mode, 'error', opt.name, `[Daily] Order failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+async function placeStockDailyOrder(
+  mode: IgMode, session: IGSession, s: BotState,
+  u: typeof STOCK_UNDERLYINGS[number],
+  opt: { epic: string; name: string; strike: number; expiry: string; expiryMs: number },
+  side: 'call' | 'put', stake: number, optOffer: number, dp: number,
+  confidence: number, aiReason: string, today: string,
+): Promise<boolean> {
+  try {
+    const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'GBP', false, opt.expiry);
+    const premium = result.level || optOffer;
+    s.lastStockEntryDay[u.finnhub] = today;
+    s.tracked[u.shareEpic] = {
+      dealId: result.dealId, epic: opt.epic, underlyingEpic: u.shareEpic, name: opt.name,
+      optionType: side, strike: opt.strike, expiry: opt.expiry, expiryMs: opt.expiryMs,
+      premium, size: stake, enteredAt: Date.now(), peakPlPct: 0, kind: 'stock',
+    };
+    saveTracked(mode, s.tracked);
+    recordJournalEvent({
+      mode: journalMode(mode), event: 'entry', symbol: opt.name, strategy: STOCK_STRATEGY,
+      side: 'long', qty: stake, price: premium,
+      reason: `${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today, momentum continuation · AI ${confidence}%`, confidence,
+    });
+    addLog(mode, 'enter', opt.name, `[Daily] BUY ${side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${stake}/pt · max loss £${(premium * stake).toFixed(2)} · closes before today's bell — ${aiReason}`);
+    return true;
+  } catch (e) {
+    addLog(mode, 'error', opt.name, `[Daily] Order failed: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
   }
 }
 
