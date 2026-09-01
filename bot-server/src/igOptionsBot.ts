@@ -786,7 +786,20 @@ async function placeStockOrder(
   const dayThrottleKey = kind === 'stock-daily' ? `${u.finnhub}:daily` : u.finnhub;
   const strategy     = kind === 'stock-daily' ? STOCK_DAILY_STRATEGY : STOCK_STRATEGY;
   try {
-    const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'GBP', false, opt.expiry, optOffer);
+    // 'USD', not 'GBP' — confirmed live 2026-09-01 by querying IG's own
+    // /markets/{epic} directly: this whole US-stock weekly/daily options
+    // chain (ON.D.* — Apple/NVIDIA/Amazon/Meta/AMD/Palantir, both weekly
+    // and same-day) only lists USD in its `currencies` array, no GBP
+    // option at all. Every single order this strategy had ever placed
+    // since going live 2026-08-31 was rejected with
+    // INSTRUMENT_NOT_TRADEABLE_IN_THIS_CURRENCY — confirmed via the trade
+    // journal: zero entry events ever recorded for ig_options_weekly_momentum,
+    // only exits (of positions opened before the pivot, under the old
+    // same-day system). The strategy has been entirely non-functional this
+    // whole time, silently. IG handles the GBP-account/USD-instrument
+    // conversion itself once given the currency the instrument actually
+    // supports — no other change needed here for the order to go through.
+    const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'USD', false, opt.expiry, optOffer);
     const premium = result.level || optOffer;
     s.lastStockEntryDay[dayThrottleKey] = today;
     s.tracked[trackedKey] = {
