@@ -1026,8 +1026,20 @@ export async function startT212Bot(mode: T212Mode): Promise<{ ok: boolean; error
   saveRunningFlag(mode, true);
   addLog(mode, 'info', '—', `T212 ISA bot started — £${T212_MIN_POSITION_GBP}-${T212_MAX_POSITION_GBP}/position, £${T212_TOTAL_BUDGET_GBP} total budget, checking every ${(T212_POLL_MS / 3_600_000).toFixed(0)}h — long-term trend+news selection, not swing timing`);
   addLog(mode, 'info', '—', `[Momentum] Second strategy running alongside — £${MOMENTUM_MIN_POSITION_GBP}-${MOMENTUM_MAX_POSITION_GBP}/position, £${MOMENTUM_TOTAL_BUDGET_GBP} total budget, checking every ${(MOMENTUM_POLL_MS / 60_000).toFixed(0)}m — today's move+volume+news, AI-confirmed`);
-  void poll(mode);
-  void pollMomentum(mode);
+  // Staggered, delayed first poll — added 2026-09-01 after a T212 429
+  // surfaced repeatedly during a stretch of frequent bot-server restarts
+  // (each restart calls startT212Bot again). Both polls used to fire
+  // immediately and simultaneously on every start with zero delay, unlike
+  // igStrategyBot.ts's own startIgStrategyBot (which waits 10s specifically
+  // because hitting the API again immediately after auth was intermittently
+  // getting rejected) — every restart doubled up two independent T212 calls
+  // (poll's getPortfolio + pollMomentum's getPortfolio/getOrders) in the
+  // same instant, on top of whatever other bots' own restart-triggered
+  // calls were also firing right then. 10s/15s gives T212's own auth/session
+  // calls room to clear first, and staggers the two polls apart from each
+  // other rather than both landing on the same tick.
+  setTimeout(() => { void poll(mode); }, 10_000);
+  setTimeout(() => { void pollMomentum(mode); }, 15_000);
   return { ok: true };
 }
 
