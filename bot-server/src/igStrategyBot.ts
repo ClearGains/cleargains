@@ -3350,11 +3350,22 @@ async function manageSwingExits(mode: IgMode, cfg: IgStrategyConfig, positions: 
         // routine red afternoon — the exact "closed off at little losses"
         // pattern this guard's own header comment already names as the
         // failure mode it exists to prevent, just reached via this same
-        // mechanism instead. Same fix already applied to the AI-close side
-        // today: mean-reversion positions keep the softer once-only
-        // stop-tighten below (still real protection) but are exempt from
-        // this guard's outright close.
-        if (corroborated && cfg.strategy !== 'mean_reversion_swing') {
+        // mechanism instead. Originally kept a softer once-only stop-tighten
+        // for mean-reversion positions instead of an outright close — but
+        // confirmed live 2026-09-01 that tighten was doing the same damage
+        // by a different route: Intel got tightened toward breakeven after
+        // an ordinary red day, then closed for ~£0.00 within the next poll
+        // once price ticked back through the now-much-closer stop — same
+        // "closed off at a little loss/nothing before the thesis had a real
+        // chance to play out" outcome, just reached via the stop instead of
+        // a direct close. Removed entirely for mean_reversion_swing now that
+        // it has a more deliberate exit instead — meanReversionBot.ts's own
+        // trendStillIntact check (see that file), which closes only when the
+        // actual 200-day trend thesis this position was opened on has
+        // genuinely broken, not on an ordinary same-day wobble.
+        if (cfg.strategy === 'mean_reversion_swing') {
+          // No action at all — see comment above.
+        } else if (corroborated) {
           const woReason = `Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, market broadly weak too (${idxPct?.toFixed(2)}%) — closing before it compounds`;
           addLog(mode, 'exit', name, `⚠️ ${woReason}`);
           try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, woReason); journalExit(mode, cfg, p, woReason); }
