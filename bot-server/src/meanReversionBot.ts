@@ -17,7 +17,7 @@ import {
   placeMarketOrder, closePosition as igClosePos, fetchMarketDetails, fetchClosedTransactions,
   type IGSession, type FullPosition,
 } from './igApi';
-import { getMeanReversionSignal, type MrBar, type MrSignal, MAX_HOLD_DAYS } from './meanReversionStrategy';
+import { getMeanReversionSignal, trendStillIntact, type MrBar, type MrSignal, MAX_HOLD_DAYS } from './meanReversionStrategy';
 import { emaCrossoverSignal } from './alpacaStrategies';
 import { epicName } from './igStrategyScanner';
 import { resolveCredentials, calcStake, type IgMode } from './igStrategyBot';
@@ -221,6 +221,50 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
         continue;
       } catch (e) {
         addLog(instance, mode, 'error', epicName(epic), `Max-hold close failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // Trend-invalidation exit — closes immediately once price has
+    // decisively broken the SAME 200-day trend line that justified this
+    // position's entry (a BUY only ever fires when price > EMA200, a SELL
+    // only when price < EMA200 — see meanReversionStrategy.ts's own
+    // trendStillIntact comment). Per explicit request 2026-09-01: "a red
+    // candle... is more a case you need to stop a loss rather than waiting
+    // for something to bounce back into profit" — some red candles really
+    // do mean the thesis has failed, not just an ordinary bad day to sit
+    // through. Skipped for japan225, which no longer runs mean-reversion
+    // (switched to EMA crossover trend-follow — no 200-day thesis to
+    // invalidate). Only implemented here, not also in igStrategyBot.ts's
+    // account-wide exit loop — this file already tracks each position's own
+    // entry direction and has the correctly-scaled bar-fetch machinery
+    // ready from entry time; duplicating it there would risk both bots
+    // racing to close the same position (same reasoning as not porting the
+    // profit-lock trail there).
+    if (instance !== 'japan225') {
+      try {
+        const isAlpacaCovered = epic in EPIC_TO_ALPACA;
+        const igMid = typeof p.bid === 'number' && typeof p.offer === 'number' ? (p.bid + p.offer) / 2 : undefined;
+        const raw = await fetchBarsWithFallback(epic, '2y', {
+          alpacaTimeframe: '1Day', yahooInterval: '1d',
+          liveReferenceLevel: !isAlpacaCovered ? igMid : undefined,
+        });
+        const intact = raw?.length ? trendStillIntact(toMrBars(raw), tr.direction) : null;
+        if (intact === false) {
+          await igClosePos(session, p.dealId, p.direction, p.size);
+          const notional = p.level * p.size;
+          recordJournalEvent({
+            mode: journalMode(mode), event: 'exit', symbol: epicName(epic), strategy: strategyKey(instance),
+            side: p.direction === 'BUY' ? 'long' : 'short', qty: p.size, price: p.level,
+            reason: 'Trend invalidated — price closed on the wrong side of its own 200-day average, the same line that justified this entry',
+            plUsd: p.upl, plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
+          });
+          addLog(instance, mode, 'exit', epicName(epic), `⚠️ Trend invalidated — closed, £${p.upl.toFixed(2)} (price broke back across its own 200-day average)`);
+          delete s.tracked[epic];
+          saveTracked(instance, mode, s.tracked);
+          continue;
+        }
+      } catch (e) {
+        addLog(instance, mode, 'error', epicName(epic), `Trend check failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 

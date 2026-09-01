@@ -104,6 +104,32 @@ function calcAtrFromBars(bars: MrBar[], period = ATR_PERIOD): number | null {
   return sum / period;
 }
 
+// Trend-invalidation check — added 2026-09-01 per explicit request: "a red
+// candle... is more a case you need to stop a loss rather than waiting for
+// something to bounce back into profit." This strategy only ever enters
+// because price sits on one side of its 200-day trend average (BUY only
+// when price > EMA200, SELL only when price < EMA200) — that relationship
+// IS the thesis, not a footnote. If price later closes decisively on the
+// WRONG side of that same average, the reason the position was opened no
+// longer holds, and continuing to wait for the far-out ATR stop is waiting
+// on a bounce the strategy's own logic no longer expects. Deliberately NOT
+// triggered by an ordinary same-day red candle or routine noise (that
+// problem was already fixed elsewhere this session) — only a genuine,
+// decisive break of the SAME line the entry was conditioned on. A small
+// buffer (0.5%) keeps this from firing on price sitting essentially right
+// on the line. Returns null (act as "don't know", never close) when there
+// isn't enough data to compute EMA200 at all.
+export function trendStillIntact(bars: MrBar[], direction: 'BUY' | 'SELL'): boolean | null {
+  if (bars.length < MIN_BARS_NEEDED) return null;
+  const closes = bars.map(b => b.close);
+  const emaVals = emaSmaSeeded(closes, EMA_TREND);
+  if (!emaVals.length) return null;
+  const currentEma = emaVals[emaVals.length - 1];
+  const price       = closes[closes.length - 1];
+  const buffer      = currentEma * 0.005;
+  return direction === 'BUY' ? price > currentEma - buffer : price < currentEma + buffer;
+}
+
 // Pure decision function — no I/O, no state. Given a full daily-bar history
 // (oldest first), returns the entry signal or HOLD. Exit/hold-management
 // (stop/TP already placed with the broker at entry, MAX_HOLD_DAYS backstop)
