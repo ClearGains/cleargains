@@ -236,6 +236,28 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
       }
     }
 
+    // Shared bar fetch for both checks below — trend-invalidation (mean-
+    // reversion instances only) and the same-day big-adverse-candle exit
+    // (every instance — thesis-agnostic, pure price action). Bug fixed
+    // 2026-09-01: these two used to share one `if (!EMA_TREND_INSTANCES...)`
+    // gate, which accidentally also skipped the big-candle exit for
+    // japan225/stocks even though its reasoning has nothing to do with the
+    // mean-reversion thesis — confirmed by user question after a Japan 225
+    // SELL opened right after what looked like an already-happened big move,
+    // exactly the scenario this exit exists to catch.
+    let mrBars: MrBar[] | null = null;
+    try {
+      const isAlpacaCovered = epic in EPIC_TO_ALPACA;
+      const igMid = typeof p.bid === 'number' && typeof p.offer === 'number' ? (p.bid + p.offer) / 2 : undefined;
+      const raw = await fetchBarsWithFallback(epic, '2y', {
+        alpacaTimeframe: '1Day', yahooInterval: '1d',
+        liveReferenceLevel: !isAlpacaCovered ? igMid : undefined,
+      });
+      mrBars = raw?.length ? toMrBars(raw) : null;
+    } catch (e) {
+      addLog(instance, mode, 'error', epicName(epic), `Trend/candle bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     // Trend-invalidation exit — closes immediately once price has
     // decisively broken the SAME 200-day trend line that justified this
     // position's entry (a BUY only ever fires when price > EMA200, a SELL
@@ -258,16 +280,9 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
     // entry time; duplicating it there would risk both bots racing to close
     // the same position (same reasoning as not porting the profit-lock
     // trail there).
-    if (!EMA_TREND_INSTANCES.has(instance)) {
+    if (!EMA_TREND_INSTANCES.has(instance) && mrBars) {
       try {
-        const isAlpacaCovered = epic in EPIC_TO_ALPACA;
-        const igMid = typeof p.bid === 'number' && typeof p.offer === 'number' ? (p.bid + p.offer) / 2 : undefined;
-        const raw = await fetchBarsWithFallback(epic, '2y', {
-          alpacaTimeframe: '1Day', yahooInterval: '1d',
-          liveReferenceLevel: !isAlpacaCovered ? igMid : undefined,
-        });
-        const mrBars = raw?.length ? toMrBars(raw) : null;
-        const intact = mrBars ? trendStillIntact(mrBars, tr.direction) : null;
+        const intact = trendStillIntact(mrBars, tr.direction);
         if (intact === false) {
           await igClosePos(session, p.dealId, p.direction, p.size);
           const notional = p.level * p.size;
@@ -282,37 +297,48 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
           saveTracked(instance, mode, s.tracked);
           continue;
         }
+      } catch (e) {
+        addLog(instance, mode, 'error', epicName(epic), `Trend check failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
 
-        // Same-day large-adverse-move exit — per explicit follow-up: news
-        // alone doesn't catch a genuinely bad day with no news behind it at
-        // all (confirmed live: this exact gap forced a manual close on
-        // Intel), and "the realtime price will be necessary" — uses IG's own
-        // live quote, not a possibly-stale daily bar field. See
-        // hadBigAdverseCandleToday's own comment for the ATR-scaled
-        // reasoning (ruling out a flat-percentage threshold, which is what
-        // made the old weak-open guard fire on ordinary noise). Only acts
-        // when the position is ALSO currently at a loss — a big move still
-        // in its favor is not a reason to panic out of it.
-        if (p.upl < 0 && mrBars) {
-          const livePrice = p.direction === 'BUY' ? p.bid : p.offer;
-          const bigMove = hadBigAdverseCandleToday(mrBars, tr.direction, livePrice);
-          if (bigMove === true) {
-            await igClosePos(session, p.dealId, p.direction, p.size);
-            const notional = p.level * p.size;
-            recordJournalEvent({
-              mode: journalMode(mode), event: 'exit', symbol: epicName(epic), strategy: strategyKey(instance),
-              side: p.direction === 'BUY' ? 'long' : 'short', qty: p.size, price: p.level,
-              reason: 'Unusually large adverse move today (well outside this stock\'s normal daily range) — cutting the loss rather than waiting for the wide stop',
-              plUsd: p.upl, plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
-            });
-            addLog(instance, mode, 'exit', epicName(epic), `⚠️ Big adverse move today — closed, £${p.upl.toFixed(2)} (well outside its normal daily range)`);
-            delete s.tracked[epic];
-            saveTracked(instance, mode, s.tracked);
-            continue;
-          }
+    // Same-day large-adverse-move exit — applies to EVERY instance,
+    // including EMA-trend ones (see the bug-fix comment above). Per
+    // explicit follow-up: news alone doesn't catch a genuinely bad day with
+    // no news behind it at all (confirmed live: this exact gap forced a
+    // manual close on Intel), and "the realtime price will be necessary" —
+    // uses IG's own live quote, not a possibly-stale daily bar field. See
+    // hadBigAdverseCandleToday's own comment for the ATR-scaled reasoning
+    // (ruling out a flat-percentage threshold, which is what made the old
+    // weak-open guard fire on ordinary noise). Only acts when the position
+    // is ALSO currently at a loss — a big move still in its favor is not a
+    // reason to panic out of it. This is also the direct answer to "the
+    // large red candle already happened, isn't entering now risky" — a
+    // crossover signal is inherently a LAGGING confirmation (it can only
+    // fire after the move that caused it), so yes, some of the move is
+    // already priced in by the time it triggers; this exit is what actually
+    // protects against having entered right as an already-large move
+    // exhausts and reverses, rather than the wide ATR stop alone.
+    if (p.upl < 0 && mrBars) {
+      try {
+        const livePrice = p.direction === 'BUY' ? p.bid : p.offer;
+        const bigMove = hadBigAdverseCandleToday(mrBars, tr.direction, livePrice);
+        if (bigMove === true) {
+          await igClosePos(session, p.dealId, p.direction, p.size);
+          const notional = p.level * p.size;
+          recordJournalEvent({
+            mode: journalMode(mode), event: 'exit', symbol: epicName(epic), strategy: strategyKey(instance),
+            side: p.direction === 'BUY' ? 'long' : 'short', qty: p.size, price: p.level,
+            reason: 'Unusually large adverse move today (well outside this instrument\'s normal daily range) — cutting the loss rather than waiting for the wide stop',
+            plUsd: p.upl, plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
+          });
+          addLog(instance, mode, 'exit', epicName(epic), `⚠️ Big adverse move today — closed, £${p.upl.toFixed(2)} (well outside its normal daily range)`);
+          delete s.tracked[epic];
+          saveTracked(instance, mode, s.tracked);
+          continue;
         }
       } catch (e) {
-        addLog(instance, mode, 'error', epicName(epic), `Trend/candle check failed: ${e instanceof Error ? e.message : String(e)}`);
+        addLog(instance, mode, 'error', epicName(epic), `Big-candle check failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
