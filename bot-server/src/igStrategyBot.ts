@@ -2789,7 +2789,12 @@ async function executeIgSignal(
   const confidence = signal.confidence ?? 60;
   const MIN_STAKE_LOW  = 0.02;
   const MIN_STAKE_HIGH = 0.06;
-  const minStakePerPoint = MIN_STAKE_LOW + Math.max(0, Math.min(confidence, 100)) / 100 * (MIN_STAKE_HIGH - MIN_STAKE_LOW);
+  // Rounded to 2dp — IG rejects a stake with more decimal places than that
+  // (confirmed live on the meanReversionBot.ts twin of this same floor:
+  // validation.number.too-many-decimal-places), and the raw floating-point
+  // arithmetic here can produce something like 0.039999999999999994 for
+  // what's meant to be a clean 0.04.
+  const minStakePerPoint = Math.round((MIN_STAKE_LOW + Math.max(0, Math.min(confidence, 100)) / 100 * (MIN_STAKE_HIGH - MIN_STAKE_LOW)) * 100) / 100;
   if (cfg.strategy === 'mean_reversion_swing' && stake < minStakePerPoint) {
     addLog(mode, 'info', name, `Stake raised to the £${minStakePerPoint.toFixed(3)}/pt floor for this ${confidence}%-conviction setup (was £${stake}/pt) — real max loss now £${(minStakePerPoint * sizingStopDist).toFixed(2)}, above the £${effectiveRiskGbp.toFixed(0)} risk target`);
     stake = minStakePerPoint;

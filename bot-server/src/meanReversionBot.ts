@@ -485,7 +485,11 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       // so the same reasoning applies there for real.
       {
         const MIN_STAKE_LOW = 0.02, MIN_STAKE_HIGH = 0.06;
-        const minStakePerPoint = MIN_STAKE_LOW + Math.max(0, Math.min(signal.conviction, 1)) * (MIN_STAKE_HIGH - MIN_STAKE_LOW);
+        // Rounded to 2dp — IG rejects a stake with more decimal places than
+        // that (confirmed live: validation.number.too-many-decimal-places),
+        // and the raw floating-point arithmetic above can produce something
+        // like 0.039999999999999994 for what's meant to be a clean 0.04.
+        const minStakePerPoint = Math.round((MIN_STAKE_LOW + Math.max(0, Math.min(signal.conviction, 1)) * (MIN_STAKE_HIGH - MIN_STAKE_LOW)) * 100) / 100;
         if (stake < minStakePerPoint) {
           addLog(instance, mode, 'info', epicName(epic),
             `Stake raised to the £${minStakePerPoint.toFixed(3)}/pt floor for this ${(signal.conviction * 100).toFixed(0)}%-conviction setup (was £${stake}/pt) — real max loss now £${(minStakePerPoint * stopDist).toFixed(2)}, above the £${MAX_RISK_GBP} risk target`);
@@ -499,10 +503,35 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
         // scales with conviction (3x target at a routine setup, up to 6x at
         // maximum conviction) rather than a flat number, same as the ig-bot
         // version — skip rather than silently accept an outsized real risk.
+
+        // Structural-floor risk scaling — same fix already proven in
+        // igStrategyBot.ts for the identical problem: a wide-ATR-stop
+        // instrument can push even the FLOOR stake's own real loss above the
+        // flat £20 target's ceiling, which would then skip every single
+        // setup on that instrument forever, not just an occasional
+        // oversized one. Confirmed live 2026-09-01: Japan 225's ATR stop
+        // (~2400pt) pushed the floor stake's real loss to ~£96 against a
+        // flat-target 3x ceiling of £60 — skipped repeatedly with no way to
+        // ever open. Scales the effective target used for the ceiling
+        // (not the stake itself — the floor above already set that)
+        // up to comfortably clear THIS trade's own structural minimum loss,
+        // capped at 6x the base target so a genuinely extreme instrument
+        // still can't balloon the ceiling without bound.
+        let effectiveRiskGbp = MAX_RISK_GBP;
+        const structuralMinLoss = minStakePerPoint * stopDist;
+        if (structuralMinLoss > effectiveRiskGbp) {
+          const scaledForFloor = Math.min(MAX_RISK_GBP * 6, structuralMinLoss * 1.15);
+          if (scaledForFloor > effectiveRiskGbp) {
+            effectiveRiskGbp = scaledForFloor;
+            addLog(instance, mode, 'info', epicName(epic),
+              `Risk target scaled to £${effectiveRiskGbp.toFixed(0)} for sizing purposes — this instrument's own stop/floor combination produces at least £${structuralMinLoss.toFixed(0)} real loss regardless of conviction`);
+          }
+        }
+
         const confidence  = signal.conviction * 100;
         const ceilingMult = 3 + Math.max(0, Math.min(confidence, 100) - 60) / 40 * 3;
         const actualMaxLoss = stake * stopDist;
-        const lossCeiling   = MAX_RISK_GBP * ceilingMult;
+        const lossCeiling   = effectiveRiskGbp * ceilingMult;
         if (actualMaxLoss > lossCeiling) {
           addLog(instance, mode, 'wait', epicName(epic),
             `Skipped — sizing works out to £${actualMaxLoss.toFixed(0)} max loss (stake £${stake}/pt × ${stopDist.toFixed(0)}pt stop), above the £${lossCeiling.toFixed(0)} ceiling (${ceilingMult.toFixed(1)}× target)`);
