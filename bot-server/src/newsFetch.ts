@@ -61,6 +61,37 @@ export async function fetchCompanyHeadlines(ticker: string, limit = 8, companyNa
   }
 }
 
+// General-market/forex news — for instruments with no company ticker to
+// query Finnhub's company-news endpoint against (FX pairs, indices). Added
+// 2026-09-01 so meanReversionBot.ts's 'fx'/'japan225' instances can get the
+// same daily AI severe-news safety net the 'stocks' instance already has —
+// per explicit request, the whole point of that check is not having to
+// remember to watch positions yourself, which applies just as much to an FX
+// pair as to a stock. Finnhub's /news endpoint (distinct from /company-news
+// above) is pre-scoped by category server-side, so there's no per-instrument
+// relevance filtering to do here — just recency and a sane limit.
+export async function fetchGeneralHeadlines(category: 'general' | 'forex', limit = 8): Promise<string[]> {
+  const key = process.env.FINNHUB_API_KEY;
+  if (!key) return [];
+  try {
+    const res = await fetch(
+      `https://finnhub.io/api/v1/news?category=${category}&token=${key}`,
+      { signal: AbortSignal.timeout(6_000) },
+    );
+    if (!res.ok) return [];
+    const raw = await res.json() as Array<{ headline?: string; datetime?: number }>;
+    if (!Array.isArray(raw)) return [];
+    const cutoff = Date.now() / 1000 - 2 * 86_400; // last 2 days only — this is a "is today's news bad" check, not a history dump
+    return raw
+      .filter(a => !!a.headline && (a.datetime ?? 0) >= cutoff)
+      .sort((a, b) => (b.datetime ?? 0) - (a.datetime ?? 0))
+      .slice(0, limit)
+      .map(a => `[${new Date((a.datetime ?? 0) * 1000).toISOString().slice(0, 10)}] ${a.headline!}`);
+  } catch {
+    return [];
+  }
+}
+
 // Finviz's per-ticker news table — a second, independent source alongside
 // Finnhub above. Not an official API (no key/ToS-sanctioned access), so
 // treat it the same way this codebase already treats Yahoo's own unofficial

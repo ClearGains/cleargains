@@ -130,6 +130,42 @@ export function trendStillIntact(bars: MrBar[], direction: 'BUY' | 'SELL'): bool
   return direction === 'BUY' ? price > currentEma - buffer : price < currentEma + buffer;
 }
 
+// Same-day large-adverse-move exit — added 2026-09-01 per explicit request.
+// The AI severe-news safety net (askMrSafety, meanReversionBot.ts) already
+// covers genuinely bad NEWS days, but a stock can have a real bad day with
+// no identifiable news behind it at all (broad risk-off, sector rotation,
+// just a heavy tape) — confirmed live this exact gap forced a manual close
+// on Intel: the AI correctly found no severe news, but the position kept
+// sliding anyway. Per explicit follow-up: "news alone won't cut it...
+// knowing the movement... the realtime price will be necessary" — takes
+// IG's own live bid/offer as "where things actually are right now" rather
+// than trusting a daily bar's own high/low field, which can lag behind the
+// real market by however stale that day's Yahoo/Alpaca fetch happens to be.
+// Distinct from trendStillIntact (which only fires once the SLOW 200-day
+// thesis has actually broken) — this is a FAST, single-day outlier check:
+// scaled to the stock's own normal daily range (ATR) rather than a flat
+// percentage (the flat-0.5%-for-every-instrument approach is exactly what
+// made the old weak-open guard too trigger-happy, closing for pennies on
+// completely ordinary noise) — a quiet stock's routine range doesn't
+// trigger this, only a genuinely outsized move relative to how that
+// specific stock normally trades. Caller decides whether to also require
+// the position be at a loss.
+const BIG_CANDLE_ATR_MULT = 1.5; // "unusually large" — normal daily noise is ~1x ATR by definition
+export function hadBigAdverseCandleToday(bars: MrBar[], direction: 'BUY' | 'SELL', livePrice: number): boolean | null {
+  const atr = calcAtrFromBars(bars);
+  if (atr === null || atr <= 0 || bars.length < 1) return null;
+  // If the freshest bar is today's own (still-forming), yesterday's close
+  // is the one before it — otherwise the freshest bar already IS yesterday
+  // (e.g. checked before today's fetch has updated yet), and is the right
+  // reference on its own.
+  const lastBar    = bars[bars.length - 1];
+  const isTodayBar = lastBar.time.slice(0, 10) === new Date().toISOString().slice(0, 10);
+  const yesterday   = isTodayBar ? bars[bars.length - 2] : lastBar;
+  if (!yesterday) return null;
+  const adverseMove = direction === 'BUY' ? yesterday.close - livePrice : livePrice - yesterday.close;
+  return adverseMove >= BIG_CANDLE_ATR_MULT * atr;
+}
+
 // Pure decision function — no I/O, no state. Given a full daily-bar history
 // (oldest first), returns the entry signal or HOLD. Exit/hold-management
 // (stop/TP already placed with the broker at entry, MAX_HOLD_DAYS backstop)

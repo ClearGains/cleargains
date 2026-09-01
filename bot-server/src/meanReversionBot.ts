@@ -17,7 +17,7 @@ import {
   placeMarketOrder, closePosition as igClosePos, fetchMarketDetails, fetchClosedTransactions,
   type IGSession, type FullPosition,
 } from './igApi';
-import { getMeanReversionSignal, trendStillIntact, type MrBar, type MrSignal, MAX_HOLD_DAYS } from './meanReversionStrategy';
+import { getMeanReversionSignal, trendStillIntact, hadBigAdverseCandleToday, type MrBar, type MrSignal, MAX_HOLD_DAYS } from './meanReversionStrategy';
 import { emaCrossoverSignal } from './alpacaStrategies';
 import { epicName } from './igStrategyScanner';
 import { resolveCredentials, calcStake, type IgMode } from './igStrategyBot';
@@ -248,7 +248,8 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
           alpacaTimeframe: '1Day', yahooInterval: '1d',
           liveReferenceLevel: !isAlpacaCovered ? igMid : undefined,
         });
-        const intact = raw?.length ? trendStillIntact(toMrBars(raw), tr.direction) : null;
+        const mrBars = raw?.length ? toMrBars(raw) : null;
+        const intact = mrBars ? trendStillIntact(mrBars, tr.direction) : null;
         if (intact === false) {
           await igClosePos(session, p.dealId, p.direction, p.size);
           const notional = p.level * p.size;
@@ -263,8 +264,37 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
           saveTracked(instance, mode, s.tracked);
           continue;
         }
+
+        // Same-day large-adverse-move exit — per explicit follow-up: news
+        // alone doesn't catch a genuinely bad day with no news behind it at
+        // all (confirmed live: this exact gap forced a manual close on
+        // Intel), and "the realtime price will be necessary" — uses IG's own
+        // live quote, not a possibly-stale daily bar field. See
+        // hadBigAdverseCandleToday's own comment for the ATR-scaled
+        // reasoning (ruling out a flat-percentage threshold, which is what
+        // made the old weak-open guard fire on ordinary noise). Only acts
+        // when the position is ALSO currently at a loss — a big move still
+        // in its favor is not a reason to panic out of it.
+        if (p.upl < 0 && mrBars) {
+          const livePrice = p.direction === 'BUY' ? p.bid : p.offer;
+          const bigMove = hadBigAdverseCandleToday(mrBars, tr.direction, livePrice);
+          if (bigMove === true) {
+            await igClosePos(session, p.dealId, p.direction, p.size);
+            const notional = p.level * p.size;
+            recordJournalEvent({
+              mode: journalMode(mode), event: 'exit', symbol: epicName(epic), strategy: strategyKey(instance),
+              side: p.direction === 'BUY' ? 'long' : 'short', qty: p.size, price: p.level,
+              reason: 'Unusually large adverse move today (well outside this stock\'s normal daily range) — cutting the loss rather than waiting for the wide stop',
+              plUsd: p.upl, plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
+            });
+            addLog(instance, mode, 'exit', epicName(epic), `⚠️ Big adverse move today — closed, £${p.upl.toFixed(2)} (well outside its normal daily range)`);
+            delete s.tracked[epic];
+            saveTracked(instance, mode, s.tracked);
+            continue;
+          }
+        }
       } catch (e) {
-        addLog(instance, mode, 'error', epicName(epic), `Trend check failed: ${e instanceof Error ? e.message : String(e)}`);
+        addLog(instance, mode, 'error', epicName(epic), `Trend/candle check failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
