@@ -56,6 +56,19 @@ const INSTANCE_EPICS: Record<MrInstance, string[]> = {
 
 const AI_MONITORED: Record<MrInstance, boolean> = { fx: false, stocks: true, japan225: false };
 
+// Instances running the lighter EMA9/21 crossover trend-follow instead of
+// RSI(2)+EMA200 mean-reversion — japan225 switched 2026-08-31 (unusually
+// clean, sustained trend; mean-reversion's narrow RSI(2)-extreme condition
+// produced too few setups), stocks switched 2026-09-01 per explicit request
+// after watching japan225 pick up a real signal almost immediately. 'fx'
+// stays on real mean-reversion — not asked for, and this account already
+// has real evidence mean-reversion works there specifically (see
+// meanReversionStrategy.ts's own header comment on the Japan 225 backtest
+// origin). Centralized here so every spot that branches on "which signal
+// does this instance use" — scanEntries, the trend-invalidation exit,
+// journal/edgeSizing keys, the startup log — stays in sync from one place.
+const EMA_TREND_INSTANCES = new Set<MrInstance>(['japan225', 'stocks']);
+
 // Raised 2026-08-31 per explicit request — £5 against these strategies' real
 // (ATR-based, often several-hundred-point) stops was sizing wins as small as
 // £0.54 even on a full run to take-profit. £20 matches what ig-bot's own
@@ -138,12 +151,11 @@ function addLog(instance: MrInstance, mode: IgMode, type: LogEntry['type'], epic
 }
 
 function journalMode(mode: IgMode): JournalMode { return mode === 'live' ? 'ig-live' : 'ig-demo'; }
-// japan225 switched from RSI(2)+EMA200 mean-reversion to a lighter EMA
-// crossover trend-follow 2026-08-31 (see scanEntries) — distinct key so
-// edgeSizing/EDGE_STATS_CUTOFF judge the new strategy on its own track
-// record rather than inheriting (or polluting) mean-reversion's.
+// Distinct key for EMA-trend instances so edgeSizing/EDGE_STATS_CUTOFF judge
+// the new strategy on its own track record rather than inheriting (or
+// polluting) mean-reversion's — see EMA_TREND_INSTANCES above.
 function strategyKey(instance: MrInstance): string {
-  return instance === 'japan225' ? 'ema_trend_japan225' : `mean_reversion_${instance}`;
+  return EMA_TREND_INSTANCES.has(instance) ? `ema_trend_${instance}` : `mean_reversion_${instance}`;
 }
 
 // Shared session with every other IG bot in this account (igStrategyBot.ts,
@@ -232,15 +244,21 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
     // candle... is more a case you need to stop a loss rather than waiting
     // for something to bounce back into profit" — some red candles really
     // do mean the thesis has failed, not just an ordinary bad day to sit
-    // through. Skipped for japan225, which no longer runs mean-reversion
-    // (switched to EMA crossover trend-follow — no 200-day thesis to
-    // invalidate). Only implemented here, not also in igStrategyBot.ts's
-    // account-wide exit loop — this file already tracks each position's own
-    // entry direction and has the correctly-scaled bar-fetch machinery
-    // ready from entry time; duplicating it there would risk both bots
-    // racing to close the same position (same reasoning as not porting the
-    // profit-lock trail there).
-    if (instance !== 'japan225') {
+    // through. Skipped for EMA_TREND_INSTANCES, which don't run
+    // mean-reversion (switched to EMA crossover trend-follow — no 200-day
+    // thesis to invalidate). Note this also stops applying to any position
+    // still open from BEFORE an instance switched over (e.g. stocks'
+    // existing NVIDIA/Netflix/Intel positions, opened under the old
+    // mean-reversion thesis) — acceptable: they keep the wide ATR stop, the
+    // same-day big-candle exit, and the AI safety check regardless, just
+    // lose this one specific layer once the instance itself has moved on.
+    // Only implemented here, not also in igStrategyBot.ts's account-wide
+    // exit loop — this file already tracks each position's own entry
+    // direction and has the correctly-scaled bar-fetch machinery ready from
+    // entry time; duplicating it there would risk both bots racing to close
+    // the same position (same reasoning as not porting the profit-lock
+    // trail there).
+    if (!EMA_TREND_INSTANCES.has(instance)) {
       try {
         const isAlpacaCovered = epic in EPIC_TO_ALPACA;
         const igMid = typeof p.bid === 'number' && typeof p.offer === 'number' ? (p.bid + p.offer) / 2 : undefined;
@@ -386,13 +404,13 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       continue;
     }
 
-    // Japan225 gets a lighter, more permissive trend-following signal
-    // instead of RSI(2)+EMA200 mean-reversion — per explicit request
-    // 2026-08-31: this index's trend tends to be unusually clean and
-    // sustained, and mean-reversion's narrow RSI(2)-extreme entry condition
-    // was producing far fewer setups than the instrument's own character
-    // supports. Reuses emaCrossoverSignal (alpacaStrategies.ts) as-is — the
-    // same validated EMA9/EMA21 crossover + ATR stop/TP already running
+    // EMA_TREND_INSTANCES get a lighter, more permissive trend-following
+    // signal instead of RSI(2)+EMA200 mean-reversion — japan225 switched
+    // 2026-08-31 (unusually clean, sustained trend; mean-reversion's narrow
+    // RSI(2)-extreme condition produced too few setups), stocks switched
+    // 2026-09-01 after watching japan225 pick up a real signal almost
+    // immediately. Reuses emaCrossoverSignal (alpacaStrategies.ts) as-is —
+    // the same validated EMA9/EMA21 crossover + ATR stop/TP already running
     // elsewhere in this codebase (igStrategyBot.ts/alpacaBot.ts's own
     // ema_crossover strategy) — rather than inventing new logic. Its
     // stopPrice/takeProfitPrice are absolute levels, converted to point
@@ -402,9 +420,13 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
     // this file — fixed broker-side stop/TP + MAX_HOLD_DAYS backstop — the
     // crossed-back-the-other-way exit emaCrossoverSignal computes for an
     // open position is never consulted here, same as mean-reversion's own
-    // signal is never re-checked once a position exists.
+    // signal is never re-checked once a position exists. 'stocks' keeps its
+    // same 26-name watchlist — only the signal changed, not the universe —
+    // and any already-open positions there (opened under the old
+    // mean-reversion thesis) keep being managed by every other mechanism
+    // unaffected by this (stop/TP, big-candle exit, AI safety, max-hold).
     let signal: MrSignal;
-    if (instance === 'japan225') {
+    if (EMA_TREND_INSTANCES.has(instance)) {
       const emaSig = emaCrossoverSignal(raw!, false);
       if (emaSig.action !== 'BUY' && emaSig.action !== 'SELL') continue;
       const lastClose  = raw![raw!.length - 1].c;
@@ -574,7 +596,7 @@ export function startMeanReversionBot(instance: MrInstance, mode: IgMode): { ok:
   if (s.pollTimer) clearTimeout(s.pollTimer);
   s.running = true;
   saveRunningFlag(instance, mode, true);
-  const signalDesc = instance === 'japan225' ? 'EMA9/21 crossover trend-follow' : 'RSI(2)+EMA200 mean-reversion';
+  const signalDesc = EMA_TREND_INSTANCES.has(instance) ? 'EMA9/21 crossover trend-follow' : 'RSI(2)+EMA200 mean-reversion';
   addLog(instance, mode, 'info', '—', `Mean-reversion bot (${instance}) started — ${signalDesc}, rules-only${AI_MONITORED[instance] ? ' + daily AI safety check on open positions' : ', no AI at all'} — £${MAX_RISK_GBP} risk/trade, max ${MAX_POSITIONS} positions, ${INSTANCE_EPICS[instance].length} epic(s) watched`);
   void poll(instance, mode);
   return { ok: true };
