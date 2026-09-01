@@ -182,42 +182,51 @@ export function rsiMeanReversionSignal(
 }
 
 // ── 2. EMA Crossover (daily swing — hold days to weeks) ───────────────────────
-// Entry: EMA9 crosses above EMA21 (long) or below (short)
+// Entry: fast EMA crosses above slow EMA (long) or below (short)
 // Exit:  opposite crossover
+// fastPeriod/slowPeriod default to 9/21 (the original, still what every
+// existing caller gets unchanged) — made configurable 2026-09-01 per
+// explicit request for a faster variant (see emaCrossoverFastSignal below):
+// same crossover logic, just a shorter-period pair reacts sooner to a new
+// trend at the cost of more false signals on ordinary noise, since a
+// shorter EMA tracks recent price more tightly.
 export function emaCrossoverSignal(
   bars:       AlpacaBar[],
   inPosition: boolean,
   side?:      PositionSide,
+  fastPeriod = 9,
+  slowPeriod = 21,
 ): StrategySignal {
-  if (bars.length < 25) return { action: 'HOLD', reason: 'insufficient bars' };
+  if (bars.length < slowPeriod + 4) return { action: 'HOLD', reason: 'insufficient bars' };
 
-  const closes = bars.map(b => b.c);
-  const ema9   = calcEma(closes, 9);
-  const ema21  = calcEma(closes, 21);
+  const closes   = bars.map(b => b.c);
+  const emaFast  = calcEma(closes, fastPeriod);
+  const emaSlow  = calcEma(closes, slowPeriod);
 
-  if (ema9.length < 2 || ema21.length < 2) return { action: 'HOLD', reason: 'EMA not ready' };
+  if (emaFast.length < 2 || emaSlow.length < 2) return { action: 'HOLD', reason: 'EMA not ready' };
 
-  // Align tails — ema9 is longer (starts from period 9 vs 21)
-  const e9curr  = ema9[ema9.length - 1];
-  const e9prev  = ema9[ema9.length - 2];
-  const e21curr = ema21[ema21.length - 1];
-  const e21prev = ema21[ema21.length - 2];
+  // Align tails — the fast EMA array is longer (starts from fastPeriod vs slowPeriod)
+  const eFcurr  = emaFast[emaFast.length - 1];
+  const eFprev  = emaFast[emaFast.length - 2];
+  const eScurr  = emaSlow[emaSlow.length - 1];
+  const eSprev  = emaSlow[emaSlow.length - 2];
   const last    = bars[bars.length - 1].c;
   const atr     = calcAtr(bars) ?? last * 0.01;
+  const label   = `EMA${fastPeriod}/EMA${slowPeriod}`;
 
-  const crossedAbove = e9prev <= e21prev && e9curr > e21curr;
-  const crossedBelow = e9prev >= e21prev && e9curr < e21curr;
+  const crossedAbove = eFprev <= eSprev && eFcurr > eScurr;
+  const crossedBelow = eFprev >= eSprev && eFcurr < eScurr;
 
   if (inPosition) {
-    if (side === 'long'  && crossedBelow) return { action: 'CLOSE_LONG',  reason: `EMA9 crossed below EMA21 (${e9curr.toFixed(2)} < ${e21curr.toFixed(2)})` };
-    if (side === 'short' && crossedAbove) return { action: 'CLOSE_SHORT', reason: `EMA9 crossed above EMA21 (${e9curr.toFixed(2)} > ${e21curr.toFixed(2)})` };
-    return { action: 'HOLD', reason: `EMA9=${e9curr.toFixed(2)} EMA21=${e21curr.toFixed(2)}` };
+    if (side === 'long'  && crossedBelow) return { action: 'CLOSE_LONG',  reason: `${label} crossed down (${eFcurr.toFixed(2)} < ${eScurr.toFixed(2)})` };
+    if (side === 'short' && crossedAbove) return { action: 'CLOSE_SHORT', reason: `${label} crossed up (${eFcurr.toFixed(2)} > ${eScurr.toFixed(2)})` };
+    return { action: 'HOLD', reason: `${label}: ${eFcurr.toFixed(2)} / ${eScurr.toFixed(2)}` };
   }
 
   if (crossedAbove) {
     return {
       action:           'BUY',
-      reason:           `EMA9 crossed above EMA21 (${e9curr.toFixed(2)} > ${e21curr.toFixed(2)})`,
+      reason:           `${label} crossed up (${eFcurr.toFixed(2)} > ${eScurr.toFixed(2)})`,
       stopPrice:        +(last - atr * 2).toFixed(2),
       takeProfitPrice:  +(last + atr * 5).toFixed(2),
       orderType:        'market',
@@ -227,14 +236,14 @@ export function emaCrossoverSignal(
   if (crossedBelow) {
     return {
       action:           'SELL',
-      reason:           `EMA9 crossed below EMA21 (${e9curr.toFixed(2)} < ${e21curr.toFixed(2)})`,
+      reason:           `${label} crossed down (${eFcurr.toFixed(2)} < ${eScurr.toFixed(2)})`,
       stopPrice:        +(last + atr * 2).toFixed(2),
       takeProfitPrice:  +(last - atr * 5).toFixed(2),
       orderType:        'market',
     };
   }
 
-  return { action: 'HOLD', reason: `EMA9=${e9curr.toFixed(2)} EMA21=${e21curr.toFixed(2)} — no crossover` };
+  return { action: 'HOLD', reason: `${label}: ${eFcurr.toFixed(2)} / ${eScurr.toFixed(2)} — no crossover` };
 }
 
 // ── Mean Reversion (RSI2 + 200-day trend) — swing, days to ~10 days ─────────

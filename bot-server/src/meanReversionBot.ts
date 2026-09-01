@@ -427,6 +427,11 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
     // unaffected by this (stop/TP, big-candle exit, AI safety, max-hold).
     let signal: MrSignal;
     if (EMA_TREND_INSTANCES.has(instance)) {
+      // Standard EMA9/21 (emaCrossoverSignal's own default) — considered a
+      // faster EMA5/13 pair 2026-09-01 but decided against it: the daily AI
+      // safety check already covers the "is something actually wrong"
+      // question, so there's less need for the entry signal itself to react
+      // faster, and 9/21 avoids the extra whipsaw a shorter pair invites.
       const emaSig = emaCrossoverSignal(raw!, false);
       if (emaSig.action !== 'BUY' && emaSig.action !== 'SELL') continue;
       const lastClose  = raw![raw!.length - 1].c;
