@@ -569,7 +569,7 @@ export function donchianBreakoutSignal(
   side?:       PositionSide,
   entryPeriod = 20,
   exitPeriod  = 10,
-  periodUnit: 'day' | 'hour' = 'day',
+  periodUnit: 'day' | 'hour' | '30min' = 'day',
 ): StrategySignal {
   if (bars.length < entryPeriod + 1) return { action: 'HOLD', reason: 'insufficient bars' };
 

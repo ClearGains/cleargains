@@ -18,14 +18,14 @@ import {
   type IGSession, type FullPosition,
 } from './igApi';
 import { getMeanReversionSignal, trendStillIntact, hadBigAdverseCandleToday, type MrBar, type MrSignal, MAX_HOLD_DAYS } from './meanReversionStrategy';
-import { emaCrossoverSignal } from './alpacaStrategies';
+import { emaCrossoverSignal, donchianBreakoutSignal, type PositionSide } from './alpacaStrategies';
 import { epicName } from './igStrategyScanner';
 import { resolveCredentials, calcStake, type IgMode } from './igStrategyBot';
 import { recordJournalEvent, type JournalMode } from './tradeJournal';
 import { askMrSafety } from './openai';
 import { fetchAllHeadlines } from './newsFetch';
 import { EPIC_TO_ALPACA, fetchBarsWithFallback } from './yahooFetch';
-import { isScannerQuietWeekend, msUntilWeekendReopen, type AlpacaBar } from './alpacaApi';
+import { isScannerQuietWeekend, msUntilWeekendReopen, type AlpacaBar, type Timeframe } from './alpacaApi';
 import { edgeSizing } from './quant';
 
 export type MrInstance = 'fx' | 'stocks' | 'japan225';
@@ -57,17 +57,51 @@ const INSTANCE_EPICS: Record<MrInstance, string[]> = {
 const AI_MONITORED: Record<MrInstance, boolean> = { fx: false, stocks: true, japan225: false };
 
 // Instances running the lighter EMA9/21 crossover trend-follow instead of
-// RSI(2)+EMA200 mean-reversion — japan225 switched 2026-08-31 (unusually
-// clean, sustained trend; mean-reversion's narrow RSI(2)-extreme condition
-// produced too few setups), stocks switched 2026-09-01 per explicit request
-// after watching japan225 pick up a real signal almost immediately. 'fx'
-// stays on real mean-reversion — not asked for, and this account already
-// has real evidence mean-reversion works there specifically (see
+// RSI(2)+EMA200 mean-reversion — stocks switched 2026-09-01 per explicit
+// request after watching japan225 (briefly on this same approach,
+// 2026-08-31) pick up a real signal almost immediately. 'fx' stays on real
+// mean-reversion — not asked for, and this account already has real
+// evidence mean-reversion works there specifically (see
 // meanReversionStrategy.ts's own header comment on the Japan 225 backtest
 // origin). Centralized here so every spot that branches on "which signal
 // does this instance use" — scanEntries, the trend-invalidation exit,
 // journal/edgeSizing keys, the startup log — stays in sync from one place.
-const EMA_TREND_INSTANCES = new Set<MrInstance>(['japan225', 'stocks']);
+// japan225 itself moved on again the same day — see INTRADAY_INSTANCES.
+const EMA_TREND_INSTANCES = new Set<MrInstance>(['stocks']);
+
+// Japan225 only, added 2026-09-01, now running Donchian breakout instead of
+// EMA crossover — the EMA-crossover-on-30min version (same day, earlier)
+// was a genuine improvement in reaction speed but is still fundamentally a
+// LAGGING confirmation (a crossover can only fire after two averages have
+// already been dragged by a move that's already happened) — confirmed live
+// the same day: both real entries opened well into an already-large morning
+// move, and the user manually closed both rather than risk it. A breakout
+// signal (donchianBreakoutSignal, alpacaStrategies.ts — same function
+// donchian_breakout/donchian_hourly already use elsewhere in this codebase)
+// answers this more directly: it enters the moment price makes a genuine
+// new extreme relative to a recent window, which is closer to "the start of
+// a move" than "confirmation two averages have crossed." Still can't
+// predict a top/bottom — no mechanical signal can — but reacts to a
+// breakout immediately rather than waiting for a lagging average to catch
+// up. Periods (24 bars entry / 12 bars exit — 12h/6h on 30-min bars) reuse
+// donchian_hourly's own already-validated 2:1 entry:exit ratio rather than
+// inventing new untested numbers, just on a finer timeframe. Exit works the
+// same way emaCrossoverSignal's did: re-consulted every poll via its own
+// inPosition branch, closing the moment price breaks the OPPOSITE side of
+// the (shorter) exit channel — symmetric, whether that's cutting a loss or
+// banking a gain ("errors to be fixed and positives to be taken"). This is
+// the PRIMARY exit for this instance; the wide ATR/percentage-capped stop
+// set at entry stays attached broker-side purely as a backstop. Scoped to
+// japan225 only — not asked for on 'stocks' too, and 26 stocks re-scanned
+// this often would be a much bigger step up in call volume than one index.
+const INTRADAY_INSTANCES = new Set<MrInstance>(['japan225']);
+const DONCHIAN_ENTRY_PERIOD_INTRADAY = 24; // 12h of 30-min bars
+const DONCHIAN_EXIT_PERIOD_INTRADAY  = 12; // 6h of 30-min bars
+function barFetchParamsFor(instance: MrInstance): { range: string; alpacaTimeframe: Timeframe; yahooInterval: '30m' | '1d' } {
+  return INTRADAY_INSTANCES.has(instance)
+    ? { range: '1mo', alpacaTimeframe: '30Min', yahooInterval: '30m' } // Yahoo's 30m interval only covers ~60 days back — 1mo comfortably fits, same reasoning as gemini_opinion's own identical params in igStrategyBot.ts
+    : { range: '2y',  alpacaTimeframe: '1Day',  yahooInterval: '1d' };
+}
 
 // Raised 2026-08-31 per explicit request — £5 against these strategies' real
 // (ATR-based, often several-hundred-point) stops was sizing wins as small as
@@ -155,6 +189,7 @@ function journalMode(mode: IgMode): JournalMode { return mode === 'live' ? 'ig-l
 // the new strategy on its own track record rather than inheriting (or
 // polluting) mean-reversion's — see EMA_TREND_INSTANCES above.
 function strategyKey(instance: MrInstance): string {
+  if (INTRADAY_INSTANCES.has(instance)) return `donchian_intraday_${instance}`;
   return EMA_TREND_INSTANCES.has(instance) ? `ema_trend_${instance}` : `mean_reversion_${instance}`;
 }
 
@@ -176,10 +211,17 @@ function toMrBars(bars: AlpacaBar[]): MrBar[] {
 }
 
 // Recovers a position that vanished from /positions without this file's own
-// close code ever running (a real stop/take-profit hit at the broker) — same
-// pattern as igStrategyBot.ts's journalSilentCloses, since a fixed ATR-based
-// stop/TP means MOST exits here happen exactly this way, not via any code in
-// this file deciding to close.
+// close code ever running — same pattern as igStrategyBot.ts's
+// journalSilentCloses. Originally assumed this always meant "a real
+// stop/take-profit hit at the broker," since a fixed ATR-based stop/TP means
+// most exits here do happen exactly this way — but confirmed live
+// 2026-09-01 that's not the only cause: the user closed two Japan 225
+// positions manually via IG's own app (saw the price already gone against
+// the direction they wanted, closed rather than risk it), and this function
+// had no way to tell that apart from a real stop/TP hit, journaling both
+// identically. Reworded to not claim a mechanism it can't actually verify —
+// still recovers the real P&L/level correctly (that part comes straight
+// from IG's own closed-transaction record), just doesn't guess why.
 async function recoverSilentClose(instance: MrInstance, mode: IgMode, session: IGSession, tr: Tracked): Promise<void> {
   const name = epicName(tr.epic);
   try {
@@ -193,10 +235,10 @@ async function recoverSilentClose(instance: MrInstance, mode: IgMode, session: I
     recordJournalEvent({
       mode: journalMode(mode), event: 'exit', symbol: name, strategy: strategyKey(instance),
       side: tr.direction === 'BUY' ? 'long' : 'short', qty: tr.size, price: match?.closeLevel ?? tr.entryLevel,
-      reason: 'Closed by broker-side stop/take-profit (real ATR-based level hit)',
+      reason: 'Closed outside this bot\'s own code — broker-side stop/TP, or closed manually/elsewhere',
       plUsd, plPct: notional > 0 ? (plUsd / notional) * 100 : 0,
     });
-    addLog(instance, mode, 'exit', name, `Stop/TP hit — £${plUsd.toFixed(2)} (${tr.entryLevel.toFixed(2)} → ${(match?.closeLevel ?? tr.entryLevel).toFixed(2)})`);
+    addLog(instance, mode, 'exit', name, `Closed elsewhere — £${plUsd.toFixed(2)} (${tr.entryLevel.toFixed(2)} → ${(match?.closeLevel ?? tr.entryLevel).toFixed(2)})`);
   } catch (e) {
     addLog(instance, mode, 'error', name, `Silent-close recovery failed: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -246,13 +288,16 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
     // SELL opened right after what looked like an already-happened big move,
     // exactly the scenario this exit exists to catch.
     let mrBars: MrBar[] | null = null;
+    let rawBars: AlpacaBar[] | null = null;
     try {
       const isAlpacaCovered = epic in EPIC_TO_ALPACA;
       const igMid = typeof p.bid === 'number' && typeof p.offer === 'number' ? (p.bid + p.offer) / 2 : undefined;
-      const raw = await fetchBarsWithFallback(epic, '2y', {
-        alpacaTimeframe: '1Day', yahooInterval: '1d',
+      const { range, alpacaTimeframe, yahooInterval } = barFetchParamsFor(instance);
+      const raw = await fetchBarsWithFallback(epic, range, {
+        alpacaTimeframe, yahooInterval,
         liveReferenceLevel: !isAlpacaCovered ? igMid : undefined,
       });
+      rawBars = raw ?? null;
       mrBars = raw?.length ? toMrBars(raw) : null;
     } catch (e) {
       addLog(instance, mode, 'error', epicName(epic), `Trend/candle bar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -280,7 +325,7 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
     // entry time; duplicating it there would risk both bots racing to close
     // the same position (same reasoning as not porting the profit-lock
     // trail there).
-    if (!EMA_TREND_INSTANCES.has(instance) && mrBars) {
+    if (!EMA_TREND_INSTANCES.has(instance) && !INTRADAY_INSTANCES.has(instance) && mrBars) {
       try {
         const intact = trendStillIntact(mrBars, tr.direction);
         if (intact === false) {
@@ -319,7 +364,12 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
     // already priced in by the time it triggers; this exit is what actually
     // protects against having entered right as an already-large move
     // exhausts and reverses, rather than the wide ATR stop alone.
-    if (p.upl < 0 && mrBars) {
+    // Excludes INTRADAY_INSTANCES — "yesterday's close vs today's worst
+    // point" doesn't translate cleanly to 30-min bars (most recent bars are
+    // ALL "today"), and these instances get the faster, more direct live
+    // crossover-reversal exit just below instead, which supersedes this as
+    // the fast-acting protection for them.
+    if (p.upl < 0 && mrBars && !INTRADAY_INSTANCES.has(instance)) {
       try {
         const livePrice = p.direction === 'BUY' ? p.bid : p.offer;
         const bigMove = hadBigAdverseCandleToday(mrBars, tr.direction, livePrice);
@@ -339,6 +389,40 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
         }
       } catch (e) {
         addLog(instance, mode, 'error', epicName(epic), `Big-candle check failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // Live breakout-channel-reversal exit — INTRADAY_INSTANCES only
+    // (japan225). Per explicit request 2026-09-01: carry the position as
+    // long as the trend holds, but reconsider and close on any real sign
+    // it's turning — whether that's cutting a loss or banking a gain.
+    // Re-runs the exact same donchianBreakoutSignal function used at entry,
+    // this time via its own inPosition branch: CLOSE_LONG when price breaks
+    // below the shorter exit channel's low, CLOSE_SHORT when it breaks
+    // above the exit channel's high. This is the PRIMARY, actively-managed
+    // exit for this instance now — the wide ATR/percentage-capped stop/TP
+    // attached at entry remains only as a broker-side backstop for a move
+    // too fast for a 15min poll to catch in time.
+    if (INTRADAY_INSTANCES.has(instance) && rawBars?.length) {
+      try {
+        const side: PositionSide = tr.direction === 'BUY' ? 'long' : 'short';
+        const donchExit = donchianBreakoutSignal(rawBars, true, side, DONCHIAN_ENTRY_PERIOD_INTRADAY, DONCHIAN_EXIT_PERIOD_INTRADAY, '30min');
+        if (donchExit.action === 'CLOSE_LONG' || donchExit.action === 'CLOSE_SHORT') {
+          await igClosePos(session, p.dealId, p.direction, p.size);
+          const notional = p.level * p.size;
+          recordJournalEvent({
+            mode: journalMode(mode), event: 'exit', symbol: epicName(epic), strategy: strategyKey(instance),
+            side: p.direction === 'BUY' ? 'long' : 'short', qty: p.size, price: p.level,
+            reason: `Trend reversed — ${donchExit.reason}`,
+            plUsd: p.upl, plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
+          });
+          addLog(instance, mode, 'exit', epicName(epic), `${p.upl >= 0 ? '💰' : '⚠️'} Trend reversed — closed, £${p.upl.toFixed(2)} (${donchExit.reason})`);
+          delete s.tracked[epic];
+          saveTracked(instance, mode, s.tracked);
+          continue;
+        }
+      } catch (e) {
+        addLog(instance, mode, 'error', epicName(epic), `Crossover-exit check failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
@@ -419,8 +503,9 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       // path produced correctly-scaled stop/TP (exactly 2:1 as configured)
       // without any extra help.
       const isAlpacaCovered = epic in EPIC_TO_ALPACA;
-      raw = await fetchBarsWithFallback(epic, '2y', {
-        alpacaTimeframe: '1Day', yahooInterval: '1d',
+      const { range, alpacaTimeframe, yahooInterval } = barFetchParamsFor(instance);
+      raw = await fetchBarsWithFallback(epic, range, {
+        alpacaTimeframe, yahooInterval,
         liveReferenceLevel: !isAlpacaCovered ? igMid : undefined,
       });
       if (!raw?.length) continue;
@@ -430,29 +515,35 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       continue;
     }
 
-    // EMA_TREND_INSTANCES get a lighter, more permissive trend-following
-    // signal instead of RSI(2)+EMA200 mean-reversion — japan225 switched
-    // 2026-08-31 (unusually clean, sustained trend; mean-reversion's narrow
-    // RSI(2)-extreme condition produced too few setups), stocks switched
-    // 2026-09-01 after watching japan225 pick up a real signal almost
-    // immediately. Reuses emaCrossoverSignal (alpacaStrategies.ts) as-is —
-    // the same validated EMA9/EMA21 crossover + ATR stop/TP already running
-    // elsewhere in this codebase (igStrategyBot.ts/alpacaBot.ts's own
-    // ema_crossover strategy) — rather than inventing new logic. Its
-    // stopPrice/takeProfitPrice are absolute levels, converted to point
-    // distances here to match MrSignal's shape, which everything downstream
-    // (calcStake, the conviction-scaled floor, journaling) already expects.
-    // Once open, the position is managed exactly like every other trade in
-    // this file — fixed broker-side stop/TP + MAX_HOLD_DAYS backstop — the
-    // crossed-back-the-other-way exit emaCrossoverSignal computes for an
-    // open position is never consulted here, same as mean-reversion's own
-    // signal is never re-checked once a position exists. 'stocks' keeps its
-    // same 26-name watchlist — only the signal changed, not the universe —
-    // and any already-open positions there (opened under the old
-    // mean-reversion thesis) keep being managed by every other mechanism
-    // unaffected by this (stop/TP, big-candle exit, AI safety, max-hold).
+    // INTRADAY_INSTANCES (japan225) get a Donchian breakout entry instead —
+    // see that Set's own comment for why (breakout reacts to a genuine new
+    // extreme, closer to "the start of a move" than a lagging crossover
+    // confirmation). EMA_TREND_INSTANCES (stocks) get the lighter, more
+    // permissive EMA9/21 crossover instead of RSI(2)+EMA200 mean-reversion —
+    // switched 2026-09-01 after watching japan225's own (now-superseded)
+    // EMA-crossover swap pick up a real signal almost immediately. Both
+    // reuse validated functions from alpacaStrategies.ts as-is rather than
+    // inventing new logic; both convert stopPrice/takeProfitPrice (absolute
+    // levels) into point distances to match MrSignal's shape, which
+    // everything downstream (calcStake, the conviction-scaled floor,
+    // journaling) already expects. Once open, a mean-reversion position is
+    // managed by fixed broker-side stop/TP + MAX_HOLD_DAYS only — its own
+    // signal is never re-checked. EMA-trend/intraday positions ARE
+    // re-checked every poll (see manageExits' own reversal-exit blocks).
+    // 'stocks' keeps its same 26-name watchlist — only the signal changed,
+    // not the universe — and any already-open positions there (opened under
+    // the old mean-reversion thesis) keep being managed by every other
+    // mechanism unaffected by this (stop/TP, big-candle exit, AI safety,
+    // max-hold).
     let signal: MrSignal;
-    if (EMA_TREND_INSTANCES.has(instance)) {
+    if (INTRADAY_INSTANCES.has(instance)) {
+      const donchSig = donchianBreakoutSignal(raw!, false, undefined, DONCHIAN_ENTRY_PERIOD_INTRADAY, DONCHIAN_EXIT_PERIOD_INTRADAY, '30min');
+      if (donchSig.action !== 'BUY' && donchSig.action !== 'SELL') continue;
+      const lastClose  = raw![raw!.length - 1].c;
+      const stopPoints = donchSig.stopPrice       !== undefined ? Math.abs(lastClose - donchSig.stopPrice)       : lastClose * 0.015;
+      const tpPoints   = donchSig.takeProfitPrice !== undefined ? Math.abs(donchSig.takeProfitPrice - lastClose) : lastClose * 0.10;
+      signal = { action: donchSig.action, reason: `[Donchian] ${donchSig.reason}`, stopPoints, tpPoints, conviction: (donchSig.confidence ?? 50) / 100 };
+    } else if (EMA_TREND_INSTANCES.has(instance)) {
       // Standard EMA9/21 (emaCrossoverSignal's own default) — considered a
       // faster EMA5/13 pair 2026-09-01 but decided against it: the daily AI
       // safety check already covers the "is something actually wrong"
@@ -656,7 +747,8 @@ export function startMeanReversionBot(instance: MrInstance, mode: IgMode): { ok:
   if (s.pollTimer) clearTimeout(s.pollTimer);
   s.running = true;
   saveRunningFlag(instance, mode, true);
-  const signalDesc = EMA_TREND_INSTANCES.has(instance) ? 'EMA9/21 crossover trend-follow' : 'RSI(2)+EMA200 mean-reversion';
+  const signalDesc = INTRADAY_INSTANCES.has(instance) ? 'Donchian breakout (30-min, intraday)'
+    : EMA_TREND_INSTANCES.has(instance) ? 'EMA9/21 crossover trend-follow' : 'RSI(2)+EMA200 mean-reversion';
   addLog(instance, mode, 'info', '—', `Mean-reversion bot (${instance}) started — ${signalDesc}, rules-only${AI_MONITORED[instance] ? ' + daily AI safety check on open positions' : ', no AI at all'} — £${MAX_RISK_GBP} risk/trade, max ${MAX_POSITIONS} positions, ${INSTANCE_EPICS[instance].length} epic(s) watched`);
   void poll(instance, mode);
   return { ok: true };
