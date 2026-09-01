@@ -697,9 +697,22 @@ async function pollEntries(mode: T212Mode): Promise<void> {
     return;
   }
 
-  const currentBudgetUsed = Object.values(st.botOpened).reduce((s, e) => s + e.budgetGbp, 0);
-  if (currentBudgetUsed >= T212_TOTAL_BUDGET_GBP) {
-    addLog(mode, 'wait', '—', `Bot budget fully deployed (£${currentBudgetUsed.toFixed(0)}/£${T212_TOTAL_BUDGET_GBP}) — skipping new entries this cycle`);
+  // Run in batches, not a continuously-topped-up pool — same fix as
+  // pollMomentumEntries above, extended here 2026-09-01 per explicit
+  // repeated request after a T212 429 surfaced: while ANY bot-opened ISA
+  // position exists, this cycle only monitors it for exit (pollExits,
+  // called separately and unconditionally in poll()) — no candidate scan,
+  // no trend/news/AI calls, no T212 instrument-lookup calls. Previously this
+  // only stopped once the budget was FULLY deployed, which still let a
+  // partially-funded book scan up to T212_CANDIDATES_PER_CYCLE (40)
+  // candidates every cycle — each candidate potentially reaching
+  // resolveT212Ticker (a real T212 API call) — real volume even with just
+  // one or two positions open. Scanning for fresh candidates only resumes
+  // once the book is completely flat again, exactly like momentum.
+  const openCount = Object.keys(st.botOpened).length;
+  if (openCount > 0) {
+    const currentBudgetUsed = Object.values(st.botOpened).reduce((s, e) => s + e.budgetGbp, 0);
+    addLog(mode, 'wait', '—', `${openCount} position(s) open (£${currentBudgetUsed.toFixed(0)}/£${T212_TOTAL_BUDGET_GBP} budget) — monitoring only, no new-candidate scan until flat`);
     return;
   }
 
