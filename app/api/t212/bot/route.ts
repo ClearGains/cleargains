@@ -51,8 +51,16 @@ export async function POST(req: NextRequest) {
     const body = await req.json() as { paused?: boolean };
     return proxyTo(`/t212/${mode}/positions/${encodeURIComponent(ticker)}/ai-pause`, 'POST', body);
   }
+  if (action === 'budget') {
+    const body = await req.json() as { gbp?: number };
+    return proxyTo(`/t212/${mode}/budget`, 'POST', body);
+  }
+  if (action === 'momentum-budget') {
+    const body = await req.json() as { gbp?: number };
+    return proxyTo(`/t212/${mode}/momentum/budget`, 'POST', body);
+  }
   if (action !== 'start' && action !== 'stop') {
-    return NextResponse.json({ ok: false, error: 'action must be "start", "stop", "ai-pause", or "position-ai-pause"' }, { status: 400 });
+    return NextResponse.json({ ok: false, error: 'action must be "start", "stop", "ai-pause", "position-ai-pause", "budget", or "momentum-budget"' }, { status: 400 });
   }
   return proxyTo(`/t212/${mode}/${action}`, 'POST');
 }

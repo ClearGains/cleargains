@@ -145,6 +145,30 @@ export default function T212TraderPage() {
     }
   };
 
+  const [budgetInput, setBudgetInput] = useState('');
+  const [budgetSaving, setBudgetSaving] = useState(false);
+  const updateBudget = async () => {
+    const gbp = Number(budgetInput);
+    if (!Number.isFinite(gbp) || gbp <= 0) { setError('Enter a valid budget amount'); return; }
+    setBudgetSaving(true);
+    setError(null);
+    try {
+      const res  = await fetch(`/api/t212/bot?mode=${mode}&action=budget`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ gbp }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok) { setError(data.error ?? 'Failed to update budget'); return; }
+      setBudgetInput('');
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Request failed');
+    } finally {
+      setBudgetSaving(false);
+    }
+  };
+
   const posByTicker = new Map((status?.positions ?? []).map(p => [p.ticker, p]));
   const preExisting  = status?.preExisting ?? [];
   const botOpened    = status?.botOpened ?? {};
@@ -245,6 +269,25 @@ export default function T212TraderPage() {
               <div className="col-span-2 pt-1 border-t border-gray-800">
                 <p className="text-[10px] text-gray-500 uppercase tracking-wider">Bot budget deployed</p>
                 <p className="text-white font-semibold tabular-nums">£{budgetUsed.toFixed(0)} / £{(status?.totalBudgetGbp ?? 3000).toLocaleString()}</p>
+              </div>
+              <div className="col-span-2 pt-2">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">
+                  Set total budget {status?.cash?.total !== undefined && <span className="text-gray-600">(up to £{status.cash.total.toFixed(0)} balance)</span>}
+                </p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={status?.cash?.total}
+                    placeholder={`${status?.totalBudgetGbp ?? 3000}`}
+                    value={budgetInput}
+                    onChange={e => setBudgetInput(e.target.value)}
+                    className="w-28 bg-gray-900 border border-gray-800 rounded-lg px-2 py-1.5 text-sm text-white tabular-nums focus:outline-none focus:border-purple-500/50"
+                  />
+                  <Button onClick={() => void updateBudget()} loading={budgetSaving} variant="secondary">
+                    Update
+                  </Button>
+                </div>
               </div>
             </div>
           </Card>

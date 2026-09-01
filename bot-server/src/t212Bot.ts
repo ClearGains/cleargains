@@ -66,7 +66,7 @@ import {
 // that a real win doesn't register.
 const T212_MIN_POSITION_GBP = 400;
 const T212_MAX_POSITION_GBP = 800;
-const T212_TOTAL_BUDGET_GBP = 3_000; // across all bot-opened positions at once — raised 2026-08-25 per explicit request; still comfortably within free cash (£3,993 at the time)
+const T212_TOTAL_BUDGET_GBP_DEFAULT = 3_000; // default, adjustable at runtime — see getT212Budget/setT212Budget
 const T212_POLL_MS = 3 * 60 * 60_000; // "every few hours" per explicit request
 const T212_CANDIDATES_PER_CYCLE = 40; // liquid-US-stock candidates scanned each cycle — keeps API/Gemini call volume sane
 const T212_MIN_CONFIRM_CONFIDENCE = 70;
@@ -130,7 +130,7 @@ const MOMENTUM_STRATEGY = 't212_momentum_news';
 const MOMENTUM_POLL_MS = 15 * 60_000;       // frequent enough that "today's move" is still fresh; gentle enough on the Finnhub key shared with the ISA bot's own news calls
 const MOMENTUM_MIN_POSITION_GBP = 100;
 const MOMENTUM_MAX_POSITION_GBP = 250;      // meaningfully smaller than the ISA bot's £400-800 — more numerous, shorter-lived positions by design, not a second long-term book
-const MOMENTUM_TOTAL_BUDGET_GBP = 750;      // separate pool from the ISA bot's £3,000 — a deliberately modest carve-out for a strategy that's new to this always-on bot, easy to raise once it's shown itself live
+const MOMENTUM_TOTAL_BUDGET_GBP_DEFAULT = 750; // default, adjustable at runtime — see getMomentumBudget/setMomentumBudget
 const MOMENTUM_MAX_POSITIONS = 5;
 const MOMENTUM_MIN_CONFIRM_CONFIDENCE = 65; // slightly below the ISA bot's 70 — this is a faster, smaller-size, higher-turnover strategy by nature, not a long-term conviction call
 // Exit plan is plain rules, not another AI call — a momentum trade's risk
@@ -249,6 +249,91 @@ export function setMomentumAiGateEnabled(mode: T212Mode, enabled: boolean): void
   addLog(mode, 'info', '—', enabled
     ? '[Momentum] AI confirm step turned back ON — rules signals now need AI agreement again'
     : '[Momentum] AI confirm step turned OFF — now trading the rules signal alone, exactly like the old /demo-trader auto-trade did');
+}
+
+// Runtime-adjustable total budgets — added 2026-09-01 per explicit request
+// ("add an element that allows adjusting the budget to any amount up to
+// the balance... i want to let more positions have funds"). Both were flat
+// constants before this; same persisted-override pattern as the momentum
+// AI-gate above (separate small JSON file, in-memory Map seeded from it at
+// load, exported get/set). The route handler (index.ts) is what actually
+// enforces "up to the balance" — validated against the account's own live
+// cash figure at the time of the request, not hardcoded here, since the
+// real ceiling changes as the account's balance does.
+function t212BudgetFile(mode: T212Mode): string {
+  return path.join(__dirname, '..', `t212-budget-${mode}.json`);
+}
+function loadBudgetOverride(mode: T212Mode): number | null {
+  try { return (JSON.parse(fs.readFileSync(t212BudgetFile(mode), 'utf8')) as { gbp: number }).gbp; }
+  catch { return null; }
+}
+function saveBudgetOverride(mode: T212Mode, gbp: number): void {
+  try { fs.writeFileSync(t212BudgetFile(mode), JSON.stringify({ gbp }), 'utf8'); } catch {}
+}
+const t212BudgetOverride = new Map<T212Mode, number>();
+{
+  const demo = loadBudgetOverride('demo'); if (demo !== null) t212BudgetOverride.set('demo', demo);
+  const live = loadBudgetOverride('live'); if (live !== null) t212BudgetOverride.set('live', live);
+}
+export function getT212Budget(mode: T212Mode): number {
+  return t212BudgetOverride.get(mode) ?? T212_TOTAL_BUDGET_GBP_DEFAULT;
+}
+export function setT212Budget(mode: T212Mode, gbp: number): void {
+  const was = getT212Budget(mode);
+  t212BudgetOverride.set(mode, gbp);
+  saveBudgetOverride(mode, gbp);
+  addLog(mode, 'info', '—', `ISA total budget set to £${gbp.toFixed(0)} (was £${was.toFixed(0)})`);
+}
+
+function t212MomentumBudgetFile(mode: T212Mode): string {
+  return path.join(__dirname, '..', `t212-momentum-budget-${mode}.json`);
+}
+function loadMomentumBudgetOverride(mode: T212Mode): number | null {
+  try { return (JSON.parse(fs.readFileSync(t212MomentumBudgetFile(mode), 'utf8')) as { gbp: number }).gbp; }
+  catch { return null; }
+}
+function saveMomentumBudgetOverride(mode: T212Mode, gbp: number): void {
+  try { fs.writeFileSync(t212MomentumBudgetFile(mode), JSON.stringify({ gbp }), 'utf8'); } catch {}
+}
+const momentumBudgetOverride = new Map<T212Mode, number>();
+{
+  const demo = loadMomentumBudgetOverride('demo'); if (demo !== null) momentumBudgetOverride.set('demo', demo);
+  const live = loadMomentumBudgetOverride('live'); if (live !== null) momentumBudgetOverride.set('live', live);
+}
+export function getMomentumBudget(mode: T212Mode): number {
+  return momentumBudgetOverride.get(mode) ?? MOMENTUM_TOTAL_BUDGET_GBP_DEFAULT;
+}
+export function setMomentumBudget(mode: T212Mode, gbp: number): void {
+  const was = getMomentumBudget(mode);
+  momentumBudgetOverride.set(mode, gbp);
+  saveMomentumBudgetOverride(mode, gbp);
+  addLog(mode, 'info', '—', `[Momentum] Total budget set to £${gbp.toFixed(0)} (was £${was.toFixed(0)})`);
+}
+
+// Validated setters — "up to the balance" is enforced HERE, against a fresh
+// live cash figure fetched at the moment of the request, not a number
+// baked into the UI or hardcoded here — the real ceiling moves as the
+// account's own balance does. If the cash check itself fails (network,
+// creds), fails open rather than blocking the update on an unrelated
+// outage — same "best-effort, don't let a side-check break the main
+// action" discipline as the rest of this file.
+export async function setT212BudgetChecked(mode: T212Mode, gbp: number): Promise<{ ok: boolean; error?: string }> {
+  if (!Number.isFinite(gbp) || gbp <= 0) return { ok: false, error: 'Budget must be a positive amount' };
+  try {
+    const cash = await getCash(mode);
+    if (gbp > cash.total) return { ok: false, error: `£${gbp.toFixed(0)} exceeds account balance (£${cash.total.toFixed(0)})` };
+  } catch { /* best-effort — see comment above */ }
+  setT212Budget(mode, gbp);
+  return { ok: true };
+}
+export async function setMomentumBudgetChecked(mode: T212Mode, gbp: number): Promise<{ ok: boolean; error?: string }> {
+  if (!Number.isFinite(gbp) || gbp <= 0) return { ok: false, error: 'Budget must be a positive amount' };
+  try {
+    const cash = await getCash(mode);
+    if (gbp > cash.total) return { ok: false, error: `£${gbp.toFixed(0)} exceeds account balance (£${cash.total.toFixed(0)})` };
+  } catch { /* best-effort — see comment above */ }
+  setMomentumBudget(mode, gbp);
+  return { ok: true };
 }
 
 // Per-position companion to the global toggle above — see
@@ -589,7 +674,7 @@ async function pollMomentumEntries(mode: T212Mode): Promise<void> {
   const aiGateOn = isMomentumAiGateEnabled(mode);
   const slotsLeft = MOMENTUM_MAX_POSITIONS - openCount;
   for (const cand of candidates.slice(0, slotsLeft)) {
-    const remainingNow = MOMENTUM_TOTAL_BUDGET_GBP - Object.values(st.botOpenedMomentum).reduce((s, e) => s + e.budgetGbp, 0);
+    const remainingNow = getMomentumBudget(mode) - Object.values(st.botOpenedMomentum).reduce((s, e) => s + e.budgetGbp, 0);
     if (remainingNow < MOMENTUM_MIN_POSITION_GBP) break;
 
     // Fallback path — see isMomentumAiGateEnabled's own comment. Buys
@@ -712,7 +797,7 @@ async function pollEntries(mode: T212Mode): Promise<void> {
   const openCount = Object.keys(st.botOpened).length;
   if (openCount > 0) {
     const currentBudgetUsed = Object.values(st.botOpened).reduce((s, e) => s + e.budgetGbp, 0);
-    addLog(mode, 'wait', '—', `${openCount} position(s) open (£${currentBudgetUsed.toFixed(0)}/£${T212_TOTAL_BUDGET_GBP} budget) — monitoring only, no new-candidate scan until flat`);
+    addLog(mode, 'wait', '—', `${openCount} position(s) open (£${currentBudgetUsed.toFixed(0)}/£${getT212Budget(mode)} budget) — monitoring only, no new-candidate scan until flat`);
     return;
   }
 
@@ -730,7 +815,7 @@ async function pollEntries(mode: T212Mode): Promise<void> {
 
   for (const sym of candidates) {
     if (!run.running) break;
-    const remaining = T212_TOTAL_BUDGET_GBP - Object.values(st.botOpened).reduce((s, e) => s + e.budgetGbp, 0);
+    const remaining = getT212Budget(mode) - Object.values(st.botOpened).reduce((s, e) => s + e.budgetGbp, 0);
     if (remaining < T212_MIN_POSITION_GBP) break;
 
     const trend = await fetchTrend(sym);
@@ -1024,8 +1109,8 @@ export async function startT212Bot(mode: T212Mode): Promise<{ ok: boolean; error
   if (run.momentumPollTimer) clearTimeout(run.momentumPollTimer);
   run.running = true;
   saveRunningFlag(mode, true);
-  addLog(mode, 'info', '—', `T212 ISA bot started — £${T212_MIN_POSITION_GBP}-${T212_MAX_POSITION_GBP}/position, £${T212_TOTAL_BUDGET_GBP} total budget, checking every ${(T212_POLL_MS / 3_600_000).toFixed(0)}h — long-term trend+news selection, not swing timing`);
-  addLog(mode, 'info', '—', `[Momentum] Second strategy running alongside — £${MOMENTUM_MIN_POSITION_GBP}-${MOMENTUM_MAX_POSITION_GBP}/position, £${MOMENTUM_TOTAL_BUDGET_GBP} total budget, checking every ${(MOMENTUM_POLL_MS / 60_000).toFixed(0)}m — today's move+volume+news, AI-confirmed`);
+  addLog(mode, 'info', '—', `T212 ISA bot started — £${T212_MIN_POSITION_GBP}-${T212_MAX_POSITION_GBP}/position, £${getT212Budget(mode)} total budget, checking every ${(T212_POLL_MS / 3_600_000).toFixed(0)}h — long-term trend+news selection, not swing timing`);
+  addLog(mode, 'info', '—', `[Momentum] Second strategy running alongside — £${MOMENTUM_MIN_POSITION_GBP}-${MOMENTUM_MAX_POSITION_GBP}/position, £${getMomentumBudget(mode)} total budget, checking every ${(MOMENTUM_POLL_MS / 60_000).toFixed(0)}m — today's move+volume+news, AI-confirmed`);
   // Staggered, delayed first poll — added 2026-09-01 after a T212 429
   // surfaced repeatedly during a stretch of frequent bot-server restarts
   // (each restart calls startT212Bot again). Both polls used to fire
@@ -1069,10 +1154,10 @@ export async function getT212BotStatus(mode: T212Mode): Promise<{
   return {
     running: run.running, log: run.log.slice(0, 100), nextRunMs: run.nextRunMs, lastPollTs: run.lastPollTs,
     preExisting: run.state.preExisting, botOpened: run.state.botOpened,
-    botOpenedMomentum: run.state.botOpenedMomentum, momentumNextRunMs: run.momentumNextRunMs, momentumBudgetGbp: MOMENTUM_TOTAL_BUDGET_GBP,
+    botOpenedMomentum: run.state.botOpenedMomentum, momentumNextRunMs: run.momentumNextRunMs, momentumBudgetGbp: getMomentumBudget(mode),
     momentumAiGateEnabled: isMomentumAiGateEnabled(mode),
     cash: cash ? { free: cash.free, total: cash.total } : undefined,
     positions,
-    aiPaused: isT212AiPaused(mode), totalBudgetGbp: T212_TOTAL_BUDGET_GBP,
+    aiPaused: isT212AiPaused(mode), totalBudgetGbp: getT212Budget(mode),
   };
 }

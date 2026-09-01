@@ -28,7 +28,7 @@ import { fetchFullPositions, getSession } from './igApi';
 import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
 import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot';
 import { startAlpacaNewsStream, isNewsStreamEnabled, setNewsStreamEnabled } from './alpacaNewsStream';
-import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212AiPaused, setT212PositionAiPaused, isMomentumAiGateEnabled, setMomentumAiGateEnabled } from './t212Bot';
+import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212AiPaused, setT212PositionAiPaused, isMomentumAiGateEnabled, setMomentumAiGateEnabled, setT212BudgetChecked, setMomentumBudgetChecked } from './t212Bot';
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning } from './igOptionsBot';
 import { getPerformanceSummary } from './performance';
@@ -370,6 +370,21 @@ app.post('/t212/:mode/momentum/ai-gate', auth, (req: Request, res: Response) => 
   if (!mode) return;
   setMomentumAiGateEnabled(mode, !!req.body?.enabled);
   res.json({ ok: true });
+});
+// Runtime-adjustable total budgets — per explicit request to let more
+// positions have funds without a redeploy. Validated server-side against
+// the account's own live balance at the time of the request (see
+// setT212BudgetChecked's own comment) — the client only needs to pass the
+// desired £ figure.
+app.post('/t212/:mode/budget', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  void setT212BudgetChecked(mode, Number(req.body?.gbp)).then(r => res.status(r.ok ? 200 : 400).json(r));
+});
+app.post('/t212/:mode/momentum/budget', auth, (req: Request, res: Response) => {
+  const mode = resolveT212Mode(req, res);
+  if (!mode) return;
+  void setMomentumBudgetChecked(mode, Number(req.body?.gbp)).then(r => res.status(r.ok ? 200 : 400).json(r));
 });
 
 // ── Mean-reversion bot (RSI(2)+EMA200) — three independent instances ───────
