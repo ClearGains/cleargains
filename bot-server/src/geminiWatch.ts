@@ -239,8 +239,23 @@ export function markNoAiClose(mode: IgMode, dealId: string): void {
   set.add(dealId);
   saveNoAiClose(mode, set);
 }
-function isNoAiCloseExempt(mode: IgMode, dealId: string): boolean {
+// Per-position override, added 2026-09-03 per explicit request — the
+// exemption above is automatic (every mean-reversion-family entry gets it),
+// but the UI gave no way to tell a position was exempt (it showed the same
+// generic "Watching" badge regardless) or to turn AI review back on for one
+// specific position if the user actually wants it. This is the "turn it
+// back on" half; markNoAiClose above is still what the mean-reversion bots
+// call automatically at entry.
+export function unmarkNoAiClose(mode: IgMode, dealId: string): void {
+  const set = noAiCloseDeals.get(mode)!;
+  set.delete(dealId);
+  saveNoAiClose(mode, set);
+}
+export function isNoAiCloseExempt(mode: IgMode, dealId: string): boolean {
   return noAiCloseDeals.get(mode)?.has(dealId) ?? false;
+}
+export function getNoAiCloseDealIds(mode: IgMode): string[] {
+  return [...(noAiCloseDeals.get(mode) ?? [])];
 }
 
 // Full last verdict per watched deal, for UI display — separate from

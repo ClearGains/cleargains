@@ -23,7 +23,7 @@ import { IG_EPICS, RULE_BASED_ANALYSIS_CONFIRMED_EPICS, FX_EPICS } from './igStr
 import { getJournal } from './tradeJournal';
 import { computeTradeAttribution } from './tradeAttribution';
 import { startLeaderboardSchedule, getLeaderboardState, runLeaderboardSweep } from './leaderboard';
-import { startGeminiWatch, getWatchedDealIds, getWatchNotes, addToWatch, setWatchNote, removeFromWatch, isWatchAiPaused, setWatchAiPaused } from './geminiWatch';
+import { startGeminiWatch, getWatchedDealIds, getWatchNotes, addToWatch, setWatchNote, removeFromWatch, isWatchAiPaused, setWatchAiPaused, getNoAiCloseDealIds, markNoAiClose, unmarkNoAiClose } from './geminiWatch';
 import { fetchFullPositions, getSession } from './igApi';
 import { getFxScalperBot, loadSavedFxScalperState, type FxScalperStartParams } from './fxScalperBot';
 import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot';
@@ -728,13 +728,26 @@ app.get('/ig-strategy/:mode/watch', auth, async (req: Request, res: Response) =>
   const mode = resolveIgMode(req, res);
   if (!mode) return;
   const session = getSession(`igstrat:${mode}`);
-  if (!session) { res.json({ ok: true, positions: [], watchedDealIds: getWatchedDealIds(mode), watchNotes: getWatchNotes(mode), aiPaused: isWatchAiPaused(mode) }); return; }
+  if (!session) { res.json({ ok: true, positions: [], watchedDealIds: getWatchedDealIds(mode), watchNotes: getWatchNotes(mode), aiPaused: isWatchAiPaused(mode), noAiCloseDealIds: getNoAiCloseDealIds(mode) }); return; }
   try {
     const positions = await fetchFullPositions(session);
-    res.json({ ok: true, positions, watchedDealIds: getWatchedDealIds(mode), watchNotes: getWatchNotes(mode), aiPaused: isWatchAiPaused(mode) });
+    res.json({ ok: true, positions, watchedDealIds: getWatchedDealIds(mode), watchNotes: getWatchNotes(mode), aiPaused: isWatchAiPaused(mode), noAiCloseDealIds: getNoAiCloseDealIds(mode) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
   }
+});
+
+// Per-position AI-exemption toggle — added 2026-09-03 so a position that
+// was automatically exempted at entry (every mean-reversion-family trade)
+// can have that turned back on if the user actually wants Gemini watching
+// it, and so the UI can show which positions are exempt in the first place
+// rather than displaying the same generic "Watching" badge for both.
+app.post('/ig-strategy/:mode/watch/:dealId/ai-exempt', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  if (req.body?.exempt) markNoAiClose(mode, req.params.dealId);
+  else unmarkNoAiClose(mode, req.params.dealId);
+  res.json({ ok: true });
 });
 
 app.post('/ig-strategy/:mode/watch/:dealId', auth, (req: Request, res: Response) => {

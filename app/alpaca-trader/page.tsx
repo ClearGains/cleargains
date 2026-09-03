@@ -635,6 +635,14 @@ function IgSpreadBetTab() {
 
   const [watchPositions, setWatchPositions] = useState<WatchPosition[]>([]);
   const [watchedDealIds, setWatchedDealIds] = useState<Set<string>>(new Set());
+  // Positions auto-exempted from AI review (every mean-reversion-family
+  // entry gets this at open) — shown as "✦ Watching" identically to a
+  // genuinely-reviewed position before this, which was confusing (typing a
+  // plan into that position's note box did nothing, since the review
+  // function exits before ever reading it). exemptBusy tracks the toggle
+  // button per dealId so only the one being changed shows a spinner.
+  const [noAiCloseDealIds, setNoAiCloseDealIds] = useState<Set<string>>(new Set());
+  const [exemptBusy, setExemptBusy]         = useState<string | null>(null);
   const [watchBusy, setWatchBusy]           = useState<string | null>(null);
   const [watchAiPaused, setWatchAiPausedState] = useState(false);
   const [aiPauseBusy, setAiPauseBusy]       = useState(false);
@@ -724,10 +732,11 @@ function IgSpreadBetTab() {
   const fetchWatch = useCallback(async () => {
     try {
       const res  = await fetch(`/api/ig-strategy?mode=${igMode}&action=watch`);
-      const data = await res.json() as { ok: boolean; positions?: WatchPosition[]; watchedDealIds?: string[]; watchNotes?: Record<string, string>; aiPaused?: boolean };
+      const data = await res.json() as { ok: boolean; positions?: WatchPosition[]; watchedDealIds?: string[]; watchNotes?: Record<string, string>; aiPaused?: boolean; noAiCloseDealIds?: string[] };
       if (data.ok) {
         setWatchPositions(data.positions ?? []);
         setWatchedDealIds(new Set(data.watchedDealIds ?? []));
+        setNoAiCloseDealIds(new Set(data.noAiCloseDealIds ?? []));
         setWatchAiPausedState(!!data.aiPaused);
         const notes = data.watchNotes ?? {};
         setWatchNotes(notes);
@@ -805,6 +814,29 @@ function IgSpreadBetTab() {
       setError(e instanceof Error ? e.message : 'Failed to save note');
     } finally {
       setNoteBusy(null);
+    }
+  };
+
+  // Per-position AI-review override — mean-reversion-family entries are
+  // exempted from AI close judgment automatically at open (see
+  // meanReversionBot.ts/igStrategyBot.ts's own markNoAiClose calls); this
+  // lets the user turn that back on for one specific position, or turn it
+  // back off, without changing the account-wide default. Added 2026-09-03
+  // after "Watching" turned out to show identically for exempt and
+  // genuinely-reviewed positions with no way to tell them apart.
+  const toggleAiExempt = async (dealId: string, currentlyExempt: boolean) => {
+    setExemptBusy(dealId);
+    try {
+      await fetch(`/api/ig-strategy?mode=${igMode}&action=watch-ai-exempt`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ dealId, exempt: !currentlyExempt }),
+      });
+      await fetchWatch();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update AI review setting');
+    } finally {
+      setExemptBusy(null);
     }
   };
 
@@ -1540,6 +1572,14 @@ function IgSpreadBetTab() {
                   const noteDirty  = draft !== savedNote;
                   const isNoteBusy = noteBusy === p.dealId;
                   const watchVerdict = status?.positionWatch?.[p.dealId];
+                  // Auto-exempted at entry for every mean-reversion-family
+                  // position (see markNoAiClose) — "✦ Watching" used to show
+                  // identically for these, with no way to tell AI was never
+                  // actually going to review it (or read whatever note you
+                  // typed). isExempt drives a distinct badge + a per-position
+                  // toggle instead.
+                  const isExempt      = noAiCloseDealIds.has(p.dealId);
+                  const isExemptBusy  = exemptBusy === p.dealId;
                   return (
                     <div key={p.dealId} className="px-4 py-3">
                       <div className="flex items-center justify-between">
@@ -1577,34 +1617,59 @@ function IgSpreadBetTab() {
                             disabled={isBusy}
                             className={clsx(
                               'text-xs px-2.5 py-1 rounded font-medium transition-colors disabled:opacity-50',
-                              isWatched
+                              isExempt
+                                ? 'bg-slate-800 text-slate-500'
+                                : isWatched
                                 ? 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/30'
                                 : 'bg-slate-800 text-slate-400 hover:bg-slate-700',
                             )}
                           >
-                            {isBusy ? '…' : isWatched ? '✦ Watching' : 'Watch'}
+                            {isBusy ? '…' : isExempt ? '⚙ Mechanical exits only' : isWatched ? '✦ Watching' : 'Watch'}
                           </button>
                         </div>
                       </div>
                       {isWatched && (
-                        <div className="mt-2 flex items-center gap-2 pl-7">
-                          <input
-                            type="text"
-                            value={draft}
-                            onChange={e => setNoteDrafts(prev => ({ ...prev, [p.dealId]: e.target.value }))}
-                            placeholder="Tell Gemini your plan for this position — e.g. close if it breaks below 210"
-                            className="flex-1 bg-slate-800/60 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-purple-500/60"
-                          />
-                          {noteDirty && (
+                        isExempt ? (
+                          <div className="mt-2 flex items-center justify-between gap-2 pl-7">
+                            <span className="text-[11px] text-slate-500">
+                              Opened by a rules-based strategy — AI review is off, exits are mechanical only (stop/TP, trend/reversal checks).
+                            </span>
                             <button
-                              onClick={() => void saveNote(p.dealId)}
-                              disabled={isNoteBusy}
-                              className="text-xs px-2 py-1 rounded font-medium bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 disabled:opacity-50"
+                              onClick={() => void toggleAiExempt(p.dealId, true)}
+                              disabled={isExemptBusy}
+                              className="text-xs px-2 py-1 rounded font-medium bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 disabled:opacity-50 shrink-0"
                             >
-                              {isNoteBusy ? '…' : 'Save'}
+                              {isExemptBusy ? '…' : 'Enable AI review'}
                             </button>
-                          )}
-                        </div>
+                          </div>
+                        ) : (
+                          <div className="mt-2 flex items-center gap-2 pl-7">
+                            <input
+                              type="text"
+                              value={draft}
+                              onChange={e => setNoteDrafts(prev => ({ ...prev, [p.dealId]: e.target.value }))}
+                              placeholder="Tell Gemini your plan for this position — e.g. close if it breaks below 210"
+                              className="flex-1 bg-slate-800/60 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-purple-500/60"
+                            />
+                            {noteDirty && (
+                              <button
+                                onClick={() => void saveNote(p.dealId)}
+                                disabled={isNoteBusy}
+                                className="text-xs px-2 py-1 rounded font-medium bg-purple-500/20 text-purple-300 hover:bg-purple-500/30 disabled:opacity-50 shrink-0"
+                              >
+                                {isNoteBusy ? '…' : 'Save'}
+                              </button>
+                            )}
+                            <button
+                              onClick={() => void toggleAiExempt(p.dealId, false)}
+                              disabled={isExemptBusy}
+                              title="Turn off AI review for this position — mechanical exits only"
+                              className="text-xs px-2 py-1 rounded font-medium bg-slate-800 text-slate-500 hover:bg-slate-700 disabled:opacity-50 shrink-0"
+                            >
+                              {isExemptBusy ? '…' : 'Disable AI'}
+                            </button>
+                          </div>
+                        )
                       )}
                     </div>
                   );

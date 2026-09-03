@@ -84,6 +84,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}/note`, 'POST', { note });
   }
 
+  if (action === 'watch-ai-exempt') {
+    const { dealId, exempt } = await req.json() as { dealId?: string; exempt?: boolean };
+    if (!dealId) return NextResponse.json({ ok: false, error: 'dealId required' }, { status: 400 });
+    return proxyTo(`/ig-strategy/${mode}/watch/${encodeURIComponent(dealId)}/ai-exempt`, 'POST', { exempt });
+  }
+
   if (action === 'open-recommendation') {
     const { epic } = await req.json() as { epic?: string };
     if (!epic) return NextResponse.json({ ok: false, error: 'epic required' }, { status: 400 });
