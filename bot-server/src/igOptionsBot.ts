@@ -152,6 +152,18 @@ const STOCK_MIN_MOVE_PCT    = 1.5;  // today's move must be a real one before th
 // this can catch a move earlier and smaller rather than waiting for it to
 // fully play out first.
 const STOCK_DAILY_MIN_MOVE_PCT = 0.3;
+// Upper bound to go with the lower one above — added 2026-09-03 per
+// explicit request. moveIsPlausible (below) only asks whether the
+// REMAINING move to breakeven is reasonable; it says nothing about how much
+// of TODAY's move has already happened before this bought in. A stock
+// already up 5%+ intraday is the same-day version of "already extended" —
+// most of the day's realistic move is probably already behind it, entering
+// now is chasing, not catching it early. Deliberately a flat percentage
+// (same style as EXTENDED_TREND_12W_PCT/EXTENDED_TREND_52W_PCT in
+// meanReversionBot.ts) rather than a per-stock historical baseline — no
+// extra historical-bars fetch needed, just a sanity ceiling on top of the
+// lower entry bar.
+const STOCK_DAILY_ALREADY_EXTENDED_PCT = 4;
 const STOCK_POLL_MS         = 15 * 60_000; // entries still want to catch intraday momentum promptly
 const STOCK_EXIT_DTE_DAYS   = 1;    // close with ~1 day left rather than ride into the weekly's own theta/settlement endgame
 
@@ -988,6 +1000,10 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
       dailyRangePct = q.h && q.l && q.h > q.l ? ((q.h - q.l) / q.c) * 100 : Math.abs(dp);
     } catch { continue; }
     if (Math.abs(dp) < STOCK_DAILY_MIN_MOVE_PCT) continue;
+    if (Math.abs(dp) >= STOCK_DAILY_ALREADY_EXTENDED_PCT) {
+      addLog(mode, 'wait', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today already — too much of today's move likely already behind it, skipping rather than chasing`);
+      continue;
+    }
     const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
 
     const d = details.get(u.shareEpic);
