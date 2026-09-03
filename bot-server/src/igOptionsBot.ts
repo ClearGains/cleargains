@@ -268,10 +268,30 @@ type Tracked = {
 
 type LogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'wait' | 'error'; epic: string; msg: string };
 
+// A trade the size-escalation cap blocked, remembered so it can be manually
+// approved instead of just logged and lost — added 2026-09-03 per explicit
+// request ("let it or near those have an override button so i can click it
+// and it will open the position as intended if i want it to be opened").
+// Deliberately expires (OVERRIDE_TTL_MS below) rather than staying valid
+// forever — the premium/strike snapshot it was built from goes stale, and
+// approving it re-fetches a live quote rather than trusting the old one, but
+// the STRIKE/expiry picked still reflects conditions from whenever the scan
+// ran, so an old override shouldn't be actionable indefinitely.
+type PendingOverride = {
+  id: string; mode: IgMode; createdAt: number;
+  underlyingEpic: string; epic: string; name: string;
+  strike: number; expiry: string; expiryMs: number;
+  side: 'call' | 'put'; kind: 'stock' | 'stock-daily' | 'stock-monthly';
+  stake: number; optOffer: number; // stake/price at the moment it was rejected — shown to the user, re-fetched fresh on approval
+  dp: number; confidence: number; aiReason: string; today: string;
+};
+const OVERRIDE_TTL_MS = 60 * 60_000; // 1 hour — long enough to notice and act, short enough the snapshot isn't badly stale
+
 type BotState = {
   running: boolean;
   session: IGSession | null;
   tracked: Record<string, Tracked>; // keyed by underlying epic — one option position per underlying
+  pendingOverrides: PendingOverride[];
   log: LogEntry[];
   pollTimer: ReturnType<typeof setTimeout> | null;
   stockPollTimer: ReturnType<typeof setTimeout> | null; // faster loop for the weekly stock strategy's entries
@@ -309,6 +329,15 @@ function saveTracked(mode: IgMode, tracked: Record<string, Tracked>): void {
   try { fs.writeFileSync(trackedFile(mode), JSON.stringify(tracked), 'utf8'); } catch {}
 }
 
+function overridesFile(mode: IgMode): string { return path.join(__dirname, '..', `ig-options-overrides-${mode}.json`); }
+function loadOverrides(mode: IgMode): PendingOverride[] {
+  try { return JSON.parse(fs.readFileSync(overridesFile(mode), 'utf8')) as PendingOverride[]; }
+  catch { return []; }
+}
+function saveOverrides(mode: IgMode, overrides: PendingOverride[]): void {
+  try { fs.writeFileSync(overridesFile(mode), JSON.stringify(overrides), 'utf8'); } catch {}
+}
+
 function runningFlagFile(mode: IgMode): string { return path.join(__dirname, '..', `ig-options-running-${mode}.json`); }
 export function wasIgOptionsBotRunning(mode: IgMode): boolean {
   try { return (JSON.parse(fs.readFileSync(runningFlagFile(mode), 'utf8')) as { running: boolean }).running; }
@@ -321,7 +350,7 @@ function saveRunningFlag(mode: IgMode, running: boolean): void {
 function st(mode: IgMode): BotState {
   let s = states.get(mode);
   if (!s) {
-    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, fastMonitorTimer: null, nextRunMs: null, lastPollTs: null, stockLastPollTs: null, lastStockEntryDay: {}, lastOptionEvalKey: {} };
+    s = { running: false, session: null, tracked: loadTracked(mode), pendingOverrides: loadOverrides(mode), log: [], pollTimer: null, stockPollTimer: null, fastMonitorTimer: null, nextRunMs: null, lastPollTs: null, stockLastPollTs: null, lastStockEntryDay: {}, lastOptionEvalKey: {} };
     states.set(mode, s);
   }
   return s;
@@ -1147,7 +1176,7 @@ async function placeStockOrder(
     // Monthly gets its own, higher ceiling — see MONTHLY_MAX_LOSS_CEILING_GBP's
     // own comment (most runway to recover of the three = most tolerable to
     // size bigger).
-    const lossCeiling = kind === 'stock-monthly' ? MONTHLY_MAX_LOSS_CEILING_GBP : DEMO_MAX_LOSS_CEILING_GBP;
+    const lossCeiling = lossCeilingFor(kind);
     let result: Awaited<ReturnType<typeof placeMarketOrder>> | null = null;
     for (let attempt = 1; attempt <= (mode === 'demo' ? DEMO_MAX_SIZE_ATTEMPTS : 1); attempt++) {
       try {
@@ -1159,7 +1188,16 @@ async function placeStockOrder(
           const nextStake = Math.round(attemptStake * 2 * 100) / 100;
           const nextPremium = optOffer * nextStake;
           if (nextPremium > lossCeiling) {
-            addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected — next retry (${nextStake}) would commit £${nextPremium.toFixed(0)} premium (= max loss), over the £${lossCeiling} ceiling — giving up rather than exceeding it`);
+            addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected — next retry (${nextStake}) would commit £${nextPremium.toFixed(0)} premium (= max loss), over the £${lossCeiling} ceiling — giving up rather than exceeding it. Overridable for ${(OVERRIDE_TTL_MS / 60_000).toFixed(0)}min if you want it opened anyway.`);
+            const override: PendingOverride = {
+              id: Math.random().toString(36).slice(2, 10), mode, createdAt: Date.now(),
+              underlyingEpic: u.shareEpic, epic: opt.epic, name: opt.name,
+              strike: opt.strike, expiry: opt.expiry, expiryMs: opt.expiryMs,
+              side, kind, stake: nextStake, optOffer,
+              dp, confidence, aiReason, today,
+            };
+            s.pendingOverrides = [...s.pendingOverrides.filter(o => o.underlyingEpic !== u.shareEpic), override];
+            saveOverrides(mode, s.pendingOverrides);
             throw e;
           }
           addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected as below IG's real minimum (reported minDealSize was wrong) — retrying at ${nextStake} (£${nextPremium.toFixed(0)} max loss, within the £${lossCeiling} ceiling)`);
@@ -1193,6 +1231,76 @@ async function placeStockOrder(
     addLog(mode, 'error', opt.name, `${tag} Order failed: ${e instanceof Error ? e.message : String(e)}`);
     return false;
   }
+}
+
+// Manually approve a size-escalation-capped trade — the explicit override
+// button's backend. Bypasses the loss-ceiling entirely (the user has
+// already seen the size/max-loss it was rejected for and asked for it
+// anyway) but still re-fetches a LIVE quote rather than trusting the
+// snapshot the rejection was built from, since real time may have passed.
+export async function executeOverride(mode: IgMode, id: string): Promise<{ ok: boolean; error?: string }> {
+  const s = st(mode);
+  const override = s.pendingOverrides.find(o => o.id === id);
+  if (!override) return { ok: false, error: 'Override not found or already expired/used' };
+  if (Date.now() - override.createdAt > OVERRIDE_TTL_MS) {
+    s.pendingOverrides = s.pendingOverrides.filter(o => o.id !== id);
+    saveOverrides(mode, s.pendingOverrides);
+    return { ok: false, error: 'Override expired — the price snapshot it was based on is too stale to trust now' };
+  }
+  const u = STOCK_UNDERLYINGS.find(x => x.shareEpic === override.underlyingEpic);
+  if (!u) return { ok: false, error: 'Underlying no longer recognized' };
+
+  const session = await getOrAuthSession(mode);
+  if (!session) return { ok: false, error: 'No IG session — check credentials' };
+
+  let optOffer: number;
+  try {
+    const details = (await fetchMarketDetails(session, [override.epic])).get(override.epic);
+    if (!details || typeof details.offer !== 'number' || details.offer <= 0 || details.marketStatus !== 'TRADEABLE') {
+      return { ok: false, error: 'This option is no longer tradeable — the chain may have moved on' };
+    }
+    optOffer = details.offer;
+  } catch (e) {
+    return { ok: false, error: `Live quote fetch failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  // Remove first — a manual override is one-shot regardless of outcome;
+  // leaving it in place on failure would let it be clicked again and again
+  // on a trade that keeps failing for a real reason.
+  s.pendingOverrides = s.pendingOverrides.filter(o => o.id !== id);
+  saveOverrides(mode, s.pendingOverrides);
+
+  // Placed directly rather than through placeStockOrder — that function's
+  // own escalation loop re-checks the exact loss ceiling this override
+  // exists to bypass, so routing through it would just hit the same
+  // rejection again. This mirrors its tail end (tracked entry, journal,
+  // log) without the cap logic.
+  const tag = override.kind === 'stock-daily' ? '[Daily]' : override.kind === 'stock-monthly' ? '[Monthly]' : '[Weekly]';
+  const trackedKey = override.kind === 'stock-daily' ? `${u.shareEpic}:daily` : override.kind === 'stock-monthly' ? `${u.shareEpic}:monthly` : u.shareEpic;
+  const strategy = override.kind === 'stock-daily' ? STOCK_DAILY_STRATEGY : override.kind === 'stock-monthly' ? STOCK_MONTHLY_STRATEGY : STOCK_STRATEGY;
+  try {
+    const result = await placeMarketOrder(session, override.epic, 'BUY', override.stake, undefined, undefined, 'USD', false, override.expiry, optOffer);
+    const premium = result.level || optOffer;
+    s.tracked[trackedKey] = {
+      dealId: result.dealId, epic: override.epic, underlyingEpic: u.shareEpic, name: override.name,
+      optionType: override.side, strike: override.strike, expiry: override.expiry, expiryMs: override.expiryMs,
+      premium, size: override.stake, enteredAt: Date.now(), peakPlPct: 0, kind: override.kind,
+    };
+    saveTracked(mode, s.tracked);
+    recordJournalEvent({
+      mode: journalMode(mode), event: 'entry', symbol: override.name, strategy,
+      side: 'long', qty: override.stake, price: premium,
+      reason: `[Manual override] ${override.aiReason}`, confidence: override.confidence,
+    });
+    addLog(mode, 'enter', override.name, `${tag} BUY ${override.side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${override.stake}/pt · max loss £${(premium * override.stake).toFixed(2)} · expiry ${override.expiry} — manually opened, was capped at £${lossCeilingFor(override.kind)}`);
+    return { ok: true };
+  } catch (e) {
+    addLog(mode, 'error', override.name, `${tag} Manual override order failed: ${e instanceof Error ? e.message : String(e)}`);
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+function lossCeilingFor(kind: 'stock' | 'stock-daily' | 'stock-monthly'): number {
+  return kind === 'stock-monthly' ? MONTHLY_MAX_LOSS_CEILING_GBP : DEMO_MAX_LOSS_CEILING_GBP;
 }
 
 // ── Same-day stock options — momentum entries ───────────────────────────────
@@ -1480,10 +1588,30 @@ export function stopIgOptionsBot(mode: IgMode): { ok: boolean } {
   return { ok: true };
 }
 
+// Prunes expired overrides as a side effect — called from getIgOptionsBotStatus
+// so the list shown to the user never includes a stale, no-longer-actionable
+// entry, without needing a separate cleanup timer.
+function pruneAndGetOverrides(mode: IgMode): PendingOverride[] {
+  const s = st(mode);
+  const fresh = s.pendingOverrides.filter(o => Date.now() - o.createdAt <= OVERRIDE_TTL_MS);
+  if (fresh.length !== s.pendingOverrides.length) {
+    s.pendingOverrides = fresh;
+    saveOverrides(mode, fresh);
+  }
+  return fresh;
+}
+
+export function dismissOverride(mode: IgMode, id: string): void {
+  const s = st(mode);
+  s.pendingOverrides = s.pendingOverrides.filter(o => o.id !== id);
+  saveOverrides(mode, s.pendingOverrides);
+}
+
 export async function getIgOptionsBotStatus(mode: IgMode): Promise<{
   running: boolean; underlyings: string[]; log: LogEntry[];
   nextRunMs: number | null; lastPollTs: string | null;
   tracked: Record<string, Tracked>; positions?: FullPosition[];
+  pendingOverrides: PendingOverride[];
 }> {
   const s = st(mode);
   let positions: FullPosition[] | undefined;
@@ -1498,5 +1626,6 @@ export async function getIgOptionsBotStatus(mode: IgMode): Promise<{
     running: s.running,
     underlyings: [...UNDERLYINGS.map(u => u.name), ...STOCK_UNDERLYINGS.map(u => `${u.name} (weekly)`), ...STOCK_DAILY_UNDERLYINGS.map(u => `${u.name} (daily)`), ...STOCK_MONTHLY_UNDERLYINGS.map(u => `${u.name} (monthly)`)],
     log: s.log, nextRunMs: s.nextRunMs, lastPollTs: s.lastPollTs, tracked: s.tracked, positions,
+    pendingOverrides: pruneAndGetOverrides(mode),
   };
 }

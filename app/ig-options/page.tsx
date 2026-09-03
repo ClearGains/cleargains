@@ -15,11 +15,17 @@ type Tracked = {
 };
 type Position = { dealId: string; epic: string; instrumentName: string; direction: 'BUY' | 'SELL'; size: number; level: number; upl: number; bid?: number | null };
 type LogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'wait' | 'error'; epic: string; msg: string };
+type PendingOverride = {
+  id: string; createdAt: number; name: string; strike: number; expiry: string;
+  side: 'call' | 'put'; kind: 'stock' | 'stock-daily' | 'stock-monthly';
+  stake: number; optOffer: number;
+};
 
 type Status = {
   running: boolean; underlyings: string[]; log: LogEntry[];
   nextRunMs: number | null; lastPollTs: string | null;
   tracked: Record<string, Tracked>; positions?: Position[];
+  pendingOverrides?: PendingOverride[];
   error?: string;
 };
 
@@ -89,8 +95,34 @@ export default function IgOptionsPage() {
     }
   };
 
+  const [overrideBusy, setOverrideBusy] = useState<string | null>(null);
+  const approveOverride = async (id: string) => {
+    setOverrideBusy(id);
+    setError(null);
+    try {
+      const res  = await fetch(`/api/ig-options/bot?mode=${mode}&action=approve-override&id=${encodeURIComponent(id)}`, { method: 'POST' });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok && data.error) setError(data.error);
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Request failed');
+    } finally {
+      setOverrideBusy(null);
+    }
+  };
+  const dismissOverrideUi = async (id: string) => {
+    setOverrideBusy(id);
+    try {
+      await fetch(`/api/ig-options/bot?mode=${mode}&id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await fetchStatus();
+    } finally {
+      setOverrideBusy(null);
+    }
+  };
+
   const posByDealId = new Map((status?.positions ?? []).map(p => [p.dealId, p]));
   const tracked = Object.values(status?.tracked ?? {});
+  const overrides = status?.pendingOverrides ?? [];
 
   return (
     <main className="max-w-screen-2xl mx-auto px-4 py-6 space-y-4">
@@ -202,6 +234,48 @@ export default function IgOptionsPage() {
               </div>
             )}
           </Card>
+
+          {overrides.length > 0 && (
+            <Card>
+              <CardHeader title="Blocked by size cap" subtitle={`${overrides.length} waiting`} icon={<AlertTriangle className="h-4 w-4 text-amber-400" />} />
+              <div className="space-y-2">
+                {overrides.map(o => {
+                  const maxLoss = o.optOffer * o.stake;
+                  const expiresIn = Math.max(0, Math.round((o.createdAt + 60 * 60_000 - Date.now()) / 60_000));
+                  return (
+                    <div key={o.id} className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-white">{o.name}</span>
+                        <span className="text-[10px] text-gray-500">expires in {expiresIn}m</span>
+                      </div>
+                      <p className="text-[10px] text-gray-500 mt-0.5">
+                        {o.side.toUpperCase()} · {o.stake}/pt @ ~{o.optOffer.toFixed(1)} premium · max loss £{maxLoss.toFixed(0)} · {o.kind === 'stock-monthly' ? 'Monthly' : o.kind === 'stock-daily' ? 'Daily' : 'Weekly'}
+                      </p>
+                      <div className="flex gap-2 mt-2">
+                        <Button
+                          onClick={() => void approveOverride(o.id)}
+                          loading={overrideBusy === o.id}
+                          variant="primary"
+                          size="sm"
+                          className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-500/30"
+                        >
+                          Open anyway
+                        </Button>
+                        <Button
+                          onClick={() => void dismissOverrideUi(o.id)}
+                          loading={overrideBusy === o.id}
+                          variant="ghost"
+                          size="sm"
+                        >
+                          Dismiss
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
         </div>
 
         <div className="lg:col-span-2">
