@@ -45,6 +45,7 @@ import { fetchAllHeadlines } from './newsFetch';
 import { fetchBarsWithFallback } from './yahooFetch';
 import { isScannerQuietWeekend, msUntilWeekendReopen, isNYSEOpen, isNearClose } from './alpacaApi';
 import { edgeSizing } from './quant';
+import { sentimentScore } from './momentumSignal';
 
 // Underlyings whose IG option chains this bot scans. optName is the exact
 // name prefix IG's option markets use ("FTSE 10300 Call" — note NOT
@@ -125,6 +126,41 @@ const STOCK_DAILY_STRATEGY = 'ig_options_daily_momentum';
 const STOCK_DAILY_UNDERLYINGS = STOCK_UNDERLYINGS.map(u => ({ ...u, searchName: u.searchName.replace('Weekly', 'Daily') }));
 const STOCK_DAILY_MAX_POSITIONS = 2;
 const STOCK_DAILY_SPREAD_CAP    = 0.25; // tighter than weekly's 0.35 — same-day chains run structurally wider
+
+// ── MONTHLY stock options (third strategy, added 2026-09-03 per explicit
+// request/observation: weekly and same-day entries both fire off TODAY's
+// price move, which means they're structurally always chasing a move that's
+// already partly (same-day) or mostly (weekly) played out by the time
+// they act — real trend-following theory says news-backed positions need
+// real TIME to develop, the exact reasoning already proven in this account
+// on the T212 ISA bot (12-week trend + 30-day news, months-to-years
+// horizon, not today's move). This isn't the weekly/daily momentum logic
+// on a longer clock — it's a genuinely different entry question, borrowed
+// from the ISA bot's own philosophy: has this stock shown a REAL sustained
+// trend over weeks, corroborated by real news, without already being a
+// spent/extended move — not "did it move today."
+//
+// Confirmed live 2026-09-03 by direct search probe that this chain
+// actually exists and was never being found: IG's stock options ALSO have
+// genuine monthly-dated contracts (e.g. "Meta Platforms Inc 65000 CALL",
+// expiry "SEP-26"/"OCT-26"/"DEC-26", epic root ON.D.*, OPT_SHARES) —
+// completely separate from the Weekly/Daily chains, and only surfaced by a
+// PLAIN company-name search (no "Weekly"/"Daily" prefix). The existing
+// index-options constants (MIN_DTE/MAX_DTE/EXIT_DTE) already describe
+// exactly this kind of monthly-expiry lifecycle, so this reuses them
+// directly rather than inventing separate ones — same target of ~30 DTE at
+// entry, same ≤5 DTE exit, same "3rd Friday" expiry estimate tolerance.
+const STOCK_MONTHLY_STRATEGY = 'ig_options_monthly_trend';
+const STOCK_MONTHLY_UNDERLYINGS = STOCK_UNDERLYINGS.map(u => ({ ...u, searchName: u.searchName.replace('Weekly ', '') }));
+const STOCK_MONTHLY_MAX_POSITIONS = 2; // fewer, higher-conviction positions — same "not maximally concentrated" spirit as the ISA bot
+// Same quality bar as the T212 ISA bot's own entry screen (t212Bot.ts) —
+// deliberately reused numbers, not re-derived, since this is the exact
+// same question asked about a different account/instrument.
+const MONTHLY_MIN_TREND_12W_PCT = 8;   // % — a real, sustained multi-week uptrend, not a blip
+const MONTHLY_MIN_TREND_4W_PCT  = -3;  // % — allow a small pullback within an intact longer trend
+const MONTHLY_EXTENDED_TREND_12W_PCT = 40; // % — already a major re-rating, easy gain likely priced in
+const MONTHLY_EXTENDED_NEAR_HIGH_PCT = 4;  // % below the 52-week high counts as "sitting at the top" of the move
+const MONTHLY_MIN_CONFIRM_CONFIDENCE = 70; // same AI bar as every other confirmed entry in this codebase
 // Per-mode premium budgets — demo runs big deliberately (per explicit
 // request 2026-08-31, "its running on demo for now so put more on the
 // line": demo money exists to generate meaningful P&L data, and tiny
@@ -208,8 +244,9 @@ const EXIT_DTE = 5;
 
 const STRATEGY = 'ig_options_directional';
 function journalMode(mode: IgMode): JournalMode { return mode === 'live' ? 'ig-live' : 'ig-demo'; }
-function strategyFor(tr: { kind?: 'index' | 'stock' | 'stock-daily' }): string {
+function strategyFor(tr: { kind?: 'index' | 'stock' | 'stock-daily' | 'stock-monthly' }): string {
   if (tr.kind === 'stock-daily') return STOCK_DAILY_STRATEGY;
+  if (tr.kind === 'stock-monthly') return STOCK_MONTHLY_STRATEGY;
   return tr.kind === 'stock' ? STOCK_STRATEGY : STRATEGY;
 }
 
@@ -218,7 +255,7 @@ type Tracked = {
   optionType: 'call' | 'put'; strike: number; expiry: string; expiryMs: number;
   premium: number; size: number; enteredAt: number; peakPlPct: number;
   lastAiCheckAt?: number; // daily severe-news safety check — see manageExits
-  kind?: 'index' | 'stock' | 'stock-daily'; // absent = index (positions tracked before the stock strategy existed)
+  kind?: 'index' | 'stock' | 'stock-daily' | 'stock-monthly'; // absent = index (positions tracked before the stock strategy existed)
 };
 
 type LogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'wait' | 'error'; epic: string; msg: string };
@@ -381,6 +418,154 @@ async function findOptionEpic(
   return null;
 }
 
+// ── Monthly stock option chain discovery ────────────────────────────────────
+// Same shape as findOptionEpic above (DTE-windowed search, closest-to-30-DTE
+// pick), adapted for stocks: OPT_SHARES not OPT_INDICES, and strike steps
+// per-underlying (u.strikeStep) rather than the index's fixed 25/50/100
+// ladder — matches the exact strike-stepping already used by
+// scanStockEntries/scanStockDailyEntries for the same underlyings.
+async function findStockMonthlyOptionEpic(
+  mode: IgMode, session: IGSession, u: typeof STOCK_MONTHLY_UNDERLYINGS[number], side: 'call' | 'put', spot: number,
+): Promise<{ epic: string; name: string; strike: number; expiry: string; expiryMs: number } | null> {
+  const dir = side === 'call' ? 1 : -1;
+  const base = side === 'call' ? Math.ceil(spot / u.strikeStep) * u.strikeStep : Math.floor(spot / u.strikeStep) * u.strikeStep;
+  const candidates = [base, base + u.strikeStep * dir, base - u.strikeStep * dir];
+  const sideWord = side === 'call' ? 'CALL' : 'PUT';
+  const now = Date.now();
+  for (const strike of candidates) {
+    await new Promise(r => setTimeout(r, 350));
+    let results;
+    try { results = await searchMarkets(session, `${u.searchName} ${strike} ${sideWord}`); }
+    catch (e) { addLog(mode, 'error', u.name, `[Monthly] Chain search failed: ${e instanceof Error ? e.message : String(e)}`); continue; }
+
+    const nameRe = new RegExp(`^${u.searchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ${strike} ${sideWord}$`, 'i');
+    const matches = results
+      .filter(m => m.instrumentType === 'OPT_SHARES' && nameRe.test(m.name))
+      .map(m => ({ ...m, expiryMs: parseExpiryMs(m.expiry) }))
+      .filter((m): m is typeof m & { expiryMs: number } => m.expiryMs !== null)
+      .map(m => ({ ...m, dte: (m.expiryMs - now) / 86_400_000 }))
+      .filter(m => m.dte >= MIN_DTE && m.dte <= MAX_DTE)
+      .sort((a, b) => Math.abs(a.dte - 30) - Math.abs(b.dte - 30));
+
+    if (matches.length) {
+      const m = matches[0];
+      return { epic: m.epic, name: m.name, strike, expiry: m.expiry, expiryMs: m.expiryMs };
+    }
+  }
+  return null;
+}
+
+// ── Monthly stock trend read ─────────────────────────────────────────────────
+// Same trend/extension question as t212Bot.ts's fetchTrend/isExtendedMove
+// (12-week trend, 4-week pullback tolerance, 52-week-high proximity) —
+// re-implemented here rather than imported, since those live in a different
+// bot's module and aren't exported; kept numerically identical
+// (MONTHLY_MIN_TREND_12W_PCT etc. above are the same values, not re-derived)
+// so "a real trend" means the same thing in both places.
+type StockTrend = { trend12w: number | null; trend4w: number | null; pctBelowHigh: number | null; currentPrice: number | null };
+async function fetchStockTrend(u: typeof STOCK_MONTHLY_UNDERLYINGS[number], spot: number): Promise<StockTrend> {
+  const empty: StockTrend = { trend12w: null, trend4w: null, pctBelowHigh: null, currentPrice: null };
+  try {
+    const bars = await fetchBarsWithFallback(u.shareEpic, '1y', { alpacaTimeframe: '1Day', yahooInterval: '1d', liveReferenceLevel: spot });
+    if (!bars?.length || bars.length < 60) return empty;
+    const closes = bars.map(b => b.c);
+    const last = closes[closes.length - 1];
+    const idx4w  = Math.max(0, closes.length - 1 - 20);
+    const idx12w = Math.max(0, closes.length - 1 - 60);
+    const trend4w  = closes[idx4w]  > 0 ? ((last - closes[idx4w])  / closes[idx4w])  * 100 : null;
+    const trend12w = closes[idx12w] > 0 ? ((last - closes[idx12w]) / closes[idx12w]) * 100 : null;
+    const window = closes.slice(Math.max(0, closes.length - 252));
+    const high52w = Math.max(...window);
+    const pctBelowHigh = high52w > 0 ? ((high52w - last) / high52w) * 100 : null;
+    return { trend12w, trend4w, pctBelowHigh, currentPrice: last };
+  } catch {
+    return empty;
+  }
+}
+
+// ── Monthly stock options — trend+news entries ──────────────────────────────
+// Entry question is deliberately NOT "did it move today" (that's the
+// weekly/daily strategies' job) — it's the ISA bot's own question: a real,
+// sustained multi-week uptrend, not already extended, corroborated by real
+// news, on a horizon that can actually afford to wait out ordinary noise.
+// Own 15-min poll slot (piggybacks on stockPoll below, no separate loop
+// needed — this doesn't need the weekly/daily strategies' urgency, but
+// there's no harm in checking this often either, since a real trend doesn't
+// appear or vanish between one 15-min check and the next).
+async function scanStockMonthlyEntries(mode: IgMode, session: IGSession): Promise<void> {
+  const s = st(mode);
+  if (countKind(s, 'stock-monthly') >= STOCK_MONTHLY_MAX_POSITIONS) return;
+  if (!isNYSEOpen()) return;
+
+  const details = await fetchMarketDetails(session, STOCK_MONTHLY_UNDERLYINGS.map(u => u.shareEpic));
+
+  for (const u of STOCK_MONTHLY_UNDERLYINGS) {
+    if (countKind(s, 'stock-monthly') >= STOCK_MONTHLY_MAX_POSITIONS) break;
+    if (s.tracked[`${u.shareEpic}:monthly`]) continue;
+
+    const d = details.get(u.shareEpic);
+    const spot = typeof d?.bid === 'number' && typeof d?.offer === 'number' ? (d.bid + d.offer) / 2 : null;
+    if (!spot) continue;
+
+    const trend = await fetchStockTrend(u, spot);
+    if (trend.trend12w === null || trend.currentPrice === null) continue;
+    if (trend.trend12w < MONTHLY_MIN_TREND_12W_PCT || (trend.trend4w !== null && trend.trend4w < MONTHLY_MIN_TREND_4W_PCT)) continue;
+    const extended = trend.trend12w >= MONTHLY_EXTENDED_TREND_12W_PCT && trend.pctBelowHigh !== null && trend.pctBelowHigh < MONTHLY_EXTENDED_NEAR_HIGH_PCT;
+    if (extended) {
+      addLog(mode, 'wait', u.name, `[Monthly] +${trend.trend12w.toFixed(1)}% /12w but sitting ${trend.pctBelowHigh!.toFixed(1)}% below its 52w high — already looks like a spent move, skipping`);
+      continue;
+    }
+
+    let headlines: string[] = [];
+    try { headlines = await fetchAllHeadlines(u.finnhub, 8, u.name); } catch { /* prompt handles empty */ }
+    const sentiment = sentimentScore(headlines).score;
+    if (sentiment <= -0.3 && headlines.length >= 2) {
+      addLog(mode, 'wait', u.name, `[Monthly] Trend looks good (+${trend.trend12w.toFixed(1)}% /12w) but recent news is genuinely negative — skipping`);
+      continue;
+    }
+
+    const side: 'call' | 'put' = 'call'; // long-only for now — same "not yet proven to short well" reasoning as most of this account's other strategies
+    const verdict = await askIgConfirmStockTrade({
+      instrumentName: `${u.name} (buying a monthly CALL option, weeks of runway, not a scalp)`,
+      suggestedDir: 'BUY',
+      ruleReasoning: `Sustained uptrend +${trend.trend12w.toFixed(1)}% over 12 weeks, real news backing, not already extended`,
+      ruleConfidence: Math.max(1, Math.min(10, Math.round(trend.trend12w / 5))),
+      price: trend.currentPrice, rsi: null, macdHist: null, lastCandles: [],
+      headlines, dayChangePercent: trend.trend4w ?? 0,
+      horizon: 'swing',
+    });
+    addLog(mode, 'info', u.name, `[Monthly] +${trend.trend12w.toFixed(1)}% /12w trend+news candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+    if (verdict.engine === 'passthrough' || verdict.direction !== 'BUY' || verdict.confidence < MONTHLY_MIN_CONFIRM_CONFIDENCE) continue;
+
+    const opt = await findStockMonthlyOptionEpic(mode, session, u, side, spot);
+    if (!opt) { addLog(mode, 'wait', u.name, `[Monthly] No ${side} found near ${spot.toFixed(0)} in the ${MIN_DTE}-${MAX_DTE}d monthly window`); continue; }
+
+    const optDetails = (await fetchMarketDetails(session, [opt.epic])).get(opt.epic);
+    const optBid   = typeof optDetails?.bid   === 'number' ? optDetails.bid   : null;
+    const optOffer = typeof optDetails?.offer === 'number' ? optDetails.offer : null;
+    if (!optDetails || optOffer === null || optOffer <= 0 || optDetails.marketStatus !== 'TRADEABLE') continue;
+    if (optBid !== null && (optOffer - optBid) / optOffer > 0.35) {
+      addLog(mode, 'wait', opt.name, `[Monthly] Spread too wide (${optBid}/${optOffer}) — skipping`);
+      continue;
+    }
+
+    const premiumBudget = STOCK_PREMIUM_GBP[mode];
+    const edge = edgeSizing(journalMode(mode), STOCK_MONTHLY_STRATEGY);
+    if (edge.skip) { addLog(mode, 'wait', u.name, `[Monthly] Skipped — ${edge.reason}`); continue; }
+    const scaledBudget = edge.multiplier !== 1 ? Math.round(premiumBudget * edge.multiplier) : premiumBudget;
+
+    const minDeal = optDetails.minDealSize || 0.1;
+    let stake = Math.max(minDeal, Math.floor((scaledBudget / optOffer) * 100) / 100);
+    stake = Math.round(stake * 100) / 100;
+    if (mode === 'live' && optOffer * stake > scaledBudget * 1.25) {
+      addLog(mode, 'wait', opt.name, `[Monthly] Minimum stake costs £${(optOffer * stake).toFixed(0)} premium — over budget, skipping`);
+      continue;
+    }
+
+    await placeStockOrder(mode, session, s, u, opt, side, stake, optOffer, trend.trend12w, verdict.confidence, verdict.reason, new Date().toISOString().slice(0, 10), 'stock-monthly', scaledBudget);
+  }
+}
+
 // ── Exits ───────────────────────────────────────────────────────────────────
 async function manageExits(mode: IgMode, session: IGSession, positions: FullPosition[]): Promise<void> {
   const s = st(mode);
@@ -505,19 +690,27 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     //    cadence meant a weekly option could go its whole remaining runway
     //    getting checked once, or not at all.
     if (!closeReason) {
-      const isStockKind = tr.kind === 'stock' || tr.kind === 'stock-daily';
-      const idxU   = isStockKind ? undefined : UNDERLYINGS.find(x => x.epic === tr.underlyingEpic);
-      const stockU = isStockKind ? STOCK_UNDERLYINGS.find(x => x.shareEpic === tr.underlyingEpic) : undefined;
+      // Three kinds now, two questions. "Tight" (askOptionsExit, 4h) is for
+      // options with only days of life — weekly and same-day. "Loose"
+      // (askMrSafety, 20h, emergency-only) is for anything with weeks-to-
+      // months of runway — index AND, as of stock-monthly (2026-09-03), a
+      // monthly stock option too: it has the same "ordinary bad news is
+      // fine to ride out, there's real time for it to resolve" shape as the
+      // index side, not the weekly/daily side's time pressure.
+      const isTightStockKind = tr.kind === 'stock' || tr.kind === 'stock-daily';
+      const isAnyStockKind = isTightStockKind || tr.kind === 'stock-monthly';
+      const idxU   = isAnyStockKind ? undefined : UNDERLYINGS.find(x => x.epic === tr.underlyingEpic);
+      const stockU = isAnyStockKind ? STOCK_UNDERLYINGS.find(x => x.shareEpic === tr.underlyingEpic) : undefined;
       const label      = idxU?.name ?? stockU?.name;
       const newsTicker = idxU?.newsTicker ?? stockU?.finnhub;
-      const checkIntervalMs = isStockKind ? 4 * 3_600_000 : 20 * 3_600_000;
+      const checkIntervalMs = isTightStockKind ? 4 * 3_600_000 : 20 * 3_600_000;
       if (label && newsTicker && Date.now() - (tr.lastAiCheckAt ?? 0) >= checkIntervalMs) {
         tr.lastAiCheckAt = Date.now();
         saveTracked(mode, s.tracked);
         try {
           const headlines = await fetchAllHeadlines(newsTicker, 8, label);
           if (headlines.length) {
-            if (isStockKind) {
+            if (isTightStockKind) {
               const verdict = await askOptionsExit({
                 instrumentName: tr.name, optionType: tr.optionType, underlyingName: label,
                 entryPremium: tr.premium, currentPremium: bid ?? tr.premium, plPct,
@@ -526,8 +719,9 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
               addLog(mode, 'info', tr.name, `[News check] thesisIntact=${verdict.thesisIntact} — ${verdict.reason} (${verdict.engine})`);
               if (!verdict.thesisIntact) closeReason = `AI news check — ${verdict.reason}`;
             } else {
+              const kindWord = idxU ? ' index' : '';
               const verdict = await askMrSafety({
-                instrumentName: `${label} index (holding a bought ${tr.optionType.toUpperCase()} option)`,
+                instrumentName: `${label}${kindWord} (holding a bought ${tr.optionType.toUpperCase()} option)`,
                 direction: tr.optionType === 'call' ? 'BUY' : 'SELL',
                 entryLevel: tr.premium, currentLevel: bid ?? tr.premium,
                 uplGbp: p.upl, heldDays: (Date.now() - tr.enteredAt) / 86_400_000, headlines,
@@ -564,7 +758,7 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
 }
 
 // ── Entries ─────────────────────────────────────────────────────────────────
-function countKind(s: BotState, kind: 'index' | 'stock' | 'stock-daily'): number {
+function countKind(s: BotState, kind: 'index' | 'stock' | 'stock-daily' | 'stock-monthly'): number {
   return Object.values(s.tracked).filter(t => (t.kind ?? 'index') === kind).length;
 }
 
@@ -887,13 +1081,13 @@ async function placeStockOrder(
   u: typeof STOCK_UNDERLYINGS[number],
   opt: { epic: string; name: string; strike: number; expiry: string; expiryMs: number },
   side: 'call' | 'put', stake: number, optOffer: number, dp: number,
-  confidence: number, aiReason: string, today: string, kind: 'stock' | 'stock-daily',
+  confidence: number, aiReason: string, today: string, kind: 'stock' | 'stock-daily' | 'stock-monthly',
   premiumBudget: number,
 ): Promise<boolean> {
-  const tag         = kind === 'stock-daily' ? '[Daily]' : '[Weekly]';
-  const trackedKey   = kind === 'stock-daily' ? `${u.shareEpic}:daily` : u.shareEpic;
-  const dayThrottleKey = kind === 'stock-daily' ? `${u.finnhub}:daily` : u.finnhub;
-  const strategy     = kind === 'stock-daily' ? STOCK_DAILY_STRATEGY : STOCK_STRATEGY;
+  const tag         = kind === 'stock-daily' ? '[Daily]' : kind === 'stock-monthly' ? '[Monthly]' : '[Weekly]';
+  const trackedKey   = kind === 'stock-daily' ? `${u.shareEpic}:daily` : kind === 'stock-monthly' ? `${u.shareEpic}:monthly` : u.shareEpic;
+  const dayThrottleKey = kind === 'stock-daily' ? `${u.finnhub}:daily` : kind === 'stock-monthly' ? `${u.finnhub}:monthly` : u.finnhub;
+  const strategy     = kind === 'stock-daily' ? STOCK_DAILY_STRATEGY : kind === 'stock-monthly' ? STOCK_MONTHLY_STRATEGY : STOCK_STRATEGY;
   try {
     // 'USD', not 'GBP' — confirmed live 2026-09-01 by querying IG's own
     // /markets/{epic} directly: this whole US-stock weekly/daily options
@@ -965,7 +1159,10 @@ async function placeStockOrder(
     recordJournalEvent({
       mode: journalMode(mode), event: 'entry', symbol: opt.name, strategy,
       side: 'long', qty: stake, price: premium,
-      reason: `${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today, momentum continuation · AI ${confidence}%`, confidence,
+      reason: kind === 'stock-monthly'
+        ? `+${dp.toFixed(1)}% /12w trend + news · AI ${confidence}%`
+        : `${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today, momentum continuation · AI ${confidence}%`,
+      confidence,
     });
     addLog(mode, 'enter', opt.name, `${tag} BUY ${side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${stake}/pt · max loss £${(premium * stake).toFixed(2)} · expiry ${opt.expiry} — ${aiReason}`);
     return true;
@@ -1144,6 +1341,7 @@ async function stockPoll(mode: IgMode): Promise<void> {
         } else {
           await scanStockEntries(mode, session);
           await scanStockDailyEntries(mode, session);
+          await scanStockMonthlyEntries(mode, session);
         }
       }
     } catch (e) {
@@ -1241,7 +1439,7 @@ export function startIgOptionsBot(mode: IgMode): { ok: boolean; error?: string }
   if (s.fastMonitorTimer) clearTimeout(s.fastMonitorTimer);
   s.running = true;
   saveRunningFlag(mode, true);
-  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d, max ${MAX_POSITIONS}) + weekly stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_PREMIUM_GBP[mode]}/position, closed ~1 day before expiry, max ${STOCK_MAX_POSITIONS}) + same-day stock momentum options (£${STOCK_PREMIUM_GBP[mode]}/position, closed before the bell, max ${STOCK_DAILY_MAX_POSITIONS}) — AI-confirmed entries on all three, exits monitored every ${FAST_MONITOR_MS / 60_000}min`);
+  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d, max ${MAX_POSITIONS}) + weekly stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_PREMIUM_GBP[mode]}/position, closed ~1 day before expiry, max ${STOCK_MAX_POSITIONS}) + same-day stock momentum options (£${STOCK_PREMIUM_GBP[mode]}/position, closed before the bell, max ${STOCK_DAILY_MAX_POSITIONS}) + monthly stock trend+news options (£${STOCK_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d, max ${STOCK_MONTHLY_MAX_POSITIONS}) — AI-confirmed entries on all four, exits monitored every ${FAST_MONITOR_MS / 60_000}min`);
   void poll(mode);
   void stockPoll(mode);
   void fastPositionMonitor(mode);
