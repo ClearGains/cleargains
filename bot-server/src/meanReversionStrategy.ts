@@ -150,7 +150,34 @@ export function trendStillIntact(bars: MrBar[], direction: 'BUY' | 'SELL'): bool
 // trigger this, only a genuinely outsized move relative to how that
 // specific stock normally trades. Caller decides whether to also require
 // the position be at a loss.
-const BIG_CANDLE_ATR_MULT = 1.5; // "unusually large" — normal daily noise is ~1x ATR by definition
+const BIG_CANDLE_ATR_MULT = 1.5; // baseline "unusually large" multiplier when a stock is trading at its own normal volatility
+const SHORT_VOL_PERIOD    = 5;   // ~a trading week — "how choppy is this stock RIGHT NOW"
+const VOL_RATIO_MIN       = 0.5; // clamp — a ratio outside this range is more likely noise in the estimate than a genuine regime shift
+const VOL_RATIO_MAX       = 2.5;
+const ADAPTIVE_MULT_MIN   = 0.75; // even at maximum "currently very choppy," don't get hair-trigger sensitive
+const ADAPTIVE_MULT_MAX   = 3.0;  // even at maximum "currently very calm," still cap how much patience this earns
+// Adaptive per-stock volatility scaling — added 2026-09-03 per explicit
+// idea: "if ai moves we know its moving big... close, but health... is less
+// volatile right now so give it more room." A flat multiplier already
+// scaled to each stock's own NORMAL range (ATR), but treated every stock
+// the same regardless of whether IT ITSELF is currently more or less
+// volatile than its own usual self. This compares a short-term (5-day)
+// ATR against the same 14-day baseline already used elsewhere: a stock
+// currently trading more volatile than its own recent normal (ratio > 1)
+// gets a TIGHTER trigger (a regime shift is real information, worth
+// reacting to faster); one trading calmer than its own normal (ratio < 1)
+// gets a more PATIENT trigger (nothing unusual is actually happening,
+// don't treat routine noise as a crisis). At ratio = 1 (trading exactly at
+// its own normal), this returns exactly the original flat 1.5x — no
+// behavior change for a stock that isn't currently in an unusual regime
+// either way.
+function adaptiveBigCandleMult(bars: MrBar[]): number {
+  const shortAtr = calcAtrFromBars(bars, SHORT_VOL_PERIOD);
+  const longAtr  = calcAtrFromBars(bars);
+  if (shortAtr === null || longAtr === null || longAtr <= 0) return BIG_CANDLE_ATR_MULT;
+  const volRatio = Math.max(VOL_RATIO_MIN, Math.min(VOL_RATIO_MAX, shortAtr / longAtr));
+  return Math.max(ADAPTIVE_MULT_MIN, Math.min(ADAPTIVE_MULT_MAX, BIG_CANDLE_ATR_MULT / volRatio));
+}
 export function hadBigAdverseCandleToday(bars: MrBar[], direction: 'BUY' | 'SELL', livePrice: number): boolean | null {
   const atr = calcAtrFromBars(bars);
   if (atr === null || atr <= 0 || bars.length < 1) return null;
@@ -163,7 +190,7 @@ export function hadBigAdverseCandleToday(bars: MrBar[], direction: 'BUY' | 'SELL
   const yesterday   = isTodayBar ? bars[bars.length - 2] : lastBar;
   if (!yesterday) return null;
   const adverseMove = direction === 'BUY' ? yesterday.close - livePrice : livePrice - yesterday.close;
-  return adverseMove >= BIG_CANDLE_ATR_MULT * atr;
+  return adverseMove >= adaptiveBigCandleMult(bars) * atr;
 }
 
 // Pure decision function — no I/O, no state. Given a full daily-bar history
