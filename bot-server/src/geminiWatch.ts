@@ -392,7 +392,16 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // original OP.-only check missed DO.D.AAPL/DO.D.TSLA daily options
   // entirely — this layer had already attached a naked-position fallback
   // stop to both open positions and was running HOLD/CLOSE reviews on them.
-  if (p.epic.startsWith('OP.') || p.epic.startsWith('DO.')) return;
+  //
+  // Recurred 2026-09-03 with weekly/monthly stock options (ON.D.* — added
+  // after this fix, so never anticipated by it): confirmed live this
+  // self-heal ran on a real NVIDIA and Palantir monthly option, logging
+  // "Attached missing stop." IG's own stopLevel field is also confirmed
+  // unreliable specifically for options (comes back null even once
+  // something's attached — controlledRisk:true showed true while
+  // stopLevel stayed null on both), so without this exemption the check
+  // could keep re-triggering every single cycle indefinitely, not just once.
+  if (p.epic.startsWith('OP.') || p.epic.startsWith('DO.') || p.epic.startsWith('ON.')) return;
 
   const heldHours = p.openedAt ? (Date.now() - new Date(p.openedAt).getTime()) / 3_600_000 : 0;
 
