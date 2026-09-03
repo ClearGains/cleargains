@@ -150,6 +150,10 @@ const INDEX_PREMIUM_GBP: Record<IgMode, number> = { demo: 250, live: 60 };
 const MAX_POSITIONS   = 2;        // across all underlyings; one per underlying enforced separately
 const MIN_CONFIRM_CONFIDENCE = 70; // same AI bar as every other confirmed entry in this codebase
 const POLL_MS = 60 * 60_000;       // hourly — the signal only changes on daily bars
+// How much longer than a loop's own normal cadence counts as "this bot was
+// actually down/delayed" rather than ordinary jitter — same threshold and
+// reasoning as meanReversionBot.ts's identical constant.
+const STALE_GAP_MULTIPLE = 3;
 // Expiry window for a NEW position — same 21-45d target as the Alpaca
 // options rebuild, with tolerance either side because IG's monthly chains
 // only come in fixed expiries (a "SEP-26" chain is whatever DTE it is today).
@@ -187,6 +191,7 @@ type BotState = {
   fastMonitorTimer: ReturnType<typeof setTimeout> | null; // exits-only loop, both kinds — see fastPositionMonitor's own comment
   nextRunMs: number | null;
   lastPollTs: string | null;
+  stockLastPollTs: string | null; // stockPoll's own cadence is independent of poll's, see each one's own gap-check
   // One momentum entry per stock per day, even after that entry has closed —
   // re-chasing the same move after banking/stopping it is how a daily-theta
   // product churns premium away. In-memory only: worst case a restart allows
@@ -229,7 +234,7 @@ function saveRunningFlag(mode: IgMode, running: boolean): void {
 function st(mode: IgMode): BotState {
   let s = states.get(mode);
   if (!s) {
-    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, fastMonitorTimer: null, nextRunMs: null, lastPollTs: null, lastStockEntryDay: {}, lastOptionEvalKey: {} };
+    s = { running: false, session: null, tracked: loadTracked(mode), log: [], pollTimer: null, stockPollTimer: null, fastMonitorTimer: null, nextRunMs: null, lastPollTs: null, stockLastPollTs: null, lastStockEntryDay: {}, lastOptionEvalKey: {} };
     states.set(mode, s);
   }
   return s;
@@ -1058,6 +1063,13 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
 async function stockPoll(mode: IgMode): Promise<void> {
   const s = st(mode);
   if (!s.running) return;
+  // Same gap-check as meanReversionBot.ts's poll — see its own comment for
+  // the full reasoning. Own timestamp/threshold since this loop runs on its
+  // own 15min cadence, independent of the index side's hourly one.
+  const previousStockPollTs = s.stockLastPollTs;
+  const stockGapMs = previousStockPollTs ? Date.now() - new Date(previousStockPollTs).getTime() : 0;
+  const stockRecoveringFromGap = stockGapMs > STOCK_POLL_MS * STALE_GAP_MULTIPLE;
+  s.stockLastPollTs = new Date().toISOString();
 
   if (!isScannerQuietWeekend() && isNYSEOpen()) {
     try {
@@ -1066,8 +1078,12 @@ async function stockPoll(mode: IgMode): Promise<void> {
         s.session = session;
         const positions = await fetchFullPositions(session);
         await manageExits(mode, session, positions);
-        await scanStockEntries(mode, session);
-        await scanStockDailyEntries(mode, session);
+        if (stockRecoveringFromGap) {
+          addLog(mode, 'info', '—', `[Weekly/Daily] Back after a ${(stockGapMs / 60_000).toFixed(0)}min gap (normal cadence is ${(STOCK_POLL_MS / 60_000).toFixed(0)}min) — skipping new entries this cycle so nothing fires on a stale signal; will scan fresh next cycle`);
+        } else {
+          await scanStockEntries(mode, session);
+          await scanStockDailyEntries(mode, session);
+        }
       }
     } catch (e) {
       addLog(mode, 'error', '—', `[Weekly] Poll failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -1084,6 +1100,11 @@ async function stockPoll(mode: IgMode): Promise<void> {
 async function poll(mode: IgMode): Promise<void> {
   const s = st(mode);
   if (!s.running) return;
+  // Same gap-check as meanReversionBot.ts's poll and this file's own
+  // stockPoll above — see either one's comment for the full reasoning.
+  const previousPollTs = s.lastPollTs;
+  const gapMs = previousPollTs ? Date.now() - new Date(previousPollTs).getTime() : 0;
+  const recoveringFromGap = gapMs > POLL_MS * STALE_GAP_MULTIPLE;
   s.lastPollTs = new Date().toISOString();
 
   // Index options only deal in their underlying's session — nothing to scan
@@ -1099,7 +1120,11 @@ async function poll(mode: IgMode): Promise<void> {
         s.session = session;
         const positions = await fetchFullPositions(session);
         await manageExits(mode, session, positions);
-        await scanEntries(mode, session);
+        if (recoveringFromGap) {
+          addLog(mode, 'info', '—', `Back after a ${(gapMs / 60_000).toFixed(0)}min gap (normal cadence is ${(POLL_MS / 60_000).toFixed(0)}min) — skipping new entries this cycle so nothing fires on a stale signal; will scan fresh next cycle`);
+        } else {
+          await scanEntries(mode, session);
+        }
       }
     } catch (e) {
       addLog(mode, 'error', '—', `Poll failed: ${e instanceof Error ? e.message : String(e)}`);
