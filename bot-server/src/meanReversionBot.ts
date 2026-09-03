@@ -135,6 +135,7 @@ type InstanceState = {
   running: boolean;
   session: IGSession | null;
   tracked: Record<string, Tracked>; // keyed by epic
+  lastEntryDay: Record<string, string>; // epic -> yyyy-mm-dd of the last entry taken on it, see its own comment below
   log: LogEntry[];
   pollTimer: ReturnType<typeof setTimeout> | null;
   nextRunMs: number | null;
@@ -155,6 +156,27 @@ function saveTracked(instance: MrInstance, mode: IgMode, tracked: Record<string,
   try { fs.writeFileSync(trackedFile(instance, mode), JSON.stringify(tracked), 'utf8'); } catch {}
 }
 
+// One entry per epic per calendar day — added 2026-09-03 after a live
+// incident: emaCrossoverSignal's "crossedAbove" check compares YESTERDAY's
+// close-based EMA relationship to TODAY's still-forming one, which stays
+// true on every single poll for the whole day (not just the moment it first
+// crosses) as long as today hasn't rolled over into a new bar yet. Meta got
+// manually closed by the user specifically to stop the position, and the
+// very next poll re-entered it — same epic, same direction, same signal —
+// because nothing remembered "we already acted on this crossover today."
+// Persisted (not just in-memory) so a restart doesn't reset the throttle
+// and immediately reopen everything that was deliberately closed that day.
+function lastEntryDayFile(instance: MrInstance, mode: IgMode): string {
+  return path.join(__dirname, '..', `mr-${instance}-last-entry-day-${mode}.json`);
+}
+function loadLastEntryDay(instance: MrInstance, mode: IgMode): Record<string, string> {
+  try { return JSON.parse(fs.readFileSync(lastEntryDayFile(instance, mode), 'utf8')) as Record<string, string>; }
+  catch { return {}; }
+}
+function saveLastEntryDay(instance: MrInstance, mode: IgMode, days: Record<string, string>): void {
+  try { fs.writeFileSync(lastEntryDayFile(instance, mode), JSON.stringify(days), 'utf8'); } catch {}
+}
+
 function runningFlagFile(instance: MrInstance, mode: IgMode): string {
   return path.join(__dirname, '..', `mr-${instance}-running-${mode}.json`);
 }
@@ -170,7 +192,7 @@ function ms(instance: MrInstance, mode: IgMode): InstanceState {
   const key = stateKey(instance, mode);
   let s = states.get(key);
   if (!s) {
-    s = { running: false, session: null, tracked: loadTracked(instance, mode), log: [], pollTimer: null, nextRunMs: null, lastPollTs: null };
+    s = { running: false, session: null, tracked: loadTracked(instance, mode), lastEntryDay: loadLastEntryDay(instance, mode), log: [], pollTimer: null, nextRunMs: null, lastPollTs: null };
     states.set(key, s);
   }
   return s;
@@ -508,6 +530,8 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
   for (const epic of INSTANCE_EPICS[instance]) {
     if (slotsLeft <= 0) break;
     if (s.tracked[epic] || openEpics.has(epic)) continue; // already have a position here — including one this bot doesn't own, to avoid doubling up on the same instrument
+    const today = new Date().toISOString().slice(0, 10);
+    if (s.lastEntryDay[epic] === today) continue; // already entered this epic today — see lastEntryDayFile's own comment
 
     // Market details fetched BEFORE the bars — needed not just for sizing
     // but to rescale non-share bars to IG's own points level (see below).
@@ -748,6 +772,8 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       const result = await placeMarketOrder(session, epic, signal.action, stake, stopDist, signal.tpPoints, 'GBP', false);
       s.tracked[epic] = { dealId: result.dealId, epic, direction: signal.action, entryLevel: result.level, size: stake, enteredAt: Date.now() };
       saveTracked(instance, mode, s.tracked);
+      s.lastEntryDay[epic] = new Date().toISOString().slice(0, 10);
+      saveLastEntryDay(instance, mode, s.lastEntryDay);
       // No longer auto-exempted from geminiWatch as of 2026-09-03 — this
       // used to protect a position from free-form AI judgment that could
       // flip-flop (Exxon/Silver), but that free-form judgment doesn't exist
@@ -774,9 +800,34 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
   }
 }
 
+// How much longer than the normal cadence counts as "this bot was actually
+// down/delayed" rather than just ordinary jitter (a slightly slow API call,
+// a few seconds of drift). 3x the normal interval means at least two full
+// cycles were missed outright — not a borderline judgment call.
+const STALE_GAP_MULTIPLE = 3;
+
 async function poll(instance: MrInstance, mode: IgMode): Promise<void> {
   const s = ms(instance, mode);
   if (!s.running) return;
+  // Added 2026-09-03 per explicit request, after a real outage (IG's API
+  // allowance got exhausted from a stretch of restarts) — when a bot comes
+  // back after a gap, this decides whether it's still safe to trust
+  // whatever signal it now sees. A crossover/breakout signal is recomputed
+  // fresh every poll (this file never persists a queue of "things to still
+  // do" — there's nothing to "replay"), but that freshness guarantee breaks
+  // down after a long gap: today's price may have moved a lot further
+  // during the outage than a normal 15-min cycle would ever see, so the
+  // signal this poll finds could really be several hours stale even though
+  // it's being read live right now. Rather than trust it immediately, this
+  // cycle only runs manageExits (existing positions stay fully protected,
+  // no delay there) and skips scanEntries entirely — the NEXT cycle, back
+  // on normal cadence with a confirmed-current picture, is what actually
+  // gets to act on it. Not a queue-and-replay-later — the opposite: forget
+  // whatever might have applied during the gap and require it to still look
+  // right on a fresh, undelayed read before anything opens.
+  const previousPollTs = s.lastPollTs;
+  const gapMs = previousPollTs ? Date.now() - new Date(previousPollTs).getTime() : 0;
+  const recoveringFromGap = gapMs > POLL_MS * STALE_GAP_MULTIPLE;
   s.lastPollTs = new Date().toISOString();
 
   // Mixed FX/index/stock universe (see INSTANCE_EPICS above) — same quiet
@@ -794,8 +845,12 @@ async function poll(instance: MrInstance, mode: IgMode): Promise<void> {
         s.session = session;
         const positions = await fetchFullPositions(session);
         await manageExits(instance, mode, session, positions);
-        const stillOpen = await fetchFullPositions(session); // re-fetch — manageExits may have closed some
-        await scanEntries(instance, mode, session, stillOpen);
+        if (recoveringFromGap) {
+          addLog(instance, mode, 'info', '—', `Back after a ${(gapMs / 60_000).toFixed(0)}min gap (normal cadence is ${(POLL_MS / 60_000).toFixed(0)}min) — skipping new entries this cycle so nothing fires on a stale signal; will scan fresh next cycle`);
+        } else {
+          const stillOpen = await fetchFullPositions(session); // re-fetch — manageExits may have closed some
+          await scanEntries(instance, mode, session, stillOpen);
+        }
       }
     } catch (e) {
       addLog(instance, mode, 'error', '—', `Poll failed: ${e instanceof Error ? e.message : String(e)}`);
