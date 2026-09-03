@@ -816,7 +816,7 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
         continue;
       }
 
-      entered = await placeStockOrder(mode, session, s, u, opt, side, stake, optOffer, dp, verdict.confidence, verdict.reason, today, 'stock');
+      entered = await placeStockOrder(mode, session, s, u, opt, side, stake, optOffer, dp, verdict.confidence, verdict.reason, today, 'stock', premiumBudget);
       if (entered) break;
     }
     if (!entered && !anyFound) addLog(mode, 'wait', u.name, `[Weekly] No ${side} found near ${spot.toFixed(0)} in this week's chain`);
@@ -860,6 +860,7 @@ async function placeStockOrder(
   opt: { epic: string; name: string; strike: number; expiry: string; expiryMs: number },
   side: 'call' | 'put', stake: number, optOffer: number, dp: number,
   confidence: number, aiReason: string, today: string, kind: 'stock' | 'stock-daily',
+  premiumBudget: number,
 ): Promise<boolean> {
   const tag         = kind === 'stock-daily' ? '[Daily]' : '[Weekly]';
   const trackedKey   = kind === 'stock-daily' ? `${u.shareEpic}:daily` : u.shareEpic;
@@ -887,11 +888,24 @@ async function placeStockOrder(
     // dealingRules for these same-day option epics can't be trusted (the
     // same query that returned minDealSize:2 also returned a nonsense
     // minStepDistance of 10 billion points), so rather than guess the real
-    // number, this just doubles the stake and retries on that specific
-    // rejection until it clears or hits DEMO_MAX_SIZE_ATTEMPTS. Demo-only —
-    // real money on live still respects the budget/minimum checks as
-    // before; this is deliberately not extended there.
-    const DEMO_MAX_SIZE_ATTEMPTS = 6;
+    // number, this doubles the stake and retries on that specific rejection
+    // until it clears. Demo-only — real money on live still respects the
+    // budget/minimum checks as before; this is deliberately not extended
+    // there.
+    //
+    // DEMO_SIZE_ESCALATION_CAP added 2026-09-03 after this actually ran
+    // live: one doubling (2 -> 4) cleared IG's rejection but pushed total
+    // premium committed to ~£1,640 against a £600 intended budget — nearly
+    // 3x, on a single retry, with no ceiling at all before this. "Let it
+    // trade freely" was meant to stop it skipping trades over a wrong
+    // minimum-size number, not to let it size up arbitrarily far past its
+    // own strategy budget on a shaky setup. Once the NEXT escalation step
+    // would push total premium past this multiple of premiumBudget, this
+    // stops retrying and fails the trade cleanly instead of placing an
+    // oversized position — same as any other "can't be sized sensibly,
+    // skip it" outcome elsewhere in this file.
+    const DEMO_SIZE_ESCALATION_CAP = 2; // total premium allowed to reach, as a multiple of premiumBudget
+    const DEMO_MAX_SIZE_ATTEMPTS = 6;   // hard backstop even within the budget cap, in case optOffer is tiny
     let attemptStake = stake;
     let result: Awaited<ReturnType<typeof placeMarketOrder>> | null = null;
     for (let attempt = 1; attempt <= (mode === 'demo' ? DEMO_MAX_SIZE_ATTEMPTS : 1); attempt++) {
@@ -902,7 +916,12 @@ async function placeStockOrder(
         const msg = e instanceof Error ? e.message : String(e);
         if (mode === 'demo' && msg.includes('MINIMUM_ORDER_SIZE_ERROR') && attempt < DEMO_MAX_SIZE_ATTEMPTS) {
           const nextStake = Math.round(attemptStake * 2 * 100) / 100;
-          addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected as below IG's real minimum (reported minDealSize was wrong) — retrying at ${nextStake} (demo, no budget cap)`);
+          const nextPremium = optOffer * nextStake;
+          if (nextPremium > premiumBudget * DEMO_SIZE_ESCALATION_CAP) {
+            addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected — next retry (${nextStake}) would commit £${nextPremium.toFixed(0)} premium, over the ${DEMO_SIZE_ESCALATION_CAP}x-budget cap (£${(premiumBudget * DEMO_SIZE_ESCALATION_CAP).toFixed(0)}) — giving up rather than oversizing`);
+            throw e;
+          }
+          addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected as below IG's real minimum (reported minDealSize was wrong) — retrying at ${nextStake} (£${nextPremium.toFixed(0)} premium, within the ${DEMO_SIZE_ESCALATION_CAP}x-budget cap)`);
           attemptStake = nextStake;
           continue;
         }
@@ -1063,7 +1082,7 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
         continue;
       }
 
-      entered = await placeStockOrder(mode, session, s, u, opt, side, stake, optOffer, dp, verdict.confidence, verdict.reason, today, 'stock-daily');
+      entered = await placeStockOrder(mode, session, s, u, opt, side, stake, optOffer, dp, verdict.confidence, verdict.reason, today, 'stock-daily', premiumBudget);
       if (entered) break;
     }
     if (!entered && !anyFound) addLog(mode, 'wait', u.name, `[Daily] No ${side} found near ${spot.toFixed(0)} in today's chain`);
