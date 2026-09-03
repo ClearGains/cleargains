@@ -30,7 +30,7 @@ import { getIgCfdBot, loadSavedCfdState, type CfdStartParams } from './igCfdBot'
 import { startAlpacaNewsStream, isNewsStreamEnabled, setNewsStreamEnabled } from './alpacaNewsStream';
 import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212AiPaused, setT212PositionAiPaused, isMomentumAiGateEnabled, setMomentumAiGateEnabled, setT212BudgetChecked, setMomentumBudgetChecked } from './t212Bot';
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
-import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride } from './igOptionsBot';
+import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
 import { getPerformanceSummary } from './performance';
 import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
@@ -438,6 +438,10 @@ app.delete('/ig-options/:mode/overrides/:id', auth, (req: Request, res: Response
   const mode = resolveIgMode(req, res); if (!mode) return;
   dismissOverride(mode, req.params.id);
   res.json({ ok: true });
+});
+app.post('/ig-options/:mode/positions/:dealId/close', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res); if (!mode) return;
+  void closePositionManually(mode, req.params.dealId).then(r => res.json(r));
 });
 
 // POST /alpaca/:mode/start

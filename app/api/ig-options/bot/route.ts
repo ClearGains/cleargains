@@ -45,6 +45,11 @@ export async function POST(req: NextRequest) {
     if (!id) return NextResponse.json({ ok: false, error: 'id required' }, { status: 400 });
     return proxyTo(`/ig-options/${mode}/overrides/${encodeURIComponent(id)}/approve`, 'POST');
   }
+  if (action === 'close-position') {
+    const dealId = req.nextUrl.searchParams.get('dealId');
+    if (!dealId) return NextResponse.json({ ok: false, error: 'dealId required' }, { status: 400 });
+    return proxyTo(`/ig-options/${mode}/positions/${encodeURIComponent(dealId)}/close`, 'POST');
+  }
   if (action !== 'start' && action !== 'stop') return NextResponse.json({ ok: false, error: 'action must be "start" or "stop"' }, { status: 400 });
   return proxyTo(`/ig-options/${mode}/${action}`, 'POST');
 }

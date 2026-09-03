@@ -794,6 +794,49 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
   }
 }
 
+// Manual close — the "Close now" button's backend, added 2026-09-03 per
+// explicit request. Same action the bot's own exit rules take, just
+// triggered by the user instead of a rule firing. Works on any tracked
+// position regardless of kind.
+export async function closePositionManually(mode: IgMode, dealId: string): Promise<{ ok: boolean; error?: string }> {
+  const s = st(mode);
+  const entry = Object.entries(s.tracked).find(([, t]) => t.dealId === dealId);
+  if (!entry) return { ok: false, error: 'Position not found' };
+  const [trackedKey, tr] = entry;
+
+  const session = await getOrAuthSession(mode);
+  if (!session) return { ok: false, error: 'No IG session — check credentials' };
+
+  let position: FullPosition | undefined;
+  try {
+    const positions = await fetchFullPositions(session);
+    position = positions.find(p => p.dealId === dealId);
+  } catch (e) {
+    return { ok: false, error: `Position lookup failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!position) return { ok: false, error: 'Position not found at IG — may already be closed' };
+
+  const bid = typeof position.bid === 'number' ? position.bid : null;
+  const plPct = bid !== null && tr.premium > 0 ? ((bid - tr.premium) / tr.premium) * 100 : 0;
+
+  try {
+    await closePosition(session, position.dealId, position.direction, position.size);
+    recordJournalEvent({
+      mode: journalMode(mode), event: 'exit', symbol: tr.name, strategy: strategyFor(tr),
+      side: 'long', qty: position.size, price: bid ?? 0, reason: 'Manually closed',
+      plUsd: position.upl, plPct,
+    });
+    addLog(mode, 'exit', tr.name, `Closed manually — £${position.upl.toFixed(2)}`);
+    delete s.tracked[trackedKey];
+    saveTracked(mode, s.tracked);
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    addLog(mode, 'error', tr.name, `Manual close failed: ${msg}`);
+    return { ok: false, error: msg };
+  }
+}
+
 // ── Entries ─────────────────────────────────────────────────────────────────
 function countKind(s: BotState, kind: 'index' | 'stock' | 'stock-daily' | 'stock-monthly'): number {
   return Object.values(s.tracked).filter(t => (t.kind ?? 'index') === kind).length;

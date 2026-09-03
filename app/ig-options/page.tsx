@@ -120,6 +120,22 @@ export default function IgOptionsPage() {
     }
   };
 
+  const [closeBusy, setCloseBusy] = useState<string | null>(null);
+  const closeNow = async (dealId: string) => {
+    setCloseBusy(dealId);
+    setError(null);
+    try {
+      const res  = await fetch(`/api/ig-options/bot?mode=${mode}&action=close-position&dealId=${encodeURIComponent(dealId)}`, { method: 'POST' });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok && data.error) setError(data.error);
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Request failed');
+    } finally {
+      setCloseBusy(null);
+    }
+  };
+
   const posByDealId = new Map((status?.positions ?? []).map(p => [p.dealId, p]));
   const tracked = Object.values(status?.tracked ?? {});
   const overrides = status?.pendingOverrides ?? [];
@@ -228,6 +244,15 @@ export default function IgOptionsPage() {
                       <p className="text-[10px] text-gray-500 mt-0.5">
                         {t.optionType.toUpperCase()} · premium {t.premium.toFixed(1)} × {t.size}/pt · max loss £{(t.premium * t.size).toFixed(2)} · {dte.toFixed(0)}d to {t.expiry}
                       </p>
+                      <Button
+                        onClick={() => void closeNow(t.dealId)}
+                        loading={closeBusy === t.dealId}
+                        variant="outline"
+                        size="sm"
+                        className="mt-2"
+                      >
+                        Close now
+                      </Button>
                     </div>
                   );
                 })}
