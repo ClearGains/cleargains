@@ -188,6 +188,14 @@ const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 800, live: 30 };
 // real constraint — target ~£800 (STOCK_PREMIUM_GBP.demo above), hard stop
 // at £1,000 even if IG's real minimum would need more.
 const DEMO_MAX_LOSS_CEILING_GBP = 1000;
+// Weekly gets a higher target/ceiling than daily and monthly — added
+// 2026-09-03 per explicit request/reasoning: it has several days of runway
+// for a position to develop or recover rather than being forced flat within
+// hours (same-day) or needing months of thesis-checking room (monthly), so
+// a bigger loss cap is more tolerable there specifically — it won't get
+// "quickly closed out" before it's had a real chance to work.
+const STOCK_WEEKLY_PREMIUM_GBP: Record<IgMode, number> = { demo: 1200, live: 30 };
+const WEEKLY_MAX_LOSS_CEILING_GBP = 1500;
 const STOCK_MAX_POSITIONS   = 3; // raised from 2, 2026-09-01 per explicit request for more scope now the daily chain runs alongside it
 const STOCK_MIN_MOVE_PCT    = 1.5;  // today's move must be a real one before the AI is even asked
 // Same-day options get their own, lower bar — added 2026-09-03 per explicit
@@ -960,10 +968,10 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
     addLog(mode, 'info', u.name, `[Weekly] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today → ${side.toUpperCase()} candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
     if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;
 
-    let premiumBudget = STOCK_PREMIUM_GBP[mode];
+    let premiumBudget = STOCK_WEEKLY_PREMIUM_GBP[mode];
     const edge = edgeSizing(journalMode(mode), STOCK_STRATEGY);
     if (edge.skip) { addLog(mode, 'wait', u.name, `[Weekly] Skipped — ${edge.reason}`); continue; }
-    if (edge.multiplier !== 1) premiumBudget = Math.round(STOCK_PREMIUM_GBP[mode] * edge.multiplier);
+    if (edge.multiplier !== 1) premiumBudget = Math.round(STOCK_WEEKLY_PREMIUM_GBP[mode] * edge.multiplier);
 
     // Chain discovery — same exact-name search as the index side, with the
     // daily chain's own naming ("Daily Apple Inc 26000 CALL") and today's
@@ -1125,6 +1133,10 @@ async function placeStockOrder(
     // ceiling, not past some smaller nominal budget.
     const DEMO_MAX_SIZE_ATTEMPTS = 6; // backstop even within the loss ceiling, in case optOffer is tiny
     let attemptStake = stake;
+    // Weekly gets its own, higher ceiling — see WEEKLY_MAX_LOSS_CEILING_GBP's
+    // own comment (more runway to recover than daily/monthly = more tolerable
+    // to size bigger).
+    const lossCeiling = kind === 'stock' ? WEEKLY_MAX_LOSS_CEILING_GBP : DEMO_MAX_LOSS_CEILING_GBP;
     let result: Awaited<ReturnType<typeof placeMarketOrder>> | null = null;
     for (let attempt = 1; attempt <= (mode === 'demo' ? DEMO_MAX_SIZE_ATTEMPTS : 1); attempt++) {
       try {
@@ -1135,11 +1147,11 @@ async function placeStockOrder(
         if (mode === 'demo' && msg.includes('MINIMUM_ORDER_SIZE_ERROR') && attempt < DEMO_MAX_SIZE_ATTEMPTS) {
           const nextStake = Math.round(attemptStake * 2 * 100) / 100;
           const nextPremium = optOffer * nextStake;
-          if (nextPremium > DEMO_MAX_LOSS_CEILING_GBP) {
-            addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected — next retry (${nextStake}) would commit £${nextPremium.toFixed(0)} premium (= max loss), over the £${DEMO_MAX_LOSS_CEILING_GBP} ceiling — giving up rather than exceeding it`);
+          if (nextPremium > lossCeiling) {
+            addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected — next retry (${nextStake}) would commit £${nextPremium.toFixed(0)} premium (= max loss), over the £${lossCeiling} ceiling — giving up rather than exceeding it`);
             throw e;
           }
-          addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected as below IG's real minimum (reported minDealSize was wrong) — retrying at ${nextStake} (£${nextPremium.toFixed(0)} max loss, within the £${DEMO_MAX_LOSS_CEILING_GBP} ceiling)`);
+          addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected as below IG's real minimum (reported minDealSize was wrong) — retrying at ${nextStake} (£${nextPremium.toFixed(0)} max loss, within the £${lossCeiling} ceiling)`);
           attemptStake = nextStake;
           continue;
         }
@@ -1439,7 +1451,7 @@ export function startIgOptionsBot(mode: IgMode): { ok: boolean; error?: string }
   if (s.fastMonitorTimer) clearTimeout(s.fastMonitorTimer);
   s.running = true;
   saveRunningFlag(mode, true);
-  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d, max ${MAX_POSITIONS}) + weekly stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_PREMIUM_GBP[mode]}/position, closed ~1 day before expiry, max ${STOCK_MAX_POSITIONS}) + same-day stock momentum options (£${STOCK_PREMIUM_GBP[mode]}/position, closed before the bell, max ${STOCK_DAILY_MAX_POSITIONS}) + monthly stock trend+news options (£${STOCK_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d, max ${STOCK_MONTHLY_MAX_POSITIONS}) — AI-confirmed entries on all four, exits monitored every ${FAST_MONITOR_MS / 60_000}min`);
+  addLog(mode, 'info', '—', `IG options bot started — trend-following index options (${UNDERLYINGS.map(u => u.name).join(', ')}, £${INDEX_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d, max ${MAX_POSITIONS}) + weekly stock momentum options (${STOCK_UNDERLYINGS.map(u => u.name).join(', ')}, £${STOCK_WEEKLY_PREMIUM_GBP[mode]}/position, closed ~1 day before expiry, max ${STOCK_MAX_POSITIONS}) + same-day stock momentum options (£${STOCK_PREMIUM_GBP[mode]}/position, closed before the bell, max ${STOCK_DAILY_MAX_POSITIONS}) + monthly stock trend+news options (£${STOCK_PREMIUM_GBP[mode]}/position, ${MIN_DTE}-${MAX_DTE}d, max ${STOCK_MONTHLY_MAX_POSITIONS}) — AI-confirmed entries on all four, exits monitored every ${FAST_MONITOR_MS / 60_000}min`);
   void poll(mode);
   void stockPoll(mode);
   void fastPositionMonitor(mode);
