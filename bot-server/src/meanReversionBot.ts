@@ -666,8 +666,29 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
         const { available } = await fetchAccountFunds(session);
         const requiredMargin = stake * igLevel * (d.marginFactorPct / 100);
         if (requiredMargin > available) {
-          addLog(instance, mode, 'wait', epicName(epic), `Skipped — needs £${requiredMargin.toFixed(0)} margin, only £${available.toFixed(0)} available`);
-          continue;
+          // Scale the stake down to whatever margin is actually available,
+          // rather than skipping outright — per explicit request 2026-09-03
+          // ("find an optimal solution to allow japan225 positions to open
+          // at least occasionally"). This account's live balance is shared
+          // across several bots running concurrently (mean-reversion
+          // stocks/fx, ig-bot's own account-wide watchlist) all drawing on
+          // the same margin pool, so the conviction-scaled "ideal" stake
+          // genuinely often doesn't fit — confirmed live: Japan225 skipped
+          // twice in a row needing £161/£129 margin against only £35/£106
+          // available. Waiting for the full ideal size to become affordable
+          // could mean this rarely or never opens at all on a tight shared
+          // pool. Opening smaller still gets its own real stop/TP and the
+          // same reversal-exit management as a full-size position — smaller
+          // real risk, not no protection. 5% haircut below the literal
+          // available figure so this doesn't shave so close that a normal
+          // price tick between the check and the actual order still fails.
+          const affordableStake = Math.floor((available * 0.95 / (igLevel * (d.marginFactorPct / 100))) * 100) / 100;
+          if (affordableStake < minDeal) {
+            addLog(instance, mode, 'wait', epicName(epic), `Skipped — needs £${requiredMargin.toFixed(0)} margin, only £${available.toFixed(0)} available (even the minimum size doesn't fit)`);
+            continue;
+          }
+          addLog(instance, mode, 'info', epicName(epic), `Stake reduced to £${affordableStake}/pt to fit available margin (was £${stake}/pt needing £${requiredMargin.toFixed(0)}, only £${available.toFixed(0)} available)`);
+          stake = affordableStake;
         }
       }
 
