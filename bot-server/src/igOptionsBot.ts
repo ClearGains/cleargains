@@ -40,7 +40,7 @@ import {
 import { optionsDirectionalSignal } from './alpacaStrategies';
 import { resolveCredentials, type IgMode } from './igStrategyBot';
 import { recordJournalEvent, type JournalMode } from './tradeJournal';
-import { askIgConfirmStockTrade, askMrSafety } from './openai';
+import { askIgConfirmStockTrade, askMrSafety, askOptionsExit } from './openai';
 import { fetchAllHeadlines } from './newsFetch';
 import { fetchBarsWithFallback } from './yahooFetch';
 import { isScannerQuietWeekend, msUntilWeekendReopen, isNYSEOpen, isNearClose } from './alpacaApi';
@@ -429,49 +429,68 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     }
     else if (plPct <= -50) closeReason = `Premium stop hit: ${plPct.toFixed(1)}%`;
 
-    // Daily severe-news safety check — the ONE exit power the AI keeps, and
-    // only where it has real information the mechanical rules can't see:
-    // headlines. severe=true means a genuine emergency (crash-grade macro
-    // news against the position's thesis), the same deliberately-narrow bar
-    // as mean_reversion_stocks' own daily check — NOT a "close or hold?"
-    // chart judgment, which was removed account-wide 2026-08-31 after
-    // confirmed live flip-flopping (Exxon, Silver). Catches the slow
-    // bleed-on-real-news case where exiting at -15% beats riding the
-    // mechanical -50% premium stop; the fast/gap case is already capped by
-    // the premium itself. Only underlyings with a news proxy (US 500 → SPY,
-    // Wall Street → DIA) get real input; the rest skip — an empty headline
-    // list can't detect anything, so the call isn't worth spending.
+    // AI news check — the ONE exit power the AI keeps, and only where it has
+    // real information the mechanical rules can't see: headlines. Two
+    // different questions depending on how much runway the position has,
+    // NOT a "close or hold?" chart judgment either way — that was removed
+    // account-wide 2026-08-31 after confirmed live flip-flopping (Exxon,
+    // Silver), and stays removed: both checks below are asymmetric (can only
+    // push toward closing early on real news, never override the mechanical
+    // stop/target/DTE rules to hold longer), and a close is a one-way
+    // action, so an inconsistent verdict on a later call can't undo an
+    // earlier one — that one-directional shape is what makes an LLM call
+    // safe to use here even though the bidirectional version wasn't.
+    //
+    //  - Index positions (weeks of runway, exit around 5 DTE) keep the
+    //    original askMrSafety question — a genuine, crash-grade emergency
+    //    only, checked at most once/20h. Ordinary bad news is fine to ride
+    //    out here; there's real time for it to resolve.
+    //  - Weekly/daily stock options (added 2026-09-03, explicit request)
+    //    get a different, options-aware question instead: askOptionsExit.
+    //    A weekly option has maybe a week of total life and bleeds theta the
+    //    whole time — "wait out ordinary bad news" isn't available the way
+    //    it is for a stock with weeks of runway, so this asks the broader
+    //    "has the news genuinely turned against this option's direction"
+    //    question (same real-headlines input the T212 momentum strategy
+    //    pulls for its own entries), not just a literal-emergency filter.
+    //    Checked far more often (every 4h vs 20h) since the position's
+    //    entire remaining life is often only 1-2 days long — the old 20h
+    //    cadence meant a weekly option could go its whole remaining runway
+    //    getting checked once, or not at all.
     if (!closeReason) {
-      // Applies to weekly and index positions — both can run several days,
-      // plenty of room for real news to break mid-hold. Same-day ('stock-daily')
-      // positions never reach this in practice: this check only fires after
-      // 20h since the last one, and a same-day position force-closes before
-      // the bell well inside that window — the lookups below still resolve
-      // correctly for it (rather than silently no-op'ing), just never get
-      // the chance to actually gate anything.
       const isStockKind = tr.kind === 'stock' || tr.kind === 'stock-daily';
       const idxU   = isStockKind ? undefined : UNDERLYINGS.find(x => x.epic === tr.underlyingEpic);
       const stockU = isStockKind ? STOCK_UNDERLYINGS.find(x => x.shareEpic === tr.underlyingEpic) : undefined;
       const label      = idxU?.name ?? stockU?.name;
       const newsTicker = idxU?.newsTicker ?? stockU?.finnhub;
-      const kindWord   = isStockKind ? '' : ' index';
-      if (label && newsTicker && Date.now() - (tr.lastAiCheckAt ?? 0) >= 20 * 3_600_000) {
+      const checkIntervalMs = isStockKind ? 4 * 3_600_000 : 20 * 3_600_000;
+      if (label && newsTicker && Date.now() - (tr.lastAiCheckAt ?? 0) >= checkIntervalMs) {
         tr.lastAiCheckAt = Date.now();
         saveTracked(mode, s.tracked);
         try {
           const headlines = await fetchAllHeadlines(newsTicker, 8, label);
           if (headlines.length) {
-            const verdict = await askMrSafety({
-              instrumentName: `${label}${kindWord} (holding a bought ${tr.optionType.toUpperCase()} option)`,
-              direction: tr.optionType === 'call' ? 'BUY' : 'SELL',
-              entryLevel: tr.premium, currentLevel: bid ?? tr.premium,
-              uplGbp: p.upl, heldDays: (Date.now() - tr.enteredAt) / 86_400_000, headlines,
-            });
-            addLog(mode, 'info', tr.name, `[Safety check] severe=${verdict.severe} — ${verdict.reason} (${verdict.engine})`);
-            if (verdict.severe) closeReason = `AI safety override — ${verdict.reason}`;
+            if (isStockKind) {
+              const verdict = await askOptionsExit({
+                instrumentName: tr.name, optionType: tr.optionType, underlyingName: label,
+                entryPremium: tr.premium, currentPremium: bid ?? tr.premium, plPct,
+                daysToExpiry: dte, headlines,
+              });
+              addLog(mode, 'info', tr.name, `[News check] thesisIntact=${verdict.thesisIntact} — ${verdict.reason} (${verdict.engine})`);
+              if (!verdict.thesisIntact) closeReason = `AI news check — ${verdict.reason}`;
+            } else {
+              const verdict = await askMrSafety({
+                instrumentName: `${label} index (holding a bought ${tr.optionType.toUpperCase()} option)`,
+                direction: tr.optionType === 'call' ? 'BUY' : 'SELL',
+                entryLevel: tr.premium, currentLevel: bid ?? tr.premium,
+                uplGbp: p.upl, heldDays: (Date.now() - tr.enteredAt) / 86_400_000, headlines,
+              });
+              addLog(mode, 'info', tr.name, `[Safety check] severe=${verdict.severe} — ${verdict.reason} (${verdict.engine})`);
+              if (verdict.severe) closeReason = `AI safety override — ${verdict.reason}`;
+            }
           }
         } catch (e) {
-          addLog(mode, 'error', tr.name, `Safety check failed: ${e instanceof Error ? e.message : String(e)}`);
+          addLog(mode, 'error', tr.name, `News check failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     }
@@ -648,13 +667,18 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
     let usdPrice: number; // real $ price — what the AI prompt gets (IG's
                           // ×100 points scale read as "$26130 Amazon" made
                           // the AI veto on "impossible price", confirmed live)
+    let dailyRangePct: number; // today's (high-low)/close — crude one-day
+                                // volatility proxy for the plausibility check
+                                // below, reusing this same quote call rather
+                                // than fetching historical bars separately.
     try {
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${u.finnhub}&token=${apiKey}`, { signal: AbortSignal.timeout(5_000) });
       if (!res.ok) continue;
-      const q = await res.json() as { c: number; dp: number };
+      const q = await res.json() as { c: number; dp: number; h?: number; l?: number };
       if (!q.c || q.dp === undefined || q.dp === null) continue;
       dp = q.dp;
       usdPrice = q.c;
+      dailyRangePct = q.h && q.l && q.h > q.l ? ((q.h - q.l) / q.c) * 100 : Math.abs(dp);
     } catch { continue; }
     if (Math.abs(dp) < STOCK_MIN_MOVE_PCT) continue;
     const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
@@ -753,6 +777,13 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
         continue;
       }
 
+      const daysRemaining = (opt.expiryMs - Date.now()) / 86_400_000;
+      const move = moveIsPlausible(spot, strike, optOffer, side, daysRemaining, dailyRangePct);
+      if (!move.plausible) {
+        addLog(mode, 'wait', opt.name, `[Weekly] Needs a ${move.requiredMovePct.toFixed(1)}% move to breakeven vs a typical ~${move.expectedMovePct.toFixed(1)}% over ${daysRemaining.toFixed(1)}d — too much of a stretch, trying next strike`);
+        continue;
+      }
+
       const minDeal = optDetails.minDealSize || 0.1;
       let stake = Math.max(minDeal, Math.floor((premiumBudget / optOffer) * 100) / 100);
       stake = Math.round(stake * 100) / 100;
@@ -766,6 +797,31 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
     }
     if (!entered && !anyFound) addLog(mode, 'wait', u.name, `[Weekly] No ${side} found near ${spot.toFixed(0)} in this week's chain`);
   }
+}
+
+// ── Move-plausibility screen — added 2026-09-03, explicit request ──────────
+// A weekly/daily bought option needs the underlying to actually move enough
+// to clear its breakeven before expiry — theta keeps bleeding the whole
+// time regardless. This is a cheap, deterministic sanity check (no AI call,
+// so no flip-flop risk at all) against entering a strike that would need an
+// implausibly large move to ever pay off. Deliberately crude, not a real
+// options-pricing/IV model: dailyRangePct (today's high-low range as a %
+// of close) stands in for one day's expected volatility, scaled by
+// sqrt(days remaining) — a standard rough scaling, not a precise one. The
+// point is only to catch the obviously-unreasonable case (a strike needing
+// a 15% move in 2 days on a stock whose own daily range is under 1%), not
+// to finely rank plausible candidates against each other.
+const REQUIRED_MOVE_MULTIPLE = 2; // required move can run up to 2x the naive expected move before this flags it
+function moveIsPlausible(
+  spot: number, strike: number, premium: number, side: 'call' | 'put',
+  daysRemaining: number, dailyRangePct: number,
+): { plausible: boolean; requiredMovePct: number; expectedMovePct: number } {
+  const breakeven = side === 'call' ? strike + premium : strike - premium;
+  const requiredMovePct = side === 'call'
+    ? Math.max(0, ((breakeven - spot) / spot) * 100)
+    : Math.max(0, ((spot - breakeven) / spot) * 100);
+  const expectedMovePct = Math.max(dailyRangePct, 0.1) * Math.sqrt(Math.max(daysRemaining, 0.25));
+  return { plausible: requiredMovePct <= REQUIRED_MOVE_MULTIPLE * expectedMovePct, requiredMovePct, expectedMovePct };
 }
 
 // Shared by both the weekly and same-day stock strategies — generalized
@@ -847,13 +903,15 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
 
     let dp: number;
     let usdPrice: number;
+    let dailyRangePct: number; // see scanStockEntries' own comment
     try {
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${u.finnhub}&token=${apiKey}`, { signal: AbortSignal.timeout(5_000) });
       if (!res.ok) continue;
-      const q = await res.json() as { c: number; dp: number };
+      const q = await res.json() as { c: number; dp: number; h?: number; l?: number };
       if (!q.c || q.dp === undefined || q.dp === null) continue;
       dp = q.dp;
       usdPrice = q.c;
+      dailyRangePct = q.h && q.l && q.h > q.l ? ((q.h - q.l) / q.c) * 100 : Math.abs(dp);
     } catch { continue; }
     if (Math.abs(dp) < STOCK_MIN_MOVE_PCT) continue;
     const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
@@ -931,6 +989,13 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
       if (!optDetails || optOffer === null || optOffer <= 0 || optDetails.marketStatus !== 'TRADEABLE') continue;
       if (optBid !== null && (optOffer - optBid) / optOffer > STOCK_DAILY_SPREAD_CAP) {
         addLog(mode, 'wait', opt.name, `[Daily] Spread too wide (${optBid}/${optOffer}) — trying next strike`);
+        continue;
+      }
+
+      const daysRemaining = (opt.expiryMs - Date.now()) / 86_400_000;
+      const move = moveIsPlausible(spot, strike, optOffer, side, daysRemaining, dailyRangePct);
+      if (!move.plausible) {
+        addLog(mode, 'wait', opt.name, `[Daily] Needs a ${move.requiredMovePct.toFixed(1)}% move to breakeven vs a typical ~${move.expectedMovePct.toFixed(1)}% today — too much of a stretch, trying next strike`);
         continue;
       }
 

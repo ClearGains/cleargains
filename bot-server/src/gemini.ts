@@ -957,6 +957,91 @@ export async function askGeminiMrSafety(req: MrSafetyRequest): Promise<MrSafetyV
   }
 }
 
+// ── Options exit check — genuinely different question from MrSafety above ──
+// Added 2026-09-03 per explicit request: MrSafety was built for mean-
+// reversion STOCKS, which have a real stop/take-profit and are designed to
+// be held through ordinary noise for weeks — so it deliberately only flags
+// literal emergencies (halted, fraud, bankruptcy) and ignores "ordinary bad
+// news, a rough day, a downgrade." A bought option is a different animal:
+// theta decay and a hard expiry date mean there is no "wait it out" — by the
+// time ordinary bad news would resolve, a weekly option is already gone.
+// So this asks the question the way the T212 momentum strategy's own entry
+// check does (real pulled headlines, not just a crisis filter): has the news
+// picture actually turned against the direction this option is betting on,
+// not just "is this a full-blown emergency."
+//
+// Kept structurally asymmetric on purpose, same discipline as MrSafety and
+// for the same reason the account-wide AI hold/close judgment was removed
+// 2026-08-31 after it flip-flopped on Exxon/Silver: this can only ever push
+// toward closing early on genuinely corroborating news, never toward
+// overriding the mechanical stop/target/DTE rules to hold longer, and a
+// close is a one-way action — there's no path back to "reopen" if a later
+// call would have answered differently. That one-directional structure is
+// what keeps a possibly-inconsistent LLM call safe to use here even though
+// the full bidirectional "hold or close?" chart judgment wasn't.
+export type OptionsExitRequest = {
+  instrumentName: string;      // e.g. "Weekly Apple Inc 32500 CALL"
+  optionType:     'call' | 'put';
+  underlyingName: string;      // e.g. "Apple Inc"
+  entryPremium:   number;
+  currentPremium: number;
+  plPct:          number;
+  daysToExpiry:   number;
+  headlines?:     string[];
+};
+
+export type OptionsExitVerdict = {
+  thesisIntact: boolean; // false = recent news has genuinely turned against this option's direction
+  reason:       string;
+  engine:       'gemini' | 'openai' | 'xai' | 'passthrough';
+};
+
+export function buildOptionsExitPrompt(req: OptionsExitRequest): string {
+  const dir = req.optionType === 'call' ? 'a rise' : 'a fall';
+  const headlineBlock = req.headlines?.length
+    ? `\nRecent headlines on ${req.underlyingName}:\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    : `\nNo notable recent headlines found on ${req.underlyingName}.\n`;
+  return `A rules-based system holds a bought ${req.optionType.toUpperCase()} option on ${req.underlyingName} (${req.instrumentName}) — a bet on ${dir}. Entered at premium ${req.entryPremium.toFixed(2)}, now ${req.currentPremium.toFixed(2)} (${req.plPct >= 0 ? '+' : ''}${req.plPct.toFixed(1)}% on premium), ${req.daysToExpiry.toFixed(1)} days left to expiry.
+
+Unlike a stock position, this can't be held through bad news to "wait it out" — time decay and the hard expiry mean the thesis needs to still be intact RIGHT NOW, not eventually. Your job: based on the headlines below, has the news picture genuinely turned against the direction this option needs (${dir} in ${req.underlyingName})? Don't flag ordinary market chatter, routine analyst noise, or headlines that are neutral or already priced in — only flag when real, fairly clear news corroborates that the move this option needs is now less likely. Default to thesisIntact=true unless the news genuinely argues against it.
+${headlineBlock}
+Respond with JSON only, no markdown:
+{"thesisIntact":true,"reason":"max 15 words"}`;
+}
+
+export function parseOptionsExitResponse(text: string, engine: OptionsExitVerdict['engine']): OptionsExitVerdict {
+  const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+  const parsed  = JSON.parse(cleaned) as { thesisIntact?: boolean; reason?: string };
+  return { thesisIntact: parsed.thesisIntact !== false, reason: parsed.reason ?? '', engine };
+}
+
+export async function askGeminiOptionsExit(req: OptionsExitRequest): Promise<OptionsExitVerdict> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return { thesisIntact: true, reason: 'No Gemini key configured', engine: 'passthrough' };
+  if (!reserveGeminiCall()) return { thesisIntact: true, reason: 'Daily Gemini call cap reached', engine: 'passthrough' };
+  try {
+    const prompt = buildOptionsExitPrompt(req);
+    const res = await fetchGeminiWithRetry(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          contents:         [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 500, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+    if (!res.ok) return { thesisIntact: true, reason: `Gemini ${res.status}`, engine: 'passthrough' };
+    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    return parseOptionsExitResponse(text, 'gemini');
+  } catch (e) {
+    return { thesisIntact: true, reason: `Gemini failed (${e instanceof Error ? e.message : String(e)})`, engine: 'passthrough' };
+  }
+}
+
 // Shared with xai.ts's askXaiTradeIdea — same question must go to every
 // provider.
 export function buildTradeIdeaPrompt(req: TradeIdeaRequest): string {

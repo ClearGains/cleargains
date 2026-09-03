@@ -30,8 +30,9 @@ import {
   buildConfirmStockTradePrompt, parseConfirmStockTradeResponse, type StockConfirmSignal, type StockConfirmVerdict,
   buildFxSwingPrompt, parseFxSwingResponse, type FxSwingEntrySignal, type FxSwingVerdict,
   buildMrSafetyPrompt, parseMrSafetyResponse, type MrSafetyRequest, type MrSafetyVerdict,
+  buildOptionsExitPrompt, parseOptionsExitResponse, type OptionsExitRequest, type OptionsExitVerdict,
   askGeminiDailyVerdict, askGeminiPositionVerdict, askGeminiTradeIdea, askGeminiConfirmStockTrade, askGeminiFxSwing,
-  askGeminiMrSafety,
+  askGeminiMrSafety, askGeminiOptionsExit,
 } from './gemini';
 
 const OPENAI_MODEL = 'gpt-5.6-sol';
@@ -188,4 +189,23 @@ export async function askOpenAiMrSafety(req: MrSafetyRequest): Promise<MrSafetyV
 export async function askMrSafety(req: MrSafetyRequest): Promise<MrSafetyVerdict> {
   const openai = await askOpenAiMrSafety(req);
   return openai.engine === 'passthrough' ? askGeminiMrSafety(req) : openai;
+}
+
+// Options exit check — see buildOptionsExitPrompt's own comment for why this
+// is a genuinely different question from askMrSafety above (time decay/hard
+// expiry means it can't just filter for literal emergencies). Same fail-
+// closed shape: an outage on both providers means thesisIntact: true —
+// absence of a working AI call is never itself a reason to close a position.
+export async function askOpenAiOptionsExit(req: OptionsExitRequest): Promise<OptionsExitVerdict> {
+  try {
+    const text = await openaiChat(buildOptionsExitPrompt(req));
+    if (text === null) return { thesisIntact: true, reason: 'No OpenAI response', engine: 'passthrough' };
+    return parseOptionsExitResponse(text, 'openai');
+  } catch (e) {
+    return { thesisIntact: true, reason: `OpenAI failed (${e instanceof Error ? e.message : String(e)})`, engine: 'passthrough' };
+  }
+}
+export async function askOptionsExit(req: OptionsExitRequest): Promise<OptionsExitVerdict> {
+  const openai = await askOpenAiOptionsExit(req);
+  return openai.engine === 'passthrough' ? askGeminiOptionsExit(req) : openai;
 }
