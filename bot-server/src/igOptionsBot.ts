@@ -1013,7 +1013,18 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       // week — the search said "weekly," the accept condition still
       // enforced "basically same-day." 8 days comfortably covers one real
       // weekly cycle while still rejecting a wrong/future one.
-      if (expiryMs === null || expiryMs <= Date.now() || expiryMs - Date.now() > 8 * 86_400_000) continue;
+      //
+      // Lower bound added 2026-09-03 per explicit request/observation: this
+      // upper-bound-only check let entries land with almost no life left at
+      // all — a contract found with, say, 1.2 days to expiry passed fine,
+      // got bought, then hit the STOCK_EXIT_DTE_DAYS(=1) forced close within
+      // hours, with no real time for the thesis to develop before being
+      // yanked out — "0.9 days to expiry" closes seen live are exactly this.
+      // Requiring at least 2 clear days above the exit threshold (3 total)
+      // means every entry has genuine runway before the forced-close rule
+      // can even become relevant, not just technically-not-expired-yet.
+      const dteAtEntry = (expiryMs !== null ? expiryMs - Date.now() : 0) / 86_400_000;
+      if (expiryMs === null || expiryMs <= Date.now() || dteAtEntry > 8 || dteAtEntry < STOCK_EXIT_DTE_DAYS + 2) continue;
       anyFound = true;
       const opt = { epic: m.epic, name: m.name, strike, expiry: m.expiry, expiryMs };
 
