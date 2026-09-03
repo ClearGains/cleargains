@@ -165,7 +165,7 @@ export default function IgOptionsPage() {
 
         <div className="lg:col-span-1 space-y-4">
           <Card>
-            <CardHeader title="Underlyings scanned" subtitle={`${status?.underlyings?.length ?? 0} index(es)`} icon={<TrendingUp className="h-4 w-4" />} />
+            <CardHeader title="Underlyings scanned" subtitle={`${status?.underlyings?.length ?? 0} instrument(s)`} icon={<TrendingUp className="h-4 w-4" />} />
             <div className="flex flex-wrap gap-1.5">
               {(status?.underlyings ?? []).map(u => (
                 <span key={u} className="text-[10px] text-gray-500 bg-gray-800/80 border border-gray-700/50 rounded px-1.5 py-0.5">{u}</span>

@@ -1473,7 +1473,7 @@ export async function getIgOptionsBotStatus(mode: IgMode): Promise<{
   }
   return {
     running: s.running,
-    underlyings: [...UNDERLYINGS.map(u => u.name), ...STOCK_UNDERLYINGS.map(u => `${u.name} (weekly)`), ...STOCK_DAILY_UNDERLYINGS.map(u => `${u.name} (daily)`)],
+    underlyings: [...UNDERLYINGS.map(u => u.name), ...STOCK_UNDERLYINGS.map(u => `${u.name} (weekly)`), ...STOCK_DAILY_UNDERLYINGS.map(u => `${u.name} (daily)`), ...STOCK_MONTHLY_UNDERLYINGS.map(u => `${u.name} (monthly)`)],
     log: s.log, nextRunMs: s.nextRunMs, lastPollTs: s.lastPollTs, tracked: s.tracked, positions,
   };
 }
