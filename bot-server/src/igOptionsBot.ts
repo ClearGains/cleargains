@@ -787,7 +787,12 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       const minDeal = optDetails.minDealSize || 0.1;
       let stake = Math.max(minDeal, Math.floor((premiumBudget / optOffer) * 100) / 100);
       stake = Math.round(stake * 100) / 100;
-      if (optOffer * stake > premiumBudget * 1.25) {
+      // Budget ceiling skipped on demo — explicit request 2026-09-03 ("let
+      // it trade freely, take off the restrictions") after this cap kept
+      // skipping strikes the strategy would otherwise have taken, on top of
+      // the separate minDealSize-mismatch issue placeStockOrder's own
+      // escalation now handles. Real money on live still respects it.
+      if (mode === 'live' && optOffer * stake > premiumBudget * 1.25) {
         addLog(mode, 'wait', opt.name, `[Weekly] Minimum stake costs £${(optOffer * stake).toFixed(0)} premium — over budget, trying next strike`);
         continue;
       }
@@ -855,7 +860,38 @@ async function placeStockOrder(
     // whole time, silently. IG handles the GBP-account/USD-instrument
     // conversion itself once given the currency the instrument actually
     // supports — no other change needed here for the order to go through.
-    const result = await placeMarketOrder(session, opt.epic, 'BUY', stake, undefined, undefined, 'USD', false, opt.expiry, optOffer);
+    // Demo-only escalation on MINIMUM_ORDER_SIZE_ERROR — added 2026-09-03
+    // per explicit request ("let it trade freely... take off the
+    // restrictions") after finding this chain's IG-reported minDealSize
+    // (2) doesn't match what IG actually enforces at order time — every
+    // attempt at size 2-2.8 kept getting rejected for hours. IG's own
+    // dealingRules for these same-day option epics can't be trusted (the
+    // same query that returned minDealSize:2 also returned a nonsense
+    // minStepDistance of 10 billion points), so rather than guess the real
+    // number, this just doubles the stake and retries on that specific
+    // rejection until it clears or hits DEMO_MAX_SIZE_ATTEMPTS. Demo-only —
+    // real money on live still respects the budget/minimum checks as
+    // before; this is deliberately not extended there.
+    const DEMO_MAX_SIZE_ATTEMPTS = 6;
+    let attemptStake = stake;
+    let result: Awaited<ReturnType<typeof placeMarketOrder>> | null = null;
+    for (let attempt = 1; attempt <= (mode === 'demo' ? DEMO_MAX_SIZE_ATTEMPTS : 1); attempt++) {
+      try {
+        result = await placeMarketOrder(session, opt.epic, 'BUY', attemptStake, undefined, undefined, 'USD', false, opt.expiry, optOffer);
+        break;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (mode === 'demo' && msg.includes('MINIMUM_ORDER_SIZE_ERROR') && attempt < DEMO_MAX_SIZE_ATTEMPTS) {
+          const nextStake = Math.round(attemptStake * 2 * 100) / 100;
+          addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected as below IG's real minimum (reported minDealSize was wrong) — retrying at ${nextStake} (demo, no budget cap)`);
+          attemptStake = nextStake;
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (!result) throw new Error('Order failed after size-escalation retries');
+    stake = attemptStake;
     const premium = result.level || optOffer;
     s.lastStockEntryDay[dayThrottleKey] = today;
     s.tracked[trackedKey] = {
@@ -1002,7 +1038,8 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
       const minDeal = optDetails.minDealSize || 0.1;
       let stake = Math.max(minDeal, Math.floor((premiumBudget / optOffer) * 100) / 100);
       stake = Math.round(stake * 100) / 100;
-      if (optOffer * stake > premiumBudget * 1.25) {
+      // See scanStockEntries' own comment — same demo-only budget-ceiling skip.
+      if (mode === 'live' && optOffer * stake > premiumBudget * 1.25) {
         addLog(mode, 'wait', opt.name, `[Daily] Minimum stake costs £${(optOffer * stake).toFixed(0)} premium — over budget, trying next strike`);
         continue;
       }
