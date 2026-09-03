@@ -2977,7 +2977,7 @@ async function executeIgSignal(
     // already imports from this file); safe here since it only runs well
     // after both modules have finished initializing.
     try {
-      const { addToWatch, recordEntryConfidence, markNoAiClose } = await import('./geminiWatch');
+      const { addToWatch, recordEntryConfidence } = await import('./geminiWatch');
       addToWatch(mode, dealId);
       // Seeds the position-rotation baseline with Gemini's own entry
       // confidence, so a fresh gemini_opinion position has something real
@@ -2985,11 +2985,13 @@ async function executeIgSignal(
       if (cfg.strategy === 'gemini_opinion' && signal.confidence !== undefined) {
         recordEntryConfidence(dealId, signal.confidence);
       }
-      // mean_reversion_swing already carries its own wide stop/TP built for
-      // a multi-day swing thesis — exempt from the discretionary AI close,
-      // same reasoning (and same live evidence) as meanReversionBot.ts's own
-      // fx/japan225 instances. See markNoAiClose's own comment.
-      if (cfg.strategy === 'mean_reversion_swing') markNoAiClose(mode, dealId);
+      // No longer auto-exempted as of 2026-09-03 — see meanReversionBot.ts's
+      // own identical change for the full reasoning: the free-form AI
+      // judgment this used to protect against no longer runs on this path
+      // at all (geminiWatch.ts is now mechanical-only on a loss, momentum-
+      // based lock-in on a gain), so there's nothing left to protect
+      // mean_reversion_swing positions FROM by exempting them — and doing
+      // so was also silently skipping the new gain-lock mechanism for them.
     } catch {}
     if (signal.triggerLevel !== undefined) {
       st.lastEntryTrigger.set(epic, { level: signal.triggerLevel, direction: effectiveDirection });

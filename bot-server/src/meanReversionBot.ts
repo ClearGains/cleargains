@@ -748,13 +748,19 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       const result = await placeMarketOrder(session, epic, signal.action, stake, stopDist, signal.tpPoints, 'GBP', false);
       s.tracked[epic] = { dealId: result.dealId, epic, direction: signal.action, entryLevel: result.level, size: stake, enteredAt: Date.now() };
       saveTracked(instance, mode, s.tracked);
-      // Exempt from ig-bot's discretionary AI watch — see markNoAiClose's own
-      // comment. This position's own stop/TP above is the only exit that
-      // should touch it (plus the 'stocks' instance's own severe-news check,
-      // a separate mechanism from geminiWatch entirely). Dynamic import
-      // avoids a circular dependency (geminiWatch imports from igStrategyBot,
-      // which this file also imports from).
-      try { const { markNoAiClose } = await import('./geminiWatch'); markNoAiClose(mode, result.dealId); } catch {}
+      // No longer auto-exempted from geminiWatch as of 2026-09-03 — this
+      // used to protect a position from free-form AI judgment that could
+      // flip-flop (Exxon/Silver), but that free-form judgment doesn't exist
+      // on that path any more: geminiWatch.ts now does nothing at all on a
+      // loss (mechanical stop only, same protection this exemption used to
+      // give) and a deterministic momentum-based lock-in on a gain — the
+      // exact mechanism explicitly requested for these positions too. Per
+      // explicit request/catch: this bot's own positions (confirmed live as
+      // the one actually placing trades, Meta's EMA-trend entry included)
+      // were silently skipping that entire new mechanism via this old
+      // auto-exemption. The manual per-position toggle (markNoAiClose/
+      // unmarkNoAiClose, exposed in the UI) still exists for anyone who
+      // wants to opt a specific position out.
       recordJournalEvent({
         mode: journalMode(mode), event: 'entry', symbol: epicName(epic), strategy: strategyKey(instance),
         side: signal.action === 'BUY' ? 'long' : 'short', qty: stake, price: result.level, reason: signal.reason,

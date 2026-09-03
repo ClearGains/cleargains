@@ -740,6 +740,18 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // computing a momentum read just to always ignore it.
   if (isNoAiCloseExempt(mode, p.dealId)) return;
 
+  // A brand-new position hasn't had time to show today's move yet — without
+  // this, a position that ticks a few pence into the green within minutes
+  // of opening gets judged on "no 0.5% move yet" and closed at essentially
+  // breakeven before its own thesis had any real chance to play out.
+  // Confirmed live 2026-09-03: exactly this happened to a fresh Meta entry,
+  // closed ~7 minutes after opening at £0.00 P&L. GREEN_TO_RED_THRESHOLD_GBP
+  // (already used elsewhere in this function as the "meaningfully positive"
+  // bar) gates the gain size; MIN_HOLD_HOURS_FOR_LOCK_IN gates the time —
+  // both need to be true before the momentum check below even runs.
+  const MIN_HOLD_HOURS_FOR_LOCK_IN = 1;
+  if (p.upl < GREEN_TO_RED_THRESHOLD_GBP || heldHours < MIN_HOLD_HOURS_FOR_LOCK_IN) return;
+
   // ── Gains: momentum-based lock-in, not free-form AI judgment ───────────
   // Added 2026-09-03 per explicit request, replacing the free-form Gemini
   // verdict call that used to decide hold-vs-close here (askIgPositionVerdict
