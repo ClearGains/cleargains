@@ -42,6 +42,13 @@ const INSTANCE_EPICS: Record<MrInstance, string[]> = {
     'IX.D.DAX.DAILY.IP', 'IX.D.DOW.DAILY.IP',
     'CS.D.USCSI.TODAY.IP', 'CC.D.LCO.USS.IP',
   ],
+  // Expanded 2026-09-03 (26 -> ~56 names) per explicit request, using ONLY
+  // epics already individually verified live elsewhere in this codebase
+  // (igStrategyScanner.ts's IG_EPICS — see that file's own comments for how
+  // each one was confirmed) — no new guessed epic introduced here, same
+  // discipline as the original 26. Paired with batching the per-poll market-
+  // details fetch (see scanEntries' own comment) specifically so this
+  // expansion doesn't scale up IG allowance use anywhere near proportionally.
   stocks: [
     'UA.D.AAPL.CASH.IP', 'UC.D.MSFT.DAILY.IP', 'UC.D.NVDA.DAILY.IP', 'UA.D.AMZN.CASH.IP',
     'UB.D.GOOGL.DAILY.IP', 'UB.D.FB.DAILY.IP', 'UD.D.TSLA.DAILY.IP', 'UC.D.NFLX.DAILY.IP',
@@ -50,6 +57,23 @@ const INSTANCE_EPICS: Record<MrInstance, string[]> = {
     'UC.D.MU.DAILY.IP', 'SG.D.TSM.DAILY.IP', 'SC.D.F.DAILY.IP',
     'KA.D.BARC.DAILY.IP', 'KA.D.BP.DAILY.IP', 'KA.D.HSBA.DAILY.IP', 'KA.D.AZN.DAILY.IP',
     'SD.D.JNJ.DAILY.IP', 'SE.D.PFE.DAILY.IP', 'SD.D.LLY.DAILY.IP',
+    // Memory/storage + enterprise/legacy tech
+    'UD.D.SNDKUS.DAILY.IP', 'UD.D.STX.DAILY.IP', 'UC.D.MRVL.DAILY.IP', 'UD.D.SKHYUS.DAILY.IP',
+    'UD.D.WDC.DAILY.IP', 'SB.D.DELLUS.DAILY.IP', 'UC.D.RIMM.DAILY.IP', 'EC.D.NOKIAFP.DAILY.IP',
+    // More UK stocks
+    'KA.D.SHELLN.DAILY.IP', 'KA.D.GSK.DAILY.IP', 'KA.D.LLOY.DAILY.IP',
+    // Consumer / crypto-adjacent
+    'UA.D.COINUS.DAILY.IP', 'UC.D.RIVNUS.DAILY.IP', 'SH.D.UBERUS.DAILY.IP',
+    // Healthcare/pharma + consumer/retail
+    'UC.D.MRNAUS.DAILY.IP', 'SE.D.NKE.DAILY.IP', 'SE.D.MCD.DAILY.IP', 'SH.D.WMT.DAILY.IP', 'UA.D.COST.DAILY.IP',
+    // Industrials
+    'SA.D.BA.DAILY.IP', 'SB.D.CAT.DAILY.IP', 'SC.D.HON.DAILY.IP',
+    // Media/communication + utilities
+    'SB.D.DIS.DAILY.IP', 'SG.D.T.DAILY.IP', 'SC.D.FPL.DAILY.IP',
+    // More AI/semiconductors
+    'UA.D.ASML.DAILY.IP', 'UC.D.ONNN.DAILY.IP',
+    // Growth tech
+    'SE.D.PLTRUS.DAILY.IP', 'SG.D.SHOPUS.DAILY.IP', 'UC.D.PYPLVUS.DAILY.IP',
   ],
   japan225: ['IX.D.NIKKEI.DAILY.IP'],
 };
@@ -527,17 +551,29 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
   if (trackedCount >= MAX_POSITIONS) return;
   let slotsLeft = MAX_POSITIONS - trackedCount;
 
+  // Batched once per poll rather than once per epic — added 2026-09-03 when
+  // 'stocks' grew from 26 to ~56 names (see INSTANCE_EPICS' own comment):
+  // this was firing one real IG API call per epic, every single poll,
+  // unconditionally (unlike the bars/trend fetch below, which is
+  // Yahoo/Alpaca and free) — the actual allowance-sensitive part of this
+  // loop. fetchMarketDetails already batches internally at IG's own 50-epic
+  // cap, so one call here costs at most 2 requests for the whole universe
+  // instead of up to 56 individual ones.
+  let detailsMap: Awaited<ReturnType<typeof fetchMarketDetails>>;
+  try {
+    detailsMap = await fetchMarketDetails(session, INSTANCE_EPICS[instance]);
+  } catch (e) {
+    addLog(instance, mode, 'error', '—', `Market details batch failed: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+
   for (const epic of INSTANCE_EPICS[instance]) {
     if (slotsLeft <= 0) break;
     if (s.tracked[epic] || openEpics.has(epic)) continue; // already have a position here — including one this bot doesn't own, to avoid doubling up on the same instrument
     const today = new Date().toISOString().slice(0, 10);
     if (s.lastEntryDay[epic] === today) continue; // already entered this epic today — see lastEntryDayFile's own comment
 
-    // Market details fetched BEFORE the bars — needed not just for sizing
-    // but to rescale non-share bars to IG's own points level (see below).
-    let d;
-    try { d = (await fetchMarketDetails(session, [epic])).get(epic); }
-    catch (e) { addLog(instance, mode, 'error', epicName(epic), `Market details failed: ${e instanceof Error ? e.message : String(e)}`); continue; }
+    const d = detailsMap.get(epic);
     const igMid = typeof d?.bid === 'number' && typeof d?.offer === 'number' ? (d.bid + d.offer) / 2 : undefined;
 
     let bars: MrBar[];
