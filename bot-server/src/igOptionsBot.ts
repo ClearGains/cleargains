@@ -138,6 +138,20 @@ const STOCK_DAILY_SPREAD_CAP    = 0.25; // tighter than weekly's 0.35 — same-d
 const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 600, live: 30 };
 const STOCK_MAX_POSITIONS   = 3; // raised from 2, 2026-09-01 per explicit request for more scope now the daily chain runs alongside it
 const STOCK_MIN_MOVE_PCT    = 1.5;  // today's move must be a real one before the AI is even asked
+// Same-day options get their own, lower bar — added 2026-09-03 per explicit
+// request/catch: this was sharing STOCK_MIN_MOVE_PCT with the weekly
+// strategy, but the two have completely different runway. A weekly option
+// entered after a 1.5% move still has ~5 trading days for the thesis to
+// keep developing; a same-day option entered after the same 1.5% move can
+// have just a few hours left before the forced pre-close, with theta
+// accelerating the whole time and the "easy" part of the move already
+// priced into the premium — waiting for the full weekly-sized bar before
+// acting means entering after most of the realistic move for the day is
+// already behind you. Set below T212 momentum's own 0.5% (same-day options
+// have even less runway than that strategy's multi-day swing hold), so
+// this can catch a move earlier and smaller rather than waiting for it to
+// fully play out first.
+const STOCK_DAILY_MIN_MOVE_PCT = 0.3;
 const STOCK_POLL_MS         = 15 * 60_000; // entries still want to catch intraday momentum promptly
 const STOCK_EXIT_DTE_DAYS   = 1;    // close with ~1 day left rather than ride into the weekly's own theta/settlement endgame
 
@@ -954,7 +968,7 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
       usdPrice = q.c;
       dailyRangePct = q.h && q.l && q.h > q.l ? ((q.h - q.l) / q.c) * 100 : Math.abs(dp);
     } catch { continue; }
-    if (Math.abs(dp) < STOCK_MIN_MOVE_PCT) continue;
+    if (Math.abs(dp) < STOCK_DAILY_MIN_MOVE_PCT) continue;
     const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
 
     const d = details.get(u.shareEpic);
