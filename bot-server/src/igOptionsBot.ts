@@ -135,7 +135,23 @@ const STOCK_DAILY_SPREAD_CAP    = 0.25; // tighter than weekly's 0.35 — same-d
 // more at IG's own minimum deal size than a small budget can afford) —
 // the weekly chain's premiums are in the same range, so the same budget
 // still applies.
-const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 600, live: 30 };
+// Demo raised to 800 2026-09-03 per explicit request — the real target for
+// a demo position's sizing is now "however much it needs to open, capped by
+// max loss" (see DEMO_MAX_LOSS_CEILING_GBP below), not a nominal budget the
+// bot tries to hit and gives up past. Live stays untouched at its original
+// £30 — this whole "size to whatever it needs, capped by loss not budget"
+// approach is demo-only for now; live gets it too only once demo's proven
+// out, per explicit instruction.
+const STOCK_PREMIUM_GBP: Record<IgMode, number> = { demo: 800, live: 30 };
+// Hard ceiling on total premium (= max possible loss, since a bought
+// option can never lose more than that) a demo position is allowed to
+// reach — replaces the old "2x nominal budget" escalation cap. The aim per
+// explicit request: let every position open and size up to whatever it
+// actually needs (not choke on a too-small nominal budget or IG's own
+// unreliable minimum-size metadata), with max loss per position the only
+// real constraint — target ~£800 (STOCK_PREMIUM_GBP.demo above), hard stop
+// at £1,000 even if IG's real minimum would need more.
+const DEMO_MAX_LOSS_CEILING_GBP = 1000;
 const STOCK_MAX_POSITIONS   = 3; // raised from 2, 2026-09-01 per explicit request for more scope now the daily chain runs alongside it
 const STOCK_MIN_MOVE_PCT    = 1.5;  // today's move must be a real one before the AI is even asked
 // Same-day options get their own, lower bar — added 2026-09-03 per explicit
@@ -905,19 +921,15 @@ async function placeStockOrder(
     // budget/minimum checks as before; this is deliberately not extended
     // there.
     //
-    // DEMO_SIZE_ESCALATION_CAP added 2026-09-03 after this actually ran
-    // live: one doubling (2 -> 4) cleared IG's rejection but pushed total
-    // premium committed to ~£1,640 against a £600 intended budget — nearly
-    // 3x, on a single retry, with no ceiling at all before this. "Let it
-    // trade freely" was meant to stop it skipping trades over a wrong
-    // minimum-size number, not to let it size up arbitrarily far past its
-    // own strategy budget on a shaky setup. Once the NEXT escalation step
-    // would push total premium past this multiple of premiumBudget, this
-    // stops retrying and fails the trade cleanly instead of placing an
-    // oversized position — same as any other "can't be sized sensibly,
-    // skip it" outcome elsewhere in this file.
-    const DEMO_SIZE_ESCALATION_CAP = 2; // total premium allowed to reach, as a multiple of premiumBudget
-    const DEMO_MAX_SIZE_ATTEMPTS = 6;   // hard backstop even within the budget cap, in case optOffer is tiny
+    // Reworked 2026-09-03 per explicit request — the aim now isn't "hit a
+    // nominal budget," it's "let this position open and size up to whatever
+    // it actually needs, with max loss (= total premium, since a bought
+    // option can never lose more than that) as the only real constraint."
+    // DEMO_MAX_LOSS_CEILING_GBP (£1,000) is that constraint — the stake
+    // escalates on IG's minimum-size rejection until it clears, and only
+    // gives up if the NEXT step would push total premium past that hard
+    // ceiling, not past some smaller nominal budget.
+    const DEMO_MAX_SIZE_ATTEMPTS = 6; // backstop even within the loss ceiling, in case optOffer is tiny
     let attemptStake = stake;
     let result: Awaited<ReturnType<typeof placeMarketOrder>> | null = null;
     for (let attempt = 1; attempt <= (mode === 'demo' ? DEMO_MAX_SIZE_ATTEMPTS : 1); attempt++) {
@@ -929,11 +941,11 @@ async function placeStockOrder(
         if (mode === 'demo' && msg.includes('MINIMUM_ORDER_SIZE_ERROR') && attempt < DEMO_MAX_SIZE_ATTEMPTS) {
           const nextStake = Math.round(attemptStake * 2 * 100) / 100;
           const nextPremium = optOffer * nextStake;
-          if (nextPremium > premiumBudget * DEMO_SIZE_ESCALATION_CAP) {
-            addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected — next retry (${nextStake}) would commit £${nextPremium.toFixed(0)} premium, over the ${DEMO_SIZE_ESCALATION_CAP}x-budget cap (£${(premiumBudget * DEMO_SIZE_ESCALATION_CAP).toFixed(0)}) — giving up rather than oversizing`);
+          if (nextPremium > DEMO_MAX_LOSS_CEILING_GBP) {
+            addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected — next retry (${nextStake}) would commit £${nextPremium.toFixed(0)} premium (= max loss), over the £${DEMO_MAX_LOSS_CEILING_GBP} ceiling — giving up rather than exceeding it`);
             throw e;
           }
-          addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected as below IG's real minimum (reported minDealSize was wrong) — retrying at ${nextStake} (£${nextPremium.toFixed(0)} premium, within the ${DEMO_SIZE_ESCALATION_CAP}x-budget cap)`);
+          addLog(mode, 'info', opt.name, `${tag} Size ${attemptStake} rejected as below IG's real minimum (reported minDealSize was wrong) — retrying at ${nextStake} (£${nextPremium.toFixed(0)} max loss, within the £${DEMO_MAX_LOSS_CEILING_GBP} ceiling)`);
           attemptStake = nextStake;
           continue;
         }
