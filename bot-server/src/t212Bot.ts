@@ -139,7 +139,18 @@ const MOMENTUM_MIN_CONFIRM_CONFIDENCE = 65; // slightly below the ISA bot's 70 �
 const MOMENTUM_STOP_LOSS_PCT   = -5;
 const MOMENTUM_TAKE_PROFIT_PCT = 10;        // 2:1 reward:risk
 const MOMENTUM_MAX_HOLD_DAYS   = 5;         // this is a swing strategy, not buy-and-hold — force-close backstop regardless of P&L
-const MOMENTUM_WINDOW_SIZE = 60;            // stocks scanned per cycle — rotates through the universe over a couple of cycles rather than scanning ~90 names (and burning that many Finnhub calls) every 15 minutes
+// Raised to cover the FULL universe (92 names) every single cycle — was 60,
+// rotating through 2 windows. Per explicit request 2026-09-03: with only
+// 60 of 92 scanned per 15min cycle, any given stock was only actually
+// checked once every ~30min, not every 15 — a real gap for a strategy
+// whose whole premise is reacting to a move happening RIGHT NOW. A fresh
+// pop could fade or reverse entirely in that blind window before ever
+// being looked at. Checked the cost: even scanning all 92 sequentially at
+// the same 100ms-per-call throttle below is under 10s of total delay —
+// trivial inside a 15min cycle, comfortably within Finnhub's free-tier
+// rate limit. 100 gives a little headroom if the universe grows later
+// without silently reintroducing the rotation gap.
+const MOMENTUM_WINDOW_SIZE = 100;
 
 const EXTENDED_TREND_52W = 80; // % — already more than ~doubled over the past year
 function isExtendedMove(trend: TrendResult): boolean {
