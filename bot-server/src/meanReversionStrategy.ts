@@ -49,15 +49,27 @@ const ATR_PERIOD     = 14;
 // to entry that ordinary intraday noise (a wick, a brief dip) can touch it
 // and lock in a loss on a position that would otherwise have recovered;
 // this strategy already expects a real pullback right after entry (it buys
-// an oversold dip), so a tight stop is fighting its own thesis. 3×ATR
-// gives real room for that to happen before treating it as genuinely
-// wrong. TP widened to keep the same 1:2 reward:risk ratio intact rather
+// an oversold dip), so a tight stop is fighting its own thesis. That was the
+// original case for 3×ATR.
+//
+// Tightened to 2×ATR 2026-09-03 per explicit request, alongside removing
+// Gemini's power to close a LOSING position at all (see geminiWatch.ts's
+// reviewOne) — the account-wide decision is now "losses are governed purely
+// by a tight mechanical stop, no AI second-guessing," which shifts the
+// tradeoff deliberately: yes, this will now cut some of the dip-buying
+// noise this strategy expects to ride through, at the benefit of a firm,
+// known worst case with nothing else (AI or otherwise) able to make it
+// worse. Also brings this strategy in line with emaCrossoverSignal and
+// donchianBreakoutSignal (alpacaStrategies.ts), which already both use
+// 2×ATR — all three spread-bet entry strategies now share one stop
+// convention instead of the mean-reversion one alone running wider.
+// TP widened to keep the same 1:2 reward:risk ratio intact rather
 // than let the win/loss math drift. Note this is NOT the fix for small
 // stakes — calcStake = risk ÷ stopDist, so a WIDER stop actually shrinks
 // the resulting £/pt for the same risk budget. That's a separate,
 // deliberate lever: maxRiskGbp itself, raised where each bot configures it.
-export const ATR_STOP_MULT = 3;
-export const ATR_TP_MULT   = 6;   // 1:2 reward:risk — needs only ~33% win rate to break even
+export const ATR_STOP_MULT = 2;
+export const ATR_TP_MULT   = 4;   // 1:2 reward:risk — needs only ~33% win rate to break even
 export const MAX_HOLD_DAYS = 10;  // backstop, not a target — matches backtest_ig.py
 export const MIN_BARS_NEEDED = EMA_TREND + 10;
 

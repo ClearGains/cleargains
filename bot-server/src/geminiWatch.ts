@@ -7,17 +7,18 @@ import {
 } from './igApi';
 import {
   resolveCredentials, addLog, recordLossExit, recordWatchClose, calcStake, isLossLocked, isProfitLocked, getMaxRiskGbp,
-  registerBotOpenedDeal, getPeerGroupChange, recordWatchExit, type IgMode,
+  registerBotOpenedDeal, recordWatchExit, type IgMode,
 } from './igStrategyBot';
 // OpenAI is the acting decision-maker here as of 2026-08-25, with Gemini
 // called only as a fallback when OpenAI's own attempt genuinely fails — see
 // openai.ts's askIg* wrappers.
-import { askIgPositionVerdict, askIgTradeIdea } from './openai';
+import { askIgTradeIdea } from './openai';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
 import { calcRsi, calcMacdHist, calcEfficiencyRatio } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
 import { hasBreakingNews } from './alpacaNewsStream';
 import { isNYSEOpen, isNearClose, isWeekend, type AlpacaBar } from './alpacaApi';
+import { sentimentScore, momentumStillSupports } from './momentumSignal';
 
 // Manual kill-switch for this watcher's own Gemini usage, independent of
 // which positions are flagged — same purpose as igStrategyBot.ts's own
@@ -190,18 +191,14 @@ const lastReview = new Map<string, { upl: number; at: number; confidence: number
 const MOVE_THRESHOLD_GBP = 3;          // re-ask once P&L has moved at least this much since the last call
 const MAX_SILENCE_MS     = 45 * 60_000; // ...or at least this long has passed, even if flat
 
-// Confirmed live 2026-08-28 (ExxonMobil, live account): a CLOSE verdict had
-// no confidence floor at all — a 68% "CLOSE" fired exactly as readily as a
-// 95% one would, and that 68% wasn't even higher than several HOLD verdicts
-// on the same position minutes earlier (64%, 67%, 68%), i.e. it was noise in
-// a boundary-line MACD read, not real conviction, and it closed the position
-// for a small loss ~90 minutes before the same setup (AI review switched off
-// on the demo side) went on to profit. Entries elsewhere in this codebase
-// already require 70%+ before acting; exits had no equivalent bar. HOLD is
-// the safe/reversible default (the stop-loss still protects the position
-// either way) so a CLOSE that doesn't clear this bar just logs and holds
-// instead of executing on a coin-flip.
-const MIN_CLOSE_CONFIDENCE = 70;
+// Historical note, kept for context: confirmed live 2026-08-28 (ExxonMobil,
+// live account) that a free-form CLOSE verdict had no confidence floor at
+// all — a 68% "CLOSE" fired exactly as readily as a 95% one would, closing a
+// position on noise in a boundary-line MACD read minutes before the same
+// setup would have gone on to profit. A MIN_CLOSE_CONFIDENCE=70 floor was
+// added here as a partial fix. Superseded 2026-09-03 — see reviewOne's own
+// comment on why free-form judgment was removed from this path entirely
+// rather than further gated.
 
 // ── No-AI-close exemption ────────────────────────────────────────────────
 // A rules-based mean-reversion swing entry (igStrategyBot's
@@ -493,6 +490,18 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
     }
   }
 
+  // ── Losses: mechanical stop only, nothing below this point applies ─────
+  // Added 2026-09-03 per explicit request: everything from here down (EOD
+  // evaluation, sharp-dip/reversal escalation, the momentum-based lock-in
+  // check) only ever exists to answer "should this be closed early" — for a
+  // position currently underwater, the answer is now always "no, only the
+  // entry stop decides that." The mechanical stall-tightening block above
+  // still ran regardless (it's not gated on current sign, only on a real
+  // peak having been given back), so a position that turned red after a
+  // genuine prior gain still got its stop tightened before reaching here —
+  // this only removes the *discretionary* layers, not that mechanical one.
+  if (p.upl < 0) return;
+
   // ── EOD profit-taking trigger (every instrument, not just stocks) ──────
   // User's own trading intuition: a position sitting in real profit late in
   // the day is worth evaluating for closing rather than automatically held
@@ -726,96 +735,66 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // here, so the hard stop-loss and every price-only protection still work
   // normally while paused.
   if (isWatchAiPaused(mode)) return;
-  // Rules-based mean-reversion swing entries opt out of this whole AI
-  // review, not just the CLOSE decision — see markNoAiClose's own comment.
-  // No point spending the call just to always ignore its verdict.
+  // Rules-based mean-reversion swing entries opt out of this whole review,
+  // not just a CLOSE decision — see markNoAiClose's own comment. No point
+  // computing a momentum read just to always ignore it.
   if (isNoAiCloseExempt(mode, p.dealId)) return;
 
+  // ── Gains: momentum-based lock-in, not free-form AI judgment ───────────
+  // Added 2026-09-03 per explicit request, replacing the free-form Gemini
+  // verdict call that used to decide hold-vs-close here (askIgPositionVerdict
+  // is left defined in openai.ts, just no longer called from this path — see
+  // its own header comment for why free-form judgment on exits kept causing
+  // real problems, Exxon/Silver included). This asks the SAME question the
+  // T212 momentum strategy asks a fresh candidate — does today's move, plus
+  // real headline sentiment, still support this direction — just aimed at a
+  // position already held: default disposition is to lock the gain in,
+  // holding only when there's active, real evidence (a real move, not
+  // contradicted by news) that it's still going. No AI call at all: purely
+  // the same deterministic scoring t212Bot.ts uses for entries, so there's
+  // no flip-flop risk here either.
   const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
-  const peerGroup = getPeerGroupChange(p.epic);
-  const userNote  = getWatchNote(mode, p.dealId);
+  if (dayChangePercent === undefined) {
+    // No live bar data for this instrument this cycle — no information to
+    // act on, so nothing happens (same "absence of a signal isn't itself a
+    // reason to close" discipline as everywhere else in this account).
+    return;
+  }
+  const sentiment = sentimentScore(headlines).score;
+  const stillTrending = momentumStillSupports(p.direction, dayChangePercent, sentiment);
 
-  const verdict = await askIgPositionVerdict({
-    instrumentName: name,
-    headlines,
-    userNote: userNote || undefined,
-    direction:      p.direction,
-    entryLevel:     p.level,
-    currentLevel,
-    uplGbp:         p.upl,
-    heldHours,
-    stopLevel:      p.stopLevel,
-    limitLevel:     p.limitLevel,
-    dayChangePercent,
-    sharpDipPercent,
-    reversedToRed,
-    isFx,
-    recentCandles,
-    rsi,
-    macdHist,
-    nearEndOfDay: nearEndOfDayProfit,
-    volumeSurgeMultiple,
-    multiDayEfficiencyRatio,
-    peerGroupChangePercent: peerGroup?.changePercent,
-    peerGroupLabel: peerGroup?.label,
-  });
-
-  addLog(mode, 'info', name, `[Gemini watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
-
-  // Only update the tracked confidence on a real verdict — a provider outage
-  // (passthrough — OpenAI failed AND its Gemini fallback also failed)
-  // shouldn't silently make a healthy position look weak in the rotation
-  // comparison, so it keeps whatever the last real reading was. Any
-  // non-passthrough engine (whichever provider actually answered) counts as real.
-  lastReview.set(p.dealId, {
-    upl: p.upl, at: Date.now(),
-    confidence: verdict.engine !== 'passthrough' ? verdict.confidence : (last?.confidence ?? 60),
-  });
+  lastReview.set(p.dealId, { upl: p.upl, at: Date.now(), confidence: stillTrending ? 80 : 60 });
   lastVerdictDisplay.set(p.dealId, {
-    action: verdict.action, confidence: verdict.confidence, reason: verdict.reason, engine: verdict.engine, at: Date.now(),
+    action: stillTrending ? 'HOLD' : 'CLOSE', confidence: stillTrending ? 80 : 60,
+    reason: stillTrending
+      ? `Momentum still supports this direction — ${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)}`
+      : `No active momentum backing further gains — ${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)} — locking in +£${p.upl.toFixed(2)}`,
+    engine: 'passthrough', at: Date.now(),
   });
 
-  // Passthrough always returns HOLD (see askGeminiPositionVerdict's own
-  // fail-closed default) — fine normally, since the stop still protects an
-  // ordinary position either way. But this specific evaluation exists to
-  // proactively bank a real profit before it's exposed to an unreviewed
-  // overnight/next-day reversal; silently falling back to "just hold
-  // through the close" because Gemini happened to be unavailable at this
-  // exact moment defeats the entire point. Falls back to the original
-  // mechanical behavior (just close) instead, only for this specific case.
-  const eodFallbackClose = nearEndOfDayProfit && verdict.engine === 'passthrough';
-  if (eodFallbackClose) addLog(mode, 'info', name, `[EOD] Gemini unavailable for the end-of-day review — closing on the original mechanical rule rather than holding unreviewed`);
-  const closeReason = eodFallbackClose
-    ? `[EOD] +£${p.upl.toFixed(2)} near end of day, Gemini unavailable to weigh trend continuation — closing rather than holding unreviewed`
-    : verdict.reason;
-
-  // A CLOSE that doesn't clear MIN_CLOSE_CONFIDENCE isn't real conviction —
-  // see that constant's own comment. Doesn't apply to eodFallbackClose,
-  // which is a deliberate mechanical rule, not this AI verdict.
-  if (verdict.action === 'CLOSE' && verdict.confidence < MIN_CLOSE_CONFIDENCE && !eodFallbackClose) {
-    addLog(mode, 'info', name, `[Gemini watch] CLOSE ${verdict.confidence}% below the ${MIN_CLOSE_CONFIDENCE}% bar to act on — holding instead: ${verdict.reason}`);
+  if (stillTrending) {
+    addLog(mode, 'info', name, `[Momentum watch] HOLD — still trending in this position's favor (${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)}) — letting +£${p.upl.toFixed(2)} run`);
     return;
   }
 
-  if (verdict.action === 'CLOSE' || eodFallbackClose) {
-    try {
-      await closePosition(session, p.dealId, p.direction, p.size);
-      addLog(mode, 'exit', name, `[Gemini watch] Closed — ${closeReason}`);
-      recordLossExit(mode, p.epic, p.upl, closeReason);
-      recordWatchClose(mode, p.epic);
-      recordWatchExit(mode, p, closeReason);
-      removeFromWatch(mode, p.dealId);
+  const closeReason = `[Momentum watch] No active trend/news supporting further gains (${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)}) — locking in +£${p.upl.toFixed(2)}`;
+  try {
+    await closePosition(session, p.dealId, p.direction, p.size);
+    addLog(mode, 'exit', name, closeReason);
+    recordLossExit(mode, p.epic, p.upl, closeReason);
+    recordWatchClose(mode, p.epic);
+    recordWatchExit(mode, p, closeReason);
+    removeFromWatch(mode, p.dealId);
 
-      // Reversal flip — closing on a genuine, price-confirmed reversal is
-      // exactly the situation where the opposite direction has real merit,
-      // not "we lost, so try the other way." Requires independent
-      // confirmation (real price action, not just this CLOSE verdict's own
-      // reasoning) and a fresh full entry-quality read, not a bare
-      // mechanical trigger — see maybeReverseFlip's own comment.
-      await maybeReverseFlip(mode, session, p, recentCandles, closeReason);
-    } catch (e) {
-      addLog(mode, 'error', name, `[Gemini watch] Close failed, still watching: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    // Reversal flip — closing on a genuine, price-confirmed reversal is
+    // exactly the situation where the opposite direction has real merit,
+    // not "we lost, so try the other way." Requires independent
+    // confirmation (real price action, not just this CLOSE verdict's own
+    // reasoning) and a fresh full entry-quality read, not a bare
+    // mechanical trigger — see maybeReverseFlip's own comment.
+    await maybeReverseFlip(mode, session, p, recentCandles, closeReason);
+  } catch (e) {
+    addLog(mode, 'error', name, `[Gemini watch] Close failed, still watching: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
