@@ -193,6 +193,44 @@ function strategyKey(instance: MrInstance): string {
   return EMA_TREND_INSTANCES.has(instance) ? `ema_trend_${instance}` : `mean_reversion_${instance}`;
 }
 
+// Extended-move screen for EMA-trend entries — ported from t212Bot.ts's own
+// isExtendedMove, added 2026-09-03 after a live Meta BUY crossed EMA9/21
+// well after what looked like the bulk of its move had already happened.
+// A crossover can only ever fire after price has already moved enough to
+// drag the fast average through the slow one — that's unavoidable
+// regardless of period length (a faster pair doesn't catch the move
+// earlier, it just reacts to a smaller prior move and whipsaws far more on
+// ordinary chop, the exact "choppy market" risk this was raised about). The
+// actual fix isn't speed, it's this: skip a crossover that's arrived after
+// the stock has ALREADY made a large run and is sitting right at its
+// extreme — the easy part of the move is already priced in and
+// mean-reversion risk is elevated. Applied symmetrically to the short side
+// (already fallen a long way, sitting near its low) since this instance
+// trades both directions, unlike the long-only ISA bot this was ported from.
+const EXTENDED_TREND_12W_PCT    = 40; // % — a run this large already reflects a major re-rating
+const EXTENDED_NEAR_EXTREME_PCT = 4;  // % off the 52-week high/low counts as "sitting at the extreme" of that move
+const EXTENDED_TREND_52W_PCT    = 80; // % — already roughly doubled (or halved, short side) over the past year
+function isExtendedMove(bars: MrBar[], direction: 'BUY' | 'SELL'): boolean {
+  if (bars.length < 60) return false;
+  const closes = bars.map(b => b.close);
+  const last   = closes[closes.length - 1];
+  const idx12w = Math.max(0, closes.length - 1 - 60);
+  const trend12w = closes[idx12w] > 0 ? ((last - closes[idx12w]) / closes[idx12w]) * 100 : 0;
+  const idx52w   = Math.max(0, closes.length - 1 - 252);
+  const trend52w = closes[idx52w] > 0 ? ((last - closes[idx52w]) / closes[idx52w]) * 100 : 0;
+  const window = closes.slice(Math.max(0, closes.length - 252));
+  if (direction === 'BUY') {
+    const high52w = Math.max(...window);
+    const pctBelowHigh = high52w > 0 ? ((high52w - last) / high52w) * 100 : 0;
+    if (trend12w >= EXTENDED_TREND_12W_PCT && pctBelowHigh < EXTENDED_NEAR_EXTREME_PCT) return true;
+    return trend52w >= EXTENDED_TREND_52W_PCT;
+  }
+  const low52w = Math.min(...window);
+  const pctAboveLow = low52w > 0 ? ((last - low52w) / low52w) * 100 : 0;
+  if (trend12w <= -EXTENDED_TREND_12W_PCT && pctAboveLow < EXTENDED_NEAR_EXTREME_PCT) return true;
+  return trend52w <= -EXTENDED_TREND_52W_PCT;
+}
+
 // Shared session with every other IG bot in this account (igStrategyBot.ts,
 // fxScalperBot.ts, geminiWatch.ts all use the same 'igstrat:<mode>' key) —
 // one login, not a fifth separate one.
@@ -551,6 +589,10 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       // faster, and 9/21 avoids the extra whipsaw a shorter pair invites.
       const emaSig = emaCrossoverSignal(raw!, false);
       if (emaSig.action !== 'BUY' && emaSig.action !== 'SELL') continue;
+      if (isExtendedMove(bars, emaSig.action)) {
+        addLog(instance, mode, 'wait', epicName(epic), `[EMA trend] ${emaSig.reason} — but the move already looks spent (12w/52w trend + sitting near its extreme), skipping`);
+        continue;
+      }
       const lastClose  = raw![raw!.length - 1].c;
       const stopPoints = emaSig.stopPrice       !== undefined ? Math.abs(lastClose - emaSig.stopPrice)       : lastClose * 0.02;
       const tpPoints   = emaSig.takeProfitPrice !== undefined ? Math.abs(emaSig.takeProfitPrice - lastClose) : lastClose * 0.05;
