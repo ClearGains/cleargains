@@ -383,22 +383,62 @@ export async function selectOptionsContract(
 // cfg.positionSizeUsd). Ask price is what a buy actually pays, so size and
 // the limit cap in executeSignal both need this, not the contract record's
 // own field.
+// Confirmed live 2026-09-04, tracing a real 2-week-long silent failure: this
+// was calling /options/snapshots/{symbol} with the full OCC contract symbol
+// (e.g. "GOOGL260925P00245000") in the path — Alpaca's actual endpoint takes
+// the UNDERLYING ticker there instead, and returns the whole chain's
+// snapshots keyed by each contract's own OCC symbol; passing the option
+// symbol itself gets a flat 400 "invalid underlying symbol" every single
+// time. Silently swallowed by the blanket try/catch below (same class of
+// bug as getOptionsContracts' own pre-fix history, see its comment) — the
+// only visible symptom downstream was executeSignal logging a generic "No
+// live quote... too illiquid to size safely" and moving on, indistinguishable
+// from a genuine illiquid contract. Backtested optionsDirectionalSignal
+// against 2 years of real data for this bot's own 20 symbols and confirmed
+// it fires ~11% of the time per symbol per day (recent real fires: MU and
+// GOOGL both within the last few days) — this bug is why zero of those ever
+// became a trade since the strategy's 2026-08-21 rewrite, not the signal
+// being rare.
 export async function getOptionQuote(symbol: string, mode: AccountMode): Promise<{ ask: number; bid: number } | null> {
   const { key, secret } = getKeys(mode);
   if (!key || !secret) throw new Error('Alpaca credentials not configured');
 
-  const url = `https://data.alpaca.markets/v1beta1/options/snapshots/${symbol}?feed=indicative`;
+  // OCC symbol encodes everything the endpoint needs to narrow to exactly
+  // this contract: underlying, expiry (YYMMDD), and type. Confirmed live
+  // 2026-09-04: the unfiltered chain for a liquid underlying like GOOGL
+  // spans 1000+ contracts across every expiry and is paginated — fetching
+  // just the underlying and hoping the target strike is on the first page
+  // silently misses it most of the time (exactly what an earlier version of
+  // this fix did). Filtering to the one expiration_date + type this
+  // contract actually is brings it down to ~100 contracts, comfortably
+  // inside a single unpaginated request.
+  const parsed = symbol.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])\d{8}$/);
+  if (!parsed) {
+    console.error(`[alpacaApi] getOptionQuote: "${symbol}" doesn't look like a valid OCC option symbol`);
+    return null;
+  }
+  const [, underlying, yy, mm, dd, cp] = parsed;
+  const expirationDate = `20${yy}-${mm}-${dd}`;
+  const type = cp === 'C' ? 'call' : 'put';
+
+  const url = `https://data.alpaca.markets/v1beta1/options/snapshots/${underlying}` +
+    `?feed=indicative&expiration_date=${expirationDate}&type=${type}&limit=1000`;
   try {
     const res = await fetch(url, {
       headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret },
       signal:  AbortSignal.timeout(8_000),
     });
-    if (!res.ok) return null;
-    const data = await res.json() as { latestQuote?: { ap?: number; bp?: number } };
-    const ask = data.latestQuote?.ap ?? 0;
-    const bid = data.latestQuote?.bp ?? 0;
+    if (!res.ok) {
+      console.error(`[alpacaApi] getOptionQuote ${res.status} for ${underlying}: ${(await res.text()).slice(0, 200)}`);
+      return null;
+    }
+    const data = await res.json() as { snapshots?: Record<string, { latestQuote?: { ap?: number; bp?: number } }> };
+    const snap = data.snapshots?.[symbol];
+    const ask = snap?.latestQuote?.ap ?? 0;
+    const bid = snap?.latestQuote?.bp ?? 0;
     return ask > 0 ? { ask, bid } : null;
-  } catch {
+  } catch (e) {
+    console.error(`[alpacaApi] getOptionQuote failed for ${symbol}: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }
