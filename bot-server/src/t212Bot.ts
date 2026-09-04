@@ -331,7 +331,7 @@ export function setMomentumBudget(mode: T212Mode, gbp: number): void {
 export async function setT212BudgetChecked(mode: T212Mode, gbp: number): Promise<{ ok: boolean; error?: string }> {
   if (!Number.isFinite(gbp) || gbp <= 0) return { ok: false, error: 'Budget must be a positive amount' };
   try {
-    const cash = await getCash(mode);
+    const cash = await getCash(mode, { fresh: true });
     if (gbp > cash.total) return { ok: false, error: `£${gbp.toFixed(0)} exceeds account balance (£${cash.total.toFixed(0)})` };
   } catch { /* best-effort — see comment above */ }
   setT212Budget(mode, gbp);
@@ -340,7 +340,7 @@ export async function setT212BudgetChecked(mode: T212Mode, gbp: number): Promise
 export async function setMomentumBudgetChecked(mode: T212Mode, gbp: number): Promise<{ ok: boolean; error?: string }> {
   if (!Number.isFinite(gbp) || gbp <= 0) return { ok: false, error: 'Budget must be a positive amount' };
   try {
-    const cash = await getCash(mode);
+    const cash = await getCash(mode, { fresh: true });
     if (gbp > cash.total) return { ok: false, error: `£${gbp.toFixed(0)} exceeds account balance (£${cash.total.toFixed(0)})` };
   } catch { /* best-effort — see comment above */ }
   setMomentumBudget(mode, gbp);

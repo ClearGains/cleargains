@@ -73,14 +73,48 @@ export type T212Position = {
   initialFillDate?: string;
 };
 
-export function getPortfolio(mode: T212Mode): Promise<T212Position[]> {
-  return t212Fetch<T212Position[]>(mode, '/equity/portfolio');
+// Short in-flight+result cache — added 2026-09-04 after "Poll failed: T212
+// 429" kept recurring. Root cause: every T212-status page (t212-trader,
+// dashboard, positions, world-affairs) polls the bot-server's /t212/:mode/status
+// every 10s, which calls getCash+getPortfolio fresh on every single request —
+// with any of those pages open (multiple tabs compound it further) that's a
+// steady stream of live T212 API calls on top of poll()'s own 3h cycle and
+// pollMomentum's 15min one, and T212's real rate limit is tight enough that
+// this alone was enough to trip it. Caches the in-flight PROMISE, not just
+// the resolved value, so concurrent callers within the same window (the
+// status endpoint's own Promise.all([getCash, getPortfolio]) landing at the
+// same moment as another tab's poll, or a bot cycle) share one real network
+// call instead of each firing their own. TTL (15s) is chosen to just exceed
+// the UI's own 10s poll interval — this coalesces that specific hot path
+// without making the data meaningfully stale for anything that reads it: no
+// caller here acts faster than 15min (pollMomentum), let alone 10s. A failed
+// fetch is evicted immediately rather than cached for the full TTL, so a
+// transient error doesn't keep everyone stuck on it.
+const T212_CACHE_TTL_MS = 15_000;
+type T212Cached<T> = { at: number; promise: Promise<T> };
+const portfolioCache = new Map<T212Mode, T212Cached<T212Position[]>>();
+const cashCache      = new Map<T212Mode, T212Cached<T212Cash>>();
+
+function cached<T>(map: Map<T212Mode, T212Cached<T>>, mode: T212Mode, fresh: boolean, fetcher: () => Promise<T>): Promise<T> {
+  const existing = map.get(mode);
+  if (!fresh && existing && Date.now() - existing.at < T212_CACHE_TTL_MS) return existing.promise;
+  const promise = fetcher();
+  map.set(mode, { at: Date.now(), promise });
+  promise.catch(() => { if (map.get(mode)?.promise === promise) map.delete(mode); });
+  return promise;
+}
+
+// `fresh: true` bypasses the cache — used by the budget-check setters below,
+// which need a genuinely live balance at the moment of the request, not a
+// value that could be up to 15s old.
+export function getPortfolio(mode: T212Mode, opts?: { fresh?: boolean }): Promise<T212Position[]> {
+  return cached(portfolioCache, mode, !!opts?.fresh, () => t212Fetch<T212Position[]>(mode, '/equity/portfolio'));
 }
 
 export type T212Cash = { free: number; total: number; currencyCode?: string };
 
-export function getCash(mode: T212Mode): Promise<T212Cash> {
-  return t212Fetch<T212Cash>(mode, '/equity/account/cash');
+export function getCash(mode: T212Mode, opts?: { fresh?: boolean }): Promise<T212Cash> {
+  return cached(cashCache, mode, !!opts?.fresh, () => t212Fetch<T212Cash>(mode, '/equity/account/cash'));
 }
 
 export type T212Instrument = { ticker: string; shortName: string; type: string; currencyCode: string };
