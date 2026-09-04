@@ -2,6 +2,7 @@ import type { AlpacaBar } from './alpacaApi';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
 import type { LWCandle } from './chartIndicators';
 import { getMeanReversionSignal, type MrBar } from './meanReversionStrategy';
+import { sentimentScore, momentumScore, readTrend } from './momentumSignal';
 
 // ── Indicators ────────────────────────────────────────────────────────────────
 
@@ -555,6 +556,78 @@ export function optionsDirectionalSignal(
   return { action: 'HOLD', reason: `No confirmed trend — price ${price.toFixed(2)} vs EMA50 ${ema50.toFixed(2)}, RSI ${rsi.toFixed(1)}` };
 }
 
+// ── News-based entry for options_directional — added 2026-09-04 ────────────
+// Per explicit request: the pure-technical entry above (EMA/RSI/MACD, no
+// news at all) was rewritten to reuse the two proven, news-based approaches
+// already running elsewhere in this account instead — short-horizon
+// momentum (the same today's-move + volume + news scoring T212's momentum
+// strategy and the IG options bot's weekly/daily chains use) and
+// long-horizon trend+news (the same 12-week-trend + not-already-extended
+// question the IG options bot's monthly strategy and the T212 ISA bot ask).
+// Momentum is checked first — it needs less lookback to mean something and
+// is the more time-sensitive of the two; trend+news is the fallback for a
+// day with no fresh move but a real underlying story. optionsDirectionalSignal
+// itself is untouched and still used for EXITS (inPosition=true) — this is
+// entry-only, a different question with a different answer, not a
+// replacement of the exit lifecycle.
+const OPTIONS_MOMENTUM_MIN_MOVE_PCT = 0.5; // matches T212 momentum's own qualifying bar
+const OPTIONS_TREND_MIN_12W_PCT     = 8;   // matches the IG monthly strategy / T212 ISA bar
+export function optionsNewsBasedEntrySignal(bars: AlpacaBar[], headlines: string[]): StrategySignal {
+  if (bars.length < 60) return { action: 'HOLD', reason: 'insufficient bars for a news-based read' };
+  const closes = bars.map(b => b.c);
+  const last   = closes[closes.length - 1];
+  const prev   = closes[closes.length - 2];
+  const dp     = prev > 0 ? ((last - prev) / prev) * 100 : 0;
+
+  const recent20   = bars.slice(-20);
+  const priorVols   = bars.slice(0, -20).map(b => b.v);
+  const avgVolPrior = priorVols.length ? priorVols.reduce((s, v) => s + v, 0) / priorVols.length : 0;
+  const recentVol    = recent20.reduce((s, b) => s + b.v, 0) / recent20.length;
+  const volRatio      = avgVolPrior > 0 ? recentVol / avgVolPrior : 1;
+
+  const sentiment = sentimentScore(headlines).score;
+  const score     = momentumScore({ dayChangePercent: dp, volumeSurgeMultiple: volRatio, headlineCount: headlines.length });
+
+  // Short-horizon momentum path — same qualifying shape as
+  // scanMomentumCandidates: a real move today, not contradicted by news.
+  if (Math.abs(dp) >= OPTIONS_MOMENTUM_MIN_MOVE_PCT) {
+    if (dp > 0 && sentiment > -0.5) {
+      return {
+        action: 'BUY', optionType: 'call',
+        reason: `[Momentum] +${dp.toFixed(1)}% today, ${volRatio.toFixed(1)}x volume, score ${score} — buying call`,
+      };
+    }
+    if (dp < 0 && sentiment < 0.5) {
+      return {
+        action: 'BUY', optionType: 'put',
+        reason: `[Momentum] ${dp.toFixed(1)}% today, ${volRatio.toFixed(1)}x volume, score ${score} — buying put`,
+      };
+    }
+  }
+
+  // Long-horizon trend+news path — same qualifying shape as the IG options
+  // bot's monthly strategy: a real sustained trend, not already extended,
+  // corroborated by real news (or at least not contradicted by it).
+  const trendUp   = readTrend(bars, 'BUY');
+  const trendDown = readTrend(bars, 'SELL');
+  if (trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT && !trendUp.isExtended
+      && (trendUp.trend4w === null || trendUp.trend4w >= -3) && sentiment > -0.3) {
+    return {
+      action: 'BUY', optionType: 'call',
+      reason: `[Trend] +${trendUp.trend12w.toFixed(1)}%/12w, not extended, news not negative — buying call`,
+    };
+  }
+  if (trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT && !trendDown.isExtended
+      && (trendDown.trend4w === null || trendDown.trend4w <= 3) && sentiment < 0.3) {
+    return {
+      action: 'BUY', optionType: 'put',
+      reason: `[Trend] ${trendDown.trend12w.toFixed(1)}%/12w, not extended, news not positive — buying put`,
+    };
+  }
+
+  return { action: 'HOLD', reason: `No momentum (${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today) or trend (${trendUp.trend12w?.toFixed(1) ?? '?'}%/12w) qualifying` };
+}
+
 // ── 7. Donchian / Turtle-style Breakout (daily bars — hold days to weeks) ─────
 // Backtested best performer: +8.9% avg return/symbol after financing costs,
 // profit factor 1.38, 30/52 symbols profitable (Backtest Lab leaderboard).
@@ -859,7 +932,11 @@ export const STRATEGY_META: Record<StrategyName, {
   // it check ONCE a day, including the stop-loss/profit-target/DTE exit
   // checks on positions already held. Those need to keep running every 5min
   // regardless of how coarse the entry signal's own bar resolution is.
-  options_directional: { label: 'Options Directional',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '1Day',  barsNeeded: 70  },
+  // Raised 70 -> 260 2026-09-04 alongside the entry rewrite below — a real
+  // 12-week/52-week trend read (the long-horizon path added per explicit
+  // request) needs a genuine year of daily bars, not just enough for
+  // RSI/MACD/EMA50 readiness.
+  options_directional: { label: 'Options Directional',    timeframe: 'intraday', pollMs: 5 * 60_000,  barPeriod: '1Day',  barsNeeded: 260 },
   donchian_breakout:   { label: 'Donchian Breakout',       timeframe: 'daily',    pollMs: 60 * 60_000, barPeriod: '1Day',  barsNeeded: 60  },
   // Same Donchian logic, hourly bars instead of daily — holds across hours to
   // ~1-2 days instead of days-to-weeks. Uses the exact same donchianBreakoutSignal

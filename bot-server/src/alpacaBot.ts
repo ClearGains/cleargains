@@ -14,7 +14,7 @@ import { edgeSizing } from './quant';
 import { hasImminentEarnings } from './earningsGuard';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
-  vwapSignal, weeklyMomentumSignal, optionsDirectionalSignal,
+  vwapSignal, weeklyMomentumSignal, optionsDirectionalSignal, optionsNewsBasedEntrySignal,
   meanReversionSwingSignal,
   calcAtr, STRATEGY_META,
   type StrategyName, type StrategySignal,
@@ -634,8 +634,15 @@ async function evaluateSymbol(
         return false;
       }
 
-      // No position — check entry
-      const entrySig = optionsDirectionalSignal(bars, false);
+      // No position — check entry. Rewritten 2026-09-04 per explicit
+      // request to use the same news-based approaches proven elsewhere in
+      // this account (short-horizon momentum, long-horizon trend+news)
+      // instead of the pure-technical EMA/RSI/MACD read — see
+      // optionsNewsBasedEntrySignal's own comment. optionsDirectionalSignal
+      // itself is untouched and still used below for exits.
+      let entryHeadlines: string[] = [];
+      try { entryHeadlines = await fetchAllHeadlines(sym, 8); } catch { /* prompt/scoring handles empty */ }
+      const entrySig = optionsNewsBasedEntrySignal(bars, entryHeadlines);
       if (entrySig.action === 'BUY') {
         const currentPrice = bars[bars.length - 1].c;
         const optType      = entrySig.optionType ?? 'call';

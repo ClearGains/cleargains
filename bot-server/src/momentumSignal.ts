@@ -65,3 +65,44 @@ export function momentumStillSupports(
   if (direction === 'BUY') return dayChangePercent >= MIN_CONTINUATION_MOVE_PCT && sentiment > -0.5;
   return dayChangePercent <= -MIN_CONTINUATION_MOVE_PCT && sentiment < 0.5;
 }
+
+// ── Long-horizon trend + extension read ─────────────────────────────────────
+// Added 2026-09-04 per explicit request to reuse igOptionsBot.ts's monthly
+// stock-options strategy elsewhere (the Alpaca options bot specifically) —
+// same question as that strategy and, before it, the T212 ISA bot: a real,
+// sustained multi-week uptrend/downtrend, not already extended (most of the
+// move already priced in, elevated mean-reversion risk). Deliberately takes
+// plain `{t,o,h,l,c,v}` bars rather than fetching them itself, so any
+// broker's own already-fetched daily bars can be passed in directly — IG's
+// via fetchBarsWithFallback, Alpaca's via its own getBars, no broker-specific
+// dependency here.
+export type TrendBar = { t: string; o: number; h: number; l: number; c: number; v: number };
+export type TrendRead = {
+  trend12w: number | null; trend4w: number | null; pctBelowHigh: number | null;
+  currentPrice: number | null; isExtended: boolean;
+};
+const EXTENDED_TREND_12W_PCT    = 40; // % — a run this large already reflects a major re-rating
+const EXTENDED_NEAR_EXTREME_PCT = 4;  // % off the 52-week high/low counts as "sitting at the extreme" of that move
+export function readTrend(bars: TrendBar[], direction: 'BUY' | 'SELL'): TrendRead {
+  const empty: TrendRead = { trend12w: null, trend4w: null, pctBelowHigh: null, currentPrice: null, isExtended: false };
+  if (bars.length < 60) return empty;
+  const closes = bars.map(b => b.c);
+  const last = closes[closes.length - 1];
+  const idx4w  = Math.max(0, closes.length - 1 - 20);
+  const idx12w = Math.max(0, closes.length - 1 - 60);
+  const trend4w  = closes[idx4w]  > 0 ? ((last - closes[idx4w])  / closes[idx4w])  * 100 : null;
+  const trend12w = closes[idx12w] > 0 ? ((last - closes[idx12w]) / closes[idx12w]) * 100 : null;
+  const window = closes.slice(Math.max(0, closes.length - 252));
+  let isExtended = false;
+  let pctBelowHigh: number | null = null;
+  if (direction === 'BUY') {
+    const high52w = Math.max(...window);
+    pctBelowHigh = high52w > 0 ? ((high52w - last) / high52w) * 100 : null;
+    isExtended = trend12w !== null && trend12w >= EXTENDED_TREND_12W_PCT && pctBelowHigh !== null && pctBelowHigh < EXTENDED_NEAR_EXTREME_PCT;
+  } else {
+    const low52w = Math.min(...window);
+    pctBelowHigh = low52w > 0 ? ((last - low52w) / low52w) * 100 : null; // "% above the low" for a short thesis, same field reused
+    isExtended = trend12w !== null && trend12w <= -EXTENDED_TREND_12W_PCT && pctBelowHigh !== null && pctBelowHigh < EXTENDED_NEAR_EXTREME_PCT;
+  }
+  return { trend12w, trend4w, pctBelowHigh, currentPrice: last, isExtended };
+}
