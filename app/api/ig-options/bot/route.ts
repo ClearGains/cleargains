@@ -41,9 +41,11 @@ export async function POST(req: NextRequest) {
   const action = req.nextUrl.searchParams.get('action');
   if (!validMode(mode)) return NextResponse.json({ ok: false, error: 'mode must be "demo" or "live"' }, { status: 400 });
   if (action === 'approve-override') {
-    const id = req.nextUrl.searchParams.get('id');
+    const id   = req.nextUrl.searchParams.get('id');
+    const size = req.nextUrl.searchParams.get('size');
     if (!id) return NextResponse.json({ ok: false, error: 'id required' }, { status: 400 });
-    return proxyTo(`/ig-options/${mode}/overrides/${encodeURIComponent(id)}/approve`, 'POST');
+    const qs = size ? `?size=${encodeURIComponent(size)}` : '';
+    return proxyTo(`/ig-options/${mode}/overrides/${encodeURIComponent(id)}/approve${qs}`, 'POST');
   }
   if (action === 'close-position') {
     const dealId = req.nextUrl.searchParams.get('dealId');

@@ -432,7 +432,9 @@ app.get('/ig-options/:mode/status', auth, (req: Request, res: Response) => {
 });
 app.post('/ig-options/:mode/overrides/:id/approve', auth, (req: Request, res: Response) => {
   const mode = resolveIgMode(req, res); if (!mode) return;
-  void executeOverride(mode, req.params.id).then(r => res.json(r));
+  const rawSize = req.query.size;
+  const size = typeof rawSize === 'string' && rawSize.trim() !== '' ? Number(rawSize) : undefined;
+  void executeOverride(mode, req.params.id, size !== undefined && Number.isFinite(size) ? size : undefined).then(r => res.json(r));
 });
 app.delete('/ig-options/:mode/overrides/:id', auth, (req: Request, res: Response) => {
   const mode = resolveIgMode(req, res); if (!mode) return;

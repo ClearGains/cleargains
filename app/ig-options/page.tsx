@@ -96,11 +96,13 @@ export default function IgOptionsPage() {
   };
 
   const [overrideBusy, setOverrideBusy] = useState<string | null>(null);
-  const approveOverride = async (id: string) => {
+  const [overrideSize, setOverrideSize] = useState<Record<string, string>>({});
+  const approveOverride = async (id: string, size?: number) => {
     setOverrideBusy(id);
     setError(null);
     try {
-      const res  = await fetch(`/api/ig-options/bot?mode=${mode}&action=approve-override&id=${encodeURIComponent(id)}`, { method: 'POST' });
+      const sizeQs = size !== undefined ? `&size=${encodeURIComponent(size)}` : '';
+      const res  = await fetch(`/api/ig-options/bot?mode=${mode}&action=approve-override&id=${encodeURIComponent(id)}${sizeQs}`, { method: 'POST' });
       const data = await res.json() as { ok: boolean; error?: string };
       if (!data.ok && data.error) setError(data.error);
       await fetchStatus();
@@ -267,6 +269,10 @@ export default function IgOptionsPage() {
                 {overrides.map(o => {
                   const maxLoss = o.optOffer * o.stake;
                   const expiresIn = Math.max(0, Math.round((o.createdAt + 60 * 60_000 - Date.now()) / 60_000));
+                  const sizeStr = overrideSize[o.id] ?? String(o.stake);
+                  const sizeNum = Number(sizeStr);
+                  const sizeValid = Number.isFinite(sizeNum) && sizeNum > 0 && sizeNum <= o.stake;
+                  const previewLoss = sizeValid ? o.optOffer * sizeNum : maxLoss;
                   return (
                     <div key={o.id} className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-3">
                       <div className="flex items-center justify-between">
@@ -274,17 +280,32 @@ export default function IgOptionsPage() {
                         <span className="text-[10px] text-gray-500">expires in {expiresIn}m</span>
                       </div>
                       <p className="text-[10px] text-gray-500 mt-0.5">
-                        {o.side.toUpperCase()} · {o.stake}/pt @ ~{o.optOffer.toFixed(1)} premium · max loss £{maxLoss.toFixed(0)} · {o.kind === 'stock-monthly' ? 'Monthly' : o.kind === 'stock-daily' ? 'Daily' : 'Weekly'}
+                        {o.side.toUpperCase()} · recommended {o.stake}/pt @ ~{o.optOffer.toFixed(1)} premium · max loss £{maxLoss.toFixed(0)} · {o.kind === 'stock-monthly' ? 'Monthly' : o.kind === 'stock-daily' ? 'Daily' : 'Weekly'}
                       </p>
+                      <div className="flex items-center gap-2 mt-2">
+                        <label className="text-[10px] text-gray-500" htmlFor={`size-${o.id}`}>Open at size</label>
+                        <input
+                          id={`size-${o.id}`}
+                          type="number"
+                          step="0.01"
+                          min="0.01"
+                          max={o.stake}
+                          value={sizeStr}
+                          onChange={e => setOverrideSize(prev => ({ ...prev, [o.id]: e.target.value }))}
+                          className="w-20 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-white"
+                        />
+                        <span className="text-[10px] text-gray-500">/pt · max loss £{previewLoss.toFixed(0)}</span>
+                      </div>
                       <div className="flex gap-2 mt-2">
                         <Button
-                          onClick={() => void approveOverride(o.id)}
+                          onClick={() => void approveOverride(o.id, sizeValid ? sizeNum : undefined)}
                           loading={overrideBusy === o.id}
+                          disabled={!sizeValid}
                           variant="primary"
                           size="sm"
                           className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-500/30"
                         >
-                          Open anyway
+                          {sizeValid && sizeNum < o.stake ? 'Open smaller' : 'Open anyway'}
                         </Button>
                         <Button
                           onClick={() => void dismissOverrideUi(o.id)}

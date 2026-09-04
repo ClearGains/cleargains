@@ -22,10 +22,14 @@ import {
 import { MAX_HOLD_DAYS as MR_SWING_MAX_HOLD_DAYS } from './meanReversionStrategy';
 // Grok (xAI) is a live test as the acting decision-maker here as of
 // 2026-08-25, paper-trading only (see xai.ts's own comment) — Gemini called
-// only as a fallback when Grok's own attempt genuinely fails.
+// only as a fallback when Grok's own attempt genuinely fails. Options
+// positions specifically no longer use this path at all as of 2026-09-04 —
+// see reviewOpenPositions and confirmOptionsEntryFinnhub below.
 import { askAlpacaDailyVerdict, askAlpacaPositionVerdict } from './xai';
+import { askGeminiPositionVerdict } from './gemini';
 import { fetchAllHeadlines } from './newsFetch';
 import { hasBreakingNews } from './alpacaNewsStream';
+import { sentimentScore } from './momentumSignal';
 
 // ── State persistence ─────────────────────────────────────────────────────────
 // Survives a PM2 restart / crash: without this, a bot running when the process
@@ -328,19 +332,27 @@ async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, posi
     tracked.lastReviewAt = Date.now();
     changed = true;
 
-    const underlying = isOptionSymbol(symbol) ? symbol.replace(/\d{6}[CP]\d{8}$/, '') : symbol;
+    const isOption = isOptionSymbol(symbol);
+    const underlying = isOption ? symbol.replace(/\d{6}[CP]\d{8}$/, '') : symbol;
     let headlines: string[] = [];
     try { headlines = await fetchAllHeadlines(underlying, 5); } catch {}
-    const verdict = await askAlpacaPositionVerdict({
+    const watchReq = {
       instrumentName:  symbol,
-      direction:       pos.side === 'long' ? 'BUY' : 'SELL',
+      direction:       (pos.side === 'long' ? 'BUY' : 'SELL') as 'BUY' | 'SELL',
       entryLevel:      parseFloat(pos.avg_entry_price) || 0,
       currentLevel:    parseFloat(pos.current_price) || 0,
       uplGbp:          upl,
       currency:        '$',
       heldHours:       (Date.now() - tracked.enteredAt) / 3_600_000,
       headlines,
-    });
+    };
+    // Options positions watch via Gemini directly, no Grok call first — per
+    // explicit request 2026-09-04 to drop xAI entirely from the options bot.
+    // Every other Alpaca position keeps the existing Grok-acting/Gemini-
+    // fallback path (askAlpacaPositionVerdict) unchanged.
+    const verdict = isOption
+      ? await askGeminiPositionVerdict(watchReq)
+      : await askAlpacaPositionVerdict(watchReq);
     const isHc = hcMap.has(symbol);
     tracked.lastVerdict = { action: verdict.action, confidence: verdict.confidence, reason: verdict.reason, engine: verdict.engine, at: Date.now() };
     addLog(mode, 'info', underlying, `${isHc ? '[HIGH CONVICTION WATCH]' : '[POSITION WATCH]'} ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
@@ -407,6 +419,41 @@ async function confirmEntryWithNews(
     return { ok: false, reason: `${verdict.engine} disagreed on direction (wanted ${verdict.direction}, signal was ${direction}) — ${verdict.reason}`, confidence: verdict.confidence };
   }
   return { ok: true, reason: verdict.reason, confidence: verdict.confidence };
+}
+
+// Options-only entry gate — deliberately NOT an AI call. Replaced
+// confirmEntryWithNews (Grok/Gemini) here 2026-09-04 per explicit request
+// ("drop the xai completely... score Finnhub headlines directly") after the
+// options bot was burning through AI usage without much to show for it.
+// Scores the same Finnhub+Finviz headlines optionsNewsBasedEntrySignal
+// already fetched for the technical signal itself (see the options_directional
+// case below — reused, not re-fetched) via sentimentScore's existing
+// bull/bear keyword count, same source this whole codebase already trusts
+// for a "does the news actually support this direction" veto elsewhere.
+// No headlines at all is NOT a veto — same "proceed on the technical signal
+// alone" default confirmEntryWithNews's own callers get when Finnhub simply
+// has nothing on a name — but thin evidence (0-1 sentiment-bearing
+// headlines) caps confidence well below the high-conviction sizing bar so a
+// single ambiguous headline can't alone trigger the $5,000 tier.
+function confirmOptionsEntryFinnhub(
+  direction: 'BUY' | 'SELL', headlines: string[],
+): { ok: boolean; reason: string; confidence: number } {
+  if (headlines.length === 0) {
+    return { ok: true, reason: 'No Finnhub/Finviz headlines found — no news veto, proceeding on the technical signal alone', confidence: 50 };
+  }
+  const { score, bull, bear } = sentimentScore(headlines);
+  const evidence = bull + bear;
+  let confidence = Math.round(50 + score * 40);
+  confidence = Math.max(5, Math.min(95, confidence));
+  if (evidence < 2) confidence = Math.min(confidence, 60);
+
+  if (direction === 'BUY' && score < -0.3) {
+    return { ok: false, reason: `Headlines lean bearish (${bull} bullish/${bear} bearish, score ${score.toFixed(2)}) — skipping the call`, confidence };
+  }
+  if (direction === 'SELL' && score > 0.3) {
+    return { ok: false, reason: `Headlines lean bullish (${bull} bullish/${bear} bearish, score ${score.toFixed(2)}) — skipping the put`, confidence };
+  }
+  return { ok: true, reason: `Headlines ${bull} bullish/${bear} bearish, net score ${score.toFixed(2)} — supports the ${direction === 'BUY' ? 'call' : 'put'}`, confidence };
 }
 
 // Deterministic per-decision order ID. Stable across a retry of the *same*
@@ -647,9 +694,12 @@ async function evaluateSymbol(
         const currentPrice = bars[bars.length - 1].c;
         const optType      = entrySig.optionType ?? 'call';
 
-        const confirm = await confirmEntryWithNews(mode, sym, optType === 'call' ? 'BUY' : 'SELL', currentPrice, entrySig.reason);
+        // No AI call — see confirmOptionsEntryFinnhub's own comment. Reuses
+        // entryHeadlines already fetched above for the signal itself.
+        const confirm = confirmOptionsEntryFinnhub(optType === 'call' ? 'BUY' : 'SELL', entryHeadlines);
+        addLog(mode, 'info', sym, `[Finnhub] ${confirm.confidence}% — ${confirm.reason}`);
         if (!confirm.ok) {
-          addLog(mode, 'wait', sym, `[AI] ${confirm.reason}`);
+          addLog(mode, 'wait', sym, `[Finnhub] ${confirm.reason}`);
           return false;
         }
 

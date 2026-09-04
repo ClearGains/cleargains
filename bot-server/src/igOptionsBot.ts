@@ -684,19 +684,30 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
       // Weekly option — a few days of runway, not hours. Same shape as the
       // index side's exit lifecycle, just a tighter DTE trigger since the
       // whole chain only spans about a week to begin with.
+      //
+      // No premium stop here (removed 2026-09-04, explicit request: "let
+      // all positions run as intended, don't stop them out — they're
+      // intended to be big positions that can recover, and closing too
+      // early may lose money on our already small demo balance"). A bought
+      // option's max loss is already capped at the premium paid — closing
+      // early on a drawdown doesn't limit risk further, it just forecloses
+      // the runway to expiry this position was sized to use for recovery.
+      // DTE, the profit target, and the AI news-thesis check below are the
+      // only ways this now closes early.
       if (dte <= STOCK_EXIT_DTE_DAYS) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid the weekly's own settlement/theta endgame`;
       else if (plPct >= 120) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
       else if (tr.peakPlPct >= 25 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= RETRACE_TRIGGER_FRAC) {
         closeReason = `Momentum stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
       }
-      else if (plPct <= -50) closeReason = `Premium stop hit: ${plPct.toFixed(1)}%`;
     }
+    // Index / stock-monthly — weeks-to-months of runway, the clearest case
+    // of "a big position that can recover." Same premium-stop removal as
+    // the weekly branch above, same reasoning.
     else if (dte <= EXIT_DTE) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid settlement/theta endgame`;
     else if (plPct >= 150) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
     else if (tr.peakPlPct >= 30 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= RETRACE_TRIGGER_FRAC) {
       closeReason = `Stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
     }
-    else if (plPct <= -50) closeReason = `Premium stop hit: ${plPct.toFixed(1)}%`;
 
     // AI news check — the ONE exit power the AI keeps, and only where it has
     // real information the mechanical rules can't see: headlines. Two
@@ -1281,10 +1292,20 @@ async function placeStockOrder(
 // already seen the size/max-loss it was rejected for and asked for it
 // anyway) but still re-fetches a LIVE quote rather than trusting the
 // snapshot the rejection was built from, since real time may have passed.
-export async function executeOverride(mode: IgMode, id: string): Promise<{ ok: boolean; error?: string }> {
+//
+// `size` — added 2026-09-04 per explicit request ("i want there to be a
+// section where i can open the recommended position on a smaller size")
+// after opening a recommended Palantir override at its full escalated
+// stake (2.72/pt) turned out larger than intended. Optional: defaults to
+// the override's own recommended stake when omitted, and is only ever
+// allowed to come in AT OR BELOW that stake — this button exists to let a
+// blocked trade through smaller, not to re-open the size-cap it bypasses
+// even further.
+export async function executeOverride(mode: IgMode, id: string, size?: number): Promise<{ ok: boolean; error?: string }> {
   const s = st(mode);
   const override = s.pendingOverrides.find(o => o.id === id);
   if (!override) return { ok: false, error: 'Override not found or already expired/used' };
+  const openStake = size !== undefined && size > 0 && size <= override.stake ? size : override.stake;
   if (Date.now() - override.createdAt > OVERRIDE_TTL_MS) {
     s.pendingOverrides = s.pendingOverrides.filter(o => o.id !== id);
     saveOverrides(mode, s.pendingOverrides);
@@ -1322,20 +1343,21 @@ export async function executeOverride(mode: IgMode, id: string): Promise<{ ok: b
   const trackedKey = override.kind === 'stock-daily' ? `${u.shareEpic}:daily` : override.kind === 'stock-monthly' ? `${u.shareEpic}:monthly` : u.shareEpic;
   const strategy = override.kind === 'stock-daily' ? STOCK_DAILY_STRATEGY : override.kind === 'stock-monthly' ? STOCK_MONTHLY_STRATEGY : STOCK_STRATEGY;
   try {
-    const result = await placeMarketOrder(session, override.epic, 'BUY', override.stake, undefined, undefined, 'USD', false, override.expiry, optOffer);
+    const result = await placeMarketOrder(session, override.epic, 'BUY', openStake, undefined, undefined, 'USD', false, override.expiry, optOffer);
     const premium = result.level || optOffer;
     s.tracked[trackedKey] = {
       dealId: result.dealId, epic: override.epic, underlyingEpic: u.shareEpic, name: override.name,
       optionType: override.side, strike: override.strike, expiry: override.expiry, expiryMs: override.expiryMs,
-      premium, size: override.stake, enteredAt: Date.now(), peakPlPct: 0, kind: override.kind,
+      premium, size: openStake, enteredAt: Date.now(), peakPlPct: 0, kind: override.kind,
     };
     saveTracked(mode, s.tracked);
     recordJournalEvent({
       mode: journalMode(mode), event: 'entry', symbol: override.name, strategy,
-      side: 'long', qty: override.stake, price: premium,
+      side: 'long', qty: openStake, price: premium,
       reason: `[Manual override] ${override.aiReason}`, confidence: override.confidence,
     });
-    addLog(mode, 'enter', override.name, `${tag} BUY ${override.side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${override.stake}/pt · max loss £${(premium * override.stake).toFixed(2)} · expiry ${override.expiry} — manually opened, was capped at £${lossCeilingFor(override.kind)}`);
+    const sizeNote = openStake < override.stake ? ` (reduced from recommended ${override.stake})` : '';
+    addLog(mode, 'enter', override.name, `${tag} BUY ${override.side.toUpperCase()} @ ${premium.toFixed(1)} premium · ${openStake}/pt${sizeNote} · max loss £${(premium * openStake).toFixed(2)} · expiry ${override.expiry} — manually opened, was capped at £${lossCeilingFor(override.kind)}`);
     return { ok: true };
   } catch (e) {
     addLog(mode, 'error', override.name, `${tag} Manual override order failed: ${e instanceof Error ? e.message : String(e)}`);
