@@ -757,79 +757,69 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // closed ~7 minutes after opening at £0.00 P&L. MIN_HOLD_HOURS_FOR_LOCK_IN
   // gates the time.
   //
-  // MOMENTUM_LOCK_IN_MIN_GBP gates the gain size — deliberately its OWN,
-  // higher constant, not a reuse of GREEN_TO_RED_THRESHOLD_GBP (£2) as
-  // before. Confirmed live 2026-09-04: that £2 bar let this mechanism bank
-  // a Germany 40 position at +£2.19 the moment today's move dipped under
-  // 0.5%, cutting a position held with real conviction off at a token gain
-  // right before the larger move it was positioned for — per explicit
-  // request ("no point making penny gains if one loss wipes it all out"),
-  // this now requires a genuinely meaningful win before it's even willing to
-  // consider locking one in, not just "technically positive." £2 stays
-  // correct for GREEN_TO_RED_THRESHOLD_GBP's own separate jobs elsewhere in
-  // this function (flagging a real reversal, triggering a fresh EOD look) —
-  // those are "is this worth another look," not "close it now," so a low
-  // bar is right there; this one actually ends the trade.
-  const MOMENTUM_LOCK_IN_MIN_GBP = 15;
+  // Rebuilt 2026-09-04 per explicit request/design, replacing the momentum-
+  // gated close entirely with a fixed-floor trailing stop. Confirmed live
+  // that the previous version — close the instant momentum stops
+  // supporting, whatever the gain — banked a Germany 40 position at just
+  // +£2.19 (then, after an interim fix, would still have cut it off at
+  // whatever it happened to show the moment momentum faded, capping a
+  // position that had real room to run further). The design now: once a
+  // position has ever earned real profit (LOCK_IN_FLOOR_GBP), that amount
+  // is protected — it can run completely freely above the floor, and ONLY
+  // closes if it round-trips all the way back down to the floor. No
+  // momentum/news judgment decides the close at all anymore; peak vs. floor
+  // is the whole rule. WATCH_ZONE_MIN/MAX_GBP is a narrow band (£15-£20)
+  // where the old momentum read still runs, purely as an informational log
+  // (lastVerdictDisplay/UI), never as a close trigger — a way to see early
+  // whether a position sitting just above the floor still looks like it has
+  // real momentum behind it, without acting on that read either way.
+  const LOCK_IN_FLOOR_GBP     = 10;
+  const WATCH_ZONE_MIN_GBP    = 15;
+  const WATCH_ZONE_MAX_GBP    = 20;
   const MIN_HOLD_HOURS_FOR_LOCK_IN = 1;
-  if (p.upl < MOMENTUM_LOCK_IN_MIN_GBP || heldHours < MIN_HOLD_HOURS_FOR_LOCK_IN) return;
+  if (heldHours < MIN_HOLD_HOURS_FOR_LOCK_IN) return;
+  if (peak < LOCK_IN_FLOOR_GBP) return; // never earned real protection yet — leave to the broker-side stop/TP
 
-  // ── Gains: momentum-based lock-in, not free-form AI judgment ───────────
-  // Added 2026-09-03 per explicit request, replacing the free-form Gemini
-  // verdict call that used to decide hold-vs-close here (askIgPositionVerdict
-  // is left defined in openai.ts, just no longer called from this path — see
-  // its own header comment for why free-form judgment on exits kept causing
-  // real problems, Exxon/Silver included). This asks the SAME question the
-  // T212 momentum strategy asks a fresh candidate — does today's move, plus
-  // real headline sentiment, still support this direction — just aimed at a
-  // position already held: default disposition is to lock the gain in,
-  // holding only when there's active, real evidence (a real move, not
-  // contradicted by news) that it's still going. No AI call at all: purely
-  // the same deterministic scoring t212Bot.ts uses for entries, so there's
-  // no flip-flop risk here either.
+  if (p.upl <= LOCK_IN_FLOOR_GBP) {
+    const closeReason = `[Profit floor] Peaked at £${peak.toFixed(2)}, retraced to £${p.upl.toFixed(2)} (≤ £${LOCK_IN_FLOOR_GBP} floor) — banking now`;
+    try {
+      await closePosition(session, p.dealId, p.direction, p.size);
+      addLog(mode, 'exit', name, closeReason);
+      recordLossExit(mode, p.epic, p.upl, closeReason);
+      recordWatchClose(mode, p.epic);
+      recordWatchExit(mode, p, closeReason);
+      removeFromWatch(mode, p.dealId);
+      await maybeReverseFlip(mode, session, p, recentCandles, closeReason);
+    } catch (e) {
+      addLog(mode, 'error', name, `[Gemini watch] Close failed, still watching: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return;
+  }
+
+  // Still above the floor — runs untouched outside the narrow watch zone.
+  // Inside it, still compute and log the momentum read (same deterministic
+  // scoring t212Bot.ts uses for entries, no AI call), purely informational.
+  if (p.upl < WATCH_ZONE_MIN_GBP || p.upl >= WATCH_ZONE_MAX_GBP) {
+    addLog(mode, 'info', name, `[Profit floor] Running above the £${LOCK_IN_FLOOR_GBP} floor — +£${p.upl.toFixed(2)} (peak £${peak.toFixed(2)}), no action`);
+    return;
+  }
+
   const headlines = ticker ? await fetchAllHeadlines(ticker, 8, name) : [];
   if (dayChangePercent === undefined) {
-    // No live bar data for this instrument this cycle — no information to
-    // act on, so nothing happens (same "absence of a signal isn't itself a
-    // reason to close" discipline as everywhere else in this account).
+    addLog(mode, 'info', name, `[Profit floor] £${WATCH_ZONE_MIN_GBP}-${WATCH_ZONE_MAX_GBP} watch zone, no bar data this cycle — +£${p.upl.toFixed(2)} (peak £${peak.toFixed(2)}), no action`);
     return;
   }
   const sentiment = sentimentScore(headlines).score;
   const stillTrending = momentumStillSupports(p.direction, dayChangePercent, sentiment);
-
   lastReview.set(p.dealId, { upl: p.upl, at: Date.now(), confidence: stillTrending ? 80 : 60 });
   lastVerdictDisplay.set(p.dealId, {
-    action: stillTrending ? 'HOLD' : 'CLOSE', confidence: stillTrending ? 80 : 60,
+    action: 'HOLD', confidence: stillTrending ? 80 : 60,
     reason: stillTrending
       ? `Momentum still supports this direction — ${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)}`
-      : `No active momentum backing further gains — ${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)} — locking in +£${p.upl.toFixed(2)}`,
+      : `Momentum fading — ${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)} — watching, not closing (floor still protects £${LOCK_IN_FLOOR_GBP})`,
     engine: 'passthrough', at: Date.now(),
   });
-
-  if (stillTrending) {
-    addLog(mode, 'info', name, `[Momentum watch] HOLD — still trending in this position's favor (${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)}) — letting +£${p.upl.toFixed(2)} run`);
-    return;
-  }
-
-  const closeReason = `[Momentum watch] No active trend/news supporting further gains (${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)}) — locking in +£${p.upl.toFixed(2)}`;
-  try {
-    await closePosition(session, p.dealId, p.direction, p.size);
-    addLog(mode, 'exit', name, closeReason);
-    recordLossExit(mode, p.epic, p.upl, closeReason);
-    recordWatchClose(mode, p.epic);
-    recordWatchExit(mode, p, closeReason);
-    removeFromWatch(mode, p.dealId);
-
-    // Reversal flip — closing on a genuine, price-confirmed reversal is
-    // exactly the situation where the opposite direction has real merit,
-    // not "we lost, so try the other way." Requires independent
-    // confirmation (real price action, not just this CLOSE verdict's own
-    // reasoning) and a fresh full entry-quality read, not a bare
-    // mechanical trigger — see maybeReverseFlip's own comment.
-    await maybeReverseFlip(mode, session, p, recentCandles, closeReason);
-  } catch (e) {
-    addLog(mode, 'error', name, `[Gemini watch] Close failed, still watching: ${e instanceof Error ? e.message : String(e)}`);
-  }
+  addLog(mode, 'info', name, `[Profit floor] £${WATCH_ZONE_MIN_GBP}-${WATCH_ZONE_MAX_GBP} watch zone — momentum ${stillTrending ? 'still supports' : 'fading'} (${dayChangePercent >= 0 ? '+' : ''}${dayChangePercent.toFixed(1)}% today, sentiment ${sentiment.toFixed(1)}) — informational only, +£${p.upl.toFixed(2)} runs`);
 }
 
 // After a position closes, consider opening the opposite direction. The
