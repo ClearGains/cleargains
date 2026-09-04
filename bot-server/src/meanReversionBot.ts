@@ -697,13 +697,28 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       // than a flat number — same reasoning and same 0.02-0.06 range as the
       // identical fix already deployed on igStrategyBot.ts's mean_reversion_swing.
       // Extended to fx/japan225 too, 2026-08-31, per explicit request — applies
-      // uniformly to all three instances now rather than 'stocks' only. FX
-      // stops are typically tight enough that calcStake already clears this
-      // floor unaided most of the time (so it rarely changes anything there),
-      // but japan225's single-index stop is wide in the same way a stock's is,
+      // to all three instances now rather than 'stocks' only. FX stops are
+      // typically tight enough that calcStake already clears this floor
+      // unaided most of the time (so it rarely changes anything there), but
+      // japan225's single-index stop is wide in the same way a stock's is,
       // so the same reasoning applies there for real.
+      //
+      // Split by instance 2026-09-04 per explicit request: japan225 and
+      // stocks should always get the larger £/pt (and so the larger margin
+      // commitment), fx/other-index trades size off whatever margin is left
+      // over. Raising ONLY the floor (not MAX_RISK_GBP itself, which stays
+      // one shared risk-per-trade figure) is what actually controls this —
+      // £/pt is what margin is computed from, not the risk target — and
+      // since all three instances draw from the same account margin pool,
+      // a genuinely bigger floor here means japan225/stocks commit more of
+      // it up front; the existing margin-affordability fallback below
+      // already shrinks fx's own sizing to fit whatever's left rather than
+      // failing outright, giving exactly the "remaining margin" behaviour
+      // asked for without needing new cross-instance coordination.
       {
-        const MIN_STAKE_LOW = 0.02, MIN_STAKE_HIGH = 0.06;
+        const isLargerMarginInstance = instance === 'stocks' || instance === 'japan225';
+        const MIN_STAKE_LOW  = isLargerMarginInstance ? 0.04 : 0.02;
+        const MIN_STAKE_HIGH = isLargerMarginInstance ? 0.10 : 0.06;
         // Rounded to 2dp — IG rejects a stake with more decimal places than
         // that (confirmed live: validation.number.too-many-decimal-places),
         // and the raw floating-point arithmetic above can produce something
