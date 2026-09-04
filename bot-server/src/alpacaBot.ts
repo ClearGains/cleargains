@@ -110,6 +110,22 @@ const optionPeaks = new Map<AccountMode, Map<string, number>>([
   ['live',  loadPeaks('live')],
 ]);
 
+// Options buying-power cooldown — added 2026-09-04 per explicit request.
+// Confirmed live: once the account's options buying power is fully
+// committed to existing positions, EVERY subsequent symbol's entry attempt
+// (headlines fetch, contract selection, live quote, and finally the order
+// itself) still ran in full every single poll, only to fail at the very
+// last step with the same "insufficient options buying power" 403 — pure
+// wasted work every cycle until something closed. In-memory only (worst
+// case after a restart is one more wasted attempt before it re-trips) —
+// same tradeoff as this file's other in-memory-only trackers.
+type OptionsBpState = { active: boolean; since: number; lastCount: number };
+const optionsBpCooldown = new Map<AccountMode, OptionsBpState>([
+  ['paper', { active: false, since: 0, lastCount: 0 }],
+  ['live',  { active: false, since: 0, lastCount: 0 }],
+]);
+const OPTIONS_BP_COOLDOWN_BACKSTOP_MS = 2 * 3_600_000; // self-clears after 2h even if the position-count check somehow misses a close
+
 // Entry timestamp per symbol for the mean_reversion_swing strategy — the
 // pure meanReversionSwingSignal function isn't given a position's age (it
 // only sees bars), so this is what lets the original strategy's
@@ -687,6 +703,31 @@ async function evaluateSymbol(
       // instead of the pure-technical EMA/RSI/MACD read — see
       // optionsNewsBasedEntrySignal's own comment. optionsDirectionalSignal
       // itself is untouched and still used below for exits.
+      //
+      // Buying-power cooldown gate — see optionsBpCooldown's own comment.
+      // Tracks the open option-position count on every call regardless of
+      // whether the cooldown is active; a real decrease (a position closing,
+      // freeing margin) clears it automatically. Placed here, before the
+      // headlines fetch/contract lookup/quote fetch below, so a tripped
+      // cooldown skips ALL of that per-symbol work, not just the final order
+      // placement that would fail anyway.
+      const bp = optionsBpCooldown.get(mode)!;
+      const currentOptionCount = positions.filter(p => isOptionSymbol(p.symbol)).length;
+      if (bp.active && currentOptionCount < bp.lastCount) {
+        bp.active = false;
+        addLog(mode, 'info', sym, `Options buying power cooldown cleared — a position closed (${bp.lastCount} → ${currentOptionCount} open)`);
+      }
+      bp.lastCount = currentOptionCount;
+      if (bp.active) {
+        if (Date.now() - bp.since > OPTIONS_BP_COOLDOWN_BACKSTOP_MS) {
+          bp.active = false;
+          addLog(mode, 'info', sym, `Options buying power cooldown expired after ${(OPTIONS_BP_COOLDOWN_BACKSTOP_MS / 3_600_000).toFixed(0)}h backstop — retrying entries`);
+        } else {
+          addLog(mode, 'wait', sym, 'Skipping entry — options buying power exhausted, waiting for a position to close');
+          return false;
+        }
+      }
+
       let entryHeadlines: string[] = [];
       try { entryHeadlines = await fetchAllHeadlines(sym, 8); } catch { /* prompt/scoring handles empty */ }
       const entrySig = optionsNewsBasedEntrySignal(bars, entryHeadlines);
@@ -987,7 +1028,24 @@ async function executeSignal(
       }
       return true;
     } catch (e) {
-      addLog(mode, 'error', sym, `Options order failed: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      addLog(mode, 'error', sym, `Options order failed: ${msg}`);
+      // Trips the cooldown checked at the top of options_directional's entry
+      // path (see optionsBpCooldown's own comment) — this specific failure
+      // means the account has no more room for a NEW options position
+      // regardless of symbol, so every other symbol's entry attempt this
+      // poll (and every poll after, until something closes) would fail the
+      // exact same way. lastCount is left as whatever the entry gate last
+      // observed — the gate itself updates it every call, this only flips
+      // the flag on.
+      if (msg.includes('insufficient options buying power')) {
+        const bp = optionsBpCooldown.get(mode)!;
+        if (!bp.active) {
+          bp.active = true;
+          bp.since = Date.now();
+          addLog(mode, 'info', sym, `Options buying power exhausted — pausing new options entries until a position closes (or a ${(OPTIONS_BP_COOLDOWN_BACKSTOP_MS / 3_600_000).toFixed(0)}h backstop)`);
+        }
+      }
       return false;
     }
   }
