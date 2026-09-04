@@ -646,23 +646,25 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     // beyond the minimum-length gate, so reuse of the underlying's daily bars
     // here is only for that gate. DTE exit handled locally at the wider
     // EXIT_DTE (estimated monthly expiries — see its comment).
-    // Peak-retrace tuning — tightened 2026-08-31 per explicit request after
-    // positions that had shown real profit closed for far less than that:
-    // two things compounded. (1) This whole check used to only run every
-    // 15min (stock) / hourly (index) — a real intraday peak between checks
-    // was invisible to peakPlPct entirely, so lock-in couldn't react to a
-    // move it never saw (fixed by fastPositionMonitor's own faster loop,
-    // see its comment). (2) The retrace tolerance itself was loose — 40%
-    // giveback before acting meant a position that peaked +80% could
-    // legitimately ride to +48% before anything happened. Tightened to 30%
-    // and paired with more frequent checks so lock-in both sees the real
-    // peak and reacts closer to it. Fixed profit targets also raised
-    // (stock 60%->120%, index 75%->150%) — they're now a generous backstop
-    // for a genuine runaway winner, not the primary profit-protection
-    // mechanism; that job now belongs to the tighter trailing lock-in,
-    // matching this account's own donchianBreakoutSignal philosophy
-    // ("no fixed target by design — let winners run").
-    const RETRACE_TRIGGER_FRAC = 0.3;
+    //
+    // Peak-retrace lock-in — rebuilt 2026-09-04 per explicit follow-up
+    // ("this lockin for the options is still a bit too early"). The
+    // previous version (giveback 30% OF THE PEAK) closed a genuine +45.3%
+    // NVIDIA winner at +31.6% — a real win, but confirmed live this pattern
+    // keeps cutting off real winners before they've used their full runway,
+    // because a bigger peak means a bigger absolute giveback is tolerated
+    // but the trigger still fires well above where the position started
+    // earning real protection. Same redesign as the CFD spread-bet gain
+    // lock-in rebuilt the same day (geminiWatch.ts): once a position has
+    // ever cleared its activation floor, that FLOOR ITSELF — not a fraction
+    // of whatever the peak happens to be — is what's protected. It runs
+    // completely freely above the floor and only closes if it retraces all
+    // the way back down to the floor, so a bigger winner gets proportionally
+    // MORE room the higher it runs, not less. Fixed profit targets (stock
+    // 120%, index 150%) still stand as a generous backstop for a genuine
+    // runaway winner.
+    const STOCK_PROFIT_LOCK_FLOOR_PCT   = 25; // daily/weekly — same bar that used to only activate tracking
+    const MONTHLY_PROFIT_LOCK_FLOOR_PCT = 30; // index/monthly — same bar that used to only activate tracking
 
     let closeReason: string | null = null;
     if (tr.kind === 'stock-daily') {
@@ -675,8 +677,8 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
       // run before the session ends anyway.
       if (isNearClose(20)) closeReason = 'Closing before the bell — same-day option, no overnight hold';
       else if (plPct >= 80) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
-      else if (tr.peakPlPct >= 25 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= RETRACE_TRIGGER_FRAC) {
-        closeReason = `Momentum stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
+      else if (tr.peakPlPct >= STOCK_PROFIT_LOCK_FLOOR_PCT && plPct <= STOCK_PROFIT_LOCK_FLOOR_PCT) {
+        closeReason = `Retraced from +${tr.peakPlPct.toFixed(1)}% peak back down to the ${STOCK_PROFIT_LOCK_FLOOR_PCT}% floor — banking +${plPct.toFixed(1)}%`;
       }
       else if (plPct <= -50) closeReason = `Premium stop hit: ${plPct.toFixed(1)}%`;
     }
@@ -696,8 +698,8 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
       // only ways this now closes early.
       if (dte <= STOCK_EXIT_DTE_DAYS) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid the weekly's own settlement/theta endgame`;
       else if (plPct >= 120) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
-      else if (tr.peakPlPct >= 25 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= RETRACE_TRIGGER_FRAC) {
-        closeReason = `Momentum stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
+      else if (tr.peakPlPct >= STOCK_PROFIT_LOCK_FLOOR_PCT && plPct <= STOCK_PROFIT_LOCK_FLOOR_PCT) {
+        closeReason = `Retraced from +${tr.peakPlPct.toFixed(1)}% peak back down to the ${STOCK_PROFIT_LOCK_FLOOR_PCT}% floor — banking +${plPct.toFixed(1)}%`;
       }
     }
     // Index / stock-monthly — weeks-to-months of runway, the clearest case
@@ -705,8 +707,8 @@ async function manageExits(mode: IgMode, session: IGSession, positions: FullPosi
     // the weekly branch above, same reasoning.
     else if (dte <= EXIT_DTE) closeReason = `${dte.toFixed(1)} days to expiry — closing to avoid settlement/theta endgame`;
     else if (plPct >= 150) closeReason = `Profit target hit: +${plPct.toFixed(1)}% on premium`;
-    else if (tr.peakPlPct >= 30 && plPct > 0 && (tr.peakPlPct - plPct) / tr.peakPlPct >= RETRACE_TRIGGER_FRAC) {
-      closeReason = `Stalling — gave back ${(((tr.peakPlPct - plPct) / tr.peakPlPct) * 100).toFixed(0)}% of its +${tr.peakPlPct.toFixed(1)}% peak, locking in +${plPct.toFixed(1)}%`;
+    else if (tr.peakPlPct >= MONTHLY_PROFIT_LOCK_FLOOR_PCT && plPct <= MONTHLY_PROFIT_LOCK_FLOOR_PCT) {
+      closeReason = `Retraced from +${tr.peakPlPct.toFixed(1)}% peak back down to the ${MONTHLY_PROFIT_LOCK_FLOOR_PCT}% floor — banking +${plPct.toFixed(1)}%`;
     }
 
     // AI news check — the ONE exit power the AI keeps, and only where it has
