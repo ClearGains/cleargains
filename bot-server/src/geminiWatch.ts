@@ -754,12 +754,25 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // of opening gets judged on "no 0.5% move yet" and closed at essentially
   // breakeven before its own thesis had any real chance to play out.
   // Confirmed live 2026-09-03: exactly this happened to a fresh Meta entry,
-  // closed ~7 minutes after opening at £0.00 P&L. GREEN_TO_RED_THRESHOLD_GBP
-  // (already used elsewhere in this function as the "meaningfully positive"
-  // bar) gates the gain size; MIN_HOLD_HOURS_FOR_LOCK_IN gates the time —
-  // both need to be true before the momentum check below even runs.
+  // closed ~7 minutes after opening at £0.00 P&L. MIN_HOLD_HOURS_FOR_LOCK_IN
+  // gates the time.
+  //
+  // MOMENTUM_LOCK_IN_MIN_GBP gates the gain size — deliberately its OWN,
+  // higher constant, not a reuse of GREEN_TO_RED_THRESHOLD_GBP (£2) as
+  // before. Confirmed live 2026-09-04: that £2 bar let this mechanism bank
+  // a Germany 40 position at +£2.19 the moment today's move dipped under
+  // 0.5%, cutting a position held with real conviction off at a token gain
+  // right before the larger move it was positioned for — per explicit
+  // request ("no point making penny gains if one loss wipes it all out"),
+  // this now requires a genuinely meaningful win before it's even willing to
+  // consider locking one in, not just "technically positive." £2 stays
+  // correct for GREEN_TO_RED_THRESHOLD_GBP's own separate jobs elsewhere in
+  // this function (flagging a real reversal, triggering a fresh EOD look) —
+  // those are "is this worth another look," not "close it now," so a low
+  // bar is right there; this one actually ends the trade.
+  const MOMENTUM_LOCK_IN_MIN_GBP = 15;
   const MIN_HOLD_HOURS_FOR_LOCK_IN = 1;
-  if (p.upl < GREEN_TO_RED_THRESHOLD_GBP || heldHours < MIN_HOLD_HOURS_FOR_LOCK_IN) return;
+  if (p.upl < MOMENTUM_LOCK_IN_MIN_GBP || heldHours < MIN_HOLD_HOURS_FOR_LOCK_IN) return;
 
   // ── Gains: momentum-based lock-in, not free-form AI judgment ───────────
   // Added 2026-09-03 per explicit request, replacing the free-form Gemini
