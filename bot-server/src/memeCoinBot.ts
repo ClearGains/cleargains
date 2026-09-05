@@ -16,7 +16,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getBoostedSolanaTokens, getTokenPairs, passesOrganicMomentumFilter, type DexPair } from './dexscreenerApi';
-import { getQuote, solToLamports, lamportsToSol, WSOL_MINT } from './jupiterApi';
+import { getQuote, solToLamports, lamportsToSol, WSOL_MINT, USDC_MINT } from './jupiterApi';
 import { checkTokenSafety } from './rugSafety';
 import { getHypeScore } from './lunarcrushApi';
 import { getMentionCount } from './redditApi';
@@ -69,6 +69,7 @@ export type TrackedPosition = {
   qtyRaw: string;         // raw base-unit token amount held (string — can exceed Number precision)
   enteredAt: number;
   peakPlPct: number;
+  lastPlPct: number;      // most recent live read (peakPlPct alone can't show a current drawdown) — UI display only, no logic depends on this
   rugStrikes: number;
   entryReason: string;
 };
@@ -193,7 +194,7 @@ async function evaluateCandidate(pair: DexPair): Promise<void> {
   state.tracked[mint] = {
     mint, symbol, pairAddress: pair.pairAddress, chainId: pair.chainId,
     costSol: POSITION_SIZE_SOL, qtyRaw: quote.outAmount,
-    enteredAt: Date.now(), peakPlPct: 0, rugStrikes: 0, entryReason: reason,
+    enteredAt: Date.now(), peakPlPct: 0, lastPlPct: 0, rugStrikes: 0, entryReason: reason,
   };
   state.balanceSol -= POSITION_SIZE_SOL;
   saveState();
@@ -239,7 +240,9 @@ async function monitorExits(): Promise<void> {
 
       const currentValueSol = lamportsToSol(sellQuote.outAmount);
       const plPct = tr.costSol > 0 ? ((currentValueSol - tr.costSol) / tr.costSol) * 100 : 0;
-      if (plPct > tr.peakPlPct) { tr.peakPlPct = plPct; saveState(); }
+      tr.lastPlPct = plPct;
+      if (plPct > tr.peakPlPct) { tr.peakPlPct = plPct; }
+      saveState();
 
       const heldHours = (Date.now() - tr.enteredAt) / 3_600_000;
       let closeReason: string | null = null;
@@ -293,15 +296,30 @@ export function stopMemeCoinBot(): { ok: boolean } {
   return { ok: true };
 }
 
-export function getMemeCoinBotStatus(): {
+// Cached SOL/USD — display-only (nothing here trades off this number; every
+// fill still goes through jupiterApi.ts's own per-trade quote). Short TTL
+// just to avoid a fresh Jupiter call on every ~8s frontend status poll.
+let cachedSolUsd: { at: number; price: number } | null = null;
+const SOL_USD_CACHE_MS = 60_000;
+async function getSolUsdPrice(): Promise<number | null> {
+  if (cachedSolUsd && Date.now() - cachedSolUsd.at < SOL_USD_CACHE_MS) return cachedSolUsd.price;
+  const quote = await getQuote(WSOL_MINT, USDC_MINT, solToLamports(1), 50);
+  if (!quote) return cachedSolUsd?.price ?? null;
+  const price = Number(quote.outAmount) / 1e6; // USDC has 6 decimals
+  cachedSolUsd = { at: Date.now(), price };
+  return price;
+}
+
+export async function getMemeCoinBotStatus(): Promise<{
   running: boolean; balanceSol: number; tracked: Record<string, TrackedPosition>;
   log: LogEntry[]; nextScanMs: number | null; lastScanTs: string | null;
-  lunarcrushConfigured: boolean; redditConfigured: boolean;
-} {
+  lunarcrushConfigured: boolean; redditConfigured: boolean; solUsdPrice: number | null;
+}> {
   return {
     running: state.running, balanceSol: state.balanceSol, tracked: state.tracked,
     log: state.log.slice(0, 100), nextScanMs: state.nextScanMs, lastScanTs: state.lastScanTs,
     lunarcrushConfigured: !!process.env.LUNARCRUSH_API_KEY,
     redditConfigured: !!(process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET),
+    solUsdPrice: await getSolUsdPrice(),
   };
 }

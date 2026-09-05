@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/Button';
 
 type TrackedPosition = {
   mint: string; symbol: string; pairAddress: string; chainId: string;
-  costSol: number; qtyRaw: string; enteredAt: number; peakPlPct: number;
+  costSol: number; qtyRaw: string; enteredAt: number; peakPlPct: number; lastPlPct: number;
   rugStrikes: number; entryReason: string;
 };
 type LogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'wait' | 'error'; symbol: string; msg: string };
@@ -16,9 +16,14 @@ type LogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'wai
 type Status = {
   running: boolean; balanceSol: number; tracked: Record<string, TrackedPosition>;
   log: LogEntry[]; nextScanMs: number | null; lastScanTs: string | null;
-  lunarcrushConfigured: boolean; redditConfigured: boolean;
+  lunarcrushConfigured: boolean; redditConfigured: boolean; solUsdPrice: number | null;
   error?: string;
 };
+
+function usd(sol: number, price: number | null): string {
+  if (price === null) return '';
+  return ` (~$${(sol * price).toLocaleString(undefined, { maximumFractionDigits: 0 })})`;
+}
 
 function relTime(ms: number | null): string {
   if (ms === null) return '—';
@@ -114,7 +119,8 @@ export default function MemeCoinBotPage() {
             <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> Next scan in {relTime(status.nextScanMs)}</span>
           )}
           <span className="flex items-center gap-1 text-teal-400">
-            <Coins className="h-3 w-3" /> {status ? status.balanceSol.toFixed(3) : '—'} SOL paper balance
+            <Coins className="h-3 w-3" />
+            {status ? `${status.balanceSol.toFixed(2)} SOL${usd(status.balanceSol, status.solUsdPrice)}` : '—'} paper balance
           </span>
           <span className={clsx('flex items-center gap-1', status?.lunarcrushConfigured ? 'text-emerald-400' : 'text-gray-600')}>
             <ShieldCheck className="h-3 w-3" /> LunarCrush {status?.lunarcrushConfigured ? 'active' : 'not configured (using DexScreener proxy)'}
@@ -151,16 +157,23 @@ export default function MemeCoinBotPage() {
               <div className="space-y-2">
                 {tracked.map(t => {
                   const heldHours = (Date.now() - t.enteredAt) / 3_600_000;
+                  const currentValueSol = t.costSol * (1 + t.lastPlPct / 100);
+                  const plSol = currentValueSol - t.costSol;
                   return (
                     <div key={t.mint} className="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-bold text-white">{t.symbol}</span>
-                        <span className={clsx('text-xs font-semibold tabular-nums', t.peakPlPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                          peak +{t.peakPlPct.toFixed(0)}%
+                        <span className={clsx('text-xs font-semibold tabular-nums', t.lastPlPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                          {t.lastPlPct >= 0 ? '+' : ''}{t.lastPlPct.toFixed(0)}%
                         </span>
                       </div>
                       <p className="text-[10px] text-gray-500 mt-0.5">
-                        {t.costSol} SOL in · {heldHours.toFixed(1)}h held
+                        {t.costSol} SOL in{usd(t.costSol, status?.solUsdPrice ?? null)} · peak +{t.peakPlPct.toFixed(0)}% · {heldHours.toFixed(1)}h held
+                      </p>
+                      <p className="text-[10px] mt-0.5">
+                        <span className={plSol >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                          {plSol >= 0 ? '+' : ''}{plSol.toFixed(3)} SOL{usd(plSol, status?.solUsdPrice ?? null)}
+                        </span>
                         {t.rugStrikes > 0 && <span className="text-red-400"> · ⚠ {t.rugStrikes} liquidity strike(s)</span>}
                       </p>
                       <p className="text-[10px] text-gray-600 mt-1 truncate" title={t.entryReason}>{t.entryReason}</p>

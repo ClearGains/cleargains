@@ -455,7 +455,7 @@ app.post('/meme-coin/stop', auth, (_req: Request, res: Response) => {
   res.json(stopMemeCoinBot());
 });
 app.get('/meme-coin/status', auth, (_req: Request, res: Response) => {
-  res.json(getMemeCoinBotStatus());
+  void getMemeCoinBotStatus().then(status => res.json(status));
 });
 
 // POST /alpaca/:mode/start
