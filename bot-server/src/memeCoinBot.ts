@@ -27,9 +27,20 @@ export type Mode = 'paper'; // live intentionally not supported yet — see head
 const STRATEGY = 'meme_coin_hype';
 
 // ── Tunables ─────────────────────────────────────────────────────────────
-const STARTING_BALANCE_SOL     = 10;    // paper "wallet" — modest, matches this account's demo-cautious sizing elsewhere
-const POSITION_SIZE_SOL        = 0.5;   // per-trade size
-const MAX_POSITIONS            = 3;
+// Scaled up 2026-09-06 per explicit request — the initial 10 SOL (~£/$~1,000)
+// bankroll was only ever meant to prove the pipeline works, not to answer
+// "is this worth running on real money." 193 SOL (~$20,000 @ ~$104/SOL at
+// the time this was set) with the SAME 5% per-trade ratio as before (was
+// 0.5/10) is what actually stress-tests that question: a real $20k-scale
+// position size (~$1,000/trade) against these pools' real depth is exactly
+// the thing MAX_ENTRY_PRICE_IMPACT_PCT below is there to catch — if most
+// candidates start failing that check at this size, that itself is the
+// answer (these pools can't absorb real money, however good the signal
+// is). MAX_POSITIONS raised too, purely to accumulate a meaningful sample
+// of trades faster, not because the risk profile changed.
+const STARTING_BALANCE_SOL     = 193;
+const POSITION_SIZE_SOL        = 9.5;   // ~5% of bankroll, same ratio as the original 10 SOL test run
+const MAX_POSITIONS            = 5;
 const ENTRY_SLIPPAGE_BPS       = 300;   // 3% — wide enough for a young pool, still a real bound
 const MAX_ENTRY_PRICE_IMPACT_PCT = 5;   // a signal that only "works" at a size the real pool can't absorb isn't a real signal
 const EXIT_SLIPPAGE_BPS        = 500;   // wider on the way out — getting out matters more than the exact price
