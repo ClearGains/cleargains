@@ -36,6 +36,7 @@ import {
   Pause,
   NotebookPen,
   Scissors,
+  Flame,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -91,6 +92,7 @@ const navLinks = [
   { href: '/t212-trader',      label: 'T212 ISA Bot',      icon: Bot         },
   { href: '/mean-reversion',   label: 'Mean Reversion',    icon: Bot         },
   { href: '/ig-options',       label: 'IG Options Bot',    icon: Bot         },
+  { href: '/meme-coin-bot',    label: 'Meme Coin Bot',     icon: Flame       },
   { href: '/backtest',         label: 'Backtest Lab',      icon: FlaskConical },
   { href: '/bot-journal',      label: 'Bot Journal',       icon: NotebookPen },
   { href: '/performance',      label: 'Bot Performance',   icon: BarChart3   },

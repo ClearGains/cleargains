@@ -19,6 +19,7 @@ import { getBoostedSolanaTokens, getTokenPairs, passesOrganicMomentumFilter, typ
 import { getQuote, solToLamports, lamportsToSol, WSOL_MINT } from './jupiterApi';
 import { checkTokenSafety } from './rugSafety';
 import { getHypeScore } from './lunarcrushApi';
+import { getMentionCount } from './redditApi';
 import { recordJournalEvent } from './tradeJournal';
 
 export type Mode = 'paper'; // live intentionally not supported yet — see header comment
@@ -158,6 +159,12 @@ async function evaluateCandidate(pair: DexPair): Promise<void> {
     return;
   }
 
+  // Reddit — supplementary only, never a gate on its own (see redditApi.ts's
+  // own comment on why: meme coin culture lives on Twitter/Telegram far more
+  // than Reddit, so a low/zero count here isn't meaningful evidence against
+  // a candidate that already cleared the real on-chain momentum filter).
+  const reddit = await getMentionCount(symbol);
+
   const quote = await getQuote(WSOL_MINT, mint, solToLamports(POSITION_SIZE_SOL), ENTRY_SLIPPAGE_BPS);
   if (!quote) {
     addLog('wait', symbol, 'No Jupiter route for entry size — pool too illiquid, skipping');
@@ -169,7 +176,8 @@ async function evaluateCandidate(pair: DexPair): Promise<void> {
   }
 
   const hypeNote = hype.source === 'lunarcrush' ? `LunarCrush ${hype.score}` : `DexScreener volume/txns (no LunarCrush key)`;
-  const reason = `Organic momentum (vol/h1 $${(pair.volume?.h1 ?? 0).toFixed(0)}, ${(pair.txns?.h1?.buys ?? 0) + (pair.txns?.h1?.sells ?? 0)} txns/h1) + safety clear + ${hypeNote}`;
+  const redditNote = reddit.source === 'reddit' ? `, Reddit ${reddit.count} mentions/24h` : '';
+  const reason = `Organic momentum (vol/h1 $${(pair.volume?.h1 ?? 0).toFixed(0)}, ${(pair.txns?.h1?.buys ?? 0) + (pair.txns?.h1?.sells ?? 0)} txns/h1) + safety clear + ${hypeNote}${redditNote}`;
 
   state.tracked[mint] = {
     mint, symbol, pairAddress: pair.pairAddress, chainId: pair.chainId,
@@ -277,11 +285,12 @@ export function stopMemeCoinBot(): { ok: boolean } {
 export function getMemeCoinBotStatus(): {
   running: boolean; balanceSol: number; tracked: Record<string, TrackedPosition>;
   log: LogEntry[]; nextScanMs: number | null; lastScanTs: string | null;
-  lunarcrushConfigured: boolean;
+  lunarcrushConfigured: boolean; redditConfigured: boolean;
 } {
   return {
     running: state.running, balanceSol: state.balanceSol, tracked: state.tracked,
     log: state.log.slice(0, 100), nextScanMs: state.nextScanMs, lastScanTs: state.lastScanTs,
     lunarcrushConfigured: !!process.env.LUNARCRUSH_API_KEY,
+    redditConfigured: !!(process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET),
   };
 }
