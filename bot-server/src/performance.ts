@@ -16,11 +16,16 @@
 import { getJournal, type JournalMode, type JournalEvent } from './tradeJournal';
 import { EDGE_STATS_CUTOFF } from './quant';
 
-const ALL_MODES: JournalMode[] = ['paper', 'live', 'ig-demo', 'ig-live', 't212-demo', 't212-live'];
+const ALL_MODES: JournalMode[] = ['paper', 'live', 'ig-demo', 'ig-live', 't212-demo', 't212-live', 'meme-paper'];
 
 // Account currency per journal mode — Alpaca journals are USD, IG/T212 GBP.
+// 'meme-paper' plUsd/plPct values are actually SOL, not USD — '$' here is a
+// placeholder to satisfy this rollup's currency type, not a real conversion.
+// Fine for now since this strategy has its own dedicated status view
+// (memeCoinBot.ts) that displays SOL correctly; only this cross-bot summary
+// mislabels the unit — revisit if this page needs to show it accurately.
 const MODE_CURRENCY: Record<JournalMode, '$' | '£'> = {
-  paper: '$', live: '$', 'ig-demo': '£', 'ig-live': '£', 't212-demo': '£', 't212-live': '£',
+  paper: '$', live: '$', 'ig-demo': '£', 'ig-live': '£', 't212-demo': '£', 't212-live': '£', 'meme-paper': '$',
 };
 
 export type StrategyPerf = {

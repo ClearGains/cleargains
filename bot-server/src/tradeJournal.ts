@@ -10,7 +10,7 @@ import path from 'path';
 // kept as distinct values (not reused generic 'live') so the systems' P&L
 // never gets aggregated together in one strategy's stats despite genuinely
 // being different accounts/instruments.
-export type JournalMode = 'paper' | 'live' | 'ig-demo' | 'ig-live' | 't212-demo' | 't212-live';
+export type JournalMode = 'paper' | 'live' | 'ig-demo' | 'ig-live' | 't212-demo' | 't212-live' | 'meme-paper';
 
 export type JournalEvent = {
   id:       string;

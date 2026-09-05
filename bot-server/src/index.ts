@@ -31,6 +31,7 @@ import { startAlpacaNewsStream, isNewsStreamEnabled, setNewsStreamEnabled } from
 import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212AiPaused, setT212PositionAiPaused, isMomentumAiGateEnabled, setMomentumAiGateEnabled, setT212BudgetChecked, setMomentumBudgetChecked } from './t212Bot';
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
+import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
 import { getPerformanceSummary } from './performance';
 import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
@@ -444,6 +445,17 @@ app.delete('/ig-options/:mode/overrides/:id', auth, (req: Request, res: Response
 app.post('/ig-options/:mode/positions/:dealId/close', auth, (req: Request, res: Response) => {
   const mode = resolveIgMode(req, res); if (!mode) return;
   void closePositionManually(mode, req.params.dealId).then(r => res.json(r));
+});
+
+// Meme coin hype bot — paper only, no mode param (see memeCoinBot.ts header).
+app.post('/meme-coin/start', auth, (_req: Request, res: Response) => {
+  res.json(startMemeCoinBot());
+});
+app.post('/meme-coin/stop', auth, (_req: Request, res: Response) => {
+  res.json(stopMemeCoinBot());
+});
+app.get('/meme-coin/status', auth, (_req: Request, res: Response) => {
+  res.json(getMemeCoinBotStatus());
 });
 
 // POST /alpaca/:mode/start
@@ -1014,6 +1026,15 @@ app.listen(PORT, '0.0.0.0', () => {
     const r = startIgOptionsBot(mode);
     if (r.ok) console.log(`[bot-server] IG options ${mode} auto-resume successful`);
     else console.error(`[bot-server] IG options ${mode} auto-resume failed: ${r.error}`);
+  }
+
+  // Auto-resume the meme coin hype bot (paper only) if it was running before
+  // restart — same rationale as every other auto-resume above.
+  if (wasMemeCoinBotRunning()) {
+    console.log('[bot-server] Auto-resuming meme coin hype bot...');
+    const r = startMemeCoinBot();
+    if (r.ok) console.log('[bot-server] Meme coin hype bot auto-resume successful');
+    else console.error(`[bot-server] Meme coin hype bot auto-resume failed: ${r.error}`);
   }
 
   // Auto-resume the IG CFD bot (demo/live) if it was running before restart —
