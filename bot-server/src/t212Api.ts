@@ -175,3 +175,36 @@ export function placeMarketOrder(mode: T212Mode, ticker: string, quantity: numbe
     body: JSON.stringify({ ticker, quantity: rounded, extendedHours }),
   });
 }
+
+// Real broker-side stop-loss/gain-floor protection for the ISA bot — added
+// 2026-09-06 per explicit request. T212 has no bracket/attached-stop order
+// (confirmed by the user directly — a protective order can only be placed
+// AFTER a position already exists, unlike IG's stopDistance/limitDistance
+// on the entry order itself), so this is always a SEPARATE follow-up call
+// once the market buy has gone through. Stop-LIMIT specifically (not a
+// plain Stop, which becomes a market order and can slip badly on a gap) —
+// once `stopPrice` is hit, T212 places a limit order at `limitPrice`, not
+// a market one. `quantity` negative = sell, matching placeMarketOrder's own
+// sign convention. Confirmed live against T212's public OpenAPI spec
+// (docs.trading212.com) — this endpoint is explicitly NOT idempotent
+// (T212's own words: sending the same request twice can create duplicate
+// orders), so callers must never retry this blindly and must track the
+// returned order id themselves to cancel/replace it later.
+export function placeStopLimitOrder(
+  mode: T212Mode, ticker: string, quantity: number, stopPrice: number, limitPrice: number,
+  timeValidity: 'DAY' | 'GOOD_TILL_CANCEL' = 'GOOD_TILL_CANCEL',
+): Promise<T212OrderResult> {
+  const rounded = quantity < 0
+    ? -(Math.round(Math.abs(quantity) * 10000) / 10000)
+    : Math.round(quantity * 10000) / 10000;
+  return t212Fetch<T212OrderResult>(mode, '/equity/orders/stop_limit', {
+    method: 'POST',
+    body: JSON.stringify({ ticker, quantity: rounded, stopPrice, limitPrice, timeValidity }),
+  });
+}
+
+// Best-effort — callers should swallow a 404 (order already filled/gone,
+// nothing to cancel) rather than treat it as a real failure.
+export function cancelOrder(mode: T212Mode, orderId: number | string): Promise<void> {
+  return t212Fetch<void>(mode, `/equity/orders/${orderId}`, { method: 'DELETE' });
+}

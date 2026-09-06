@@ -50,6 +50,7 @@ import { UNIVERSE as MOMENTUM_UNIVERSE, ADR_MAP, type UniverseStock } from './t2
 import { isWeekend, msUntilMondayOpen } from './marketHours';
 import {
   getPortfolio, getCash, getOrders, resolveT212Ticker, placeMarketOrder,
+  placeStopLimitOrder, cancelOrder,
   hasT212Creds, type T212Mode, type T212Position,
 } from './t212Api';
 
@@ -98,7 +99,64 @@ const EXTENDED_NEAR_HIGH_PCT = 4;   // % below 6-month high counts as "sitting a
 // re-rating before this order was even placed). Judged on 2026-08-24 to be
 // worth screening out before Gemini even sees them, not just flagging.
 const ISA_STRATEGY = 'isa_trend_news'; // journal/quant strategy key
+
+// ── Real broker-side stop protection ────────────────────────────────────────
+// Added 2026-09-06 per explicit request. These positions are held for weeks
+// (trend+news selection, reviewed every 3h, not a swing/day trade), so per
+// the user's own framing: "a little loss is fine" — this stop only guards
+// against a genuine reversal, not ordinary week-to-week noise, and is
+// deliberately much wider than anything on the CFD/options side of this
+// account. ISA_STOP_LOSS_PCT protects capital immediately after entry
+// (T212 has no attached bracket order — see maintainStopOrder's own
+// comment). Above ISA_PROFIT_LOCK_FLOOR_PCT, the SAME fixed-floor-trail
+// philosophy used everywhere else in this account this week (geminiWatch.ts,
+// igOptionsBot.ts) applies here too: once a position has earned a real gain,
+// the stop is raised to protect exactly that floor and never lowered again —
+// per explicit request ("we want to take the largest share possible of
+// gains"), this is NOT a fixed take-profit order (which would cap the
+// upside at a fixed level) — the position keeps running completely free
+// above the floor; the stop only ever moves up, it never triggers a sale
+// on its own until price actually retraces all the way back down to it.
+const ISA_STOP_LOSS_PCT        = -18; // %, wide — protects against a real reversal, not noise
+const ISA_PROFIT_LOCK_FLOOR_PCT = 25; // %, only starts protecting once a real gain is showing
+// Stop-LIMIT, not a plain Stop — once stopPrice triggers, T212 places a
+// LIMIT order at limitPrice, not a market one, so a bad gap doesn't sell at
+// an arbitrarily worse price. This gap between the two is what actually
+// gives that limit order room to fill rather than sit unfilled while price
+// keeps falling past it — too tight and it risks never executing at all.
+const STOP_LIMIT_GAP_PCT = 3; // %, limitPrice sits this far below stopPrice
 function journalMode(mode: T212Mode): JournalMode { return mode === 'live' ? 't212-live' : 't212-demo'; }
+
+// Places (or replaces) the protective stop-limit order for a position.
+// `newFloorPct` is null for the very first, post-entry stop (protects
+// ISA_STOP_LOSS_PCT below the fill price); a number when raising the floor
+// after a real gain (protects that % ABOVE the entry price instead). Always
+// cancels whatever stop order was previously tracked before placing the new
+// one — required by T212's own non-idempotent-endpoint warning (placing a
+// second protective order without removing the first would leave two live
+// orders against the same position, either of which could fire).
+// `pct` is the % move (positive or negative) from tracked.avgPrice this
+// stop should sit at — the base stop-loss (negative, e.g. ISA_STOP_LOSS_PCT/
+// MOMENTUM_STOP_LOSS_PCT) for a fresh position, or a raised gain floor
+// (positive, ISA-only — see ISA_PROFIT_LOCK_FLOOR_PCT) once a real gain is
+// showing. `isFloorRaise` just controls whether tracked.protectedFloorPct
+// gets set (only meaningful for the ISA floor-trail; Momentum never raises,
+// its existing MOMENTUM_TAKE_PROFIT_PCT mechanical check owns the upside).
+async function maintainStopOrder(
+  mode: T212Mode, ticker: string, tracked: BotOpenedEntry, qty: number, pct: number, isFloorRaise: boolean,
+): Promise<void> {
+  const referencePrice = tracked.avgPrice;
+  const stopPrice  = Math.round(referencePrice * (1 + pct / 100) * 10000) / 10000;
+  const limitPrice = Math.round(stopPrice * (1 - STOP_LIMIT_GAP_PCT / 100) * 10000) / 10000;
+
+  if (tracked.stopOrderId !== undefined) {
+    try { await cancelOrder(mode, tracked.stopOrderId); }
+    catch { /* best-effort — likely already filled/gone; proceeding to place the new one regardless */ }
+  }
+  const order = await placeStopLimitOrder(mode, ticker, -Math.abs(qty), stopPrice, limitPrice, 'GOOD_TILL_CANCEL');
+  tracked.stopOrderId = order.id;
+  if (isFloorRaise) tracked.protectedFloorPct = pct;
+}
 
 // ── Momentum + news strategy (added 2026-08-28) ─────────────────────────────
 // This is a second, genuinely different strategy running inside the same
@@ -169,6 +227,17 @@ type BotOpenedEntry = {
   // anything, don't let the AI touch it") while every other position keeps
   // getting reviewed normally. Undefined/false = reviewed as normal.
   aiReviewPaused?: boolean;
+  // Real broker-side protection — added 2026-09-06 per explicit request
+  // ("T212 can't put in stop limits till after positions are opened... is
+  // it possible for us to implement these as a measure"). stopOrderId is
+  // T212's own order id for whichever protective stop-limit order is
+  // currently live for this position (the initial wide stop-loss, or a
+  // later floor-raise — see ISA_PROFIT_LOCK_FLOOR_PCT). protectedFloorPct
+  // tracks which gain floor (if any) that order is currently protecting —
+  // undefined/0 means only the base stop-loss is live, no gain floor
+  // raised yet. See maintainStopOrder's own comment for the full design.
+  stopOrderId?: number | string;
+  protectedFloorPct?: number;
 };
 
 type T212State = {
@@ -725,12 +794,26 @@ async function pollMomentumEntries(mode: T212Mode): Promise<void> {
     try {
       const order = await placeMarketOrder(mode, cand.stock.t212, qty);
       addLog(mode, 'enter', cand.stock.symbol, `[Momentum] BUY ${qty} ${cand.stock.t212} — £${budgetGbp} (score ${cand.profitScore}${aiGateOn ? `, AI ${verdict.confidence}%` : ', no AI'}) — order ${order.id ?? 'placed'}`);
-      st.botOpenedMomentum[cand.stock.t212] = { enteredAt: Date.now(), budgetGbp, avgPrice: cand.price };
+      const entry: BotOpenedEntry = { enteredAt: Date.now(), budgetGbp, avgPrice: cand.price };
+      st.botOpenedMomentum[cand.stock.t212] = entry;
       saveState(mode, st);
       recordJournalEvent({
         mode: journalMode(mode), event: 'entry', symbol: cand.stock.symbol, strategy: MOMENTUM_STRATEGY,
         side: 'long', qty, price: cand.price, reason: verdict.reason, confidence: verdict.confidence,
       });
+
+      // Real broker-side stop-loss — same precaution as the ISA bot (added
+      // 2026-09-06 per explicit request to cover every T212 position, not
+      // just ISA's). No floor-raise here: MOMENTUM_TAKE_PROFIT_PCT already
+      // mechanically closes winners, this only covers the downside gap
+      // between the 15min checks.
+      try {
+        await maintainStopOrder(mode, cand.stock.t212, entry, qty, MOMENTUM_STOP_LOSS_PCT, false);
+        saveState(mode, st);
+        addLog(mode, 'info', cand.stock.symbol, `[Momentum] Stop-limit placed — sell below ${(cand.price * (1 + MOMENTUM_STOP_LOSS_PCT / 100)).toFixed(2)} (${MOMENTUM_STOP_LOSS_PCT}%)`);
+      } catch (e) {
+        addLog(mode, 'error', cand.stock.symbol, `[Momentum] Stop-limit order failed — position unprotected until next poll's retry: ${e instanceof Error ? e.message : String(e)}`);
+      }
     } catch (e) {
       addLog(mode, 'error', cand.stock.symbol, `[Momentum] Order failed: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -755,6 +838,19 @@ async function pollMomentumExits(mode: T212Mode, positions: T212Position[]): Pro
       delete st.botOpenedMomentum[ticker]; saveState(mode, st); continue;
     }
 
+    // Real broker-side stop retry — see the ISA bot's identical block in
+    // pollExits for the full reasoning. No floor-raise for Momentum (see
+    // the entry site's own comment) — just make sure the base stop exists.
+    if (tracked.stopOrderId === undefined) {
+      try {
+        await maintainStopOrder(mode, ticker, tracked, pos.quantity, MOMENTUM_STOP_LOSS_PCT, false);
+        saveState(mode, st);
+        addLog(mode, 'info', ticker.replace(/_[A-Z]{2}_EQ$/, ''), `[Momentum] Stop-limit placed (retry) — protecting ${MOMENTUM_STOP_LOSS_PCT}%`);
+      } catch (e) {
+        addLog(mode, 'error', ticker.replace(/_[A-Z]{2}_EQ$/, ''), `[Momentum] Stop-limit retry failed — still unprotected: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     const upl = pos.ppl ?? ((pos.currentPrice ?? tracked.avgPrice) - tracked.avgPrice) * pos.quantity;
     const uplPct = tracked.avgPrice > 0 ? (upl / (tracked.avgPrice * pos.quantity)) * 100 : 0;
     const heldDays = (Date.now() - tracked.enteredAt) / 86_400_000;
@@ -767,6 +863,10 @@ async function pollMomentumExits(mode: T212Mode, positions: T212Position[]): Pro
 
     const underlying = ticker.replace(/_[A-Z]{2}_EQ$/, '');
     try {
+      if (tracked.stopOrderId !== undefined) {
+        try { await cancelOrder(mode, tracked.stopOrderId); }
+        catch (e) { addLog(mode, 'error', underlying, `[Momentum] Stop cancel before sell failed (proceeding with the sell anyway): ${e instanceof Error ? e.message : String(e)}`); }
+      }
       await placeMarketOrder(mode, ticker, -Math.abs(pos.quantity));
       addLog(mode, 'exit', underlying, `[Momentum] SOLD ${pos.quantity} ${ticker} — ${closeReason}`);
       recordJournalEvent({
@@ -898,12 +998,28 @@ async function pollEntries(mode: T212Mode): Promise<void> {
     try {
       const order = await placeMarketOrder(mode, t212Ticker, qty);
       addLog(mode, 'enter', sym, `BUY ${qty} ${t212Ticker} — £${budgetGbp} (trend +${trend.trend12w.toFixed(1)}%/12w, Gemini ${verdict.confidence}%) — order ${order.id ?? 'placed'}`);
-      st.botOpened[t212Ticker] = { enteredAt: Date.now(), budgetGbp, avgPrice: trend.currentPrice };
+      const entry: BotOpenedEntry = { enteredAt: Date.now(), budgetGbp, avgPrice: trend.currentPrice };
+      st.botOpened[t212Ticker] = entry;
       saveState(mode, st);
       recordJournalEvent({
         mode: journalMode(mode), event: 'entry', symbol: sym, strategy: ISA_STRATEGY,
         side: 'long', qty, price: trend.currentPrice, reason: verdict.reason, confidence: verdict.confidence,
       });
+
+      // Real broker-side stop-loss — T212 has no attached bracket order, so
+      // this is always a separate follow-up call once the buy has actually
+      // gone through (see maintainStopOrder's own comment). Best-effort:
+      // the position is still tracked/reviewed normally even if this fails,
+      // same as every other bot's self-heal-on-next-poll discipline —
+      // failing the whole entry over a protective order that can be retried
+      // would be worse than the gap it's meant to close.
+      try {
+        await maintainStopOrder(mode, t212Ticker, entry, qty, ISA_STOP_LOSS_PCT, false);
+        saveState(mode, st);
+        addLog(mode, 'info', sym, `Stop-limit placed — sell below ${(trend.currentPrice * (1 + ISA_STOP_LOSS_PCT / 100)).toFixed(2)} (${ISA_STOP_LOSS_PCT}%)`);
+      } catch (e) {
+        addLog(mode, 'error', sym, `Stop-limit order failed — position unprotected until next poll's retry: ${e instanceof Error ? e.message : String(e)}`);
+      }
     } catch (e) {
       addLog(mode, 'error', sym, `Order failed: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -937,10 +1053,40 @@ async function pollExits(mode: T212Mode, positions: T212Position[]): Promise<voi
     const pos = byTicker.get(ticker);
     if (!pos) {
       if (pendingTickers.has(ticker)) continue; // order still working, not filled yet — leave tracked, check again next cycle
-      delete st.botOpened[ticker]; saveState(mode, st); continue; // genuinely closed elsewhere (or the order never filled/was cancelled)
+      delete st.botOpened[ticker]; saveState(mode, st); continue; // genuinely closed elsewhere (or the order never filled/was cancelled) — most likely the stop-limit order itself triggering
     }
 
     const underlying = ticker.replace(/_[A-Z]{2}_EQ$/, '');
+
+    // Stop-order maintenance — runs on EVERY position every poll, unlike the
+    // Gemini thesis review below (which only fires on the trendBad/extended
+    // gate a few lines down). The stop's own lifecycle depends purely on
+    // P&L, not on trend/news, so it can't sit behind that gate.
+    {
+      const upl = pos.ppl ?? ((pos.currentPrice ?? tracked.avgPrice) - tracked.avgPrice) * pos.quantity;
+      const uplPct = tracked.avgPrice > 0 ? (upl / (tracked.avgPrice * pos.quantity)) * 100 : 0;
+      if (tracked.stopOrderId === undefined) {
+        // No protective order on record — either the initial placement at
+        // entry failed, or this position predates the feature. Retry rather
+        // than leave it unprotected indefinitely.
+        try {
+          await maintainStopOrder(mode, ticker, tracked, pos.quantity, ISA_STOP_LOSS_PCT, false);
+          saveState(mode, st);
+          addLog(mode, 'info', underlying, `Stop-limit placed (retry) — protecting ${ISA_STOP_LOSS_PCT}%`);
+        } catch (e) {
+          addLog(mode, 'error', underlying, `Stop-limit retry failed — still unprotected: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      } else if (uplPct >= ISA_PROFIT_LOCK_FLOOR_PCT && (tracked.protectedFloorPct ?? -Infinity) < ISA_PROFIT_LOCK_FLOOR_PCT) {
+        try {
+          await maintainStopOrder(mode, ticker, tracked, pos.quantity, ISA_PROFIT_LOCK_FLOOR_PCT, true);
+          saveState(mode, st);
+          addLog(mode, 'info', underlying, `Stop raised — now protecting +${ISA_PROFIT_LOCK_FLOOR_PCT}% (currently +${uplPct.toFixed(1)}%), runs free above that`);
+        } catch (e) {
+          addLog(mode, 'error', underlying, `Stop raise failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
     const trend = await fetchTrend(underlying);
     // Two separate reasons to escalate to Gemini, both intentionally rare:
     //  1. A genuinely sustained, corroborated decline (same conservative bar
@@ -996,6 +1142,13 @@ async function pollExits(mode: T212Mode, positions: T212Position[]): Promise<voi
 
     if (verdict.action === 'SELL' && verdict.engine === 'xai') {
       try {
+        // Cancel the outstanding protective stop-limit FIRST — leaving it
+        // live against a position about to be fully sold would mean a
+        // stale order sitting against shares that no longer exist.
+        if (tracked.stopOrderId !== undefined) {
+          try { await cancelOrder(mode, tracked.stopOrderId); }
+          catch (e) { addLog(mode, 'error', underlying, `Stop cancel before sell failed (proceeding with the sell anyway): ${e instanceof Error ? e.message : String(e)}`); }
+        }
         await placeMarketOrder(mode, ticker, -Math.abs(pos.quantity));
         addLog(mode, 'exit', underlying, `SOLD ${pos.quantity} ${ticker} — ${verdict.reason}`);
         recordJournalEvent({
