@@ -224,6 +224,39 @@ export async function POST(request: NextRequest) {
       break;
   }
 
+  // T212 won't let a position close normally while it has an active
+  // protective order (stop/stop-limit) sitting against it — confirmed
+  // directly by the user. This route has no idea whether the bot-server (or
+  // the user themselves, from the T212 app) ever placed one on this ticker,
+  // so rather than tracking that, a market SELL just asks T212 directly:
+  // cancel anything pending for this exact ticker first. Best-effort — a
+  // cancel failing here shouldn't block the sell attempt itself; if a real
+  // stop is still in the way, the sell call below will surface that error
+  // clearly instead of silently doing nothing. Never applies to a BUY
+  // (roundedQty > 0) — nothing to clear before opening a new position.
+  if (orderType === 'MARKET' && roundedQty < 0) {
+    try {
+      const ordersRes = await fetch(`${base}/equity/orders`, {
+        headers: { Authorization: 'Basic ' + encoded },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (ordersRes.ok) {
+        const pendingOrders = await ordersRes.json() as Array<{ id?: number | string; ticker?: string }>;
+        const pending = Array.isArray(pendingOrders) ? pendingOrders.filter(o => o.ticker === resolvedTicker) : [];
+        for (const o of pending) {
+          if (o.id === undefined) continue;
+          try {
+            await fetch(`${base}/equity/orders/${o.id}`, {
+              method: 'DELETE',
+              headers: { Authorization: 'Basic ' + encoded },
+              signal: AbortSignal.timeout(10_000),
+            });
+          } catch { /* best-effort — proceed to the sell attempt regardless */ }
+        }
+      }
+    } catch { /* best-effort — proceed to the sell attempt regardless */ }
+  }
+
   console.log(`[t212/live-order] → ${env} ${orderPath}`, JSON.stringify(orderBody));
 
   const mainResult = await placeT212Order(orderPath, orderBody, encoded);
