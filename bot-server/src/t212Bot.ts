@@ -512,7 +512,7 @@ type TrendResult = {
 };
 const EMPTY_TREND: TrendResult = { trend4w: null, trend12w: null, trend52w: null, pctBelowHigh: null, currentPrice: null };
 
-async function fetchTrend(yahooTicker: string): Promise<TrendResult> {
+export async function fetchTrend(yahooTicker: string): Promise<TrendResult> {
   try {
     // 1y range, not just the recent window — the point isn't just "is it up
     // over 12 weeks" but *how has it moved relative to the last year*: a
@@ -566,7 +566,7 @@ function sentimentScore(headlines: string[]): { score: number; bull: number; bea
   return { score: total === 0 ? 0 : (bull - bear) / total, bull, bear };
 }
 
-async function fetch30DayNews(symbol: string): Promise<{ headlines: string[]; sentiment: number; bull: number; bear: number }> {
+export async function fetch30DayNews(symbol: string): Promise<{ headlines: string[]; sentiment: number; bull: number; bear: number }> {
   const apiKey = process.env.FINNHUB_API_KEY;
   if (!apiKey) return { headlines: [], sentiment: 0, bull: 0, bear: 0 };
   try {
