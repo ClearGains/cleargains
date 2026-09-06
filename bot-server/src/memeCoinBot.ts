@@ -15,7 +15,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { getBoostedSolanaTokens, getTokenPairs, passesOrganicMomentumFilter, type DexPair } from './dexscreenerApi';
+import { getBoostedSolanaTokens, getTokenPairs, passesOrganicMomentumFilter, isAlreadyExtended, type DexPair } from './dexscreenerApi';
 import { getQuote, solToLamports, lamportsToSol, WSOL_MINT, USDC_MINT } from './jupiterApi';
 import { checkTokenSafety } from './rugSafety';
 import { getHypeScore } from './lunarcrushApi';
@@ -141,6 +141,10 @@ async function scan(): Promise<void> {
         if (!pairs.length) continue;
         const pair = pairs.reduce((best, p) => (p.volume?.h1 ?? 0) > (best.volume?.h1 ?? 0) ? p : best, pairs[0]);
         if (!passesOrganicMomentumFilter(pair)) continue;
+        if (isAlreadyExtended(pair)) {
+          addLog('wait', pair.baseToken.symbol, `Already extended (h1 ${(pair.priceChange?.h1 ?? 0).toFixed(0)}%, h6 ${(pair.priceChange?.h6 ?? 0).toFixed(0)}%) — likely past its top, skipping`);
+          continue;
+        }
 
         await evaluateCandidate(pair);
       }
@@ -189,7 +193,13 @@ async function evaluateCandidate(pair: DexPair): Promise<void> {
 
   const hypeNote = hype.source === 'lunarcrush' ? `LunarCrush ${hype.score}` : `DexScreener volume/txns (no LunarCrush key)`;
   const redditNote = reddit.source === 'reddit' ? `, Reddit ${reddit.count} mentions/24h` : '';
-  const reason = `Organic momentum (vol/h1 $${(pair.volume?.h1 ?? 0).toFixed(0)}, ${(pair.txns?.h1?.buys ?? 0) + (pair.txns?.h1?.sells ?? 0)} txns/h1) + safety clear + ${hypeNote}${redditNote}`;
+  // priceChange logged here on purpose — the first $20k-scale run had no
+  // record of how extended a token already was at entry, which made the
+  // "were these already-topped-out buys" theory unverifiable after the
+  // fact. Now every entry carries this so the pattern can actually be
+  // checked against real outcomes going forward, not just inferred.
+  const priceChangeNote = `h1 ${(pair.priceChange?.h1 ?? 0).toFixed(0)}%/h6 ${(pair.priceChange?.h6 ?? 0).toFixed(0)}% at entry`;
+  const reason = `Organic momentum (vol/h1 $${(pair.volume?.h1 ?? 0).toFixed(0)}, ${(pair.txns?.h1?.buys ?? 0) + (pair.txns?.h1?.sells ?? 0)} txns/h1, ${priceChangeNote}) + safety clear + ${hypeNote}${redditNote}`;
 
   state.tracked[mint] = {
     mint, symbol, pairAddress: pair.pairAddress, chainId: pair.chainId,

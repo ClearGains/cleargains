@@ -70,9 +70,41 @@ export async function getTokenPairs(chainId: string, tokenAddress: string): Prom
 const AGE_MAX_HOURS = 72;
 const MIN_H1_VOLUME_USD = 2_000;
 const MIN_H1_TXNS = 20;
+// Added 2026-09-06 alongside isAlreadyExtended below, same root-cause fix:
+// confirmed live that this filter was passing tokens actively DECLINING
+// (e.g. -44% in the last hour) purely because volume/txn count was high —
+// a token crashing on panic-sell volume looks identical to one pumping on
+// buy volume from these two numbers alone. This bot only ever buys (no
+// shorting), so "momentum" has to mean price is actually going up, not
+// just that a lot of trading is happening.
+const MIN_H1_PRICE_CHANGE_PCT = 3;
 export function passesOrganicMomentumFilter(pair: DexPair): boolean {
   const ageHours = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : Infinity;
   const h1Vol = pair.volume?.h1 ?? 0;
   const h1Txns = (pair.txns?.h1?.buys ?? 0) + (pair.txns?.h1?.sells ?? 0);
-  return ageHours <= AGE_MAX_HOURS && h1Vol >= MIN_H1_VOLUME_USD && h1Txns >= MIN_H1_TXNS;
+  const h1Change = pair.priceChange?.h1 ?? 0;
+  return ageHours <= AGE_MAX_HOURS && h1Vol >= MIN_H1_VOLUME_USD && h1Txns >= MIN_H1_TXNS && h1Change >= MIN_H1_PRICE_CHANGE_PCT;
+}
+
+// "Already extended" veto — added 2026-09-06 after the first real $20k-scale
+// run: 5/5 positions crashed 35-91% within ~3h of entry, all sourced from
+// the boosted (paid-promotion) seed list, all showing near-zero peak% (i.e.
+// they never ran up after entry, just declined). Confirmed independently
+// via a live DexScreener check that the loss was real, not a bug. Boosted
+// listings are a known vector for exactly this: paying to attract buyers
+// right before insiders sell into that demand — the volume/txn filter above
+// can't tell "the start of a move" from "the middle of a dump" since both
+// look identical on activity level alone. This checks the one thing that
+// actually distinguishes them: has the price already run hard recently. A
+// token already up a large amount in the last hour or six is far more
+// likely near/past its local top than at the start of one — directly the
+// "avoid the tail end, don't become exit liquidity" principle. Not a
+// guarantee (a token can still crash after clearing this), just removes the
+// most obvious version of buying the top.
+const EXTENDED_H1_PCT = 40;
+const EXTENDED_H6_PCT = 150;
+export function isAlreadyExtended(pair: DexPair): boolean {
+  const h1 = pair.priceChange?.h1 ?? 0;
+  const h6 = pair.priceChange?.h6 ?? 0;
+  return h1 > EXTENDED_H1_PCT || h6 > EXTENDED_H6_PCT;
 }
