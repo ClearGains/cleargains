@@ -117,7 +117,7 @@ const ISA_STRATEGY = 'isa_trend_news'; // journal/quant strategy key
 // upside at a fixed level) — the position keeps running completely free
 // above the floor; the stop only ever moves up, it never triggers a sale
 // on its own until price actually retraces all the way back down to it.
-const ISA_STOP_LOSS_PCT        = -18; // %, wide — protects against a real reversal, not noise
+const ISA_STOP_LOSS_PCT        = -15; // %, tightened 2026-09-06 from -18 per explicit request — the user's own risk tolerance treats a 12-15% decline as already "catastrophic," not -18%; still wide enough not to fire on ordinary volatility
 const ISA_PROFIT_LOCK_FLOOR_PCT = 25; // %, only starts protecting once a real gain is showing
 // Stop-LIMIT, not a plain Stop — once stopPrice triggers, T212 places a
 // LIMIT order at limitPrice, not a market one, so a bad gap doesn't sell at
