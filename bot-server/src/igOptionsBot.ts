@@ -42,7 +42,7 @@ import { resolveCredentials, type IgMode } from './igStrategyBot';
 import { recordJournalEvent, type JournalMode } from './tradeJournal';
 import { askIgConfirmStockTrade, askMrSafety, askOptionsExit } from './openai';
 import { fetchAllHeadlines } from './newsFetch';
-import { fetchBarsWithFallback } from './yahooFetch';
+import { fetchBarsWithFallback, fetchYahooBars } from './yahooFetch';
 import { isScannerQuietWeekend, msUntilWeekendReopen, isNYSEOpen, isNearClose } from './alpacaApi';
 import { edgeSizing } from './quant';
 import { sentimentScore } from './momentumSignal';
@@ -1015,6 +1015,14 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       dailyRangePct = q.h && q.l && q.h > q.l ? ((q.h - q.l) / q.c) * 100 : Math.abs(dp);
     } catch { continue; }
     if (Math.abs(dp) < STOCK_MIN_MOVE_PCT) continue;
+    // Weekly's own upper bound — see STOCK_WEEKLY_ALREADY_EXTENDED_PCT's own
+    // comment. This didn't exist before 2026-09-09; a move this size was
+    // previously accepted as a valid "momentum continuation" candidate no
+    // differently than a fresh 1.6% one.
+    if (Math.abs(dp) >= STOCK_WEEKLY_ALREADY_EXTENDED_PCT) {
+      addLog(mode, 'wait', u.name, `[Weekly] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today already — too much of the move likely already behind it, skipping rather than chasing`);
+      continue;
+    }
     const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
 
     // Spot in IG points (matches the option strikes' own scale — Apple
@@ -1025,6 +1033,19 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
 
     let headlines: string[] = [];
     try { headlines = await fetchAllHeadlines(u.finnhub, 8, u.name); } catch { /* prompt handles empty */ }
+    // A real catalyst is now required, not just weighed by the AI — see
+    // checkVolumeSurge's own comment for the full reasoning. A move with no
+    // headline behind it at all is exactly the "why did this happen" gap
+    // that let the AI approve moves on pure technicals alone before.
+    if (headlines.length === 0) {
+      addLog(mode, 'wait', u.name, `[Weekly] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today but no headlines found — no real catalyst to confirm this isn't just noise, skipping`);
+      continue;
+    }
+    const volRatio = await checkVolumeSurge(u.finnhub);
+    if (volRatio === null || volRatio < STOCK_MIN_VOLUME_SURGE) {
+      addLog(mode, 'wait', u.name, `[Weekly] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today but volume only ${volRatio !== null ? volRatio.toFixed(1) + 'x' : 'unavailable'} vs its own 20-day average (need ${STOCK_MIN_VOLUME_SURGE}x+) — real participation isn't there, skipping`);
+      continue;
+    }
 
     // Don't re-ask on facts the AI has already judged today. Confirmed live
     // 2026-08-31 (Apple/Tim Cook, 8 calls on the exact same headline over
@@ -1042,10 +1063,10 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
     const verdict = await askIgConfirmStockTrade({
       instrumentName: `${u.name} (buying a ${side.toUpperCase()} option, this week's expiry — a few trading days, not months)`,
       suggestedDir: side === 'call' ? 'BUY' : 'SELL',
-      ruleReasoning: `Moving ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today — momentum-continuation bet over the rest of this week`,
+      ruleReasoning: `Moving ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today on ${volRatio.toFixed(1)}x normal volume, ${headlines.length} real headline(s) found — is this a fresh, forward-looking catalyst still with room to run, or is the move already priced in?`,
       ruleConfidence: Math.max(1, Math.min(10, Math.round(Math.abs(dp) * 2))),
       price: usdPrice, rsi: null, macdHist: null, lastCandles: [],
-      headlines, dayChangePercent: dp,
+      headlines, dayChangePercent: dp, volumeSurgeMultiple: volRatio,
       // Default 'swing' framing ("days to weeks") fits a several-day weekly
       // option far better than 'intraday' did when this traded same-day
       // dailies — see STOCK_UNDERLYINGS' own comment for why that changed.
@@ -1161,6 +1182,46 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
 // point is only to catch the obviously-unreasonable case (a strike needing
 // a 15% move in 2 days on a stock whose own daily range is under 1%), not
 // to finely rank plausible candidates against each other.
+// Real volume-surge check — added 2026-09-09 per explicit request, after the
+// weekly/daily momentum entries were found to have a genuine, evidence-backed
+// quality problem: they qualified on today's % move ALONE (no volume check,
+// no upper bound on weekly, no requirement that any real news exists), fed a
+// generic "momentum continuation" framing to the AI, which then approved
+// almost everything crossing the bare move threshold at 80%+ confidence
+// (real numbers: 5W/11L weekly, 1W/3L daily, 45% of all entries on one name
+// — NVIDIA — repeatedly re-entered on moves as small as 1.5%). Modeled on
+// this account's own OLDER, better-designed client-side Finnhub scanner
+// (app/api/demo-trader/signals/route.ts's "Smart Money Swing" mode), which
+// requires a real volume surge + a real catalyst + a BOUNDED move (penalizes
+// >5-6% as already-extended/parabolic, not just a floor) before a signal
+// even counts as a candidate — deliberately NOT porting that file's
+// force-3-BUY-signals fallback, which would undermine the whole point of a
+// strict filter by promoting weak candidates just to hit a quota; a day with
+// zero real qualifying candidates should produce zero trades, not manufactured ones.
+//
+// Uses real Yahoo daily bars (not Finnhub's own /quote endpoint, which has
+// no volume field at all — confirmed by inspecting its actual response
+// schema; the demo-trader route above was silently reading an undefined `v`
+// this whole time, so its own "volume surge" leg was never actually live).
+// Trailing 20-session average, excluding today, same window this account
+// already uses elsewhere (alpacaStrategies.ts's optionsNewsBasedEntrySignal).
+async function checkVolumeSurge(finnhubSymbol: string): Promise<number | null> {
+  try {
+    const bars = await fetchYahooBars(finnhubSymbol, '1d', '2mo');
+    if (!bars || bars.length < 15) return null;
+    const today = bars[bars.length - 1];
+    const prior = bars.slice(-21, -1);
+    if (!prior.length) return null;
+    const avgPriorVol = prior.reduce((sum, b) => sum + b.v, 0) / prior.length;
+    if (avgPriorVol <= 0) return null;
+    return today.v / avgPriorVol;
+  } catch {
+    return null;
+  }
+}
+const STOCK_MIN_VOLUME_SURGE = 1.3; // matches the demo-trader Smart-Money threshold — a real, not token, surge
+const STOCK_WEEKLY_ALREADY_EXTENDED_PCT = 6; // weekly had NO upper bound at all before this — same "don't chase an already-spent move" principle as the daily side's own 4% ceiling and monthly's 40%/12w one, just weekly's own scale
+
 const REQUIRED_MOVE_MULTIPLE = 2; // required move can run up to 2x the naive expected move before this flags it
 function moveIsPlausible(
   spot: number, strike: number, premium: number, side: 'call' | 'put',
@@ -1419,6 +1480,16 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
 
     let headlines: string[] = [];
     try { headlines = await fetchAllHeadlines(u.finnhub, 8, u.name); } catch { /* prompt handles empty */ }
+    // Real catalyst required — see checkVolumeSurge's own comment.
+    if (headlines.length === 0) {
+      addLog(mode, 'wait', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today but no headlines found — no real catalyst to confirm this isn't just noise, skipping`);
+      continue;
+    }
+    const volRatio = await checkVolumeSurge(u.finnhub);
+    if (volRatio === null || volRatio < STOCK_MIN_VOLUME_SURGE) {
+      addLog(mode, 'wait', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today but volume only ${volRatio !== null ? volRatio.toFixed(1) + 'x' : 'unavailable'} vs its own 20-day average (need ${STOCK_MIN_VOLUME_SURGE}x+) — real participation isn't there, skipping`);
+      continue;
+    }
 
     // Same anti-drift throttle as weekly, own namespace (":daily" suffix)
     // so a stock evaluating for weekly doesn't block its own same-day eval
@@ -1430,10 +1501,10 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
     const verdict = await askIgConfirmStockTrade({
       instrumentName: `${u.name} (buying a ${side.toUpperCase()} option, today's expiry — intraday, no overnight hold)`,
       suggestedDir: side === 'call' ? 'BUY' : 'SELL',
-      ruleReasoning: `Moving ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today — same-day momentum-continuation bet`,
+      ruleReasoning: `Moving ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today on ${volRatio.toFixed(1)}x normal volume, ${headlines.length} real headline(s) found — is this a fresh, forward-looking catalyst still with room to run today, or is the move already priced in?`,
       ruleConfidence: Math.max(1, Math.min(10, Math.round(Math.abs(dp) * 2))),
       price: usdPrice, rsi: null, macdHist: null, lastCandles: [],
-      headlines, dayChangePercent: dp,
+      headlines, dayChangePercent: dp, volumeSurgeMultiple: volRatio,
       // Without this, StockConfirmSignal.horizon defaults to 'swing' — the
       // prompt then contradicts itself (instrumentName says intraday, the
       // horizon framing says "days to weeks, not a scalp") and the AI
