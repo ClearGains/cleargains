@@ -12,13 +12,18 @@ import {
   type SwingEpicState, type SwingConfig, type Trend,
 } from './fxSwingStrategy';
 import { isMarketOpen, isClosingSoon } from './marketHours';
-import { type FxSwingEntrySignal } from './gemini';
-// OpenAI is the acting decision-maker for this bot as of 2026-08-25, with
-// Gemini called only as a fallback when OpenAI's own attempt genuinely
-// fails — see openai.ts's askFxSwing/askIgPositionVerdict for the failover
-// logic (the position-review question is identical to the IG bot's own, so
-// it reuses that same wrapper rather than a separate one).
-import { askFxSwing, askIgPositionVerdict } from './openai';
+import { type FxSwingEntrySignal, askGeminiFxSwing } from './gemini';
+// Reverted to Gemini as the acting decision-maker 2026-09-09 per explicit
+// request — this bot moved to OpenAI (askFxSwing) on 2026-08-25, but that
+// version was never actually confirmed to trade well: this bot has never
+// written a single trade to the persistent journal (see recordJournalEvent
+// grep — zero hits in this file), so there's no track record either way for
+// the OpenAI period. The user's own explicit "keep it as is, don't touch"
+// confirmation on 2026-08-19 was for the Gemini-acting version, right after
+// the 2026-08-11 overhaul (stall-detection fix, correlation guard, correct
+// swing prompt) — this reverts to that specific, actually-validated
+// configuration rather than the untested OpenAI one.
+import { askIgPositionVerdict } from './openai';
 import { fetchMacroEvents } from './macroCalendar';
 import { resolveCredentials, isLossLocked, registerBotOpenedDeal, type IgMode } from './igStrategyBot';
 import { FX_EPICS, SCALPER_INDEX_EPICS } from './igStrategyScanner';
@@ -625,8 +630,8 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
           macroEvents,
         };
 
-        const verdict = await askFxSwing(entrySignal);
-        addLog('info', name, `Gemini (${verdict.engine}): ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
+        const verdict = await askGeminiFxSwing(entrySignal);
+        addLog('info', name, `${verdict.engine}: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason}`);
 
         if (verdict.direction === 'SKIP' || verdict.confidence < currentConfig.minConfidence) {
           addLog('wait', name, `Gemini skipped entry (${verdict.direction}, ${verdict.confidence}%)`);
