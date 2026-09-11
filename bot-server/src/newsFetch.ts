@@ -14,6 +14,30 @@
 // Requiring the actual company name to appear in the headline text filters
 // those out — better to surface fewer, genuinely-relevant headlines than
 // hand Gemini a stack of sector noise about competitors.
+// Shared relevance filter — extracted 2026-09-11 (was inline in
+// fetchCompanyHeadlines only) after confirming the exact same cross-tagged-
+// sector-noise problem hits Finviz too, not just Finnhub: Parker Hannifin
+// (PH) came back with a Finviz feed of Eaton/Howmet/Qiagen/TransDigm
+// headlines — different companies entirely, no PH-specific content at all
+// except one real match buried at the bottom — and since fetchAllHeadlines
+// merges Finviz in with NO filtering of its own, that noise was drowning
+// out the one genuinely relevant Finnhub headline that did exist once
+// sorted-by-date and sliced to the caller's limit. A 2-letter ticker like
+// "PH" makes the raw ticker-substring check dangerously loose on its own
+// (it would match "graPH", "PHone", etc.) — length-gated below so only the
+// company-name fragment match applies for very short tickers.
+function isRelevantHeadline(headline: string, ticker: string, companyName?: string): boolean {
+  if (!companyName) return true; // caller didn't ask for filtering — used for the general-market/forex path
+  const lower = headline.toLowerCase();
+  // First word of the display name (e.g. "Western" out of "Western
+  // Digital") rather than the full name — headlines commonly abbreviate
+  // ("Western Digital Corp", "WD") but rarely drop the distinctive first
+  // word entirely.
+  const nameFragment = companyName.split(' ')[0]?.toLowerCase();
+  const tickerMatch = ticker.length >= 3 && lower.includes(ticker.toLowerCase());
+  return tickerMatch || (!!nameFragment && lower.includes(nameFragment));
+}
+
 export async function fetchCompanyHeadlines(ticker: string, limit = 8, companyName?: string): Promise<string[]> {
   const key = process.env.FINNHUB_API_KEY;
   if (!key) return [];
@@ -30,15 +54,7 @@ export async function fetchCompanyHeadlines(ticker: string, limit = 8, companyNa
     const raw = await res.json() as Array<{ headline?: string; datetime?: number }>;
     if (!Array.isArray(raw)) return [];
 
-    // Match on the first word of the display name (e.g. "Western" out of
-    // "Western Digital") rather than the full name — headlines commonly
-    // abbreviate ("Western Digital Corp", "WD") but rarely drop the
-    // distinctive first word entirely.
-    const nameFragment = companyName?.split(' ')[0]?.toLowerCase();
-    const relevant = (h: string) => {
-      const lower = h.toLowerCase();
-      return lower.includes(ticker.toLowerCase()) || (!!nameFragment && lower.includes(nameFragment));
-    };
+    const relevant = (h: string) => isRelevantHeadline(h, ticker, companyName);
 
     // Dated, not just a bag of recent headlines — confirmed live Gemini had
     // no way to tell "this happened today" from "this happened 6 days ago"
@@ -115,9 +131,17 @@ function decodeHtmlEntities(s: string): string {
     .replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(Number(code)));
 }
 
-export async function fetchFinvizHeadlines(ticker: string, limit = 8): Promise<string[]> {
+// companyName filter added 2026-09-11 — see isRelevantHeadline's own
+// comment (the Parker Hannifin/PH incident). Cache stays keyed on ticker
+// alone and stores the FULL unfiltered scrape (companyName is applied on
+// the way out, not before caching) so a later call for the same ticker
+// without a companyName still gets everything, and the cache doesn't need
+// to be duplicated per companyName variant.
+export async function fetchFinvizHeadlines(ticker: string, limit = 8, companyName?: string): Promise<string[]> {
   const cached = finvizCache.get(ticker);
-  if (cached && Date.now() - cached.at < FINVIZ_CACHE_TTL_MS) return cached.headlines.slice(0, limit);
+  if (cached && Date.now() - cached.at < FINVIZ_CACHE_TTL_MS) {
+    return cached.headlines.filter(h => isRelevantHeadline(h, ticker, companyName)).slice(0, limit);
+  }
 
   try {
     const res = await fetch(`https://finviz.com/quote.ashx?t=${encodeURIComponent(ticker)}`, {
@@ -135,7 +159,15 @@ export async function fetchFinvizHeadlines(ticker: string, limit = 8): Promise<s
     let currentDateISO = today.toISOString().slice(0, 10);
     const out: string[] = [];
     let m: RegExpExecArray | null;
-    while ((m = rowRe.exec(html)) && out.length < limit * 3) {
+    // Scrape well past `limit` regardless of it — the companyName filter
+    // below can reject most of a ticker's raw feed (confirmed live: 9 of 10
+    // rows for PH were about other companies entirely), so capping the raw
+    // scrape at a small multiple of `limit` risked filtering down to almost
+    // nothing even when real relevant stories existed further down the
+    // page. The HTML is already fetched at this point — parsing more rows
+    // out of it costs nothing extra.
+    const RAW_SCRAPE_CAP = 30;
+    while ((m = rowRe.exec(html)) && out.length < RAW_SCRAPE_CAP) {
       const timeCell = m[1].trim();
       const headline = decodeHtmlEntities(m[2].trim().replace(/\s+/g, ' '));
       const dateMatch = timeCell.match(/^([A-Z][a-z]{2})-(\d{2})-(\d{2})\s/);
@@ -153,10 +185,10 @@ export async function fetchFinvizHeadlines(ticker: string, limit = 8): Promise<s
       if (headline) out.push(`[${currentDateISO}] ${headline}`);
     }
 
-    finvizCache.set(ticker, { at: Date.now(), headlines: out });
-    return out.slice(0, limit);
+    finvizCache.set(ticker, { at: Date.now(), headlines: out }); // full unfiltered scrape cached — see cache-hit branch's own comment
+    return out.filter(h => isRelevantHeadline(h, ticker, companyName)).slice(0, limit);
   } catch {
-    return cached?.headlines.slice(0, limit) ?? [];
+    return (cached?.headlines ?? []).filter(h => isRelevantHeadline(h, ticker, companyName)).slice(0, limit);
   }
 }
 
@@ -168,7 +200,7 @@ export async function fetchFinvizHeadlines(ticker: string, limit = 8): Promise<s
 export async function fetchAllHeadlines(ticker: string, limit = 8, companyName?: string): Promise<string[]> {
   const [finnhub, finviz] = await Promise.all([
     fetchCompanyHeadlines(ticker, limit, companyName),
-    fetchFinvizHeadlines(ticker, limit),
+    fetchFinvizHeadlines(ticker, limit, companyName),
   ]);
   const seen = new Set<string>();
   const merged: string[] = [];
