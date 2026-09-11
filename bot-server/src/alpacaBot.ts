@@ -314,6 +314,69 @@ export function setPositionWatchEnabled(mode: AccountMode, symbol: string, enabl
   return { ok: true };
 }
 
+// Recovers an options_directional contract that vanished from /positions
+// without this bot's own exit code ever running — same pattern already
+// proven in meanReversionBot.ts's recoverSilentClose and igOptionsBot.ts's
+// equivalent, ported here 2026-09-11 after finding this bot had NO such
+// fallback at all. Confirmed live this is a real, not theoretical, gap: two
+// real trades (TSLA, XLE) since the 2026-09-04 news-based rewrite closed
+// via their own attached broker-side stop-loss order filling directly
+// (their real sell prices matched that stop almost exactly) — the bot's own
+// optionsDirectionalSignal exit path never ran, and with no fallback, both
+// closes went completely unjournaled. This mattered beyond just reporting:
+// quant.ts's edgeSizing scales this strategy's position size off its
+// journaled track record, so it was silently blind to these two losses when
+// deciding how much to risk on the next trade.
+//
+// Reconstructs the real fill data from Alpaca's own order history (ground
+// truth, not a locally-cached guess) rather than requiring extra state to
+// be tracked at entry time — matches the most recent BUY/SELL fill pair for
+// the exact contract symbol.
+async function reconcileSilentOptionCloses(mode: AccountMode, positions: AlpacaPosition[]): Promise<void> {
+  const peaks = optionPeaks.get(mode)!;
+  const liveSymbols = new Set(positions.map(p => p.symbol));
+  const vanished = [...peaks.keys()].filter(sym => !liveSymbols.has(sym));
+  if (!vanished.length) return;
+
+  let orders: import('./alpacaApi').AlpacaOrder[];
+  try { orders = await getOrders(mode, 'closed'); }
+  catch (e) { addLog(mode, 'error', '—', `Silent-close reconciliation failed to fetch order history: ${e instanceof Error ? e.message : String(e)}`); return; }
+
+  for (const symbol of vanished) {
+    const underlying = isOptionSymbol(symbol) ? symbol.replace(/\d{6}[CP]\d{8}$/, '') : symbol;
+    try {
+      const fills = orders
+        .filter(o => o.symbol === symbol && o.status === 'filled' && o.filled_avg_price)
+        .sort((a, b) => new Date(b.filled_at ?? 0).getTime() - new Date(a.filled_at ?? 0).getTime());
+      const sell = fills.find(o => o.side === 'sell');
+      const buy  = fills.find(o => o.side === 'buy' && (!sell || new Date(o.filled_at ?? 0) < new Date(sell.filled_at ?? 0)));
+      if (!sell || !buy) {
+        addLog(mode, 'error', underlying, `⚠ ${symbol} vanished from positions but no matching buy+sell fill pair found in order history — cannot recover P&L, dropping from tracking`);
+        peaks.delete(symbol);
+        savePeaks(mode, peaks);
+        continue;
+      }
+      const qty = Number(sell.filled_qty);
+      const buyPrice = Number(buy.filled_avg_price);
+      const sellPrice = Number(sell.filled_avg_price);
+      const plUsd = (sellPrice - buyPrice) * qty * 100; // options are quoted per-share, contract = 100 shares
+      const plPct = buyPrice > 0 ? ((sellPrice - buyPrice) / buyPrice) * 100 : 0;
+      recordJournalEvent({
+        mode, event: 'exit', symbol: underlying, strategy: 'options_directional',
+        side: 'long', qty, price: sellPrice,
+        reason: `Closed outside this bot's own code (likely its own broker-side stop/TP order filling directly) — recovered from real fill history`,
+        plUsd, plPct,
+      });
+      addLog(mode, 'exit', underlying, `Recovered a silent close — ${symbol}: ${buyPrice.toFixed(2)} → ${sellPrice.toFixed(2)}, ${plUsd >= 0 ? '+' : ''}$${plUsd.toFixed(2)} (${plPct >= 0 ? '+' : ''}${plPct.toFixed(1)}%)`);
+    } catch (e) {
+      addLog(mode, 'error', underlying, `Silent-close recovery failed for ${symbol}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      peaks.delete(symbol);
+      savePeaks(mode, peaks);
+    }
+  }
+}
+
 async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, positions: AlpacaPosition[]): Promise<void> {
   const watchMap = positionWatch.get(mode)!;
   const hcMap    = highConviction.get(mode)!;
@@ -1223,6 +1286,14 @@ async function poll(mode: AccountMode) {
       addLog(mode, 'info', '—', `Equity: $${parseFloat(account.equity).toFixed(2)} | Cash: $${parseFloat(account.cash).toFixed(2)} | Positions: ${positions.length}`);
     }
 
+    // Silent-close reconciliation — see reconcileSilentOptionCloses' own
+    // comment. Only meaningful for options_directional (the only strategy
+    // that populates optionPeaks); harmless no-op call otherwise since
+    // peaks will just be empty.
+    if (cfg.strategy === 'options_directional') {
+      await reconcileSilentOptionCloses(mode, positions);
+    }
+
     // ── Daily-loss circuit breaker ──────────────────────────────────────────
     const equity = parseFloat(account.equity);
     const today  = new Date().toISOString().slice(0, 10);
@@ -1258,6 +1329,35 @@ async function poll(mode: AccountMode) {
     }
     const opened = await evaluateSymbol(mode, sym, positions, cfg);
     if (opened) openCount++;
+  }
+
+  // Orphaned open positions — added 2026-09-11 after finding a real, live
+  // gap: cfg.symbols is a DYNAMIC scanner watchlist that rotates (see
+  // scanForBestSymbols), and evaluateSymbol above is only ever called for
+  // symbols currently in it. Confirmed live: HOOD held an open
+  // options_directional contract (down -34%, 7 days old) whose underlying
+  // had rotated out of cfg.symbols — meaning it received ZERO exit checks,
+  // zero peak-tracking, nothing, the whole time it sat there losing money,
+  // purely because the scanner stopped selecting it, with no connection to
+  // whether the position itself needed attention. This closes that gap:
+  // any symbol with a currently-open position that ISN'T already in
+  // cfg.symbols gets evaluated too — evaluateSymbol's own internal branching
+  // (exit-check only runs when a position is actually open) means this
+  // can never accidentally open a NEW position in a symbol the scanner has
+  // moved on from, it only ever reaches the exit-check path for these.
+  if (cfg.strategy === 'options_directional') {
+    const scannedUnderlyings = new Set(cfg.symbols);
+    const orphaned = new Set(
+      positions
+        .filter(p => isOptionSymbol(p.symbol))
+        .map(p => p.symbol.replace(/\d{6}[CP]\d{8}$/, ''))
+        .filter(u => !scannedUnderlyings.has(u)),
+    );
+    for (const sym of orphaned) {
+      if (!st.running) break;
+      addLog(mode, 'info', sym, `Held position's underlying has rotated out of the current scan list — checking its exit anyway`);
+      await evaluateSymbol(mode, sym, positions, cfg);
+    }
   }
 
   try {
