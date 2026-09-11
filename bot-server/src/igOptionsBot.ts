@@ -45,7 +45,7 @@ import { fetchAllHeadlines } from './newsFetch';
 import { fetchBarsWithFallback, fetchYahooBars } from './yahooFetch';
 import { isScannerQuietWeekend, msUntilWeekendReopen, isNYSEOpen, isNearClose } from './alpacaApi';
 import { edgeSizing } from './quant';
-import { sentimentScore } from './momentumSignal';
+import { sentimentScore, momentumScore } from './momentumSignal';
 
 // Underlyings whose IG option chains this bot scans. optName is the exact
 // name prefix IG's option markets use ("FTSE 10300 Call" — note NOT
@@ -1040,8 +1040,29 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
   const today = new Date().toISOString().slice(0, 10);
   const details = await fetchMarketDetails(session, STOCK_UNDERLYINGS.map(u => u.shareEpic));
 
+  // ── Phase 1: gather every underlying that clears the mechanical gates ────
+  // Added 2026-09-11 per explicit request for a real point-scoring system on
+  // top of (not instead of) the existing gates/AI confirmation — reuses
+  // momentumSignal.ts's own momentumScore formula (already this account's
+  // shared momentum/volume/news/volatility weighting, used by t212Bot.ts's
+  // entries and geminiWatch.ts's lock-in) rather than inventing a fourth
+  // slightly-different one. Purely a PRIORITY ORDER: previously this loop
+  // evaluated STOCK_UNDERLYINGS in its fixed declaration order (Apple,
+  // NVIDIA, Amazon, Meta, AMD, Palantir), so on a day multiple stocks
+  // qualified, whichever came first in that array got priority for the
+  // limited position slots regardless of which signal was actually
+  // stronger. Now every qualifying candidate is scored and the strongest
+  // goes first — the gates themselves (move bound, volume, headlines) and
+  // the AI confirmation are completely unchanged, this only reorders WHICH
+  // qualifying candidate gets evaluated/entered first when there's more
+  // than STOCK_MAX_POSITIONS worth of them on a given scan.
+  type WeeklyCandidate = {
+    u: typeof STOCK_UNDERLYINGS[number]; dp: number; usdPrice: number;
+    dailyRangePct: number; spot: number; headlines: string[]; volRatio: number; score: number;
+  };
+  const candidates: WeeklyCandidate[] = [];
+
   for (const u of STOCK_UNDERLYINGS) {
-    if (countKind(s, 'stock') >= STOCK_MAX_POSITIONS) break;
     if (s.tracked[u.shareEpic]) continue;
     if (s.lastStockEntryDay[u.finnhub] === today) continue; // one shot per stock per day
 
@@ -1073,7 +1094,6 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       addLog(mode, 'wait', u.name, `[Weekly] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today already — too much of the move likely already behind it, skipping rather than chasing`);
       continue;
     }
-    const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
 
     // Spot in IG points (matches the option strikes' own scale — Apple
     // ~$260 quotes as ~26000, and its chain's strikes are 26000/26500/…).
@@ -1096,6 +1116,20 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       addLog(mode, 'wait', u.name, `[Weekly] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today but volume only ${volRatio !== null ? volRatio.toFixed(1) + 'x' : 'unavailable'} vs its own 20-day average (need ${STOCK_MIN_VOLUME_SURGE}x+) — real participation isn't there, skipping`);
       continue;
     }
+
+    const score = momentumScore({ dayChangePercent: dp, volumeSurgeMultiple: volRatio, headlineCount: headlines.length, intradayRangePct: dailyRangePct });
+    candidates.push({ u, dp, usdPrice, dailyRangePct, spot, headlines, volRatio, score });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  if (candidates.length > 1) {
+    addLog(mode, 'info', '—', `[Weekly] ${candidates.length} candidate(s) qualified — evaluating strongest first: ${candidates.map(c => `${c.u.name} (${c.score})`).join(', ')}`);
+  }
+
+  // ── Phase 2: AI-confirm and enter in score order ─────────────────────────
+  for (const { u, dp, usdPrice, dailyRangePct, spot, headlines, volRatio } of candidates) {
+    if (countKind(s, 'stock') >= STOCK_MAX_POSITIONS) break;
+    const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
 
     // Don't re-ask on facts the AI has already judged today. Confirmed live
     // 2026-08-31 (Apple/Tim Cook, 8 calls on the exact same headline over
@@ -1509,8 +1543,14 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
   const today = new Date().toISOString().slice(0, 10);
   const details = await fetchMarketDetails(session, STOCK_DAILY_UNDERLYINGS.map(u => u.shareEpic));
 
+  // Phase 1/2 split — same reasoning as scanStockEntries' own comment.
+  type DailyCandidate = {
+    u: typeof STOCK_DAILY_UNDERLYINGS[number]; dp: number; usdPrice: number;
+    dailyRangePct: number; spot: number; headlines: string[]; volRatio: number; score: number;
+  };
+  const candidates: DailyCandidate[] = [];
+
   for (const u of STOCK_DAILY_UNDERLYINGS) {
-    if (countKind(s, 'stock-daily') >= STOCK_DAILY_MAX_POSITIONS) break;
     if (s.tracked[`${u.shareEpic}:daily`]) continue;
     if (s.lastStockEntryDay[`${u.finnhub}:daily`] === today) continue; // one shot per stock per day
 
@@ -1531,7 +1571,6 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
       addLog(mode, 'wait', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today already — too much of today's move likely already behind it, skipping rather than chasing`);
       continue;
     }
-    const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
 
     const d = details.get(u.shareEpic);
     const spot = typeof d?.bid === 'number' && typeof d?.offer === 'number' ? (d.bid + d.offer) / 2 : null;
@@ -1549,6 +1588,19 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
       addLog(mode, 'wait', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today but volume only ${volRatio !== null ? volRatio.toFixed(1) + 'x' : 'unavailable'} vs its own 20-day average (need ${STOCK_MIN_VOLUME_SURGE}x+) — real participation isn't there, skipping`);
       continue;
     }
+
+    const score = momentumScore({ dayChangePercent: dp, volumeSurgeMultiple: volRatio, headlineCount: headlines.length, intradayRangePct: dailyRangePct });
+    candidates.push({ u, dp, usdPrice, dailyRangePct, spot, headlines, volRatio, score });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  if (candidates.length > 1) {
+    addLog(mode, 'info', '—', `[Daily] ${candidates.length} candidate(s) qualified — evaluating strongest first: ${candidates.map(c => `${c.u.name} (${c.score})`).join(', ')}`);
+  }
+
+  for (const { u, dp, usdPrice, dailyRangePct, spot, headlines, volRatio } of candidates) {
+    if (countKind(s, 'stock-daily') >= STOCK_DAILY_MAX_POSITIONS) break;
+    const side: 'call' | 'put' = dp > 0 ? 'call' : 'put';
 
     // Same anti-drift throttle as weekly, own namespace (":daily" suffix)
     // so a stock evaluating for weekly doesn't block its own same-day eval
