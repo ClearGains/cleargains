@@ -161,6 +161,35 @@ const MONTHLY_MIN_TREND_4W_PCT  = -3;  // % — allow a small pullback within an
 const MONTHLY_EXTENDED_TREND_12W_PCT = 40; // % — already a major re-rating, easy gain likely priced in
 const MONTHLY_EXTENDED_NEAR_HIGH_PCT = 4;  // % below the 52-week high counts as "sitting at the top" of the move
 const MONTHLY_MIN_CONFIRM_CONFIDENCE = 70; // same AI bar as every other confirmed entry in this codebase
+
+// Counter-thesis detector — added 2026-09-11 after a manually-overridden
+// Palantir monthly CALL lost -£2,176: the AI's own ACCEPTED reasoning at
+// entry was "PwC alliance expansion... counters Burry's warning" — i.e. it
+// wasn't reporting a clean signal with no real objection, it was explicitly
+// betting AGAINST a specific, named, real skeptic's stated concern. Weeks
+// later that exact concern resurfaced as fresh news (Burry publicly
+// re-flagged Palantir) and the position had no defense against it — the
+// entry check had already acknowledged the risk existed and waved it
+// through anyway at an ordinary 82% confidence, no extra scrutiny for the
+// fact that this was a "despite X" trade rather than a "no real objection"
+// one. A clean uptrend with no known counter-argument and a trend that's
+// merely being bet against a specific stated skeptic are NOT the same risk
+// profile, even at identical confidence numbers — this makes that
+// distinction visible instead of collapsing both into one score.
+//
+// Deliberately a plain keyword scan on the AI's own free-text reason, not a
+// second AI call — the whole point is a cheap, mechanical check that can't
+// itself be argued out of firing the way a second LLM opinion could.
+function hasCounterThesisLanguage(reason: string): boolean {
+  return /\b(despite|counters?|notwithstanding|outweighs?|even though|regardless of)\b/i.test(reason);
+}
+// Flagged candidates need meaningfully more conviction than the ordinary
+// bar before this account will act on them at all — 15pts above whichever
+// strategy's own MIN_CONFIRM_CONFIDENCE applies. Not a hard block: a
+// genuinely strong, well-evidenced case for overriding a known risk can
+// still clear this; the ordinary bar just isn't enough on its own anymore
+// once the AI itself is naming a real objection it's arguing past.
+const COUNTER_THESIS_CONFIDENCE_BONUS = 15;
 // Per-mode premium budgets — demo runs big deliberately (per explicit
 // request 2026-08-31, "its running on demo for now so put more on the
 // line": demo money exists to generate meaningful P&L data, and tiny
@@ -284,6 +313,13 @@ type PendingOverride = {
   side: 'call' | 'put'; kind: 'stock' | 'stock-daily' | 'stock-monthly';
   stake: number; optOffer: number; // stake/price at the moment it was rejected — shown to the user, re-fetched fresh on approval
   dp: number; confidence: number; aiReason: string; today: string;
+  // Surfaced 2026-09-11 — see hasCounterThesisLanguage's own comment. By
+  // construction this override can only exist at all if aiReason already
+  // cleared the stricter counter-thesis confidence bar (the check runs
+  // upstream of this, before placeStockOrder is ever called) — this field
+  // is purely about not hiding that fact from a human deciding whether to
+  // click "open anyway," not an additional gate.
+  counterThesis: boolean;
 };
 const OVERRIDE_TTL_MS = 60 * 60_000; // 1 hour — long enough to notice and act, short enough the snapshot isn't badly stale
 
@@ -572,7 +608,13 @@ async function scanStockMonthlyEntries(mode: IgMode, session: IGSession): Promis
       horizon: 'swing',
     });
     addLog(mode, 'info', u.name, `[Monthly] +${trend.trend12w.toFixed(1)}% /12w trend+news candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
-    if (verdict.engine === 'passthrough' || verdict.direction !== 'BUY' || verdict.confidence < MONTHLY_MIN_CONFIRM_CONFIDENCE) continue;
+    if (verdict.engine === 'passthrough' || verdict.direction !== 'BUY') continue;
+    const counterThesis = hasCounterThesisLanguage(verdict.reason);
+    const requiredConfidence = MONTHLY_MIN_CONFIRM_CONFIDENCE + (counterThesis ? COUNTER_THESIS_CONFIDENCE_BONUS : 0);
+    if (verdict.confidence < requiredConfidence) {
+      if (counterThesis) addLog(mode, 'wait', u.name, `[Monthly] ⚠ Reasoning explicitly argues past a named risk ("${verdict.reason}") — needs ${requiredConfidence}%+ to act on that, only got ${verdict.confidence}%, skipping`);
+      continue;
+    }
 
     const opt = await findStockMonthlyOptionEpic(mode, session, u, side, spot);
     if (!opt) { addLog(mode, 'wait', u.name, `[Monthly] No ${side} found near ${spot.toFixed(0)} in the ${MIN_DTE}-${MAX_DTE}d monthly window`); continue; }
@@ -915,7 +957,15 @@ async function scanEntries(mode: IgMode, session: IGSession): Promise<void> {
       headlines,
     });
     addLog(mode, 'info', u.name, `Signal ${side.toUpperCase()} — ${signal.reason} → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
-    if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;
+    if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP') continue;
+    {
+      const counterThesis = hasCounterThesisLanguage(verdict.reason);
+      const requiredConfidence = MIN_CONFIRM_CONFIDENCE + (counterThesis ? COUNTER_THESIS_CONFIDENCE_BONUS : 0);
+      if (verdict.confidence < requiredConfidence) {
+        if (counterThesis) addLog(mode, 'wait', u.name, `⚠ Reasoning explicitly argues past a named risk ("${verdict.reason}") — needs ${requiredConfidence}%+ to act on that, only got ${verdict.confidence}%, skipping`);
+        continue;
+      }
+    }
 
     // Track-record sizing/gate — same quant layer as T212/mean-reversion.
     let premiumBudget = INDEX_PREMIUM_GBP[mode];
@@ -1072,7 +1122,15 @@ async function scanStockEntries(mode: IgMode, session: IGSession): Promise<void>
       // dailies — see STOCK_UNDERLYINGS' own comment for why that changed.
     });
     addLog(mode, 'info', u.name, `[Weekly] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today → ${side.toUpperCase()} candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
-    if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;
+    if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP') continue;
+    {
+      const counterThesis = hasCounterThesisLanguage(verdict.reason);
+      const requiredConfidence = MIN_CONFIRM_CONFIDENCE + (counterThesis ? COUNTER_THESIS_CONFIDENCE_BONUS : 0);
+      if (verdict.confidence < requiredConfidence) {
+        if (counterThesis) addLog(mode, 'wait', u.name, `[Weekly] ⚠ Reasoning explicitly argues past a named risk ("${verdict.reason}") — needs ${requiredConfidence}%+ to act on that, only got ${verdict.confidence}%, skipping`);
+        continue;
+      }
+    }
 
     let premiumBudget = STOCK_PREMIUM_GBP[mode];
     const edge = edgeSizing(journalMode(mode), STOCK_STRATEGY);
@@ -1312,6 +1370,7 @@ async function placeStockOrder(
               strike: opt.strike, expiry: opt.expiry, expiryMs: opt.expiryMs,
               side, kind, stake: nextStake, optOffer,
               dp, confidence, aiReason, today,
+              counterThesis: hasCounterThesisLanguage(aiReason),
             };
             s.pendingOverrides = [...s.pendingOverrides.filter(o => o.underlyingEpic !== u.shareEpic), override];
             saveOverrides(mode, s.pendingOverrides);
@@ -1517,7 +1576,15 @@ async function scanStockDailyEntries(mode: IgMode, session: IGSession): Promise<
       horizon: 'intraday',
     });
     addLog(mode, 'info', u.name, `[Daily] ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today → ${side.toUpperCase()} candidate → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
-    if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP' || verdict.confidence < MIN_CONFIRM_CONFIDENCE) continue;
+    if (verdict.engine === 'passthrough' || verdict.direction === 'SKIP') continue;
+    {
+      const counterThesis = hasCounterThesisLanguage(verdict.reason);
+      const requiredConfidence = MIN_CONFIRM_CONFIDENCE + (counterThesis ? COUNTER_THESIS_CONFIDENCE_BONUS : 0);
+      if (verdict.confidence < requiredConfidence) {
+        if (counterThesis) addLog(mode, 'wait', u.name, `[Daily] ⚠ Reasoning explicitly argues past a named risk ("${verdict.reason}") — needs ${requiredConfidence}%+ to act on that, only got ${verdict.confidence}%, skipping`);
+        continue;
+      }
+    }
 
     let premiumBudget = STOCK_PREMIUM_GBP[mode];
     const edge = edgeSizing(journalMode(mode), STOCK_DAILY_STRATEGY);

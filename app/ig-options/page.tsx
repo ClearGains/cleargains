@@ -18,7 +18,7 @@ type LogEntry = { id: string; ts: string; type: 'info' | 'enter' | 'exit' | 'wai
 type PendingOverride = {
   id: string; createdAt: number; name: string; strike: number; expiry: string;
   side: 'call' | 'put'; kind: 'stock' | 'stock-daily' | 'stock-monthly';
-  stake: number; optOffer: number;
+  stake: number; optOffer: number; aiReason: string; counterThesis: boolean;
 };
 
 type Status = {
@@ -282,6 +282,12 @@ export default function IgOptionsPage() {
                       <p className="text-[10px] text-gray-500 mt-0.5">
                         {o.side.toUpperCase()} · recommended {o.stake}/pt @ ~{o.optOffer.toFixed(1)} premium · max loss £{maxLoss.toFixed(0)} · {o.kind === 'stock-monthly' ? 'Monthly' : o.kind === 'stock-daily' ? 'Daily' : 'Weekly'}
                       </p>
+                      {o.counterThesis && (
+                        <p className="text-[10px] text-red-400 mt-1 flex items-start gap-1">
+                          <AlertTriangle className="h-3 w-3 flex-shrink-0 mt-0.5" />
+                          <span>This reasoning explicitly argues past a named risk, not a clean signal: &ldquo;{o.aiReason}&rdquo;</span>
+                        </p>
+                      )}
                       <div className="flex items-center gap-2 mt-2">
                         <label className="text-[10px] text-gray-500" htmlFor={`size-${o.id}`}>Open at size</label>
                         <input
