@@ -311,7 +311,19 @@ async function recoverSilentClose(instance: MrInstance, mode: IgMode, session: I
   try {
     const since = new Date(tr.enteredAt - 3600_000).toISOString();
     const txns = await fetchClosedTransactions(session, since);
-    const candidates = txns.filter(t => t.instrumentName === name);
+    // Bug found 2026-09-11: this used to require an EXACT match on
+    // instrumentName, but IG's real closed-transaction records carry a
+    // dealing-hours suffix this bot's own short epicName() lookup never
+    // had — confirmed live, IG returns "Netflix Inc (24 Hours)" / "Ford
+    // Motor Co (24 Hours)" / "Shopify Inc - US (24 Hours)" while epicName()
+    // gives "Netflix" / "Ford" / "Shopify". The exact-equality check never
+    // matched a single real transaction for any stock this instance has
+    // ever traded — every one of its silent-close recoveries silently fell
+    // back to plUsd=0 instead of the real P&L that was sitting right there
+    // in IG's own data the whole time. startsWith is a real fix, not just a
+    // looser guess: every short name this account uses is a true prefix of
+    // IG's own longer instrument name for that CFD.
+    const candidates = txns.filter(t => t.instrumentName?.startsWith(name));
     const match = candidates.length === 1 ? candidates[0]
       : candidates.find(t => t.openLevel !== undefined && Math.abs(t.openLevel - tr.entryLevel) < Math.max(1, tr.entryLevel * 0.005));
     const plUsd = match?.profitAndLoss ?? 0;

@@ -191,6 +191,23 @@ const MOMENTUM_MAX_POSITION_GBP = 250;      // meaningfully smaller than the ISA
 const MOMENTUM_TOTAL_BUDGET_GBP_DEFAULT = 750; // default, adjustable at runtime — see getMomentumBudget/setMomentumBudget
 const MOMENTUM_MAX_POSITIONS = 5;
 const MOMENTUM_MIN_CONFIRM_CONFIDENCE = 65; // slightly below the ISA bot's 70 — this is a faster, smaller-size, higher-turnover strategy by nature, not a long-term conviction call
+
+// Counter-thesis detector — ported 2026-09-11 from igOptionsBot.ts (built
+// there the same day after a manually-overridden Palantir monthly CALL lost
+// -£2,176 on an entry whose own accepted reasoning was "counters Burry's
+// warning" — i.e. it wasn't a clean signal, it was explicitly betting
+// against a named, real objection). Direct real evidence this applies here
+// too: this strategy's own GOOGL entry (2026-08-29) was accepted with the
+// reasoning "current price of 346.59 suggests data error or extreme
+// extension" — the AI's own accepted BUY reasoning flagging a genuine
+// data-quality/extension concern about itself — and that trade lost
+// (-£1.54, -1.1%). Small sample (one instance), but it's the exact failure
+// shape this check exists to catch, so porting it rather than waiting for
+// a bigger sample to prove the pattern.
+function hasCounterThesisLanguage(reason: string): boolean {
+  return /\b(despite|counters?|notwithstanding|outweighs?|even though|regardless of|suggests? (a |an )?(data error|extreme extension))\b/i.test(reason);
+}
+const COUNTER_THESIS_CONFIDENCE_BONUS = 15; // same bonus as igOptionsBot.ts — not a hard block, a flagged candidate just needs real conviction to clear
 // Exit plan is plain rules, not another AI call — a momentum trade's risk
 // needs to be bounded even if the AI/Finnhub side is down, same "structural
 // stop, not a persuadable one" reasoning as every other bot's stop-loss.
@@ -776,7 +793,13 @@ async function pollMomentumEntries(mode: T212Mode): Promise<void> {
       };
       verdict = await askIgConfirmStockTrade(signal);
       addLog(mode, 'info', cand.stock.symbol, `[Momentum] Score ${cand.profitScore} — ${cand.reason} → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
-      if (verdict.engine === 'passthrough' || verdict.direction !== 'BUY' || verdict.confidence < MOMENTUM_MIN_CONFIRM_CONFIDENCE) continue;
+      if (verdict.engine === 'passthrough' || verdict.direction !== 'BUY') continue;
+      const counterThesis = hasCounterThesisLanguage(verdict.reason);
+      const requiredConfidence = MOMENTUM_MIN_CONFIRM_CONFIDENCE + (counterThesis ? COUNTER_THESIS_CONFIDENCE_BONUS : 0);
+      if (verdict.confidence < requiredConfidence) {
+        if (counterThesis) addLog(mode, 'wait', cand.stock.symbol, `⚠ Reasoning explicitly argues past a named risk ("${verdict.reason}") — needs ${requiredConfidence}%+ to act on that, only got ${verdict.confidence}%, skipping`);
+        continue;
+      }
       const scale = Math.min(1, Math.max(0, (verdict.confidence - MOMENTUM_MIN_CONFIRM_CONFIDENCE) / (100 - MOMENTUM_MIN_CONFIRM_CONFIDENCE)));
       budgetGbp = Math.round(MOMENTUM_MIN_POSITION_GBP + scale * (MOMENTUM_MAX_POSITION_GBP - MOMENTUM_MIN_POSITION_GBP));
     }

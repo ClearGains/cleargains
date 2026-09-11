@@ -122,6 +122,24 @@ export function setStrategyAiPaused(mode: IgMode, paused: boolean): void {
 // itself — it just slows how fast one instrument can spend that budget.
 const LOSS_COOLDOWN_MS = 3 * 60 * 60_000;  // 3h — long enough to stop immediate flip-flopping, short enough a same-day different setup isn't locked out for good
 
+// Funds-rejection cooldown for the AUTOMATED sweep only — added 2026-09-11
+// after confirming live that autoOpenRecommendations() has no memory of a
+// broker-side INSUFFICIENT_FUNDS rejection at all: the same recommendation
+// (Marvell, confirmed live) was retried and failed identically every ~30min
+// for hours. Each retry burns a real, paid Gemini call (askIgDailyVerdict,
+// inside openRecommendation) BEFORE the funds check even happens deep inside
+// placeMarketOrder — margin availability doesn't change between one 30min
+// cycle and the next in practice, so that AI call was being spent on an
+// outcome already known this cycle to be a dead end. Deliberately only
+// consulted by autoOpenRecommendations, never by openRecommendation itself
+// — a manual "Open Position" click should still be allowed to try
+// immediately (the existing design already treats a human click as its own
+// override of the position cap; this is the same principle for margin).
+// In-memory only, same tradeoff as journaledDealIds/lastKnownPosition above
+// — worst case after a restart is one wasted retry, not a real gap.
+const FUNDS_COOLDOWN_MS = 2 * 60 * 60_000; // 2h — shorter than LOSS_COOLDOWN_MS since freed margin (a position closing elsewhere) can happen faster than a real thesis reset
+const fundsCooldownEpics = new Map<string, number>();
+
 // Scales the cooldown by how many times in a row this exact instrument has
 // just been cut — confirmed live 2026-08-25 that a flat 3h wasn't enough on
 // its own: Visa got re-entered and re-closed twice more (02:24→02:39,
@@ -387,7 +405,17 @@ async function journalSilentCloses(mode: IgMode, session: IGSession, dealIds: st
     // history uses its own reference for the closing deal, which does NOT
     // equal the dealId this bot tracked at open time, so dealId itself
     // can't be used to look this up directly.
-    const candidates = transactions.filter(t => t.instrumentName === name);
+    // Was an exact-string match — confirmed live 2026-09-11 (found
+    // independently while auditing meanReversionBot.ts's identical pattern
+    // the same day) that IG's own transaction history uses longer reference
+    // names than this bot's own short epicName() output (e.g. "Netflix Inc
+    // (24 Hours)" vs "Netflix"), so the exact match silently never fired —
+    // this whole recovery path was failing closed, meaning a real
+    // broker-side/manual close here just never got journaled at all rather
+    // than being recorded with a wrong number. The short name is always a
+    // true prefix of IG's longer one, so startsWith is the fix, same as
+    // meanReversionBot.ts's identical bug.
+    const candidates = transactions.filter(t => t.instrumentName?.startsWith(name));
     const match = candidates.length === 1 ? candidates[0]
       : candidates.filter(t => t.openLevel !== undefined && Math.abs(t.openLevel - last.level) < Math.max(1, last.level * 0.005))[0];
     if (!match) continue; // couldn't confidently identify which transaction this was — skip rather than guess
@@ -1661,6 +1689,7 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
     return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('INSUFFICIENT_FUNDS')) fundsCooldownEpics.set(epic, Date.now() + FUNDS_COOLDOWN_MS);
     addLog(mode, 'error', name, `Manual open from recommendation failed: ${msg}`);
     return { ok: false, error: msg };
   }
@@ -1698,6 +1727,11 @@ async function autoOpenRecommendations(mode: IgMode): Promise<void> {
   for (const rec of ranked) {
     if (!st.running) break;
     if (count >= cfg.maxPositions) continue;
+    // See FUNDS_COOLDOWN_MS's own comment — skip re-attempting (and
+    // re-spending a real AI call on) a recommendation that just failed on
+    // margin, until the cooldown clears.
+    const fundsCoolUntil = fundsCooldownEpics.get(rec.epic);
+    if (fundsCoolUntil && Date.now() < fundsCoolUntil) continue;
     const result = await openRecommendation(mode, rec.epic);
     if (result.ok) count++;
   }
