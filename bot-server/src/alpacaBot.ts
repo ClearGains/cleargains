@@ -6,7 +6,7 @@ import {
   sessionStartUtcMs,
   isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
   selectOptionsContract, getOptionQuote,
-  type AccountMode, type AlpacaPosition, type AlpacaBar,
+  type AccountMode, type AlpacaPosition, type AlpacaBar, type AlpacaAccount,
 } from './alpacaApi';
 import { scanForBestSymbols } from './alpacaScanner';
 import { recordJournalEvent } from './tradeJournal';
@@ -119,10 +119,10 @@ const optionPeaks = new Map<AccountMode, Map<string, number>>([
 // wasted work every cycle until something closed. In-memory only (worst
 // case after a restart is one more wasted attempt before it re-trips) —
 // same tradeoff as this file's other in-memory-only trackers.
-type OptionsBpState = { active: boolean; since: number; lastCount: number };
+type OptionsBpState = { active: boolean; since: number };
 const optionsBpCooldown = new Map<AccountMode, OptionsBpState>([
-  ['paper', { active: false, since: 0, lastCount: 0 }],
-  ['live',  { active: false, since: 0, lastCount: 0 }],
+  ['paper', { active: false, since: 0 }],
+  ['live',  { active: false, since: 0 }],
 ]);
 const OPTIONS_BP_COOLDOWN_BACKSTOP_MS = 2 * 3_600_000; // self-clears after 2h even if the position-count check somehow misses a close
 
@@ -609,6 +609,7 @@ async function evaluateSymbol(
   sym:       string,
   positions: AlpacaPosition[],
   cfg:       AlpacaBotConfig,
+  account?:  AlpacaAccount,
 ): Promise<boolean> {
   const openPos    = positions.find(p => p.symbol === sym);
   const inPosition = !!openPos;
@@ -768,25 +769,28 @@ async function evaluateSymbol(
       // itself is untouched and still used below for exits.
       //
       // Buying-power cooldown gate — see optionsBpCooldown's own comment.
-      // Tracks the open option-position count on every call regardless of
-      // whether the cooldown is active; a real decrease (a position closing,
-      // freeing margin) clears it automatically. Placed here, before the
-      // headlines fetch/contract lookup/quote fetch below, so a tripped
-      // cooldown skips ALL of that per-symbol work, not just the final order
-      // placement that would fail anyway.
+      // Used to clear itself whenever the open option-position count
+      // dropped, on the assumption a closed position frees margin for a new
+      // one — confirmed live over 2026-09-07 through 2026-09-11 that this is
+      // a false signal: real options_buying_power stayed pinned at $93.10
+      // across four days while positions opened and closed repeatedly, so
+      // this "cleared" the cooldown dozens of times only for the very next
+      // SPY attempt to fail the exact same way each time (wasted headlines
+      // fetch + a scary 403 every retry). Now clears only on a real,
+      // current options_buying_power check against this account — the
+      // actual number the broker will enforce, not a proxy for it.
       const bp = optionsBpCooldown.get(mode)!;
-      const currentOptionCount = positions.filter(p => isOptionSymbol(p.symbol)).length;
-      if (bp.active && currentOptionCount < bp.lastCount) {
+      const realBp = account?.options_buying_power !== undefined ? parseFloat(account.options_buying_power) : undefined;
+      if (bp.active && realBp !== undefined && realBp >= cfg.positionSizeUsd) {
         bp.active = false;
-        addLog(mode, 'info', sym, `Options buying power cooldown cleared — a position closed (${bp.lastCount} → ${currentOptionCount} open)`);
+        addLog(mode, 'info', sym, `Options buying power cooldown cleared — real balance recovered to $${realBp.toFixed(2)} (≥ $${cfg.positionSizeUsd} position size)`);
       }
-      bp.lastCount = currentOptionCount;
       if (bp.active) {
         if (Date.now() - bp.since > OPTIONS_BP_COOLDOWN_BACKSTOP_MS) {
           bp.active = false;
           addLog(mode, 'info', sym, `Options buying power cooldown expired after ${(OPTIONS_BP_COOLDOWN_BACKSTOP_MS / 3_600_000).toFixed(0)}h backstop — retrying entries`);
         } else {
-          addLog(mode, 'wait', sym, 'Skipping entry — options buying power exhausted, waiting for a position to close');
+          addLog(mode, 'wait', sym, 'Skipping entry — options buying power exhausted, waiting for real balance to recover');
           return false;
         }
       }
@@ -829,6 +833,23 @@ async function evaluateSymbol(
         const isHighConviction = confirm.confidence >= HIGH_CONVICTION_MIN_CONFIDENCE && hcMap.size === 0;
         const budgetUsd = isHighConviction ? HIGH_CONVICTION_SIZE_USD : cfg.positionSizeUsd;
         const qty = Math.max(1, Math.floor((budgetUsd * sizeMult) / (contractPrice * 100)));
+        const estimatedCost = qty * contractPrice * 100;
+        // Real pre-flight check, not just the qty formula above — Math.max(1, …)
+        // guarantees at least 1 contract even when 1 contract alone costs far
+        // more than budgetUsd (confirmed live: SPY calls priced so 1 contract
+        // ran $13,200-$13,700, against a $93.10 real options_buying_power —
+        // the qty formula never accounted for that, so this would always have
+        // gone on to attempt (and fail) the order regardless of the cooldown
+        // gate above). Checking real balance here, right before the actual
+        // order, catches this even on the first attempt of a fresh cooldown
+        // window, and re-arms the cooldown immediately instead of waiting for
+        // the broker's own 403 round-trip to do it.
+        if (realBp !== undefined && estimatedCost > realBp) {
+          addLog(mode, 'wait', sym, `${contract.symbol} needs ~$${estimatedCost.toFixed(2)} but real options buying power is only $${realBp.toFixed(2)} — skipping, not attempting a doomed order`);
+          bp.active = true;
+          bp.since = Date.now();
+          return false;
+        }
         entrySig.optionContract = contract.symbol;
         entrySig.optionQty      = qty;
         if (isHighConviction) {
@@ -1097,10 +1118,11 @@ async function executeSignal(
       // path (see optionsBpCooldown's own comment) — this specific failure
       // means the account has no more room for a NEW options position
       // regardless of symbol, so every other symbol's entry attempt this
-      // poll (and every poll after, until something closes) would fail the
-      // exact same way. lastCount is left as whatever the entry gate last
-      // observed — the gate itself updates it every call, this only flips
-      // the flag on.
+      // poll (and every poll after, until real balance recovers) would fail
+      // the exact same way. Kept as a backstop even with the real pre-flight
+      // balance check above — this still catches a stale/race case where the
+      // fetched account balance was fine but the broker's own live number
+      // wasn't.
       if (msg.includes('insufficient options buying power')) {
         const bp = optionsBpCooldown.get(mode)!;
         if (!bp.active) {
@@ -1279,9 +1301,10 @@ async function poll(mode: AccountMode) {
   }
 
   let positions: AlpacaPosition[] = [];
+  let account: AlpacaAccount | undefined;
   try {
-    const account = await getAccount(mode);
-    positions     = await getPositions(mode);
+    account   = await getAccount(mode);
+    positions = await getPositions(mode);
     if (Math.random() < 0.1) {
       addLog(mode, 'info', '—', `Equity: $${parseFloat(account.equity).toFixed(2)} | Cash: $${parseFloat(account.cash).toFixed(2)} | Positions: ${positions.length}`);
     }
@@ -1327,7 +1350,7 @@ async function poll(mode: AccountMode) {
       addLog(mode, 'wait', sym, `Max positions (${cfg.maxPositions}) reached — skipping`);
       continue;
     }
-    const opened = await evaluateSymbol(mode, sym, positions, cfg);
+    const opened = await evaluateSymbol(mode, sym, positions, cfg, account);
     if (opened) openCount++;
   }
 
@@ -1356,7 +1379,7 @@ async function poll(mode: AccountMode) {
     for (const sym of orphaned) {
       if (!st.running) break;
       addLog(mode, 'info', sym, `Held position's underlying has rotated out of the current scan list — checking its exit anyway`);
-      await evaluateSymbol(mode, sym, positions, cfg);
+      await evaluateSymbol(mode, sym, positions, cfg, account);
     }
   }
 

@@ -46,6 +46,7 @@ export type AlpacaAccount = {
   cash:                string;
   portfolio_value:     string;
   buying_power:        string;
+  options_buying_power?: string; // real per-account cap on new options orders — distinct from buying_power, and NOT proportional to open option-position count (confirmed live: stayed pinned at $93.10 across 4 days while positions opened and closed) — see optionsBpCooldown's own comment in alpacaBot.ts
   equity:              string;
   pattern_day_trader:  boolean;
   trading_blocked:     boolean;
