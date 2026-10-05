@@ -344,8 +344,14 @@ export function meanReversionOwnedDealIds(): Set<string> {
 // isn't igStrategyBot's to manage even if tracked state is momentarily out
 // of sync (mid-entry, or a dealId not yet persisted).
 export function meanReversionOwnedEpics(): Set<string> {
+  // Only instances actually switched on — a stopped instance owns nothing, and
+  // claiming its whole watchlist would strip igStrategyBot's severe-loss and
+  // weekend guards (and Gemini watch) from any other position on those names.
   const epics = new Set<string>();
-  for (const list of Object.values(INSTANCE_EPICS)) for (const e of list) epics.add(e);
+  for (const [instance, list] of Object.entries(INSTANCE_EPICS) as [MrInstance, string[]][]) {
+    if (!wasMeanReversionBotRunning(instance, 'demo') && !wasMeanReversionBotRunning(instance, 'live')) continue;
+    for (const e of list) epics.add(e);
+  }
   return epics;
 }
 

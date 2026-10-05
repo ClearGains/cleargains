@@ -365,6 +365,16 @@ function saveTracked(mode: IgMode, tracked: Record<string, Tracked>): void {
   try { fs.writeFileSync(trackedFile(mode), JSON.stringify(tracked), 'utf8'); } catch {}
 }
 
+// Deal IDs this bot is managing, both modes — consumed by positionOwnership.ts
+// so igStrategyBot's guards leave option positions to this bot's own exits.
+export function igOptionsOwnedDealIds(): Set<string> {
+  const owned = new Set<string>();
+  for (const mode of ['demo', 'live'] as IgMode[]) {
+    for (const t of Object.values(loadTracked(mode))) if (t?.dealId) owned.add(t.dealId);
+  }
+  return owned;
+}
+
 function overridesFile(mode: IgMode): string { return path.join(__dirname, '..', `ig-options-overrides-${mode}.json`); }
 function loadOverrides(mode: IgMode): PendingOverride[] {
   try { return JSON.parse(fs.readFileSync(overridesFile(mode), 'utf8')) as PendingOverride[]; }

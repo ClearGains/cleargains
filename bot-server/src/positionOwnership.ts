@@ -34,9 +34,16 @@ export async function getForeignOwnership(): Promise<ForeignOwnership> {
   if (cache && Date.now() - cache.at < TTL_MS) return cache.owned;
   try {
     const mr = await import('./meanReversionBot');
+    const opts = await import('./igOptionsBot');
+    // igOptionsBot added 2026-10-06: confirmed live, igStrategyBot's severe-
+    // loss guard (£20 ceiling) was trying every 30s to close the options
+    // bot's NVDA/PLTR demo positions (-£468/-£842) — option premiums swing
+    // far past that ceiling by design, and their exits belong to that bot.
+    const dealIds = mr.meanReversionOwnedDealIds();
+    for (const id of opts.igOptionsOwnedDealIds()) dealIds.add(id);
     cache = {
       at: Date.now(),
-      owned: { dealIds: mr.meanReversionOwnedDealIds(), epics: mr.meanReversionOwnedEpics() },
+      owned: { dealIds, epics: mr.meanReversionOwnedEpics() },
     };
   } catch {
     // Never let an ownership lookup failure block a real safety guard —
