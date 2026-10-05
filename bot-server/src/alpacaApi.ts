@@ -33,6 +33,7 @@ export type AlpacaOrder = {
   side:              'buy' | 'sell';
   type:              string;
   status:            string;
+  time_in_force:     string;
   created_at:        string;
   filled_at:         string | null;
   filled_avg_price:  string | null;

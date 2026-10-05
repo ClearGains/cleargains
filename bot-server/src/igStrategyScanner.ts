@@ -239,6 +239,16 @@ export const FX_EPICS = new Set([
   'CS.D.EURGBP.TODAY.IP', 'CS.D.AUDUSD.TODAY.IP',
 ]);
 
+// Same exclusivity reasoning as FX_EPICS above, added 2026-09-24 for the new
+// dedicated 'commodities' mean-reversion instance (meanReversionBot.ts) —
+// without this, the main scan-and-score strategies could independently pick
+// up Natural Gas/Brent Crude/Silver too (all three are already real,
+// individually-verified epics in IG_EPICS below), racing an uncoordinated
+// second bot against the one that's actually meant to own them.
+export const COMMODITY_EPICS = new Set([
+  'CC.D.NG.USS.IP', 'CC.D.LCO.USS.IP', 'CS.D.USCSI.TODAY.IP',
+]);
+
 // Restricts rule_based_analysis to only the instruments genuinely confirmed
 // profitable — SUPERSEDES an earlier version of this list (2026-08-15,
 // scripts/backtestDailyBrief.ts) that turned out to be built on an
@@ -421,6 +431,9 @@ const SCAN_RESOLUTION: Record<IgStrategyName, { resolution: string; count: numbe
   // Also not used at runtime — in YAHOO_SCAN_STRATEGIES below. 210 =
   // meanReversionStrategy.ts's own MIN_BARS_NEEDED.
   mean_reversion_swing: { resolution: 'DAY', count: 210 },
+  // Also not used at runtime in practice, matching igStrategyBot.ts's
+  // IG_RES.news_momentum (80 daily bars).
+  news_momentum: { resolution: 'DAY', count: 80 },
 };
 
 // ── Bar conversion ────────────────────────────────────────────────────────────
@@ -734,7 +747,7 @@ export async function scanIgEpics(
   // exclusively) even though they backtested profitably too.
   const restrictToConfirmed = strategy === 'rule_based_analysis';
   const pool = IG_EPICS.filter(e =>
-    !exclude.includes(e.epic) && !FX_EPICS.has(e.epic) && !MANUAL_ONLY_EPICS.has(e.epic)
+    !exclude.includes(e.epic) && !FX_EPICS.has(e.epic) && !COMMODITY_EPICS.has(e.epic) && !MANUAL_ONLY_EPICS.has(e.epic)
     && (!excludeIndices || !isIndexEpic(e.epic) || e.epic === PRIORITY_EPIC)
     && (!restrictToConfirmed || RULE_BASED_ANALYSIS_CONFIRMED_EPICS.has(e.epic))
     && (!alpacaOnly || e.epic in EPIC_TO_ALPACA));
@@ -752,7 +765,33 @@ export async function scanIgEpics(
           ? await fetchBarsWithFallback(epic, freeParams.range, freeParams) ?? []
           : await fetchBarsWithFallback(epic, '6mo') ?? []
         : (await fetchCandleHistory(session, epic, resolution, barCount)).map(igBarToAlpacaBar);
-      scored.push({ epic, name, score: scoreForStrategy(strategy, bars, epic, name) });
+      // Volatility tilt — added 2026-10-01 per explicit request ("priority
+      // trade less volatile stocks"). The execution side (igStrategyBot.ts)
+      // already derates size on volatile names and requires 75+ conviction
+      // to open one at all; without this, the scanner would still keep
+      // FILLING the watchlist with them and those slots would just sit
+      // unused. This makes the calm names actually get picked.
+      //
+      // Same ATR*1.5-as-%-of-price measure and same 2.5%/6.0% anchors the
+      // execution-side derate uses, so there's one mental model rather than
+      // two competing volatility definitions. A tilt on the ranking, not a
+      // filter: a genuinely outstanding volatile setup can still out-score
+      // a mediocre calm one, it just has to be clearly better rather than
+      // marginally better. Multiplier only ever reduces, so it cannot push
+      // a positive score below the `score > 0` filter below.
+      const rawScore = scoreForStrategy(strategy, bars, epic, name);
+      let volTilt = 1;
+      const tiltAtr   = calcAtr(bars);
+      const tiltPrice = bars.length ? bars[bars.length - 1].c : 0;
+      if (tiltAtr !== null && tiltPrice > 0) {
+        const stopPct = (tiltAtr * 1.5) / tiltPrice * 100;
+        const TILT_START_PCT = 2.5, TILT_FULL_PCT = 6.0, TILT_FLOOR = 0.6;
+        if (stopPct > TILT_START_PCT) {
+          const over = Math.min(stopPct - TILT_START_PCT, TILT_FULL_PCT - TILT_START_PCT);
+          volTilt = 1 - (1 - TILT_FLOOR) * (over / (TILT_FULL_PCT - TILT_START_PCT));
+        }
+      }
+      scored.push({ epic, name, score: rawScore * volTilt });
     } catch {
       // Epic unavailable or market closed — skip silently
     }

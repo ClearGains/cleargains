@@ -572,7 +572,53 @@ export function optionsDirectionalSignal(
 // replacement of the exit lifecycle.
 const OPTIONS_MOMENTUM_MIN_MOVE_PCT = 0.5; // matches T212 momentum's own qualifying bar
 const OPTIONS_TREND_MIN_12W_PCT     = 8;   // matches the IG monthly strategy / T212 ISA bar
-export function optionsNewsBasedEntrySignal(bars: AlpacaBar[], headlines: string[]): StrategySignal {
+// Added 2026-09-23 per explicit request, after reviewing this account's own
+// real trade history and iterating on it live. momentumScore alone did NOT
+// cleanly separate wins from losses in the ~16 real trades checked — the
+// account's best winner (+£6,255, score 43) and one of its worst losers
+// (score 48-56) scored in the same range — so score by itself isn't a
+// reliable gate. What DOES separate them once volume is folded in as a
+// second, independent axis: either a genuinely strong score with at least
+// modest volume behind it, OR a merely decent score backed by real volume
+// confirmation. Two tiers rather than one flat AND: a strong-score setup on
+// thin volume can still be real (a fast-moving story nobody's caught onto
+// yet), but a merely-decent score NEEDS the volume to back it up — that's
+// exactly the gap Micron's own entry fell through (score 56, 0.8x volume:
+// a middling score with unconvincing volume, would fail the mid-tier's 1.2x
+// bar). AMD's dead/illiquid contract (score 65, 0.5x volume) fails even the
+// lower high-tier bar. Retroactively checked against every real trade this
+// account has made: blocks Micron and the 2nd-biggest loser outright, keeps
+// both proven winners (META 43/1.2x, INTC 62/0.7x — each clears its tier
+// exactly), blocks AMD's illiquid trap. Two modest winners (sub-40 score)
+// are collateral — deliberately accepted per explicit request to err
+// conservative rather than tune purely to this sample's exact outcomes.
+const OPTIONS_MOMENTUM_MIN_SCORE            = 40; // below this, blocked regardless of volume
+const OPTIONS_MOMENTUM_HIGH_SCORE           = 60; // at/above this, only needs the lower volume bar
+const OPTIONS_MOMENTUM_HIGH_SCORE_MIN_VOL   = 0.7;
+const OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL    = 1.2; // score 40-59 needs real volume confirmation to compensate
+
+// "Chasing a just-banked win" guard — added 2026-09-27 per explicit request,
+// straight after META closed a genuine winner and the bot bought a fresh
+// call on the same underlying shortly after. The concern is real: once a
+// move has already run far enough to bank a real gain, buying the same
+// direction again is disproportionately likely to be buying the top of a
+// move that's already largely played out, not the start of a new one — the
+// gain is banked, the easy part of the move is behind it, and a re-entry
+// needs real new evidence the run continues, not just "still looks fine."
+// alpacaBot.ts passes chaseGuard.call/put = true when a win closed on this
+// exact underlying, same direction, within the cooldown window (see
+// CHASE_COOLDOWN_MS there). When active: the long-horizon trend+news path
+// is skipped entirely for that direction (a trend that "still looks
+// intact" is exactly the weak, backward-looking reasoning that leads to
+// chasing) and the momentum path needs a MUCH higher bar than normal —
+// genuinely fresh, strong, current evidence, not just clearing the regular
+// tier.
+const CHASE_REENTRY_MIN_SCORE = 75;
+const CHASE_REENTRY_MIN_VOL   = 1.5;
+export type ChaseGuard = { call: boolean; put: boolean };
+export function optionsNewsBasedEntrySignal(
+  bars: AlpacaBar[], headlines: string[], chaseGuard?: ChaseGuard,
+): StrategySignal {
   if (bars.length < 60) return { action: 'HOLD', reason: 'insufficient bars for a news-based read' };
   const closes = bars.map(b => b.c);
   const last   = closes[closes.length - 1];
@@ -587,37 +633,56 @@ export function optionsNewsBasedEntrySignal(bars: AlpacaBar[], headlines: string
 
   const sentiment = sentimentScore(headlines).score;
   const score     = momentumScore({ dayChangePercent: dp, volumeSurgeMultiple: volRatio, headlineCount: headlines.length });
+  // See OPTIONS_MOMENTUM_MIN_SCORE's own comment for the two-tier reasoning.
+  const momentumQualifies =
+    score >= OPTIONS_MOMENTUM_MIN_SCORE &&
+    volRatio >= (score >= OPTIONS_MOMENTUM_HIGH_SCORE ? OPTIONS_MOMENTUM_HIGH_SCORE_MIN_VOL : OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL);
 
   // Short-horizon momentum path — same qualifying shape as
-  // scanMomentumCandidates: a real move today, not contradicted by news.
-  if (Math.abs(dp) >= OPTIONS_MOMENTUM_MIN_MOVE_PCT) {
+  // scanMomentumCandidates: a real move today, not contradicted by news,
+  // now also gated on score+volume (momentumQualifies above). Under the
+  // chase guard, the normal tier isn't enough — needs CHASE_REENTRY_MIN_SCORE
+  // (75) and CHASE_REENTRY_MIN_VOL (1.5x) instead, i.e. a materially
+  // stronger, fresher signal than what originally qualified the position
+  // that just closed.
+  if (Math.abs(dp) >= OPTIONS_MOMENTUM_MIN_MOVE_PCT && momentumQualifies) {
     if (dp > 0 && sentiment > -0.5) {
-      return {
-        action: 'BUY', optionType: 'call',
-        reason: `[Momentum] +${dp.toFixed(1)}% today, ${volRatio.toFixed(1)}x volume, score ${score} — buying call`,
-      };
+      if (!chaseGuard?.call || (score >= CHASE_REENTRY_MIN_SCORE && volRatio >= CHASE_REENTRY_MIN_VOL)) {
+        return {
+          action: 'BUY', optionType: 'call',
+          reason: `[Momentum] +${dp.toFixed(1)}% today, ${volRatio.toFixed(1)}x volume, score ${score} — buying call`
+            + (chaseGuard?.call ? ' (cleared the higher chase-guard bar after a recent win)' : ''),
+        };
+      }
     }
     if (dp < 0 && sentiment < 0.5) {
-      return {
-        action: 'BUY', optionType: 'put',
-        reason: `[Momentum] ${dp.toFixed(1)}% today, ${volRatio.toFixed(1)}x volume, score ${score} — buying put`,
-      };
+      if (!chaseGuard?.put || (score >= CHASE_REENTRY_MIN_SCORE && volRatio >= CHASE_REENTRY_MIN_VOL)) {
+        return {
+          action: 'BUY', optionType: 'put',
+          reason: `[Momentum] ${dp.toFixed(1)}% today, ${volRatio.toFixed(1)}x volume, score ${score} — buying put`
+            + (chaseGuard?.put ? ' (cleared the higher chase-guard bar after a recent win)' : ''),
+        };
+      }
     }
   }
 
   // Long-horizon trend+news path — same qualifying shape as the IG options
   // bot's monthly strategy: a real sustained trend, not already extended,
-  // corroborated by real news (or at least not contradicted by it).
+  // corroborated by real news (or at least not contradicted by it). Skipped
+  // entirely under the chase guard — "the trend still looks intact" is
+  // exactly the backward-looking reasoning that leads to buying a top, so a
+  // guarded re-entry can only come from the stricter, fresher momentum path
+  // above, never from this one.
   const trendUp   = readTrend(bars, 'BUY');
   const trendDown = readTrend(bars, 'SELL');
-  if (trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT && !trendUp.isExtended
+  if (!chaseGuard?.call && trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT && !trendUp.isExtended
       && (trendUp.trend4w === null || trendUp.trend4w >= -3) && sentiment > -0.3) {
     return {
       action: 'BUY', optionType: 'call',
       reason: `[Trend] +${trendUp.trend12w.toFixed(1)}%/12w, not extended, news not negative — buying call`,
     };
   }
-  if (trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT && !trendDown.isExtended
+  if (!chaseGuard?.put && trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT && !trendDown.isExtended
       && (trendDown.trend4w === null || trendDown.trend4w <= 3) && sentiment < 0.3) {
     return {
       action: 'BUY', optionType: 'put',
@@ -625,7 +690,150 @@ export function optionsNewsBasedEntrySignal(bars: AlpacaBar[], headlines: string
     };
   }
 
-  return { action: 'HOLD', reason: `No momentum (${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today) or trend (${trendUp.trend12w?.toFixed(1) ?? '?'}%/12w) qualifying` };
+  const moveQualifies = Math.abs(dp) >= OPTIONS_MOMENTUM_MIN_MOVE_PCT;
+  const neededVol = score >= OPTIONS_MOMENTUM_HIGH_SCORE ? OPTIONS_MOMENTUM_HIGH_SCORE_MIN_VOL : OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL;
+  const guardActive = (dp > 0 && chaseGuard?.call) || (dp < 0 && chaseGuard?.put);
+  const momentumReason = moveQualifies && !momentumQualifies
+    ? ` (momentum move qualified at ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% but score ${score} / volume ${volRatio.toFixed(1)}x didn't clear its tier — needs ${score >= OPTIONS_MOMENTUM_HIGH_SCORE ? `${neededVol}x volume at this score` : score >= OPTIONS_MOMENTUM_MIN_SCORE ? `${neededVol}x volume at this score` : `score ${OPTIONS_MOMENTUM_MIN_SCORE}+`})`
+    : moveQualifies && guardActive && !(score >= CHASE_REENTRY_MIN_SCORE && volRatio >= CHASE_REENTRY_MIN_VOL)
+    ? ` (chase-guard active after a recent win here — needed score ${CHASE_REENTRY_MIN_SCORE}+/${CHASE_REENTRY_MIN_VOL}x volume, got score ${score}/${volRatio.toFixed(1)}x)`
+    : '';
+  return { action: 'HOLD', reason: `No momentum (${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today) or trend (${trendUp.trend12w?.toFixed(1) ?? '?'}%/12w) qualifying${momentumReason}` };
+}
+
+// ── News Momentum (IG spread-bet — daily bars, re-checked every 15min) ─────
+// Added 2026-09-28 per explicit request: bring the same Finnhub-scored
+// momentum design already proven on T212's own Momentum strategy and the
+// Alpaca options bot to the IG spread-bet account. Deliberately "much
+// simpler" than optionsNewsBasedEntrySignal above — momentum path only, no
+// long-horizon trend+news secondary path — since that's literally what was
+// asked for. Same underlying score (momentumScore: today's real move +
+// relative volume + real headline count, the exact formula T212's
+// scanMomentumCandidates uses), the same tiered score+volume qualify bar,
+// and the same chase-guard shape as the options bot — just BUY/SELL instead
+// of call/put, since IG spread bets have no options-specific concept here.
+// Mechanical throughout — real Finnhub-derived numbers, not an AI's
+// free-form read of them, per explicit preference: a fixed formula can be
+// tailored directly to what today's move/volume/headline-count actually
+// mean, where an AI's qualitative judgement can't reliably tell a fresh
+// move from news that's already priced in.
+// Raised again 2026-09-29 per explicit request: fewer, higher-conviction
+// entries rather than continuously opening small positions on marginal
+// signals. score is 0-100 (35 momentum + 25 volume + 30 news + 10
+// volatility — see momentumScore) — 60/85 means a position only opens on a
+// genuinely strong, well-confirmed setup, not just "technically cleared the
+// bar." Volume requirements raised alongside it for the same reason.
+const NEWS_MOMENTUM_MIN_SCORE          = 60;
+const NEWS_MOMENTUM_HIGH_SCORE         = 85;
+const NEWS_MOMENTUM_HIGH_SCORE_MIN_VOL = 0.9;
+const NEWS_MOMENTUM_MID_SCORE_MIN_VOL  = 1.5;
+// Chase-guard bar — same idea as CHASE_REENTRY_MIN_SCORE above (a much
+// higher bar than the normal tier, applied only after a recent real win on
+// this epic, same direction, within the cooldown window). Near the
+// formula's own practical ceiling now that the base tiers moved up this
+// far — deliberately close to unreachable: chasing a just-banked win is
+// exactly the lowest-conviction reason to re-enter, so this should all but
+// never clear.
+const NEWS_MOMENTUM_CHASE_MIN_SCORE = 95;
+const NEWS_MOMENTUM_CHASE_MIN_VOL   = 2;
+export type DirectionalChaseGuard = { buy: boolean; sell: boolean };
+export function newsMomentumSignal(
+  bars: AlpacaBar[], headlines: string[], chaseGuard?: DirectionalChaseGuard,
+): StrategySignal {
+  if (bars.length < 60) return { action: 'HOLD', reason: 'insufficient bars for a news-based read' };
+  const closes = bars.map(b => b.c);
+  const last   = closes[closes.length - 1];
+  const prev   = closes[closes.length - 2];
+  const dp     = prev > 0 ? ((last - prev) / prev) * 100 : 0;
+
+  const recent20    = bars.slice(-20);
+  const priorVols    = bars.slice(0, -20).map(b => b.v);
+  const avgVolPrior  = priorVols.length ? priorVols.reduce((s, v) => s + v, 0) / priorVols.length : 0;
+  const recentVol    = recent20.reduce((s, b) => s + b.v, 0) / recent20.length;
+  const volRatio     = avgVolPrior > 0 ? recentVol / avgVolPrior : 1;
+
+  const sentiment = sentimentScore(headlines).score;
+
+  // ── Scoring: leading indicators weighted over the already-happened move ──
+  // Reworked 2026-10-01 per explicit request. The shared momentumScore()
+  // gives 35 of its ~90 achievable points to |today's move| — so a third of
+  // the score was "how much has this ALREADY gone", which is precisely the
+  // part that is no longer available to profit from. Volume surge and real
+  // headline flow are the LEADING half of the read: they're what says a
+  // move is coming. Waiting for the move to also show up before entering
+  // means entering after it.
+  //
+  // Deliberately a local weighting rather than changing momentumScore()
+  // itself — that function is shared with t212Bot and igOptionsBot, whose
+  // own strategies DO want move-confirmation weighted that way.
+  // Same ~90 achievable total as before, so NEWS_MOMENTUM_MIN_SCORE etc.
+  // stay on a comparable scale:
+  //     volume up to 40 (was 25) · news up to 35 (was 30) · move up to 15 (was 35)
+  const moveComponent   = Math.min(15, Math.abs(dp) * 7);
+  const volumeComponent = Math.max(0, Math.min(40, (volRatio - 1) * 26));
+  const newsComponent   = Math.min(35, headlines.length * 7);
+  const score = Math.round(Math.min(100, moveComponent + volumeComponent + newsComponent));
+
+  // ── Two ways to qualify ────────────────────────────────────────────────
+  // The old code had ONE path and a hard precondition: |dp| >= 0.5% or
+  // rejected outright ("No real move yet"). That threw away the single
+  // best setup this strategy could look for — heavy volume and fresh news
+  // while price is still flat, i.e. before the move. Live logs were full of
+  // exactly those rejections ("No real move yet (+0.1% today)").
+  //
+  // ANTICIPATION: price hasn't declared yet, so volume has to be genuinely
+  // elevated AND the news decisive enough to say which way — volume alone
+  // is directionless, it tells you something is coming, not what. That's
+  // the honest limit of entering early, and it's why this path demands more
+  // of both inputs than the confirmation path does.
+  //
+  // CONFIRMATION: price is already moving; trade with it unless the news
+  // actively contradicts. Threshold cut 0.5% -> 0.3% so "starting to move"
+  // counts rather than only "has moved".
+  const CONFIRM_MOVE_PCT    = 0.3;
+  const ANTICIPATE_MIN_VOL  = 1.5;
+  const ANTICIPATE_MIN_SENT = 0.3;
+
+  let direction: 'BUY' | 'SELL' | null = null;
+  let path = '';
+  if (Math.abs(dp) >= CONFIRM_MOVE_PCT) {
+    if (dp > 0 && sentiment > -0.5)      { direction = 'BUY';  path = 'confirming'; }
+    else if (dp < 0 && sentiment < 0.5)  { direction = 'SELL'; path = 'confirming'; }
+  } else if (volRatio >= ANTICIPATE_MIN_VOL && Math.abs(sentiment) >= ANTICIPATE_MIN_SENT) {
+    direction = sentiment > 0 ? 'BUY' : 'SELL';
+    path = 'anticipating';
+  }
+
+  const qualifies = score >= NEWS_MOMENTUM_MIN_SCORE
+    && volRatio >= (score >= NEWS_MOMENTUM_HIGH_SCORE ? NEWS_MOMENTUM_HIGH_SCORE_MIN_VOL : NEWS_MOMENTUM_MID_SCORE_MIN_VOL);
+
+  const atr = calcAtr(bars);
+  if (atr === null) return { action: 'HOLD', reason: 'ATR not ready' };
+
+  if (direction && qualifies) {
+    const guarded     = direction === 'BUY' ? !!chaseGuard?.buy : !!chaseGuard?.sell;
+    const clearsGuard = !guarded || (score >= NEWS_MOMENTUM_CHASE_MIN_SCORE && volRatio >= NEWS_MOMENTUM_CHASE_MIN_VOL);
+    if (clearsGuard) {
+      const isBuy = direction === 'BUY';
+      return {
+        action: direction, orderType: 'market', confidence: score,
+        stopPrice:       +(isBuy ? last - atr * 1.5 : last + atr * 1.5).toFixed(2),
+        takeProfitPrice: +(isBuy ? last + atr * 3   : last - atr * 3).toFixed(2),
+        reason: `${path} — ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today, ${volRatio.toFixed(1)}x volume, sentiment ${sentiment.toFixed(2)}, score ${score} — ${isBuy ? 'buying' : 'selling'}`
+          + (guarded ? ' (cleared the higher chase-guard bar after a recent win)' : ''),
+      };
+    }
+  }
+
+  const guardActive = direction !== null && (direction === 'BUY' ? chaseGuard?.buy : chaseGuard?.sell);
+  const reason = !direction
+    ? `No directional read — ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today (needs ${CONFIRM_MOVE_PCT}% to confirm) and ${volRatio.toFixed(1)}x volume / sentiment ${sentiment.toFixed(2)} not decisive enough to anticipate`
+    : !qualifies
+    ? `${path} setup but score ${score}/volume ${volRatio.toFixed(1)}x didn't clear its tier`
+    : guardActive
+    ? `Chase-guard active after a recent win here — needed score ${NEWS_MOMENTUM_CHASE_MIN_SCORE}+/${NEWS_MOMENTUM_CHASE_MIN_VOL}x volume, got score ${score}/${volRatio.toFixed(1)}x`
+    : 'No entry';
+  return { action: 'HOLD', reason };
 }
 
 // ── 7. Donchian / Turtle-style Breakout (daily bars — hold days to weeks) ─────
@@ -911,7 +1119,7 @@ export function ruleBasedAnalysisSignal(
 
 // ── Strategy metadata ─────────────────────────────────────────────────────────
 
-export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed' | 'mean_reversion_swing';
+export type StrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'options_directional' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed' | 'mean_reversion_swing' | 'news_momentum';
 
 export const STRATEGY_META: Record<StrategyName, {
   label:     string;
@@ -1017,4 +1225,16 @@ export const STRATEGY_META: Record<StrategyName, {
   // 403s (rate-limit-shaped) at the old 60min cadence, so tightening this a
   // lot further raises those, not the entry signal's own quality.
   mean_reversion_swing: { label: 'Mean Reversion (RSI2+EMA200)', timeframe: 'daily', pollMs: 25 * 60_000, barPeriod: '1Day', barsNeeded: 210 },
+  // Added 2026-09-28 per explicit request: the same Finnhub-scored
+  // momentum design as T212's own Momentum strategy and the Alpaca options
+  // bot (today's move + relative volume + real headline count, weighted
+  // into the shared 0-100 momentumScore formula), brought to the IG
+  // spread-bet bot with the same tiered score+volume floor, chase-guard,
+  // and stalled-loser escalation those two already have — see
+  // newsMomentumSignal's own comment. timeframe 'intraday' (not 'daily')
+  // deliberately, same reasoning as options_directional — this needs to
+  // re-check TODAY's move every cycle, not just once/day off a closed bar.
+  // barsNeeded 80 covers the 60-bar minimum the signal itself requires plus
+  // the ~25-bar volume-ratio lookback with headroom.
+  news_momentum: { label: 'News Momentum (Finnhub-scored)', timeframe: 'intraday', pollMs: 15 * 60_000, barPeriod: '1Day', barsNeeded: 80 },
 };

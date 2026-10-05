@@ -555,13 +555,26 @@ export async function placeMarketOrder(
     return { ok: confirm.dealStatus === 'ACCEPTED' && !!confirm.dealId, confirm };
   };
 
-  let guaranteedApplied = useGuaranteed;
-  let { ok, confirm } = await submitAndConfirm(useGuaranteed);
+  // Don't re-ask for a guaranteed stop on an epic that has already refused
+  // one — added 2026-10-03. Every rejected attempt costs a full extra order
+  // submission AND up to 4 x 1.5s of confirm polling before the retry even
+  // starts, so on an unsupported instrument every single entry was paying
+  // ~6-12s of dead latency (during which the price moves away from the
+  // signal) and double the order rate, then succeeding without the
+  // guarantee anyway. Confirmed live: ATTACHED_ORDER_LEVEL_ERROR on
+  // essentially every attempt across this account's instruments — Intel,
+  // ExxonMobil, Disney, AMD, Uber, Dell, Coinbase, NVIDIA, Broadcom, Apple,
+  // Lilly, Moderna. IG's market details don't expose guaranteed-stop
+  // availability, so the only way to know is to have been told once.
+  const wantsGuaranteed = useGuaranteed && !guaranteedStopUnsupported.has(epic);
+  let guaranteedApplied = wantsGuaranteed;
+  let { ok, confirm } = await submitAndConfirm(wantsGuaranteed);
   // Not every instrument supports guaranteed stops (and some reject the
   // requested distance as too tight) — fall back to a normal stop rather
   // than failing the entry outright.
-  if (!ok && useGuaranteed) {
-    console.warn(`[igApi] Guaranteed stop rejected for ${epic} (${confirm.reason ?? 'unknown'}) — retrying with a normal stop`);
+  if (!ok && wantsGuaranteed) {
+    guaranteedStopUnsupported.add(epic);
+    console.warn(`[igApi] Guaranteed stop rejected for ${epic} (${confirm.reason ?? 'unknown'}) — retrying with a normal stop, and not requesting one for this epic again`);
     guaranteedApplied = false;
     ({ ok, confirm } = await submitAndConfirm(false));
   }
@@ -681,6 +694,38 @@ export async function updatePositionLevels(
     throw new Error(`updatePositionLevels ${r.status}: ${t.slice(0, 100)}`);
   }
 }
+
+// ── Matching this account's short instrument names to IG's own ────────────
+// Added 2026-10-06. Silent-close recovery finds a real closed trade in IG's
+// transaction history by instrument name, and every consumer was doing
+// `igName.startsWith(shortName)`. That handled IG's SUFFIXES — the case the
+// 2026-09-11 fix was written for, where epicName() gives "Netflix" and IG
+// returns "Netflix Inc (24 Hours)" — but silently fails on a PREFIX:
+//     epicName("CS.D.USCSI.TODAY.IP") = "Silver"
+//     IG's transaction record          = "Spot Silver"
+//     "Spot Silver".startsWith("Silver") === false
+// so no match, P&L falls back to 0, and the bot journals a fabricated £0.00
+// close using the ENTRY level as the exit level. Confirmed live on Silver:
+// journal recorded "+£9.88 / £0.00 (6053.50 -> 6053.50)" for a trade IG shows
+// as 6053.5 -> 6146.7, a real -£10.25 loss. A £20 error on one position, and
+// the same shape would hit any instrument IG prefixes ("Spot Gold", "US Crude").
+//
+// Matching both directions on a normalised form is safe here because every
+// caller ALSO disambiguates on openLevel proximity — the name only has to
+// narrow the candidate pool, the level is what identifies the trade.
+export function instrumentNameMatches(shortName: string, igName?: string): boolean {
+  if (!igName) return false;
+  const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const a = norm(shortName), b = norm(igName);
+  if (!a || !b) return false;
+  return b.includes(a) || a.includes(b);
+}
+
+// Epics that have refused a guaranteed stop at least once this process — see
+// placeMarketOrder's own comment. In-memory only: worst case after a restart
+// is one wasted retry per epic, which is exactly the old behaviour, so there's
+// no safety loss in not persisting it.
+const guaranteedStopUnsupported = new Set<string>();
 
 export type MarketDetail = {
   epic:            string;

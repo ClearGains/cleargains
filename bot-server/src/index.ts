@@ -8,6 +8,7 @@ import { calcRsi, calcMacdHist, calcAtr } from './scalperStrategy';
 import {
   startAlpacaBot, stopAlpacaBot, pauseAlpacaBot, resumeAlpacaBot,
   getAlpacaBotStatus, emergencyStop, loadSavedAlpacaState, setPositionWatchEnabled,
+  closePositionManually as closeAlpacaPositionManually,
   type AlpacaBotConfig,
 } from './alpacaBot';
 import {
@@ -15,7 +16,7 @@ import {
   getIgStrategyBotStatus, loadSavedIgStrategyState, startRecommendationRefresh,
   refreshRecommendations, refreshDailyPick, openRecommendation,
   getPausedEpics, pauseEpic, resumeEpic,
-  releaseDeal, holdDeal, updateMaxDailyLossPct, updateDailyProfitTargetGbp,
+  releaseDeal, holdDeal, closeIgPositionManually, updateMaxDailyLossPct, updateDailyProfitTargetGbp,
   setStrategyAiPaused,
   type IgMode, type IgStrategyConfig,
 } from './igStrategyBot';
@@ -322,6 +323,12 @@ app.delete('/alpaca/:mode/watch/:symbol', auth, (req: Request, res: Response) =>
   res.json(setPositionWatchEnabled(mode, decodeURIComponent(req.params.symbol), false));
 });
 
+app.post('/alpaca/:mode/positions/:symbol/close', auth, (req: Request, res: Response) => {
+  const mode = resolveAlpacaMode(req, res);
+  if (!mode) return;
+  void closeAlpacaPositionManually(mode, decodeURIComponent(req.params.symbol)).then(r => res.json(r));
+});
+
 // ── T212 Stocks ISA bot ──────────────────────────────────────────────────
 function resolveT212Mode(req: Request, res: Response): T212Mode | null {
   const mode = (req.params.mode ?? req.query.mode) as string;
@@ -391,8 +398,8 @@ app.post('/t212/:mode/momentum/budget', auth, (req: Request, res: Response) => {
 // ── Mean-reversion bot (RSI(2)+EMA200) — three independent instances ───────
 function resolveMrInstance(req: Request, res: Response): MrInstance | null {
   const instance = req.params.instance;
-  if (instance !== 'fx' && instance !== 'stocks' && instance !== 'japan225') {
-    res.status(400).json({ ok: false, error: 'instance must be "fx", "stocks", or "japan225"' });
+  if (instance !== 'fx' && instance !== 'stocks' && instance !== 'japan225' && instance !== 'commodities') {
+    res.status(400).json({ ok: false, error: 'instance must be "fx", "stocks", "japan225", or "commodities"' });
     return null;
   }
   return instance;
@@ -908,6 +915,12 @@ app.post('/ig-strategy/:mode/deals/:dealId/hold', auth, (req: Request, res: Resp
   res.json({ ok: true });
 });
 
+app.post('/ig-strategy/:mode/positions/:dealId/close', auth, (req: Request, res: Response) => {
+  const mode = resolveIgMode(req, res);
+  if (!mode) return;
+  void closeIgPositionManually(mode, req.params.dealId).then(r => res.json(r));
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[bot-server] Listening on 0.0.0.0:${PORT}`);
@@ -1006,9 +1019,9 @@ app.listen(PORT, '0.0.0.0', () => {
     });
   }
 
-  // Auto-resume the mean-reversion bot's three instances (demo/live each) —
+  // Auto-resume the mean-reversion bot's four instances (demo/live each) —
   // same rationale as every other bot's auto-resume.
-  for (const instance of ['fx', 'stocks', 'japan225'] as const) {
+  for (const instance of ['fx', 'stocks', 'japan225', 'commodities'] as const) {
     for (const mode of ['demo', 'live'] as const) {
       if (!wasMeanReversionBotRunning(instance, mode)) continue;
       console.log(`[bot-server] Auto-resuming mean-reversion ${instance} ${mode} bot...`);

@@ -879,19 +879,17 @@ export function createFxScalperBot(mode: FxMode): FxScalperHandle {
         } else if (p.upl >= profitLockFloor) {
           addLog('exit', epicName(p.epic), `🔒 Profit lock +£${p.upl.toFixed(2)} ≥ £${profitLockFloor.toFixed(2)} — locking in gain`);
           await closeAndReset(p.epic, p.dealId, p.direction, p.size);
-        } else if (weekendGuardWindow && p.stopLevel !== undefined) {
-          const currentDist   = Math.abs(p.level - p.stopLevel);
-          const tightenedDist = currentDist * 0.5;
-          const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
-          const wouldTighten  = p.direction === 'BUY' ? newStop > p.stopLevel : newStop < p.stopLevel;
-          if (wouldTighten) {
-            try {
-              await updatePositionLevels(session, p.dealId, newStop, p.limitLevel ?? null);
-              addLog('info', epicName(p.epic), `Weekend risk guard — tightened stop ${currentDist.toFixed(2)}→${tightenedDist.toFixed(2)} pts ahead of the gap, ${minsToClose}min to Friday close`);
-            } catch (e) {
-              addLog('error', epicName(p.epic), `Weekend stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
+        } else if (weekendGuardWindow) {
+          // Pre-weekend stop-HALVING removed 2026-10-03, same reasoning as
+          // igStrategyBot.ts's own weekend guard (see its comment for the
+          // full version): halving the stop does nothing about an actual
+          // weekend gap — a gap jumps straight through a stop wherever it
+          // sits — while reliably getting the position stopped out on
+          // ordinary Sunday-open noise at half its intended room. This bot
+          // already correctly declines to flatten over the weekend; this
+          // removes the one remaining action that made a surviving position
+          // more fragile rather than less.
+          addLog('info', epicName(p.epic), `Weekend risk guard — £${p.upl.toFixed(2)} open, ${minsToClose}min to Friday close: leaving it on its own stop (no pre-weekend tighten)`);
         }
       }
 

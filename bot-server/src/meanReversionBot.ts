@@ -1,4 +1,4 @@
-// ── RSI(2) mean-reversion bot — three independent instances ─────────────────
+// ── RSI(2) mean-reversion bot — four independent instances ──────────────────
 // Built 2026-08-28, deliberately rules-only (no AI entry gate) for 'fx' and
 // 'japan225' — see meanReversionStrategy.ts's own comment for why this
 // specific approach earned that treatment (real evidence trail, not a guess).
@@ -14,84 +14,136 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   authenticate, getSession, fetchFullPositions, fetchAccountFunds,
-  placeMarketOrder, closePosition as igClosePos, fetchMarketDetails, fetchClosedTransactions,
+  placeMarketOrder, closePosition as igClosePos, fetchMarketDetails, fetchClosedTransactions, instrumentNameMatches,
   type IGSession, type FullPosition,
 } from './igApi';
 import { getMeanReversionSignal, trendStillIntact, hadBigAdverseCandleToday, type MrBar, type MrSignal, MAX_HOLD_DAYS } from './meanReversionStrategy';
 import { emaCrossoverSignal, donchianBreakoutSignal, type PositionSide } from './alpacaStrategies';
+import { readTrend } from './momentumSignal';
 import { epicName } from './igStrategyScanner';
 import { resolveCredentials, calcStake, type IgMode } from './igStrategyBot';
 import { recordJournalEvent, type JournalMode } from './tradeJournal';
 import { askMrSafety } from './openai';
-import { fetchAllHeadlines } from './newsFetch';
+import { fetchAllHeadlines, fetchGeneralHeadlines } from './newsFetch';
 import { EPIC_TO_ALPACA, fetchBarsWithFallback } from './yahooFetch';
 import { isScannerQuietWeekend, msUntilWeekendReopen, type AlpacaBar, type Timeframe } from './alpacaApi';
 import { edgeSizing } from './quant';
 
-export type MrInstance = 'fx' | 'stocks' | 'japan225';
+export type MrInstance = 'fx' | 'stocks' | 'japan225' | 'commodities';
 
 // Every epic below is one already individually verified live elsewhere in
 // this codebase (igStrategyScanner.ts's IG_EPICS) — this file deliberately
 // does not introduce a single new, unverified epic code, given how often a
 // guessed one has turned out silently wrong (see that file's own comments).
 const INSTANCE_EPICS: Record<MrInstance, string[]> = {
+  // Silver and Brent Crude moved out 2026-09-24 into their own dedicated
+  // 'commodities' instance (see that entry's own comment) — they never
+  // really belonged in the FX/index list thematically, and now get the
+  // trend-following signal that actually suits them instead of RSI(2)
+  // mean-reversion. No open position held either at the time, so nothing
+  // to migrate.
   fx: [
     'CS.D.GBPUSD.TODAY.IP', 'CS.D.EURUSD.TODAY.IP', 'CS.D.USDJPY.TODAY.IP',
     'CS.D.EURGBP.TODAY.IP', 'CS.D.AUDUSD.TODAY.IP',
     'IX.D.FTSE.DAILY.IP', 'IX.D.SPTRD.DAILY.IP', 'IX.D.NASDAQ.CASH.IP',
     'IX.D.DAX.DAILY.IP', 'IX.D.DOW.DAILY.IP',
-    'CS.D.USCSI.TODAY.IP', 'CC.D.LCO.USS.IP',
   ],
-  // Expanded 2026-09-03 (26 -> ~56 names) per explicit request, using ONLY
-  // epics already individually verified live elsewhere in this codebase
-  // (igStrategyScanner.ts's IG_EPICS — see that file's own comments for how
-  // each one was confirmed) — no new guessed epic introduced here, same
-  // discipline as the original 26. Paired with batching the per-poll market-
-  // details fetch (see scanEntries' own comment) specifically so this
-  // expansion doesn't scale up IG allowance use anywhere near proportionally.
+  // Re-curated 2026-09-18 per explicit request ("focus on more reliable
+  // predictable stocks... let it trade over multiple days e.g. a week") after
+  // the previous ~56-name version (mixing megacaps with speculative/volatile
+  // names on a fast EMA9/21 crossover) came back with a 12% win rate and
+  // -£72 net over 24 real live trades — the worst-performing strategy on
+  // this account by a wide margin. Rather than guess at "reliable" from
+  // scratch, this reuses igStrategyScanner.ts's own RULE_BASED_ANALYSIS_CONFIRMED_EPICS
+  // — real backtest data (return% + profit factor) already computed for
+  // this exact watchlist under a comparable rules-only/SMA200-trend engine —
+  // filtered to just the individual stocks (dropping indices, commodities,
+  // and Bitcoin, which belong to other bots/instances) and to names actually
+  // auto-tradeable (MANUAL_ONLY_EPICS' Nokia and SK Hynix backtested even
+  // better than everything below but are excluded there for real data-feed
+  // reasons, not strategy ones — see that Set's own comment).
+  // One deliberate override on top of the backtest data: NVIDIA IS in
+  // RULE_BASED_ANALYSIS_CONFIRMED_EPICS but at the weakest edge of the whole
+  // confirmed list (+0.63% return, PF 1.06 — barely above noise), and this
+  // account has independently had real, repeated trouble with NVIDIA
+  // specifically (a live short fighting its own uptrend just this week, a
+  // demo options call down >80% for two weeks straight) — excluded here
+  // despite technically clearing the backtest bar.
   stocks: [
-    'UA.D.AAPL.CASH.IP', 'UC.D.MSFT.DAILY.IP', 'UC.D.NVDA.DAILY.IP', 'UA.D.AMZN.CASH.IP',
-    'UB.D.GOOGL.DAILY.IP', 'UB.D.FB.DAILY.IP', 'UD.D.TSLA.DAILY.IP', 'UC.D.NFLX.DAILY.IP',
-    'SD.D.JPM.DAILY.IP', 'SH.D.VUS.DAILY.IP', 'SH.D.UNH.DAILY.IP', 'SH.D.XOM.DAILY.IP',
-    'SA.D.AMD.DAILY.IP', 'UA.D.AVGO.DAILY.IP', 'UB.D.INTC.DAILY.IP', 'UC.D.QCOM.DAILY.IP',
-    'UC.D.MU.DAILY.IP', 'SG.D.TSM.DAILY.IP', 'SC.D.F.DAILY.IP',
-    'KA.D.BARC.DAILY.IP', 'KA.D.BP.DAILY.IP', 'KA.D.HSBA.DAILY.IP', 'KA.D.AZN.DAILY.IP',
-    'SD.D.JNJ.DAILY.IP', 'SE.D.PFE.DAILY.IP', 'SD.D.LLY.DAILY.IP',
-    // Memory/storage + enterprise/legacy tech
-    'UD.D.SNDKUS.DAILY.IP', 'UD.D.STX.DAILY.IP', 'UC.D.MRVL.DAILY.IP', 'UD.D.SKHYUS.DAILY.IP',
-    'UD.D.WDC.DAILY.IP', 'SB.D.DELLUS.DAILY.IP', 'UC.D.RIMM.DAILY.IP', 'EC.D.NOKIAFP.DAILY.IP',
-    // More UK stocks
-    'KA.D.SHELLN.DAILY.IP', 'KA.D.GSK.DAILY.IP', 'KA.D.LLOY.DAILY.IP',
-    // Consumer / crypto-adjacent
-    'UA.D.COINUS.DAILY.IP', 'UC.D.RIVNUS.DAILY.IP', 'SH.D.UBERUS.DAILY.IP',
-    // Healthcare/pharma + consumer/retail
-    'UC.D.MRNAUS.DAILY.IP', 'SE.D.NKE.DAILY.IP', 'SE.D.MCD.DAILY.IP', 'SH.D.WMT.DAILY.IP', 'UA.D.COST.DAILY.IP',
-    // Industrials
-    'SA.D.BA.DAILY.IP', 'SB.D.CAT.DAILY.IP', 'SC.D.HON.DAILY.IP',
-    // Media/communication + utilities
-    'SB.D.DIS.DAILY.IP', 'SG.D.T.DAILY.IP', 'SC.D.FPL.DAILY.IP',
-    // More AI/semiconductors
-    'UA.D.ASML.DAILY.IP', 'UC.D.ONNN.DAILY.IP',
-    // Growth tech
-    'SE.D.PLTRUS.DAILY.IP', 'SG.D.SHOPUS.DAILY.IP', 'UC.D.PYPLVUS.DAILY.IP',
+    'UA.D.AAPL.CASH.IP',    // Apple             +11.23% PF=2.33
+    'KA.D.BARC.DAILY.IP',   // Barclays          +2.03%  PF=1.14
+    'UB.D.GOOGL.DAILY.IP',  // Alphabet          +14.53% PF=4.21 (best in this universe)
+    'KA.D.HSBA.DAILY.IP',   // HSBC              +10.98% PF=1.82
+    'KA.D.BP.DAILY.IP',     // BP                +4.00%  PF=1.24
+    'UC.D.RIVNUS.DAILY.IP', // Rivian            +12.79% PF=1.51
+    'SH.D.UBERUS.DAILY.IP', // Uber              +3.73%  PF=1.38
+    'SC.D.F.DAILY.IP',      // Ford              +3.56%  PF=1.21
+    'UA.D.COINUS.DAILY.IP', // Coinbase          +2.54%  PF=1.65
+    'UC.D.MRVL.DAILY.IP',   // Marvell           +13.62% PF=1.41
+    'SD.D.JNJ.DAILY.IP',    // Johnson & Johnson +8.44%  PF=1.77
+    'SE.D.PLTRUS.DAILY.IP', // Palantir          +8.03%  PF=1.63
+    'SC.D.HON.DAILY.IP',    // Honeywell         +7.73%  PF=1.72
+    'SB.D.CAT.DAILY.IP',    // Caterpillar       +6.23%  PF=1.33
+    'SE.D.MCD.DAILY.IP',    // McDonald's        +4.89%  PF=1.89
+    'UD.D.WDC.DAILY.IP',    // Western Digital   +36.66% PF=1.95
+    'UD.D.SNDKUS.DAILY.IP', // SanDisk           +23.25% PF=2.46
+    'SB.D.DELLUS.DAILY.IP', // Dell              +3.42%  PF=1.14
+    'SH.D.XOM.DAILY.IP',    // ExxonMobil        +3.06%  PF=1.24
+    'UB.D.INTC.DAILY.IP',   // Intel             +2.99%  PF=1.14
+    'UD.D.STX.DAILY.IP',    // Seagate           +2.25%  PF=1.11
   ],
   japan225: ['IX.D.NIKKEI.DAILY.IP'],
+  // New 2026-09-24, per explicit request — commodities "trend harder" than
+  // stocks and don't fit a mean-reversion read as well (already noted
+  // elsewhere in this codebase re: the SMA200 trend-filter backtest), so
+  // rather than force them through the RSI(2) engine everything else here
+  // runs, they get their own instance on the Donchian/Turtle breakout
+  // signal instead — see DONCHIAN_INSTANCES' own comment. All three already
+  // individually verified live epics with real standalone backtest data
+  // under a comparable trend-following engine (igStrategyScanner.ts's
+  // RULE_BASED_ANALYSIS_CONFIRMED_EPICS): Silver +26.17% PF=2.45 (best raw
+  // return of any symbol tested anywhere in this account), Brent Crude
+  // +22.98% PF=2.55, Natural Gas +17.69% PF=2.32. Deliberately not
+  // guessing at a 4th (e.g. Gold) without first verifying a real epic the
+  // same way every other one in this codebase has been.
+  commodities: ['CC.D.NG.USS.IP', 'CC.D.LCO.USS.IP', 'CS.D.USCSI.TODAY.IP'],
 };
 
-const AI_MONITORED: Record<MrInstance, boolean> = { fx: false, stocks: true, japan225: false };
+const AI_MONITORED: Record<MrInstance, boolean> = {
+  fx: false, stocks: true, japan225: false,
+  // Turned ON 2026-09-24, reversing the initial call — these are broad,
+  // macro-driven instruments (not individual companies carrying
+  // fraud/delisting-style single-name risk, the original reasoning for
+  // leaving this off), but per explicit follow-up that's exactly why they
+  // need it more than most: inflation prints, Fed decisions, OPEC+ supply
+  // moves, and weather-driven demand shift these hard, and a Donchian
+  // breakout is pure price action with zero visibility into any of that.
+  // See the AI-safety block in manageExits for how headlines get sourced
+  // here (no real company ticker to query Finnhub's company-news endpoint
+  // against, unlike 'stocks').
+  commodities: true,
+};
 
 // Instances running the lighter EMA9/21 crossover trend-follow instead of
-// RSI(2)+EMA200 mean-reversion — stocks switched 2026-09-01 per explicit
-// request after watching japan225 (briefly on this same approach,
-// 2026-08-31) pick up a real signal almost immediately. 'fx' stays on real
-// mean-reversion — not asked for, and this account already has real
-// evidence mean-reversion works there specifically (see
+// RSI(2)+EMA200 mean-reversion. 'stocks' ran this from 2026-09-01 until
+// 2026-09-18, when it was moved BACK to real mean-reversion per explicit
+// request ("focus on more reliable predictable stocks... let it trade over
+// multiple days") after 24 real live trades came back at a 12% win rate and
+// -£72 net — a fast, lagging crossover with no real trend-confirmation on a
+// wide, mixed-volatility watchlist was whipsawing constantly (the live
+// NVIDIA short that prompted this is one instance of the same pattern).
+// getMeanReversionSignal's RSI(2)+EMA200 entry plus its 2×ATR stop / 4×ATR
+// target and 10-day max-hold backstop (meanReversionStrategy.ts) is
+// deliberately slower and gives a real move room to develop instead of
+// flipping on the next crossover — matches what was asked for directly.
+// 'fx' stays on the same real mean-reversion it's always used — this
+// account already has real evidence it works there specifically (see
 // meanReversionStrategy.ts's own header comment on the Japan 225 backtest
-// origin). Centralized here so every spot that branches on "which signal
-// does this instance use" — scanEntries, the trend-invalidation exit,
-// journal/edgeSizing keys, the startup log — stays in sync from one place.
-// japan225 itself moved on again the same day — see INTRADAY_INSTANCES.
-const EMA_TREND_INSTANCES = new Set<MrInstance>(['stocks']);
+// origin). Left as an empty Set (not deleted) so every spot that branches on
+// "which signal does this instance use" — scanEntries, the trend-invalidation
+// exit, journal/edgeSizing keys, the startup log — still has one place to
+// flip an instance back to EMA-trend later without re-threading each site.
+const EMA_TREND_INSTANCES = new Set<MrInstance>([]);
 
 // Japan225 only, added 2026-09-01, now running Donchian breakout instead of
 // EMA crossover — the EMA-crossover-on-30min version (same day, earlier)
@@ -127,6 +179,33 @@ function barFetchParamsFor(instance: MrInstance): { range: string; alpacaTimefra
     : { range: '2y',  alpacaTimeframe: '1Day',  yahooInterval: '1d' };
 }
 
+// Every instance running the Donchian breakout signal (entry AND the live
+// channel-reversal exit, not just entry) — japan225 on 30-min bars, and now
+// 'commodities' (2026-09-24) on daily bars, deliberately decoupled from
+// INTRADAY_INSTANCES above (that Set is purely about bar RESOLUTION; this
+// one is about which SIGNAL an instance uses — commodities wants daily
+// bars, same as fx/stocks, just with the Donchian signal instead of RSI(2)
+// mean-reversion). 20-day entry / 10-day exit reuses this codebase's own
+// already-backtested Donchian breakout parameters (alpacaStrategies.ts —
+// "+8.9% avg return/symbol, profit factor 1.38, 30/52 symbols profitable"),
+// not new untested numbers — same 2:1 entry:exit ratio japan225's own
+// intraday version already uses, just on the daily-bar donchian_breakout
+// strategy's own validated periods rather than reinventing one.
+const DONCHIAN_INSTANCES = new Set<MrInstance>(['japan225', 'commodities']);
+const DONCHIAN_ENTRY_PERIOD_DAILY = 20;
+const DONCHIAN_EXIT_PERIOD_DAILY  = 10;
+// Entry-side quality gate for 'commodities' only — see its own use site's
+// comment for why. 1.0 = at least this instrument's own recent normal
+// volume, not a fixed absolute number (a quiet market by nature vs a busy
+// one shouldn't be judged on the same scale) — the same self-relative
+// principle already used elsewhere in this file (adaptiveBigCandleMult).
+const COMMODITY_BREAKOUT_MIN_VOLUME = 1.0;
+function donchianParamsFor(instance: MrInstance): { entryPeriod: number; exitPeriod: number; unit: 'day' | '30min' } {
+  return INTRADAY_INSTANCES.has(instance)
+    ? { entryPeriod: DONCHIAN_ENTRY_PERIOD_INTRADAY, exitPeriod: DONCHIAN_EXIT_PERIOD_INTRADAY, unit: '30min' }
+    : { entryPeriod: DONCHIAN_ENTRY_PERIOD_DAILY,    exitPeriod: DONCHIAN_EXIT_PERIOD_DAILY,    unit: 'day' };
+}
+
 // Raised 2026-08-31 per explicit request — £5 against these strategies' real
 // (ATR-based, often several-hundred-point) stops was sizing wins as small as
 // £0.54 even on a full run to take-profit. £20 matches what ig-bot's own
@@ -146,6 +225,34 @@ const MAX_POSITIONS = 3;   // per instance, not shared across instances
 // is just more frequent Yahoo/IG market-detail fetches, not more AI spend.
 const POLL_MS        = 15 * 60_000;
 const AI_CHECK_EVERY_MS = 20 * 3_600_000; // ~once/day per open position, deliberately low-frequency
+
+// Profit-lock floor-trail — added 2026-09-22 per explicit request after
+// real evidence across every RSI(2)+EMA200 instance on this account (fx,
+// stocks): tracing real exits showed the wide 4×ATR take-profit almost
+// never actually gets reached — a position either gets stopped out for the
+// full loss, or gets cut early by the trend-invalidation/big-candle/max-hold
+// checks below for whatever small gain happened to be sitting there at that
+// moment. Losses run to their full, wide stop while wins get capped small
+// by an unrelated safety check — the 1:2 reward:risk this strategy is
+// designed around never actually shows up in real trades, which is exactly
+// why average loss keeps beating average win across this account. This
+// doesn't touch the stop or the far TP (still resting broker-side as a
+// backstop for a genuine runaway winner) — it proactively BANKS a real,
+// worthwhile gain once one shows up, rather than leaving it to chance
+// whether the distant target or an unrelated exit check gets there first.
+// Floor is a FRACTION OF THIS POSITION'S OWN REAL £ RISK (size × stop
+// distance), not a fixed £ figure off maxRiskGbp — actual stakes here are
+// routinely clamped far below the nominal risk target to fit this account's
+// thin available margin (confirmed live: sub-£0.10/pt on several entries),
+// so a fixed-£ floor sized off the nominal target would rarely or never
+// activate. Same 30% giveback-from-peak shape already proven and tuned on
+// the profit-lock trails in igStrategyBot.ts/igOptionsBot.ts, not a new
+// number. Deliberately NOT ported to EMA_TREND/INTRADAY instances — those
+// already have their own faster, purpose-built exit (the crossover-reversal
+// check, or the Donchian channel exit) that plays the same role.
+const profitPeakByDeal = new Map<string, number>(); // dealId -> best upl seen (module-level like this file's other in-memory trackers — worst case after a restart is one missed peak, not a safety gap, the real stop/TP still protects the position regardless)
+const FLOOR_ACTIVATE_RISK_FRACTION = 0.5; // peak must clear at least half of what this specific position actually risks before the floor activates
+const FLOOR_GIVEBACK_FRACTION      = 0.3;
 
 type Tracked = {
   dealId: string; epic: string; direction: 'BUY' | 'SELL';
@@ -204,6 +311,44 @@ function saveLastEntryDay(instance: MrInstance, mode: IgMode, days: Record<strin
 function runningFlagFile(instance: MrInstance, mode: IgMode): string {
   return path.join(__dirname, '..', `mr-${instance}-running-${mode}.json`);
 }
+// ── Position ownership, for other bots sharing this IG account ────────────
+// Added 2026-10-03. Every bot in this process trades the SAME IG account, and
+// IG's /positions returns the whole account to whoever asks. igStrategyBot's
+// mechanical guards (severe-loss, weekend, stuck-loss, profit floor) iterate
+// that raw list, so they were acting on positions this bot owns — confirmed
+// live on Spot Silver, which appeared in igStrategyBot's position list and in
+// this bot's tracked state simultaneously, and produced two conflicting
+// journal records of the same close 15 minutes apart (one tagged
+// rsi_mean_reversion, one donchian_daily_commodities). Worst case one bot
+// force-closes a position whose exit thesis belongs to another.
+//
+// Reads persisted tracked state rather than only in-memory, so an instance
+// that isn't currently running (or hasn't been touched since a restart) still
+// correctly claims its open positions.
+export function meanReversionOwnedDealIds(): Set<string> {
+  const owned = new Set<string>();
+  for (const instance of ['fx', 'stocks', 'japan225', 'commodities'] as MrInstance[]) {
+    for (const mode of ['demo', 'live'] as IgMode[]) {
+      try {
+        for (const t of Object.values(loadTracked(instance, mode))) {
+          if (t?.dealId) owned.add(t.dealId);
+        }
+      } catch { /* missing/corrupt state file — nothing claimed from it */ }
+    }
+  }
+  return owned;
+}
+
+// The epics this bot trades at all. Used as a second, coarser ownership
+// signal: if a position sits on an instrument only this bot ever opens, it
+// isn't igStrategyBot's to manage even if tracked state is momentarily out
+// of sync (mid-entry, or a dealId not yet persisted).
+export function meanReversionOwnedEpics(): Set<string> {
+  const epics = new Set<string>();
+  for (const list of Object.values(INSTANCE_EPICS)) for (const e of list) epics.add(e);
+  return epics;
+}
+
 export function wasMeanReversionBotRunning(instance: MrInstance, mode: IgMode): boolean {
   try { return (JSON.parse(fs.readFileSync(runningFlagFile(instance, mode), 'utf8')) as { running: boolean }).running; }
   catch { return false; }
@@ -236,6 +381,7 @@ function journalMode(mode: IgMode): JournalMode { return mode === 'live' ? 'ig-l
 // polluting) mean-reversion's — see EMA_TREND_INSTANCES above.
 function strategyKey(instance: MrInstance): string {
   if (INTRADAY_INSTANCES.has(instance)) return `donchian_intraday_${instance}`;
+  if (DONCHIAN_INSTANCES.has(instance)) return `donchian_daily_${instance}`;
   return EMA_TREND_INSTANCES.has(instance) ? `ema_trend_${instance}` : `mean_reversion_${instance}`;
 }
 
@@ -256,6 +402,19 @@ function strategyKey(instance: MrInstance): string {
 const EXTENDED_TREND_12W_PCT    = 40; // % — a run this large already reflects a major re-rating
 const EXTENDED_NEAR_EXTREME_PCT = 4;  // % off the 52-week high/low counts as "sitting at the extreme" of that move
 const EXTENDED_TREND_52W_PCT    = 80; // % — already roughly doubled (or halved, short side) over the past year
+
+// Counter-trend guard — added 2026-09-17 after a real live NVIDIA short: the
+// EMA9/21 crossover flipped bearish on nothing more than a short-term dip
+// while NVDA's own 12-week trend was still solidly up, and the stock kept
+// climbing straight through the short. isExtendedMove above only ever
+// checks whether a move has run too far in the SAME direction as the
+// signal (protects against chasing an already-spent move) — it says
+// nothing about whether the crossover is fighting the stock's own bigger
+// trend, which is a different and, on this evidence, more common failure
+// mode for a fast/lagging signal like a 9/21 crossover. Same 8% bar
+// optionsNewsBasedEntrySignal already uses for "a real sustained 12-week
+// trend" (alpacaStrategies.ts) — not a new number pulled from nowhere.
+const EMA_TREND_AGAINST_PCT = 8;
 function isExtendedMove(bars: MrBar[], direction: 'BUY' | 'SELL'): boolean {
   if (bars.length < 60) return false;
   const closes = bars.map(b => b.close);
@@ -323,7 +482,7 @@ async function recoverSilentClose(instance: MrInstance, mode: IgMode, session: I
     // in IG's own data the whole time. startsWith is a real fix, not just a
     // looser guess: every short name this account uses is a true prefix of
     // IG's own longer instrument name for that CFD.
-    const candidates = txns.filter(t => t.instrumentName?.startsWith(name));
+    const candidates = txns.filter(t => instrumentNameMatches(name, t.instrumentName));
     const match = candidates.length === 1 ? candidates[0]
       : candidates.find(t => t.openLevel !== undefined && Math.abs(t.openLevel - tr.entryLevel) < Math.max(1, tr.entryLevel * 0.005));
     const plUsd = match?.profitAndLoss ?? 0;
@@ -351,6 +510,7 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
       await recoverSilentClose(instance, mode, session, tr);
       delete s.tracked[epic];
       saveTracked(instance, mode, s.tracked);
+      profitPeakByDeal.delete(tr.dealId);
       continue;
     }
 
@@ -368,9 +528,46 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
         addLog(instance, mode, 'exit', epicName(epic), `Max hold ${MAX_HOLD_DAYS}d reached — closed, £${p.upl.toFixed(2)}`);
         delete s.tracked[epic];
         saveTracked(instance, mode, s.tracked);
+        profitPeakByDeal.delete(p.dealId);
         continue;
       } catch (e) {
         addLog(instance, mode, 'error', epicName(epic), `Max-hold close failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // See profitPeakByDeal's own comment. Real £ risk on THIS position
+    // (not the nominal maxRiskGbp target) — needs a live stopLevel, so
+    // skipped (not blocked, just no-op) if the position somehow doesn't
+    // have one, same as everywhere else in this codebase that treats a
+    // missing stop as "can't compute this check, move on."
+    if (!EMA_TREND_INSTANCES.has(instance) && !DONCHIAN_INSTANCES.has(instance) && p.stopLevel !== undefined) {
+      const realRiskGbp = p.size * Math.abs(p.level - p.stopLevel);
+      if (realRiskGbp > 0) {
+        const floorGbp = realRiskGbp * FLOOR_ACTIVATE_RISK_FRACTION;
+        const peak = Math.max(profitPeakByDeal.get(p.dealId) ?? -Infinity, p.upl);
+        profitPeakByDeal.set(p.dealId, peak);
+        if (peak >= floorGbp) {
+          const giveback = peak > 0 ? (peak - p.upl) / peak : 0;
+          if (giveback >= FLOOR_GIVEBACK_FRACTION) {
+            try {
+              await igClosePos(session, p.dealId, p.direction, p.size);
+              const notional = p.level * p.size;
+              const reason = `Profit lock — gave back ${(giveback * 100).toFixed(0)}% of its £${peak.toFixed(2)} peak (real risk on this position was £${realRiskGbp.toFixed(2)}), banking £${p.upl.toFixed(2)} before it erodes further`;
+              recordJournalEvent({
+                mode: journalMode(mode), event: 'exit', symbol: epicName(epic), strategy: strategyKey(instance),
+                side: p.direction === 'BUY' ? 'long' : 'short', qty: p.size, price: p.level,
+                reason, plUsd: p.upl, plPct: notional > 0 ? (p.upl / notional) * 100 : 0,
+              });
+              addLog(instance, mode, 'exit', epicName(epic), `💰 ${reason}`);
+              delete s.tracked[epic];
+              saveTracked(instance, mode, s.tracked);
+              profitPeakByDeal.delete(p.dealId);
+              continue;
+            } catch (e) {
+              addLog(instance, mode, 'error', epicName(epic), `Profit lock close failed: ${e instanceof Error ? e.message : String(e)}. Will retry next poll.`);
+            }
+          }
+        }
       }
     }
 
@@ -421,7 +618,7 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
     // entry time; duplicating it there would risk both bots racing to close
     // the same position (same reasoning as not porting the profit-lock
     // trail there).
-    if (!EMA_TREND_INSTANCES.has(instance) && !INTRADAY_INSTANCES.has(instance) && mrBars) {
+    if (!EMA_TREND_INSTANCES.has(instance) && !DONCHIAN_INSTANCES.has(instance) && mrBars) {
       try {
         const intact = trendStillIntact(mrBars, tr.direction);
         if (intact === false) {
@@ -436,6 +633,7 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
           addLog(instance, mode, 'exit', epicName(epic), `⚠️ Trend invalidated — closed, £${p.upl.toFixed(2)} (price broke back across its own 200-day average)`);
           delete s.tracked[epic];
           saveTracked(instance, mode, s.tracked);
+          profitPeakByDeal.delete(p.dealId);
           continue;
         }
       } catch (e) {
@@ -465,7 +663,21 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
     // ALL "today"), and these instances get the faster, more direct live
     // crossover-reversal exit just below instead, which supersedes this as
     // the fast-acting protection for them.
-    if (p.upl < 0 && mrBars && !INTRADAY_INSTANCES.has(instance)) {
+    //
+    // Also excludes 'commodities' as of 2026-09-24, per explicit request:
+    // unlike a stock, a commodity can take up to a week of real volatility
+    // to actually stabilise after a big move — a single rough day here is
+    // closer to normal behaviour than a warning sign, even after the
+    // adaptive ATR scaling above (that only compares a name against its OWN
+    // recent volatility, not against how much longer commodities in
+    // general take to settle than stocks do). Same underlying reasoning as
+    // the INTRADAY_INSTANCES exclusion just above: DONCHIAN_INSTANCES
+    // already has its own, more deliberate reversal-based exit (the
+    // channel check below) built for exactly this "give it real room, only
+    // act on an actual trend reversal" job — this same-day check would
+    // just be racing it with a faster trigger tuned for a different asset
+    // class's thesis.
+    if (p.upl < 0 && mrBars && !DONCHIAN_INSTANCES.has(instance)) {
       try {
         const livePrice = p.direction === 'BUY' ? p.bid : p.offer;
         const bigMove = hadBigAdverseCandleToday(mrBars, tr.direction, livePrice);
@@ -481,6 +693,7 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
           addLog(instance, mode, 'exit', epicName(epic), `⚠️ Big adverse move today — closed, £${p.upl.toFixed(2)} (well outside its normal daily range)`);
           delete s.tracked[epic];
           saveTracked(instance, mode, s.tracked);
+          profitPeakByDeal.delete(p.dealId);
           continue;
         }
       } catch (e) {
@@ -499,10 +712,11 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
     // exit for this instance now — the wide ATR/percentage-capped stop/TP
     // attached at entry remains only as a broker-side backstop for a move
     // too fast for a 15min poll to catch in time.
-    if (INTRADAY_INSTANCES.has(instance) && rawBars?.length) {
+    if (DONCHIAN_INSTANCES.has(instance) && rawBars?.length) {
       try {
         const side: PositionSide = tr.direction === 'BUY' ? 'long' : 'short';
-        const donchExit = donchianBreakoutSignal(rawBars, true, side, DONCHIAN_ENTRY_PERIOD_INTRADAY, DONCHIAN_EXIT_PERIOD_INTRADAY, '30min');
+        const { entryPeriod, exitPeriod, unit } = donchianParamsFor(instance);
+        const donchExit = donchianBreakoutSignal(rawBars, true, side, entryPeriod, exitPeriod, unit);
         if (donchExit.action === 'CLOSE_LONG' || donchExit.action === 'CLOSE_SHORT') {
           await igClosePos(session, p.dealId, p.direction, p.size);
           const notional = p.level * p.size;
@@ -522,14 +736,39 @@ async function manageExits(instance: MrInstance, mode: IgMode, session: IGSessio
       }
     }
 
-    // Light-touch AI safety net — 'stocks' only, at most once/day per
-    // position, never an entry gate. See buildMrSafetyPrompt's own comment.
+    // Light-touch AI safety net — 'stocks' and 'commodities' only, at most
+    // once/day per position, never an entry gate. See buildMrSafetyPrompt's
+    // own comment.
+    //
+    // 'commodities' turned on 2026-09-24 per explicit request: a Donchian
+    // breakout is pure price action with zero visibility into the macro
+    // news these three specifically live and die by (inflation prints, Fed
+    // decisions, OPEC+ supply moves, weather-driven demand) — arguably a
+    // bigger blind spot here than the single-company risk that's the reason
+    // 'stocks' already has this check. Natural Gas/Brent Crude/Silver have
+    // no real company ticker for fetchAllHeadlines' Finnhub company-news
+    // lookup to query (EPIC_TO_ALPACA maps them to Yahoo futures codes like
+    // "NG=F", not a tradeable stock symbol) — falls back to
+    // fetchGeneralHeadlines('general'), built 2026-09-01 for exactly this
+    // "no company ticker to query" case (see that function's own comment)
+    // but never actually wired up anywhere until now.
     if (aiOn && Date.now() - (tr.lastAiCheckAt ?? 0) >= AI_CHECK_EVERY_MS) {
       tr.lastAiCheckAt = Date.now();
       saveTracked(instance, mode, s.tracked);
-      const ticker = EPIC_TO_ALPACA[epic];
+      // EPIC_TO_ALPACA maps these three to Yahoo FUTURES codes (e.g.
+      // "NG=F") for bar-data purposes, not a real stock symbol — truthy,
+      // but useless (and silently wrong) as input to Finnhub's
+      // company-news endpoint. Branch on the instance itself, not on
+      // whether `ticker` happens to be set.
+      const ticker = instance === 'stocks' ? EPIC_TO_ALPACA[epic] : undefined;
       let headlines: string[] = [];
-      try { if (ticker) headlines = await fetchAllHeadlines(ticker, 5, epicName(epic)); } catch {}
+      // General headlines get a wider limit than the ticker-based path —
+      // per explicit request, the AI needs enough raw material to actually
+      // do a wide-then-close-up read (supply chains, policy, geopolitics,
+      // transport — see buildMrSafetyPrompt's own instructions), not just
+      // 5 generic top-of-feed stories that may have nothing to do with
+      // this instrument even indirectly.
+      try { headlines = ticker ? await fetchAllHeadlines(ticker, 5, epicName(epic)) : await fetchGeneralHeadlines('general', 20); } catch {}
       try {
         const verdict = await askMrSafety({
           instrumentName: epicName(epic), direction: p.direction, entryLevel: p.level,
@@ -625,10 +864,10 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       continue;
     }
 
-    // INTRADAY_INSTANCES (japan225) get a Donchian breakout entry instead —
-    // see that Set's own comment for why (breakout reacts to a genuine new
-    // extreme, closer to "the start of a move" than a lagging crossover
-    // confirmation). EMA_TREND_INSTANCES (stocks) get the lighter, more
+    // DONCHIAN_INSTANCES (japan225, commodities) get a Donchian breakout
+    // entry instead — see that Set's own comment for why (breakout reacts
+    // to a genuine new extreme, closer to "the start of a move" than a
+    // lagging crossover confirmation). EMA_TREND_INSTANCES (stocks) get the lighter, more
     // permissive EMA9/21 crossover instead of RSI(2)+EMA200 mean-reversion —
     // switched 2026-09-01 after watching japan225's own (now-superseded)
     // EMA-crossover swap pick up a real signal almost immediately. Both
@@ -646,9 +885,33 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
     // mechanism unaffected by this (stop/TP, big-candle exit, AI safety,
     // max-hold).
     let signal: MrSignal;
-    if (INTRADAY_INSTANCES.has(instance)) {
-      const donchSig = donchianBreakoutSignal(raw!, false, undefined, DONCHIAN_ENTRY_PERIOD_INTRADAY, DONCHIAN_EXIT_PERIOD_INTRADAY, '30min');
+    if (DONCHIAN_INSTANCES.has(instance)) {
+      const { entryPeriod, exitPeriod, unit } = donchianParamsFor(instance);
+      const donchSig = donchianBreakoutSignal(raw!, false, undefined, entryPeriod, exitPeriod, unit);
       if (donchSig.action !== 'BUY' && donchSig.action !== 'SELL') continue;
+      // Volume confirmation — 'commodities' only, added 2026-09-24 per
+      // explicit request: now that these get more room to run (excluded
+      // from the same-day big-candle exit, see that comment), a weak entry
+      // has real time to compound before anything catches it, so the entry
+      // itself needs to earn that patience rather than get it for free. A
+      // raw Donchian breakout on its own has zero quality filter — this is
+      // the standard technical-analysis guard against it: a breakout on
+      // thin/below-average volume is real participation *not* actually
+      // confirming the move, and is meaningfully more likely to be a
+      // fakeout than one on real volume. Not applied to japan225 — that
+      // one already has a real, separate track record on the unfiltered
+      // signal and this isn't touching what's already proven.
+      if (instance === 'commodities') {
+        const recent   = raw!.slice(-5);
+        const priorVols = raw!.slice(0, -5).map(b => b.v);
+        const avgVolPrior = priorVols.length ? priorVols.reduce((s, v) => s + v, 0) / priorVols.length : 0;
+        const recentVol   = recent.reduce((s, b) => s + b.v, 0) / recent.length;
+        const volRatio    = avgVolPrior > 0 ? recentVol / avgVolPrior : 1;
+        if (volRatio < COMMODITY_BREAKOUT_MIN_VOLUME) {
+          addLog(instance, mode, 'wait', epicName(epic), `[Donchian] ${donchSig.reason} — but only ${volRatio.toFixed(1)}x its own recent volume, skipping (a breakout on thin volume is more likely a fakeout)`);
+          continue;
+        }
+      }
       const lastClose  = raw![raw!.length - 1].c;
       const stopPoints = donchSig.stopPrice       !== undefined ? Math.abs(lastClose - donchSig.stopPrice)       : lastClose * 0.015;
       const tpPoints   = donchSig.takeProfitPrice !== undefined ? Math.abs(donchSig.takeProfitPrice - lastClose) : lastClose * 0.10;
@@ -663,6 +926,16 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
       if (emaSig.action !== 'BUY' && emaSig.action !== 'SELL') continue;
       if (isExtendedMove(bars, emaSig.action)) {
         addLog(instance, mode, 'wait', epicName(epic), `[EMA trend] ${emaSig.reason} — but the move already looks spent (12w/52w trend + sitting near its extreme), skipping`);
+        continue;
+      }
+      // See EMA_TREND_AGAINST_PCT's own comment.
+      const trend12w = readTrend(raw!, emaSig.action).trend12w;
+      if (emaSig.action === 'SELL' && trend12w !== null && trend12w >= EMA_TREND_AGAINST_PCT) {
+        addLog(instance, mode, 'wait', epicName(epic), `[EMA trend] ${emaSig.reason} — but still up ${trend12w.toFixed(1)}%/12w, shorting into that trend, skipping`);
+        continue;
+      }
+      if (emaSig.action === 'BUY' && trend12w !== null && trend12w <= -EMA_TREND_AGAINST_PCT) {
+        addLog(instance, mode, 'wait', epicName(epic), `[EMA trend] ${emaSig.reason} — but still down ${trend12w.toFixed(1)}%/12w, buying into that trend, skipping`);
         continue;
       }
       const lastClose  = raw![raw!.length - 1].c;
@@ -935,6 +1208,7 @@ export function startMeanReversionBot(instance: MrInstance, mode: IgMode): { ok:
   s.running = true;
   saveRunningFlag(instance, mode, true);
   const signalDesc = INTRADAY_INSTANCES.has(instance) ? 'Donchian breakout (30-min, intraday)'
+    : DONCHIAN_INSTANCES.has(instance) ? 'Donchian breakout (daily, 20d entry/10d exit)'
     : EMA_TREND_INSTANCES.has(instance) ? 'EMA9/21 crossover trend-follow' : 'RSI(2)+EMA200 mean-reversion';
   addLog(instance, mode, 'info', '—', `Mean-reversion bot (${instance}) started — ${signalDesc}, rules-only${AI_MONITORED[instance] ? ' + daily AI safety check on open positions' : ', no AI at all'} — £${MAX_RISK_GBP} risk/trade, max ${MAX_POSITIONS} positions, ${INSTANCE_EPICS[instance].length} epic(s) watched`);
   void poll(instance, mode);

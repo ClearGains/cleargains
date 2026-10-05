@@ -7,18 +7,19 @@ import {
 } from './igApi';
 import {
   resolveCredentials, addLog, recordLossExit, recordWatchClose, calcStake, isLossLocked, isProfitLocked, getMaxRiskGbp,
-  registerBotOpenedDeal, recordWatchExit, type IgMode,
+  registerBotOpenedDeal, recordWatchExit, isNewsMomentumEpic, type IgMode,
 } from './igStrategyBot';
 // OpenAI is the acting decision-maker here as of 2026-08-25, with Gemini
 // called only as a fallback when OpenAI's own attempt genuinely fails — see
 // openai.ts's askIg* wrappers.
-import { askIgTradeIdea } from './openai';
+import { askIgTradeIdea, askIgPositionVerdict } from './openai';
 import { EPIC_TO_ALPACA, EPIC_TO_YAHOO, fetchBarsWithFallback } from './yahooFetch';
 import { calcRsi, calcMacdHist, calcEfficiencyRatio } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
 import { hasBreakingNews } from './alpacaNewsStream';
 import { isNYSEOpen, isNearClose, isWeekend, type AlpacaBar } from './alpacaApi';
 import { sentimentScore, momentumStillSupports } from './momentumSignal';
+import { getForeignOwnership, isForeignPosition } from './positionOwnership';
 
 // Manual kill-switch for this watcher's own Gemini usage, independent of
 // which positions are flagged — same purpose as igStrategyBot.ts's own
@@ -123,6 +124,7 @@ export function removeFromWatch(mode: IgMode, dealId: string): void {
   lastVerdictDisplay.delete(dealId);
   peakUpl.delete(dealId);
   lastStopTightenAt.delete(dealId);
+  newsMomentumWatchLastAt.delete(dealId);
   const noAiSet = noAiCloseDeals.get(mode)!;
   if (noAiSet.delete(dealId)) saveNoAiClose(mode, noAiSet);
 }
@@ -155,11 +157,22 @@ const autoWatchConsidered = new Map<IgMode, Set<string>>([
   ['live', loadAutoWatchConsidered('live')],
 ]);
 
-function autoWatchNewPositions(mode: IgMode, positions: FullPosition[]): void {
+async function autoWatchNewPositions(mode: IgMode, positions: FullPosition[]): Promise<void> {
   const considered = autoWatchConsidered.get(mode)!;
+  // Positions owned by another bot on this shared IG account must NOT be
+  // auto-watched — added 2026-10-03. This sweep deliberately picks up
+  // anything it hasn't seen before, which is right for a manually-opened
+  // position but wrong for one meanReversionBot's instances are actively
+  // managing: once watched, the profit-floor close below acts on it. That is
+  // exactly how Spot Silver (owned by the commodities instance) was closed
+  // and journaled under the rsi_mean_reversion tag. See positionOwnership.ts.
+  const foreign = await getForeignOwnership();
   let changed = false;
   for (const p of positions) {
     if (considered.has(p.dealId)) continue;
+    // openedByCaller=false: this sweep exists precisely for deals this bot
+    // did NOT open, so ownership rests entirely on the other bots' records.
+    if (isForeignPosition(p.dealId, p.epic, foreign, false)) continue;
     considered.add(p.dealId);
     changed = true;
     if (!isWatched(mode, p.dealId)) {
@@ -279,6 +292,13 @@ export function getWatchVerdicts(mode: IgMode): Record<string, { action: string;
 // one missed reversal detection on an already-reversed position, not a
 // silent failure to protect it (the hard stop still applies regardless).
 const peakUpl = new Map<string, number>();
+
+// Informational-only AI watch, news_momentum positions only — see
+// reviewOne's own comment at the point this is used. Separate from
+// lastReview above on purpose: that map's confidence value feeds real
+// decisions elsewhere (getWeakestConfidence, entry-confidence seeding) and
+// this must never influence any of that, only log an opinion.
+const newsMomentumWatchLastAt = new Map<string, number>();
 
 // Mechanical stop-tightening on a stalling position — same lesson
 // fxScalperBot.ts's stall detection already learned the hard way (see its
@@ -495,6 +515,39 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
         } catch (e) {
           addLog(mode, 'error', name, `Stop tighten failed: ${e instanceof Error ? e.message : String(e)}`);
         }
+      }
+    }
+  }
+
+  // ── News Momentum informational watch — logs only, never closes ────────
+  // Added 2026-09-28 per explicit request: "still want some sort of AI
+  // position watch on the positions just in case I need to close positions
+  // off." Deliberately NOT wired into an auto-close, win or lose — that's
+  // exactly what the 2026-09-03 decision below removed after free-form AI
+  // judgment kept finding reasons to hold a loser, and igStrategyBot.ts's
+  // own stalled-loser override (mechanical, no AI) already covers the
+  // auto-close side for this strategy. This exists purely so there's a real,
+  // current opinion to look at if a manual close is being considered — the
+  // reasoning stays in the activity log, nothing here ever calls
+  // closePosition. Runs regardless of P&L sign (unlike everything below,
+  // which is profit-side only) since a losing position is exactly when this
+  // is most useful. Own throttle, separate from the profit-floor trail's.
+  const NEWS_MOMENTUM_WATCH_INTERVAL_MS = 30 * 60_000;
+  if (isNewsMomentumEpic(mode, p.epic)) {
+    const lastWatchAt = newsMomentumWatchLastAt.get(p.dealId) ?? 0;
+    if (Date.now() - lastWatchAt >= NEWS_MOMENTUM_WATCH_INTERVAL_MS) {
+      newsMomentumWatchLastAt.set(p.dealId, Date.now());
+      try {
+        const watchTicker = EPIC_TO_ALPACA[p.epic];
+        const headlines = watchTicker ? await fetchAllHeadlines(watchTicker, 5, name) : [];
+        const verdict = await askIgPositionVerdict({
+          instrumentName: name, direction: p.direction,
+          entryLevel: p.level, currentLevel, uplGbp: p.upl,
+          heldHours, stopLevel: p.stopLevel, limitLevel: p.limitLevel, headlines,
+        });
+        addLog(mode, 'info', name, `[News Momentum Watch] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine}) — informational only, not acted on`);
+      } catch (e) {
+        addLog(mode, 'wait', name, `[News Momentum Watch] Review failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
   }
@@ -773,15 +826,72 @@ async function reviewOne(mode: IgMode, session: IGSession, p: FullPosition): Pro
   // (lastVerdictDisplay/UI), never as a close trigger — a way to see early
   // whether a position sitting just above the floor still looks like it has
   // real momentum behind it, without acting on that read either way.
-  const LOCK_IN_FLOOR_GBP     = 10;
-  const WATCH_ZONE_MIN_GBP    = 15;
-  const WATCH_ZONE_MAX_GBP    = 20;
+  // ── Engagement point, relative to what this position actually risked ───
+  // Reworked 2026-10-03. LOCK_IN_FLOOR_GBP was a flat £10 for every
+  // position regardless of size, instrument or stop distance — so a trade
+  // risking £5 and a trade risking £40 both banked at exactly £10. On a
+  // trade risking £40 that is a 0.25:1 reward:risk, taken deliberately,
+  // every time. The 6-week audit found the consequence: 175 closed trades
+  // and not one winner above £10, against losses running to -£42.
+  //
+  // R = this position's own money-at-risk (stop distance x stake). It's
+  // already encoded in the position and needs no new data. Engaging at 1R
+  // means "protect the gain once you've made back what you put at risk",
+  // which is the same decision on every instrument — unlike a flat £10,
+  // which is a different decision on every instrument.
+  //
+  // HONEST TRADEOFF, since this cuts both ways: on a typical £20-risk
+  // position the floor now engages at £20 instead of £10, so gains between
+  // £10 and £20 are no longer protected and can round-trip to the stop.
+  // The audit's £5-£10 win bucket (10 trades, +£85.91) was largely this
+  // floor banking at £10, and some of those will now either run further or
+  // give it all back. That is the deliberate bet: the same mechanism that
+  // produced those small wins is what capped every large one, and a system
+  // whose best possible outcome is +£10 against a -£42 worst case cannot
+  // profit at a ~48% win rate. MIN_FLOOR_GBP keeps a small absolute base so
+  // a tiny-R position can't engage on noise.
+  const LOCK_IN_R_MULT        = 1.0;
+  const LOCK_IN_MIN_FLOOR_GBP = 5;
+  const stopDistPts = p.stopLevel !== undefined ? Math.abs(p.level - p.stopLevel) : null;
+  const positionR   = stopDistPts !== null && p.size > 0 ? stopDistPts * p.size : null;
+  const LOCK_IN_FLOOR_GBP = positionR !== null
+    ? Math.max(LOCK_IN_MIN_FLOOR_GBP, positionR * LOCK_IN_R_MULT)
+    : 10; // no stop level reported by IG — fall back to the old flat bar
+  const WATCH_ZONE_MIN_GBP    = LOCK_IN_FLOOR_GBP * 1.5;
+  const WATCH_ZONE_MAX_GBP    = LOCK_IN_FLOOR_GBP * 2;
   const MIN_HOLD_HOURS_FOR_LOCK_IN = 1;
   if (heldHours < MIN_HOLD_HOURS_FOR_LOCK_IN) return;
   if (peak < LOCK_IN_FLOOR_GBP) return; // never earned real protection yet — leave to the broker-side stop/TP
 
-  if (p.upl <= LOCK_IN_FLOOR_GBP) {
-    const closeReason = `[Profit floor] Peaked at £${peak.toFixed(2)}, retraced to £${p.upl.toFixed(2)} (≤ £${LOCK_IN_FLOOR_GBP} floor) — banking now`;
+  // ── Ratcheting floor — added 2026-10-01 ────────────────────────────────
+  // The floor above was FIXED at £10 for the life of a position, and the
+  // account's own 6-week record (Aug 20 - Sep 30) shows exactly what that
+  // cost: across 175 closed trades there is not one single winner above
+  // £10. Not one. The best bucket is £5-£10 (10 trades, +£85.91) and it
+  // simply stops there, because this check closed every winner the moment
+  // it round-tripped to £10 no matter how high it had been — a position
+  // that peaked at £17.76 (Japan 225, 2026-09-08) banked £8.08. Meanwhile
+  // the loss side was uncapped: ten trades beyond -£10 totalled -£171.23,
+  // which is essentially the entire -£174.32 net loss.
+  //
+  // So the system was structurally capping its winners at ~£10 while
+  // letting losers run to -£42. With a ~48% win rate that cannot profit,
+  // however good the entries are — and this is the mechanism that did it.
+  // It was also the only genuinely profitable exit in the whole account
+  // (4 trades, +£36.59, +£9.15 avg), which makes raising its ceiling the
+  // single highest-value change available rather than something to remove.
+  //
+  // Now the floor ratchets with the peak instead of standing still: it
+  // keeps 70% of whatever the position has actually achieved, never drops
+  // below the original £10 guarantee, and never moves down. A trade that
+  // peaks at £40 now banks ~£28 instead of £10; one that peaks at £12 is
+  // unchanged. 30% giveback is deliberately generous — tighter re-creates
+  // the "cut the winner short" failure this is meant to fix.
+  const RATCHET_KEEP_FRAC = 0.7;
+  const ratchetFloor = Math.max(LOCK_IN_FLOOR_GBP, peak * RATCHET_KEEP_FRAC);
+
+  if (p.upl <= ratchetFloor) {
+    const closeReason = `[Profit floor] Peaked at £${peak.toFixed(2)}, retraced to £${p.upl.toFixed(2)} (≤ £${ratchetFloor.toFixed(2)} ratcheting floor, ${Math.round(RATCHET_KEEP_FRAC * 100)}% of peak) — banking now`;
     try {
       await closePosition(session, p.dealId, p.direction, p.size);
       addLog(mode, 'exit', name, closeReason);
@@ -929,7 +1039,7 @@ async function pollAll(): Promise<void> {
       continue;
     }
 
-    autoWatchNewPositions(mode, positions);
+    await autoWatchNewPositions(mode, positions);
     const ids = getWatchedDealIds(mode);
 
     for (const dealId of ids) {

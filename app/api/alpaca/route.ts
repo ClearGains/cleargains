@@ -74,5 +74,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return proxyTo(`/alpaca/${mode}/watch/${encodeURIComponent(symbol)}`, action === 'watch-on' ? 'POST' : 'DELETE');
   }
 
+  if (action === 'close-position') {
+    const { symbol } = await req.json() as { symbol?: string };
+    if (!symbol) return NextResponse.json({ ok: false, error: 'symbol required' }, { status: 400 });
+    return proxyTo(`/alpaca/${mode}/positions/${encodeURIComponent(symbol)}/close`, 'POST');
+  }
+
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });
 }

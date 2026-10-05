@@ -127,6 +127,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return proxyTo(`/ig-strategy/${mode}/deals/${encodeURIComponent(dealId)}/hold`, 'POST');
   }
 
+  if (action === 'close-position') {
+    const { dealId } = await req.json() as { dealId?: string };
+    if (!dealId) return NextResponse.json({ ok: false, error: 'dealId required' }, { status: 400 });
+    return proxyTo(`/ig-strategy/${mode}/positions/${encodeURIComponent(dealId)}/close`, 'POST');
+  }
+
   if (action === 'ai-pause') {
     const body = await req.json() as { paused?: boolean };
     return proxyTo(`/ig-strategy/${mode}/ai-pause`, 'POST', body);

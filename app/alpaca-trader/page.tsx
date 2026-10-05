@@ -48,6 +48,7 @@ type BotStatus = {
   lastPollTs:  string | null;
   lossLock?:   boolean;   // daily-loss circuit breaker engaged (no new entries today)
   positionWatch?: Record<string, { enabled: boolean; lastVerdict?: { action: string; confidence: number; reason: string; engine: string; at: number } }>;
+  pendingCloseSymbols?: string[]; // a close order is actually queued for this symbol right now
 };
 
 type ServerHealth = 'checking' | 'online' | 'offline' | 'misconfigured';
@@ -874,6 +875,30 @@ function IgSpreadBetTab() {
     }
   };
 
+  const [closeBusy, setCloseBusy] = useState<string | null>(null);
+  const closeIgPosition = async (dealId: string, name: string, upl: number) => {
+    const plStr  = `${upl >= 0 ? '+' : ''}£${upl.toFixed(2)}`;
+    const prompt = igMode === 'live'
+      ? `⚠️ LIVE — this is real money.\n\nClose ${name} now at the current market price? Current P&L: ${plStr}.`
+      : `Close ${name} now at the current market price? Current P&L: ${plStr}.`;
+    if (!confirm(prompt)) return;
+    setCloseBusy(dealId);
+    try {
+      const res  = await fetch(`/api/ig-strategy?mode=${igMode}&action=close-position`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ dealId }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok && data.error) setError(data.error);
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Close failed');
+    } finally {
+      setCloseBusy(null);
+    }
+  };
+
   const post = async (action: string, body?: object) => {
     setLoading(true);
     setError(null);
@@ -1499,22 +1524,32 @@ function IgSpreadBetTab() {
                       <div className={clsx('text-xs font-medium', (p.upl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
                         {(p.upl ?? 0) >= 0 ? '+' : ''}£{(p.upl ?? 0).toFixed(2)}
                       </div>
-                      {(() => {
-                        const managed = status?.managedDeals?.includes(p.dealId) ?? true;
-                        return (
-                          <button
-                            onClick={() => void toggleDealManaged(p.dealId, managed)}
-                            disabled={dealBusy === p.dealId}
-                            className={clsx(
-                              'mt-1 text-[10px] px-1.5 py-0.5 rounded font-normal shrink-0 disabled:opacity-50',
-                              managed ? 'text-slate-400 bg-slate-500/10 hover:bg-slate-500/20' : 'text-amber-400 bg-amber-500/10 hover:bg-amber-500/20',
-                            )}
-                            title={managed ? 'Bot can close this — click to hold it instead' : 'Bot will not close this automatically — click to let it manage exits'}
-                          >
-                            {managed ? '🔓 Bot-managed' : '🔒 Manual — hold'}
-                          </button>
-                        );
-                      })()}
+                      <div className="mt-1 flex items-center justify-end gap-1.5">
+                        {(() => {
+                          const managed = status?.managedDeals?.includes(p.dealId) ?? true;
+                          return (
+                            <button
+                              onClick={() => void toggleDealManaged(p.dealId, managed)}
+                              disabled={dealBusy === p.dealId}
+                              className={clsx(
+                                'text-[10px] px-1.5 py-0.5 rounded font-normal shrink-0 disabled:opacity-50',
+                                managed ? 'text-slate-400 bg-slate-500/10 hover:bg-slate-500/20' : 'text-amber-400 bg-amber-500/10 hover:bg-amber-500/20',
+                              )}
+                              title={managed ? 'Bot can close this — click to hold it instead' : 'Bot will not close this automatically — click to let it manage exits'}
+                            >
+                              {managed ? '🔓 Bot-managed' : '🔒 Manual — hold'}
+                            </button>
+                          );
+                        })()}
+                        <button
+                          onClick={() => void closeIgPosition(p.dealId, p.name || p.epic, p.upl ?? 0)}
+                          disabled={closeBusy === p.dealId}
+                          className="text-[10px] px-1.5 py-0.5 rounded font-normal shrink-0 text-red-400 bg-red-500/10 hover:bg-red-500/20 disabled:opacity-50"
+                          title="Close this position now at the current market price"
+                        >
+                          {closeBusy === p.dealId ? 'Closing…' : 'Close'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -2366,7 +2401,12 @@ function IgCfdBotTab() {
                       </div>
                       <button
                         onClick={() => {
-                          if (!window.confirm(`Close ${p.instrumentName || cfdEpicName(p.epic)} — ${p.direction} ${p.size} @ ${p.level.toFixed(2)}?`)) return;
+                          const plStr  = `${p.upl >= 0 ? '+' : ''}£${p.upl.toFixed(2)}`;
+                          const name   = p.instrumentName || cfdEpicName(p.epic);
+                          const prompt = cfdMode === 'live'
+                            ? `⚠️ LIVE — this is real money.\n\nClose ${name} — ${p.direction} ${p.size} @ ${p.level.toFixed(2)}? Current P&L: ${plStr}.`
+                            : `Close ${name} — ${p.direction} ${p.size} @ ${p.level.toFixed(2)}? Current P&L: ${plStr}.`;
+                          if (!window.confirm(prompt)) return;
                           void post('close', { dealId: p.dealId });
                         }}
                         disabled={loading}
@@ -2844,16 +2884,52 @@ export default function AlpacaTraderPage() {
                     // watch or toggle here, so don't show a button implying
                     // otherwise; it'll settle to $0 automatically at expiry.
                     const isDead = parseFloat(p.current_price) === 0 && parseFloat(p.market_value) === 0;
+                    // Options symbols follow OCC format (TICKER + YYMMDD + C/P +
+                    // 8-digit strike). p.side is 'long' for every position this
+                    // bot ever opens — it only ever buys options, never writes
+                    // them — so it can't distinguish a bullish call from a
+                    // bearish put bet; every option showed the same green
+                    // up-tick regardless. Read the real direction off the
+                    // symbol itself for options, and fall back to p.side for
+                    // plain stock positions (where long/short is meaningful).
+                    const optionMatch = p.symbol.match(/^[A-Z]+\d{6}([CP])\d{8}$/);
+                    const isBullish = optionMatch ? optionMatch[1] === 'C' : p.side === 'long';
+                    // A close was actually requested and is sitting queued —
+                    // e.g. placed outside market hours, or an options limit
+                    // order still waiting on a fill. Without this the
+                    // position just looks unchanged after clicking Close,
+                    // like the click did nothing.
+                    const pendingClose = status.pendingCloseSymbols?.includes(p.symbol) ?? false;
                     return (
                       <div key={p.symbol} className="px-4 py-3 flex items-center justify-between">
                         <div className="flex items-center gap-3">
-                          {p.side === 'long'
+                          {isBullish
                             ? <TrendingUp   className="w-4 h-4 text-green-400" />
                             : <TrendingDown className="w-4 h-4 text-red-400"   />}
                           <div>
-                            <div className="font-medium text-white text-sm">{p.symbol}</div>
+                            <div className="font-medium text-white text-sm flex items-center gap-1.5">
+                              {p.symbol}
+                              {optionMatch && (
+                                <span
+                                  className={clsx(
+                                    'text-[10px] font-semibold px-1.5 py-0.5 rounded',
+                                    optionMatch[1] === 'C' ? 'text-green-300 bg-green-500/10' : 'text-red-300 bg-red-500/10',
+                                  )}
+                                >
+                                  {optionMatch[1] === 'C' ? 'CALL' : 'PUT'}
+                                </span>
+                              )}
+                              {pendingClose && (
+                                <span
+                                  className="text-[10px] font-semibold px-1.5 py-0.5 rounded text-amber-300 bg-amber-500/10"
+                                  title="A close order is queued for this position — it'll fill once the market's open (or once an existing stuck order clears)"
+                                >
+                                  ⏳ Pending close
+                                </span>
+                              )}
+                            </div>
                             <div className="text-xs text-slate-500">
-                              {p.qty} shares · avg ${parseFloat(p.avg_entry_price).toFixed(2)}
+                              {p.qty} {optionMatch ? 'contracts' : 'shares'} · avg ${parseFloat(p.avg_entry_price).toFixed(2)}
                             </div>
                             {watch?.lastVerdict && (
                               <div
@@ -2898,6 +2974,21 @@ export default function AlpacaTraderPage() {
                               {isWatched ? '✦ Watching' : 'Watch'}
                             </button>
                           )}
+                          <button
+                            onClick={() => {
+                              const plStr  = `${pl >= 0 ? '+' : ''}$${pl.toFixed(2)}`;
+                              const prompt = mode === 'live'
+                                ? `⚠️ LIVE — this is real money.\n\nClose ${p.symbol} now at the current market price? Current P&L: ${plStr}.`
+                                : `Close ${p.symbol} now at the current market price? Current P&L: ${plStr}.`;
+                              if (!window.confirm(prompt)) return;
+                              void post('close-position', { symbol: p.symbol });
+                            }}
+                            disabled={loading || pendingClose}
+                            className="text-xs px-2.5 py-1 rounded font-medium transition-colors disabled:opacity-50 shrink-0 text-red-400 bg-red-500/10 hover:bg-red-500/20"
+                            title={pendingClose ? 'Already queued to close — waiting on a fill' : optionMatch ? 'Places a limit sell — options can\'t always close instantly' : 'Close this position now at market'}
+                          >
+                            {pendingClose ? 'Pending…' : 'Close'}
+                          </button>
                         </div>
                       </div>
                     );

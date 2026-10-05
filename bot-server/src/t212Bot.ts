@@ -77,6 +77,16 @@ const T212_MIN_CONFIRM_CONFIDENCE = 70;
 // anything that just looks good this week.
 const ENTRY_MIN_TREND_12W = 8;    // %
 const ENTRY_MIN_TREND_4W  = -3;   // % — allow a small pullback within an intact longer trend, not a full reversal
+// Added 2026-09-24: a real, non-AI volume floor — see TrendResult.volRatio's
+// own comment. Same underlying idea as the Alpaca options and T212 momentum
+// gates, just judged over weeks instead of days: a genuine trend should be
+// showing real recent volume relative to its own last couple of months, not
+// drifting up on thin, disinterested volume. Set below 1.0 (unlike the
+// day-trade bots) deliberately — a mature multi-month uptrend often cools
+// from its initial breakout volume while still being perfectly real, so this
+// only needs to catch a trend that's gone genuinely quiet/thin, not merely
+// "not accelerating."
+const ISA_ENTRY_MIN_VOLUME_RATIO = 0.8;
 // Exit consideration bar — same numbers as the existing position-review
 // tool's own `shouldFlag`, kept identical deliberately (already the
 // validated "this isn't noise" threshold for this exact use case).
@@ -191,6 +201,20 @@ const MOMENTUM_MAX_POSITION_GBP = 250;      // meaningfully smaller than the ISA
 const MOMENTUM_TOTAL_BUDGET_GBP_DEFAULT = 750; // default, adjustable at runtime — see getMomentumBudget/setMomentumBudget
 const MOMENTUM_MAX_POSITIONS = 5;
 const MOMENTUM_MIN_CONFIRM_CONFIDENCE = 65; // slightly below the ISA bot's 70 — this is a faster, smaller-size, higher-turnover strategy by nature, not a long-term conviction call
+
+// Rules-level score+volume floor — added 2026-09-24, same tiered gate already
+// proven on the Alpaca options bot (see OPTIONS_MOMENTUM_MIN_SCORE's own
+// comment in alpacaStrategies.ts for the full reasoning). profitScore was
+// already computed here but only ever used for display/sizing — nothing in
+// code actually blocked a weak-score, weak-volume candidate from reaching
+// the AI confirm step, and if the AI confirm step is ever turned off
+// (momentumAiGateEnabled=false), there was NO floor at all: any 0.5%+ move
+// bought outright regardless of score or volume. This makes the score
+// actually mean something, and holds whether or not the AI gate is on.
+const MOMENTUM_QUALIFY_MIN_SCORE          = 40; // below this, blocked regardless of volume
+const MOMENTUM_QUALIFY_HIGH_SCORE         = 60; // at/above this, only needs the lower volume bar
+const MOMENTUM_QUALIFY_HIGH_SCORE_MIN_VOL = 0.7;
+const MOMENTUM_QUALIFY_MID_SCORE_MIN_VOL  = 1.2; // score 40-59 needs real volume confirmation to compensate
 
 // Counter-thesis detector — ported 2026-09-11 from igOptionsBot.ts (built
 // there the same day after a manually-overridden Palantir monthly CALL lost
@@ -526,8 +550,16 @@ type TrendResult = {
   trend52w:      number | null;  // full-year change — context for whether the 12w move is a fresh re-rating within a longer uptrend, a recovery within a longer downtrend, or already very extended over the full year
   pctBelowHigh:  number | null;  // % below the 52-week high right now — 0 = sitting at the high, i.e. whatever move it made is fully realized and priced in already
   currentPrice:  number | null;
+  // Added 2026-09-24: real volume ratio, not an AI-judged one — last ~1
+  // month's average daily volume vs the ~2 months before that, off the same
+  // Yahoo bars already fetched for the price trend above (no extra call).
+  // Longer windows than the day-trade bots use (Alpaca options/T212
+  // momentum compare ~5 days vs ~20) because this bot is judging a
+  // multi-week trend, not a single day's move — a brief 2-day volume spike
+  // shouldn't swing a thesis built on 12 weeks of price action either way.
+  volRatio:      number | null;
 };
-const EMPTY_TREND: TrendResult = { trend4w: null, trend12w: null, trend52w: null, pctBelowHigh: null, currentPrice: null };
+const EMPTY_TREND: TrendResult = { trend4w: null, trend12w: null, trend52w: null, pctBelowHigh: null, currentPrice: null, volRatio: null };
 
 export async function fetchTrend(yahooTicker: string): Promise<TrendResult> {
   try {
@@ -543,9 +575,10 @@ export async function fetchTrend(yahooTicker: string): Promise<TrendResult> {
     });
     if (!res.ok) return EMPTY_TREND;
     const data = await res.json() as {
-      chart?: { result?: Array<{ indicators?: { quote?: Array<{ close?: (number | null)[] }> } }> };
+      chart?: { result?: Array<{ indicators?: { quote?: Array<{ close?: (number | null)[]; volume?: (number | null)[] }> } }> };
     };
-    const closes = (data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? []).filter(
+    const quote = data?.chart?.result?.[0]?.indicators?.quote?.[0];
+    const closes = (quote?.close ?? []).filter(
       (c): c is number => c !== null && c !== undefined && c > 0,
     );
     if (closes.length < 10) return { ...EMPTY_TREND, currentPrice: closes.at(-1) ?? null };
@@ -557,7 +590,17 @@ export async function fetchTrend(yahooTicker: string): Promise<TrendResult> {
     const trend52w = closes[0] > 0 ? ((last - closes[0]) / closes[0]) * 100 : null;
     const high52w  = Math.max(...closes);
     const pctBelowHigh = high52w > 0 ? ((high52w - last) / high52w) * 100 : null;
-    return { trend4w, trend12w, trend52w, pctBelowHigh, currentPrice: last };
+
+    const volumes = (quote?.volume ?? []).filter((v): v is number => v !== null && v !== undefined && v > 0);
+    let volRatio: number | null = null;
+    if (volumes.length >= 40) {
+      const recent20 = volumes.slice(-20);
+      const prior40  = volumes.slice(-60, -20);
+      const avgRecent = recent20.reduce((s, v) => s + v, 0) / recent20.length;
+      const avgPrior  = prior40.reduce((s, v) => s + v, 0) / Math.max(prior40.length, 1);
+      volRatio = avgPrior > 0 ? avgRecent / avgPrior : null;
+    }
+    return { trend4w, trend12w, trend52w, pctBelowHigh, currentPrice: last, volRatio };
   } catch {
     return EMPTY_TREND;
   }
@@ -721,6 +764,12 @@ async function scanMomentumCandidates(exclude: Set<string>): Promise<MomentumCan
     if (q.changePercent >= 0.5) signal = news.sentiment <= -0.5 ? 'NEUTRAL' : 'BUY';
     else if (q.changePercent <= -0.5) signal = news.sentiment >= 0.5 ? 'NEUTRAL' : 'SELL';
     if (signal !== 'BUY') return;
+
+    // See MOMENTUM_QUALIFY_MIN_SCORE's own comment — a hard rules floor,
+    // independent of the AI confirm step below (applies whether or not
+    // that's turned on).
+    const requiredVol = profitScore >= MOMENTUM_QUALIFY_HIGH_SCORE ? MOMENTUM_QUALIFY_HIGH_SCORE_MIN_VOL : MOMENTUM_QUALIFY_MID_SCORE_MIN_VOL;
+    if (profitScore < MOMENTUM_QUALIFY_MIN_SCORE || volRatio < requiredVol) return;
 
     const sentimentLabel = news.sentiment >= 0.1 ? 'positive' : news.sentiment <= -0.1 ? 'negative' : 'neutral';
     const reason = [
@@ -955,6 +1004,10 @@ async function pollEntries(mode: T212Mode): Promise<void> {
     const trend = await fetchTrend(sym);
     if (trend.trend12w === null || trend.currentPrice === null) continue;
     if (trend.trend12w < ENTRY_MIN_TREND_12W || (trend.trend4w !== null && trend.trend4w < ENTRY_MIN_TREND_4W)) continue;
+    if (trend.volRatio !== null && trend.volRatio < ISA_ENTRY_MIN_VOLUME_RATIO) {
+      addLog(mode, 'wait', sym, `Trend looks good (+${trend.trend12w.toFixed(1)}%/12w) but recent volume is only ${trend.volRatio.toFixed(2)}x the prior 2 months' — not enough real conviction behind it yet, skipping`);
+      continue;
+    }
     // Deliberately NOT a hard skip on move size alone — a large move backed
     // by real fundamentals (earnings, guidance, structural demand) is a
     // fine long-term buy regardless of how far it's already run; it's an

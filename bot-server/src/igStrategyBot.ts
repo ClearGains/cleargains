@@ -3,16 +3,16 @@ import * as path from 'path';
 import {
   authenticate, getSession, fetchCandleHistory, fetchFullPositions,
   fetchAccountFunds, placeMarketOrder, closePosition as igClosePos,
-  fetchMarketDetails, updatePositionLevels, fetchClosedTransactions,
+  fetchMarketDetails, updatePositionLevels, fetchClosedTransactions, instrumentNameMatches,
   type IGSession, type CandleBar, type FullPosition, type MarketDetail,
 } from './igApi';
 import {
   rsiMeanReversionSignal, emaCrossoverSignal, orbSignal,
   vwapSignal, weeklyMomentumSignal, donchianBreakoutSignal, macdCrossoverSignal, pivotPointsSignal,
-  ruleBasedAnalysisSignal, meanReversionSwingSignal,
+  ruleBasedAnalysisSignal, meanReversionSwingSignal, newsMomentumSignal,
   calcRsi, calcMacdHist, calcAtr, calcEfficiencyRatio,
   STRATEGY_META, MIN_SWING_CONFIDENCE, MIN_DAILY_EFFICIENCY_RATIO,
-  type StrategySignal,
+  type StrategySignal, type DirectionalChaseGuard,
 } from './alpacaStrategies';
 import { MAX_HOLD_DAYS as MR_SWING_MAX_HOLD_DAYS } from './meanReversionStrategy';
 import { ruleBasedAnalysis } from './ruleBasedAnalysis';
@@ -28,6 +28,7 @@ import { scanIgEpics, epicName, IG_EPICS, scoreForStrategy, LIGHTSTREAM_ELIGIBLE
 import { askIgDailyVerdict, askIgTradeIdea, askIgConfirmStockTrade } from './openai';
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchAllHeadlines } from './newsFetch';
+import { getForeignOwnership, isForeignPosition } from './positionOwnership';
 import { createStreamManager, type StreamManager } from './igStream';
 import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
@@ -139,6 +140,63 @@ const LOSS_COOLDOWN_MS = 3 * 60 * 60_000;  // 3h — long enough to stop immedia
 // — worst case after a restart is one wasted retry, not a real gap.
 const FUNDS_COOLDOWN_MS = 2 * 60 * 60_000; // 2h — shorter than LOSS_COOLDOWN_MS since freed margin (a position closing elsewhere) can happen faster than a real thesis reset
 const fundsCooldownEpics = new Map<string, number>();
+
+// Probe-then-scale entry — added per explicit request 2026-09-15 after a
+// real pattern on the live account: a modest win on one auto-opened
+// recommendation repeatedly getting wiped out, and then some, by a bigger
+// full-size loss on the very next one. The automatic path (autoOpenRecommendations)
+// was sending every AI-cleared idea straight in at full maxRiskGbp size, with
+// nothing standing between a bad thesis and the full hard stop.
+// Now: an automatic entry opens at the smallest size IG allows first — a
+// cheap "trial" — instead of full size immediately. runProbeGuard (own fast
+// interval, same cadence as the severe-loss guard below) then watches it:
+//   - down ~£3 → thesis isn't confirming, cut it now rather than ride it all
+//     the way to the full stop. £3 chosen to match what was actually asked
+//     for ("cutting losses early at like £3 loss").
+//   - moved a real fraction of the planned stop distance in our favour →
+//     that's the "directional test" working — bank the trial and open the
+//     real full-size position right away, same stop/TP the idea was scored on.
+//   - neither, after a while → stop treating it specially; it's just a small
+//     position now, left to its own ordinary stop/TP like anything else.
+// A manual "Open Position" click still goes straight to full size (see
+// openRecommendation's own comment) — this only changes the unattended path.
+// In-memory only, same tradeoff as this file's other per-position trackers
+// (weakOpenTightenedOnce, profitPeakByDeal): worst case after a restart is
+// one probe that never gets to scale up, not a safety gap — the probe's own
+// full stop/TP already protects it regardless.
+type ProbeInfo = {
+  mode: IgMode; epic: string; action: 'BUY' | 'SELL'; entryLevel: number;
+  stopDist: number; profitDist: number; fullStake: number; minDeal: number; confidence: number; openedAt: number;
+};
+// Keyed by dealId like this file's other cross-mode trackers, but unlike
+// those this one carries its own `mode` and runProbeGuard filters on it —
+// demo and live each run this guard off their own session/positions fetch,
+// so without that filter a live probe would look "already closed" (just
+// absent) to demo's fetch and get pruned within one 30s tick, silently
+// disabling the scale-up for it. Not a safety gap either way (the probe's
+// own real stop/TP still protects it) but the filter keeps the feature
+// actually working rather than quietly degrading to "never confirms."
+const probingDeals = new Map<string, ProbeInfo>(); // dealId -> probe info
+const PROBE_CUT_GBP          = 3;             // cut the trial here rather than ride it to the full hard stop
+const PROBE_CONFIRM_FRACTION = 0.25;          // favourable move ≥ 25% of the planned stop distance counts as confirmed
+const PROBE_TIMEOUT_MS       = 90 * 60_000;   // 90min undecided — stop special-casing it, let it run as a normal small position
+
+// Non-AI, code-computed volume floor — added 2026-09-24 per explicit
+// request: most of this bot's strategies (RSI/EMA/VWAP/Donchian/MACD/ORB)
+// trade on a pure technical trigger with zero volume check at all, and even
+// the AI-confirmed strategies (mean_reversion_swing, gemini_confirmed) only
+// ever hand volume to the AI as one line of context in its reasoning — never
+// a hard code-level floor. Same underlying idea already proven on
+// commodities' entries (meanReversionBot.ts) and the Alpaca/T212 momentum
+// gates: recent volume vs this instrument's own recent normal, computed
+// straight off the same bars already fetched for the signal, mechanically —
+// no AI involved, so it can't be reasoned past. Shares only (classifyMarketType
+// below) — IG's own feed doesn't carry meaningful traded volume for FX/indices.
+const IG_SB_ENTRY_MIN_VOLUME_RATIO = 1.0;
+
+// Same backstop shape as MR_SWING_MAX_HOLD_DAYS — a momentum thesis that
+// hasn't resolved in under a week has stopped being a momentum trade.
+const NEWS_MOMENTUM_MAX_HOLD_DAYS = 7;
 
 // Scales the cooldown by how many times in a row this exact instrument has
 // just been cut — confirmed live 2026-08-25 that a flat 3h wasn't enough on
@@ -306,6 +364,15 @@ function strategyFor(cfg: IgStrategyConfig, epic: string): IgStrategyName {
   return cfg.epicStrategyOverrides?.[epic] ?? cfg.strategy;
 }
 
+// Lets geminiWatch.ts (which has no direct access to this bot's own config
+// object) tell whether a given epic is currently running news_momentum —
+// see its own informational-watch block for why that matters. Returns
+// false, not an error, when this mode isn't currently running at all.
+export function isNewsMomentumEpic(mode: IgMode, epic: string): boolean {
+  const cfg = ms(mode).config;
+  return !!cfg && strategyFor(cfg, epic) === 'news_momentum';
+}
+
 function journalEntry(
   mode: IgMode, cfg: IgStrategyConfig, epic: string,
   side: 'long' | 'short', qty: number, price: number, reason: string, confidence?: number,
@@ -328,9 +395,54 @@ function journalEntry(
 // a gap, and rare in practice.
 const journaledDealIds = new Set<string>();
 
+// "Chasing a just-banked win" tracker — added 2026-09-28, same idea and same
+// thresholds as alpacaBot.ts's recentWinExits (see its own comment): a
+// genuine gain closed on an epic makes the SAME direction disproportionately
+// likely to be chasing a move that's already largely played out. Keyed by
+// epic, not dealId — a fresh deal on the same instrument is still the same
+// chase risk. Only consulted for news_momentum entries (see evaluateEpic's
+// own case); written on every real exit regardless of strategy, same
+// "record everything, gate narrowly" shape as the Alpaca version.
+type RecentWinExit = { closedAt: number; plGbp: number; direction: 'BUY' | 'SELL' };
+function winExitFile(mode: IgMode): string {
+  return path.join(__dirname, '..', `ig-recent-win-exits-${mode}.json`);
+}
+function loadWinExits(mode: IgMode): Map<string, RecentWinExit> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(winExitFile(mode), 'utf8')) as Record<string, RecentWinExit>;
+    return new Map(Object.entries(raw));
+  } catch { return new Map(); }
+}
+function saveWinExits(mode: IgMode, map: Map<string, RecentWinExit>): void {
+  try { fs.writeFileSync(winExitFile(mode), JSON.stringify(Object.fromEntries(map)), 'utf8'); } catch {}
+}
+const recentWinExits = new Map<IgMode, Map<string, RecentWinExit>>([
+  ['demo', loadWinExits('demo')],
+  ['live', loadWinExits('live')],
+]);
+const CHASE_COOLDOWN_MS = 3 * 86_400_000; // 3 days — same window as the Alpaca version
+// £-relative, not a raw %, matching this file's own guard style (see
+// severeLossCeiling = maxRiskGbp*5, STUCK_LOSS_GBP, etc. elsewhere in this
+// file) — a spread bet's notional-based % (p.upl / (level*size)) isn't a
+// comparable scale to an option's premium %, so this judges "was doing
+// well" against the account's own defined risk-per-trade instead.
+const CHASE_MIN_WIN_MULT = 1.5;
+function recordWinExitIfAny(mode: IgMode, p: FullPosition, maxRiskGbp: number): void {
+  if (p.upl < maxRiskGbp * CHASE_MIN_WIN_MULT) return;
+  const map = recentWinExits.get(mode)!;
+  map.set(p.epic, { closedAt: Date.now(), plGbp: p.upl, direction: p.direction });
+  saveWinExits(mode, map);
+}
+export function chaseGuardFor(mode: IgMode, epic: string): DirectionalChaseGuard {
+  const rec = recentWinExits.get(mode)!.get(epic);
+  if (!rec || Date.now() - rec.closedAt > CHASE_COOLDOWN_MS) return { buy: false, sell: false };
+  return { buy: rec.direction === 'BUY', sell: rec.direction === 'SELL' };
+}
+
 function journalExit(mode: IgMode, cfg: IgStrategyConfig, p: FullPosition, reason: string): void {
   journaledDealIds.add(p.dealId);
   const notional = p.level * p.size;
+  recordWinExitIfAny(mode, p, cfg.maxRiskGbp);
   recordJournalEvent({
     mode: journalMode(mode), event: 'exit',
     symbol: epicName(p.epic), strategy: strategyFor(cfg, p.epic),
@@ -356,6 +468,7 @@ function journalExit(mode: IgMode, cfg: IgStrategyConfig, p: FullPosition, reaso
 export function recordWatchExit(mode: IgMode, p: FullPosition, reason: string): void {
   journaledDealIds.add(p.dealId);
   const cfg = ms(mode).config;
+  if (cfg) recordWinExitIfAny(mode, p, cfg.maxRiskGbp);
   const notional = p.level * p.size;
   recordJournalEvent({
     mode: journalMode(mode), event: 'exit',
@@ -415,10 +528,16 @@ async function journalSilentCloses(mode: IgMode, session: IGSession, dealIds: st
     // than being recorded with a wrong number. The short name is always a
     // true prefix of IG's longer one, so startsWith is the fix, same as
     // meanReversionBot.ts's identical bug.
-    const candidates = transactions.filter(t => t.instrumentName?.startsWith(name));
+    const candidates = transactions.filter(t => instrumentNameMatches(name, t.instrumentName));
     const match = candidates.length === 1 ? candidates[0]
       : candidates.filter(t => t.openLevel !== undefined && Math.abs(t.openLevel - last.level) < Math.max(1, last.level * 0.005))[0];
     if (!match) continue; // couldn't confidently identify which transaction this was — skip rather than guess
+    // Same journaledDealIds-marking fix as runProbeGuard's own recovery
+    // branch (see its 2026-09-30 comment) — this also journals via a raw
+    // recordJournalEvent rather than journalExit/recordWatchExit, so without
+    // this it stays invisible to any OTHER recovery path that might see the
+    // same dealId vanish later.
+    journaledDealIds.add(dealId);
     recordJournalEvent({
       mode: journalMode(mode), event: 'exit',
       symbol: name, strategy: cfg ? strategyFor(cfg, last.epic) : 'unknown',
@@ -604,7 +723,7 @@ function loadReleasedDeals(mode: IgMode): Set<string> {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed' | 'mean_reversion_swing';
+export type IgStrategyName = 'rsi_mean_reversion' | 'ema_crossover' | 'orb' | 'vwap' | 'weekly_momentum' | 'donchian_breakout' | 'donchian_hourly' | 'macd_crossover' | 'pivot_points' | 'gemini_opinion' | 'rule_based_analysis' | 'gemini_confirmed' | 'mean_reversion_swing' | 'news_momentum';
 
 // Fixed watchlist for mean_reversion_swing — deliberately NOT scan-and-score
 // picked the way every other strategy's watchlist is. The original strategy
@@ -952,6 +1071,36 @@ export function holdDeal(mode: IgMode, dealId: string): void {
   addLog(mode, 'info', '—', `🔒 Deal ${dealId} held — bot will not close it automatically`);
 }
 
+// Manual "close this now" from the dashboard — per explicit request, so a
+// position can be closed from the site directly instead of having to go
+// into IG's own platform. Looks the position up fresh (not from any local
+// cache) since it needs the real, current direction/size IG will actually
+// accept a close order against.
+export async function closeIgPositionManually(mode: IgMode, dealId: string): Promise<{ ok: boolean; error?: string }> {
+  const st = ms(mode);
+  if (!st.session || !st.config) return { ok: false, error: 'Bot not running' };
+  let position: FullPosition | undefined;
+  try {
+    position = (await fetchFullPositions(st.session)).find(p => p.dealId === dealId);
+  } catch (e) {
+    return { ok: false, error: `Position lookup failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!position) return { ok: false, error: 'Position not found at IG — may already be closed' };
+  const name = epicName(position.epic);
+  try {
+    await igClosePos(st.session, position.dealId, position.direction, position.size);
+    const reason = 'Manually closed from the dashboard';
+    recordLossExit(mode, position.epic, position.upl, reason);
+    journalExit(mode, st.config, position, reason);
+    addLog(mode, 'exit', name, `Closed manually — £${position.upl.toFixed(2)}`);
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    addLog(mode, 'error', name, `Manual close failed: ${msg}`);
+    return { ok: false, error: msg };
+  }
+}
+
 export function isPaused(mode: IgMode, epic: string): boolean { return ms(mode).pausedEpics.has(epic); }
 export function getPausedEpics(mode: IgMode): string[] { return [...ms(mode).pausedEpics]; }
 export function pauseEpic(mode: IgMode, epic: string): void {
@@ -1001,6 +1150,12 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
   // this strategy is Yahoo/Alpaca-covered in practice (see FREE_DATA_PARAMS
   // below), so this IG-native path is a rare fallback too.
   mean_reversion_swing: { resolution: 'DAY', count: 210 },
+  // 80 daily bars — see STRATEGY_META.news_momentum in alpacaStrategies.ts.
+  // Almost never used in practice (this strategy's universe is Alpaca/Yahoo-
+  // covered shares, same as rule_based_analysis/gemini_confirmed above), so
+  // this IG-native fallback just needs to clear newsMomentumSignal's own
+  // 60-bar minimum with headroom.
+  news_momentum: { resolution: 'DAY', count: 80 },
 };
 
 // Free-data params for strategies that need something other than the daily
@@ -1567,12 +1722,27 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
         if (ticker) {
           try { headlines = await fetchAllHeadlines(ticker, 3, name); } catch {}
         }
+        // ── Quality bar before a candidate becomes a recommendation ──────
+        // Added 2026-10-03. Every recommendation that survives this sweep
+        // gets a real AI confirmation call when autoOpenRecommendations
+        // reaches it — and live, ~15 of those fired every 30 minutes with
+        // nearly all returning SKIP at 35%, i.e. the rule layer was handing
+        // the AI a pile of setups it was always going to reject. That's paid
+        // API calls and log noise standing in for a filter the rules should
+        // have applied themselves. Rejecting weak candidates here costs
+        // nothing and never reaches the AI at all.
+        const recScore = scoreForStrategy(cfg.strategy, bars, epic, name);
+        const MIN_RECOMMENDATION_SCORE = 25;
+        if (recScore < MIN_RECOMMENDATION_SCORE) {
+          st.recommendations.delete(epic);
+          continue;
+        }
         addRecommendation(st.recommendations, {
           epic, name, action: signal.action, reason: signal.reason,
           level: bars[bars.length - 1].c,
           stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice,
           computedAt: new Date().toISOString(),
-          score: scoreForStrategy(cfg.strategy, bars, epic, name),
+          score: recScore,
           headlines,
         });
       } else {
@@ -1594,13 +1764,14 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
   if (force) addLog(mode, 'info', '—', `[Recommendation check] Done — ${checked} checked, ${found} signal(s) found, ${blocked} allowance-blocked`);
 }
 
-// Manually executes a currently-listed recommendation as a real order — the
-// "just send it through" path: re-prices against the live market rather
-// than trusting the (possibly several-minutes-stale) level the recommendation
-// was computed at, but keeps the same stop/TP *distance* the recommendation
-// chose, applied relative to the fresh price. Sized off the bot's own
-// maxRiskGbp, same as every other entry this bot places.
-export async function openRecommendation(mode: IgMode, epic: string): Promise<{ ok: boolean; error?: string }> {
+// Shared setup for both the manual "Open Position" click and the automatic
+// probe entry below: runs every pre-trade check (already-open, cooldown, AI
+// paused, Gemini confirmation) and works out sizing, but stops short of
+// actually placing anything — the two callers differ only in what stake they
+// send and what happens after the order goes in.
+async function prepareRecommendationEntry(mode: IgMode, epic: string):
+  Promise<{ ok: true; action: 'BUY' | 'SELL'; stopDist: number; profitDist: number; minDeal: number; fullStake: number; confidence: number }
+         | { ok: false; error: string }> {
   const st = ms(mode);
   if (!st.running || !st.session || !st.config) return { ok: false, error: 'Bot not running' };
   const rec = st.recommendations.get(epic);
@@ -1608,84 +1779,179 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
   const cfg  = st.config;
   const name = epicName(epic);
 
+  const livePositions = await fetchFullPositions(st.session);
+  if (livePositions.some(p => p.epic === epic)) return { ok: false, error: 'Position already open on this epic' };
+
+  // Confirmed live 2026-08-25 this check was missing entirely — Visa got
+  // opened and closed 5 times in one day through this exact function
+  // (every one logged "Manually opened from recommendation"), because
+  // this was the one entry path in the whole file that never consulted
+  // lossCooldownEpics (the scanner's own candidate list already excludes
+  // cooling-down epics — see its exclude-list build — but a recommendation
+  // already sitting in st.recommendations bypasses that scan entirely).
+  const coolUntil = st.lossCooldownEpics.get(epic);
+  if (coolUntil && Date.now() < coolUntil) {
+    return { ok: false, error: `Recently closed on this instrument — cooling down until ${new Date(coolUntil).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} before re-entering` };
+  }
+
+  // The recommendations sweep deliberately skips Gemini confirmation per
+  // candidate (see refreshRecommendations' own comment — not worth a real
+  // call for every idea a wide scan considers), which means clicking
+  // "Open Position" was sending the raw rule signal straight to the
+  // broker with none of the news-aware check that automatic entries get
+  // — confirmed live this is exactly how a GOOGL SELL went through
+  // repeatedly while the stock was breaking out on genuinely bullish
+  // news. Run that same check here, once, only for the idea actually
+  // being acted on. Fails closed like every other Gemini gate in this
+  // file — an unconfirmed manual entry is worse than a blocked one.
+  if (isStrategyAiPaused(mode)) {
+    return { ok: false, error: 'AI paused for this bot — resume to open recommendations again' };
+  }
+  const ticker    = EPIC_TO_ALPACA[epic];
+  let headlines: string[] = [];
+  try { if (ticker) headlines = await fetchAllHeadlines(ticker, 5, name); } catch {}
+  const confirmVerdict = await askIgDailyVerdict({
+    instrumentName: name,
+    direction:      rec.action,
+    strength:       70,
+    price:          rec.level,
+    changePercent:  0,
+    stopPoints:     rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : rec.level * 0.02,
+    tpPoints:       rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : rec.level * 0.03,
+    headlines,
+  });
+  addLog(mode, 'info', name, `[AI] ${confirmVerdict.direction} ${confirmVerdict.confidence}% — ${confirmVerdict.reason} (${confirmVerdict.engine})`);
+  if (confirmVerdict.engine === 'passthrough') {
+    return { ok: false, error: `Gemini unavailable (${confirmVerdict.reason}) — not opening unconfirmed` };
+  }
+  // Raised 50 -> 65 2026-09-30 per explicit request ("be calculated with
+  // the amount of positions") — this was the floor for literally any idea
+  // in this account's entire recommendation universe to open a real trade,
+  // and confirmed live it was letting through a high volume of marginal
+  // setups (most actual calls here were landing well below 50 anyway and
+  // correctly getting rejected, but the ones scraping past 50 weren't
+  // meaningfully better-reasoned than the ones that didn't). 65 matches the
+  // bar used elsewhere in this account for a similar "should this actually
+  // open" AI gate (T212 Momentum, mean_reversion_swing's entry confirm).
+  if (confirmVerdict.direction !== rec.action || confirmVerdict.confidence < 65) {
+    return { ok: false, error: `Gemini vetoed — ${confirmVerdict.direction} ${confirmVerdict.confidence}%: ${confirmVerdict.reason}` };
+  }
+
+  const details = await fetchMarketDetails(st.session, [epic]);
+  const detail  = details.get(epic);
+  // `||` not `??` — confirmed live a stake of 0.05 got through despite
+  // this clamp existing, on an instrument (Amazon) whose real minDealSize
+  // is 0.24. IG never legitimately returns 0 for these, so if it ever
+  // does, `??` treats that as a real value and skips the fallback,
+  // silently turning the clamp into a no-op.
+  const minDeal = detail?.minDealSize || 0.5;
+  const minStop = detail?.minStopDist || 1;
+  const currentPrice = (rec.action === 'BUY' ? detail?.offer : detail?.bid) ?? rec.level;
+
+  const stopDist   = Math.max(minStop, rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : currentPrice * 0.02);
+  const profitDist = Math.max(minStop, rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : currentPrice * 0.03);
+  let fullStake   = Math.max(minDeal, calcStake(cfg.maxRiskGbp, stopDist, minDeal));
+
+  // Minimum £/pt floor — added 2026-09-30 per explicit request ("solely
+  // having positions trading in pennies is never going to profit"). Same
+  // mechanism as mean_reversion_swing's and news_momentum's own floors
+  // elsewhere in this file: risk ÷ stopDist on a wide-ATR name can produce a
+  // real stake so small that even a genuine, correctly-called move barely
+  // registers in £. Scaled to confirmVerdict's own real AI confidence
+  // (0-100, now 65+ to even reach this point) — a borderline-qualifying
+  // idea gets the low end, a genuinely high-conviction one gets the top.
+  const REC_MIN_STAKE_LOW  = 0.03;
+  const REC_MIN_STAKE_HIGH = 0.08;
+  const recMinStakePerPoint = Math.round((REC_MIN_STAKE_LOW + Math.max(0, Math.min(confirmVerdict.confidence, 100)) / 100 * (REC_MIN_STAKE_HIGH - REC_MIN_STAKE_LOW)) * 100) / 100;
+  if (fullStake < recMinStakePerPoint) {
+    addLog(mode, 'info', name, `Stake raised to the £${recMinStakePerPoint.toFixed(3)}/pt floor for this ${confirmVerdict.confidence}%-conviction idea (was £${fullStake}/pt)`);
+    fullStake = recMinStakePerPoint;
+  }
+
+  // Loss ceiling — the floor above can push the realized stop-loss past
+  // cfg.maxRiskGbp on a wide-stop instrument; this bounds how far, same
+  // "check the actual max loss, not just the nominal target" principle as
+  // executeIgSignal's own ceiling check. Flat 4x here rather than that
+  // function's confidence-scaled 3-6x — this path's own floor already only
+  // ever kicks in for a 65%+-confidence idea, so there's less range in
+  // confidence left to scale against.
+  const recActualMaxLoss = fullStake * stopDist;
+  const recLossCeiling   = cfg.maxRiskGbp * 4;
+  if (recActualMaxLoss > recLossCeiling) {
+    return { ok: false, error: `Sizing works out to £${recActualMaxLoss.toFixed(0)} max loss (£${fullStake}/pt × ${stopDist.toFixed(0)}pt stop), above the £${recLossCeiling.toFixed(0)} ceiling (4× target)` };
+  }
+
+  // Margin affordability — added 2026-09-29 per explicit request, same
+  // check and same real incident shape as executeIgSignal's own (Western
+  // Digital/Micron rejected with INSUFFICIENT_FUNDS at the IG minimum
+  // stake). This path (recommendation open / probe-and-scale) never had
+  // the equivalent check at all, so it kept attempting — and failing — on
+  // instruments this account structurally can't afford right now, one real
+  // rejected order and cooldown at a time instead of being skipped up
+  // front. Checked against minDeal specifically: that's the actual first
+  // order this path ever places, whether opening straight at full size
+  // (minDeal >= fullStake, see openRecommendationProbe) or as the smaller
+  // probe leg (minDeal < fullStake) — either way, if even that smallest
+  // possible stake doesn't fit, nothing downstream would have worked either.
+  if (detail?.marginFactorPct !== undefined) {
+    const requiredMargin = minDeal * currentPrice * (detail.marginFactorPct / 100);
+    const { available } = await fetchAccountFunds(st.session).catch(() => ({ balance: 0, available: 0 }));
+    if (requiredMargin > available) {
+      const errMsg = `Would need £${requiredMargin.toFixed(0)} margin for even the minimum stake (${minDeal}/pt, ${detail.marginFactorPct}% factor), only £${available.toFixed(0)} available`;
+      addLog(mode, 'wait', name, `Skipped — ${errMsg}`);
+      // Same cooldown the catch-block INSUFFICIENT_FUNDS handlers below
+      // apply after a real rejected order — this is that same outcome,
+      // just caught before spending a live order attempt on it.
+      fundsCooldownEpics.set(epic, Date.now() + FUNDS_COOLDOWN_MS);
+      return { ok: false, error: errMsg };
+    }
+  }
+
+  return { ok: true, action: rec.action, stopDist, profitDist, minDeal, fullStake, confidence: confirmVerdict.confidence };
+}
+
+// Places the order and does all the bookkeeping a real entry needs
+// (protection logging, bot-opened registration, journal, Gemini Position
+// Watch enrolment) — shared by the manual full-size open, the automatic
+// probe open, and the probe's own scale-up-to-full-size open below.
+async function finalizeRecommendationEntry(
+  mode: IgMode, epic: string, action: 'BUY' | 'SELL', stake: number,
+  stopDist: number, profitDist: number, label: string, confidence: number,
+): Promise<{ dealId: string; level: number }> {
+  const st   = ms(mode);
+  const cfg  = st.config!;
+  const name = epicName(epic);
+  const { dealId, level, protectionOk, protectionError, guaranteedStop } =
+    await placeMarketOrder(st.session!, epic, action, stake, stopDist, profitDist, 'GBP', true);
+
+  addLog(mode, 'enter', name,
+    `↑ ${label} — ${action} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt${guaranteedStop ? ' (guaranteed)' : ''} TP ${profitDist.toFixed(1)}pt`);
+  if (!protectionOk) addLog(mode, 'error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
+
+  registerBotOpenedDeal(mode, dealId);
+  journalEntry(mode, cfg, epic, action === 'BUY' ? 'long' : 'short', stake, level, label, confidence);
+  try { const { addToWatch } = await import('./geminiWatch'); addToWatch(mode, dealId); } catch {}
+
+  return { dealId, level };
+}
+
+// Manually executes a currently-listed recommendation as a real order — the
+// "just send it through" path: re-prices against the live market rather
+// than trusting the (possibly several-minutes-stale) level the recommendation
+// was computed at, but keeps the same stop/TP *distance* the recommendation
+// chose, applied relative to the fresh price. Sized off the bot's own
+// maxRiskGbp, same as every other entry this bot places. Full size,
+// immediately — a human clicking this button is itself the conviction check,
+// unlike the automatic path below which probes first (see openRecommendationProbe).
+export async function openRecommendation(mode: IgMode, epic: string): Promise<{ ok: boolean; error?: string }> {
+  const st   = ms(mode);
+  const name = epicName(epic);
   try {
-    const livePositions = await fetchFullPositions(st.session);
-    if (livePositions.some(p => p.epic === epic)) return { ok: false, error: 'Position already open on this epic' };
-
-    // Confirmed live 2026-08-25 this check was missing entirely — Visa got
-    // opened and closed 5 times in one day through this exact function
-    // (every one logged "Manually opened from recommendation"), because
-    // this was the one entry path in the whole file that never consulted
-    // lossCooldownEpics (the scanner's own candidate list already excludes
-    // cooling-down epics — see its exclude-list build — but a recommendation
-    // already sitting in st.recommendations bypasses that scan entirely).
-    const coolUntil = st.lossCooldownEpics.get(epic);
-    if (coolUntil && Date.now() < coolUntil) {
-      return { ok: false, error: `Recently closed on this instrument — cooling down until ${new Date(coolUntil).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} before re-entering` };
-    }
-
-    // The recommendations sweep deliberately skips Gemini confirmation per
-    // candidate (see refreshRecommendations' own comment — not worth a real
-    // call for every idea a wide scan considers), which means clicking
-    // "Open Position" was sending the raw rule signal straight to the
-    // broker with none of the news-aware check that automatic entries get
-    // — confirmed live this is exactly how a GOOGL SELL went through
-    // repeatedly while the stock was breaking out on genuinely bullish
-    // news. Run that same check here, once, only for the idea actually
-    // being acted on. Fails closed like every other Gemini gate in this
-    // file — an unconfirmed manual entry is worse than a blocked one.
-    if (isStrategyAiPaused(mode)) {
-      return { ok: false, error: 'AI paused for this bot — resume to open recommendations again' };
-    }
-    const ticker    = EPIC_TO_ALPACA[epic];
-    let headlines: string[] = [];
-    try { if (ticker) headlines = await fetchAllHeadlines(ticker, 5, name); } catch {}
-    const confirmVerdict = await askIgDailyVerdict({
-      instrumentName: name,
-      direction:      rec.action,
-      strength:       70,
-      price:          rec.level,
-      changePercent:  0,
-      stopPoints:     rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : rec.level * 0.02,
-      tpPoints:       rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : rec.level * 0.03,
-      headlines,
-    });
-    addLog(mode, 'info', name, `[AI] ${confirmVerdict.direction} ${confirmVerdict.confidence}% — ${confirmVerdict.reason} (${confirmVerdict.engine})`);
-    if (confirmVerdict.engine === 'passthrough') {
-      return { ok: false, error: `Gemini unavailable (${confirmVerdict.reason}) — not opening unconfirmed` };
-    }
-    if (confirmVerdict.direction !== rec.action || confirmVerdict.confidence < 50) {
-      return { ok: false, error: `Gemini vetoed — ${confirmVerdict.direction} ${confirmVerdict.confidence}%: ${confirmVerdict.reason}` };
-    }
-
-    const details = await fetchMarketDetails(st.session, [epic]);
-    const detail  = details.get(epic);
-    // `||` not `??` — confirmed live a stake of 0.05 got through despite
-    // this clamp existing, on an instrument (Amazon) whose real minDealSize
-    // is 0.24. IG never legitimately returns 0 for these, so if it ever
-    // does, `??` treats that as a real value and skips the fallback,
-    // silently turning the clamp into a no-op.
-    const minDeal = detail?.minDealSize || 0.5;
-    const minStop = detail?.minStopDist || 1;
-    const currentPrice = (rec.action === 'BUY' ? detail?.offer : detail?.bid) ?? rec.level;
-
-    const stopDist   = Math.max(minStop, rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : currentPrice * 0.02);
-    const profitDist = Math.max(minStop, rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : currentPrice * 0.03);
-    const stake       = Math.max(minDeal, calcStake(cfg.maxRiskGbp, stopDist, minDeal));
-
-    const { dealId, level, protectionOk, protectionError, guaranteedStop } =
-      await placeMarketOrder(st.session, epic, rec.action, stake, stopDist, profitDist, 'GBP', true);
-
-    addLog(mode, 'enter', name,
-      `↑ Manually opened from recommendation — ${rec.action} @ ${level.toFixed(2)} · stake ${stake} · stop ${stopDist.toFixed(1)}pt${guaranteedStop ? ' (guaranteed)' : ''} TP ${profitDist.toFixed(1)}pt`);
-    if (!protectionOk) addLog(mode, 'error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
-
-    registerBotOpenedDeal(mode, dealId);
-    journalEntry(mode, cfg, epic, rec.action === 'BUY' ? 'long' : 'short', stake, level,
-      'Manually opened from recommendation', confirmVerdict.confidence);
-    try { const { addToWatch } = await import('./geminiWatch'); addToWatch(mode, dealId); } catch {}
+    const prep = await prepareRecommendationEntry(mode, epic);
+    if (!prep.ok) return prep;
+    await finalizeRecommendationEntry(mode, epic, prep.action, prep.fullStake, prep.stopDist, prep.profitDist,
+      'Manually opened from recommendation', prep.confidence);
     st.recommendations.delete(epic);
-
     return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -1695,13 +1961,276 @@ export async function openRecommendation(mode: IgMode, epic: string): Promise<{ 
   }
 }
 
+// Automatic counterpart to openRecommendation — same pre-trade checks
+// (prepareRecommendationEntry), but opens at the smallest size IG allows
+// instead of full size, and hands the resulting deal to runProbeGuard to
+// decide whether it earns the rest of the full stake. See PROBE_CUT_GBP's
+// own comment above for why. If the minimum size IG allows is already at or
+// past the intended full stake (some higher-priced-per-point names — nothing
+// left to scale into), there's no point probing: just open the full amount
+// directly, same as a manual click would.
+async function openRecommendationProbe(mode: IgMode, epic: string): Promise<{ ok: boolean; error?: string }> {
+  const st   = ms(mode);
+  const name = epicName(epic);
+  try {
+    const prep = await prepareRecommendationEntry(mode, epic);
+    if (!prep.ok) return prep;
+
+    if (prep.minDeal >= prep.fullStake) {
+      await finalizeRecommendationEntry(mode, epic, prep.action, prep.fullStake, prep.stopDist, prep.profitDist,
+        'Opened from recommendation (min size already covers the full stake)', prep.confidence);
+      st.recommendations.delete(epic);
+      return { ok: true };
+    }
+
+    // ── Only probe if the scale-up can actually happen ──────────────────
+    // Added 2026-10-03. Probing is only worth the extra round trip if the
+    // full-size second leg is genuinely reachable. On this account it often
+    // wasn't: the journal shows 36 "probe confirmed" exits averaging +£0.42,
+    // i.e. paying spread twice to bank 42p, and the scale-up repeatedly
+    // failing outright on INSUFFICIENT_FUNDS afterwards. A probe that can
+    // never grow isn't risk management, it's a worse version of just opening
+    // the position — two spreads, two sets of slippage, one small position
+    // at the end either way.
+    // So: check the full stake's margin up front. If it fits, probe as
+    // designed. If it doesn't, skip the trial leg entirely and open once at
+    // whatever size the account can actually carry.
+    let canScaleUp = true;
+    try {
+      const details = await fetchMarketDetails(st.session!, [epic]);
+      const detail  = details.get(epic);
+      const px      = (prep.action === 'BUY' ? detail?.offer : detail?.bid) ?? 0;
+      if (detail?.marginFactorPct !== undefined && px > 0) {
+        const fullMargin = prep.fullStake * px * (detail.marginFactorPct / 100);
+        const { available } = await fetchAccountFunds(st.session!).catch(() => ({ balance: 0, available: 0 }));
+        canScaleUp = fullMargin <= available;
+        if (!canScaleUp) {
+          addLog(mode, 'info', name,
+            `Skipping the probe leg — full size would need £${fullMargin.toFixed(0)} margin against £${available.toFixed(0)} available, so the scale-up could never happen. Opening once at the affordable size instead of paying two spreads to end up here anyway.`);
+        }
+      }
+    } catch { /* best-effort — if this can't be determined, probe as before */ }
+
+    if (!canScaleUp) {
+      await finalizeRecommendationEntry(mode, epic, prep.action, prep.minDeal, prep.stopDist, prep.profitDist,
+        'Opened from recommendation (single leg — full size unaffordable, no probe)', prep.confidence);
+      st.recommendations.delete(epic);
+      return { ok: true };
+    }
+
+    const { dealId, level } = await finalizeRecommendationEntry(mode, epic, prep.action, prep.minDeal, prep.stopDist, prep.profitDist,
+      'Probe opened from recommendation', prep.confidence);
+    probingDeals.set(dealId, {
+      mode, epic, action: prep.action, entryLevel: level, stopDist: prep.stopDist, profitDist: prep.profitDist,
+      fullStake: prep.fullStake, minDeal: prep.minDeal, confidence: prep.confidence, openedAt: Date.now(),
+    });
+    st.recommendations.delete(epic);
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('INSUFFICIENT_FUNDS')) fundsCooldownEpics.set(epic, Date.now() + FUNDS_COOLDOWN_MS);
+    addLog(mode, 'error', name, `Probe open from recommendation failed: ${msg}`);
+    return { ok: false, error: msg };
+  }
+}
+
+// Watches every open probe (see PROBE_CUT_GBP's own comment) on its own fast
+// interval, same cadence as runSevereLossGuard — a probe getting cut cheaply
+// or confirmed and scaled up is exactly as time-sensitive as the severe-loss
+// guard's own job, so it runs alongside it rather than waiting for the next
+// full poll cycle. Shares runFastGuards' single positions fetch rather than
+// making its own — no sense doubling the IG API calls made every 30s for
+// this, especially when there's usually no probe open to even check.
+async function runProbeGuard(mode: IgMode, positions: FullPosition[]): Promise<void> {
+  const st = ms(mode);
+  if (!st.session || !st.config) return;
+  if (probingDeals.size === 0) return;
+  const byId = new Map(positions.map(p => [p.dealId, p]));
+
+  for (const [dealId, probe] of [...probingDeals]) {
+    if (probe.mode !== mode) continue; // belongs to the other mode's session — its own guard call handles it
+    const p = byId.get(dealId);
+    if (!p) {
+      // Bug found 2026-09-30, real live money: this branch never checked
+      // journaledDealIds before recovering — so a probe that was ALREADY
+      // closed and journaled through a completely different, legitimate
+      // path (most commonly: the main per-epic strategy evaluation closing
+      // it on its own signal, e.g. "RSI recovered to 64.6" — that path has
+      // no knowledge of probingDeals and never cleans this map) still got
+      // treated as an unexplained silent close on this guard's very next
+      // 30s tick, and re-journaled a SECOND time from IG's transaction
+      // history. Confirmed live: AT&T, Broadcom, and Meta all show the
+      // exact same trade journaled twice, once under its real close reason
+      // and again seconds later as "recovered from IG transaction history"
+      // — double-counting realized P&L in the journal/edgeSizing history,
+      // and looking like two contradictory closes happened on one trade.
+      // journaledDealIds exists for precisely this — see its own comment —
+      // it just wasn't consulted here. The account-wide silent-close
+      // recovery elsewhere in this file (journalSilentCloses) already gets
+      // this right; this inline copy didn't.
+      if (journaledDealIds.has(dealId)) {
+        probingDeals.delete(dealId);
+        continue;
+      }
+      // Bug found 2026-09-24, real live money: this used to just drop the
+      // probe here with no record of what happened — "already closed by
+      // its own stop/TP, or elsewhere" was true, but silently. Confirmed
+      // live: a probe can close (its own tight stop, or the broker's) well
+      // inside the 30s gap between guard ticks, especially on a choppier
+      // name — this path fired 9 times for Boeing in 18h, none of them
+      // journaled, none of them cooling the epic down, so the very next
+      // scan just re-recommended and re-probed the same idea again. Real
+      // total: 11 separate live trades, -£25.16, for something that should
+      // have been cut once and left alone. Recover the real fill from IG's
+      // own transaction history (same pattern as journalSilentCloses
+      // above) and — unlike that function, which deliberately skips this —
+      // DO apply the normal loss cooldown here: recordLossExit already
+      // runs on every other probe-cut path in this function, so skipping
+      // it only on the silent-close path was the actual bug, not a
+      // deliberate choice.
+      probingDeals.delete(dealId);
+      try {
+        const since = new Date(probe.openedAt - 60_000).toISOString();
+        const txns = await fetchClosedTransactions(st.session, since);
+        const name = epicName(probe.epic);
+        const candidates = txns.filter(t => instrumentNameMatches(name, t.instrumentName));
+        const match = candidates.length === 1 ? candidates[0]
+          : candidates.find(t => t.openLevel !== undefined && Math.abs(t.openLevel - probe.entryLevel) < Math.max(1, probe.entryLevel * 0.005));
+        if (match) {
+          const reason = 'Probe closed outside this bot\'s own logic (broker-side stop, or closed elsewhere) — recovered from IG transaction history';
+          recordLossExit(mode, probe.epic, match.profitAndLoss, reason);
+          // Bug found 2026-09-30, real live money, part 2: this called
+          // recordJournalEvent directly instead of going through
+          // journalExit/recordWatchExit, so it never added dealId to
+          // journaledDealIds — meaning the journaledDealIds.has(dealId)
+          // guard just added above protected this branch from re-firing on
+          // top of something ELSE, but did nothing to stop the account-wide
+          // silent-close recovery (journalSilentCloses) from firing on top
+          // of THIS branch a few minutes later. Confirmed live: Boeing and
+          // Moderna both still double-journaled after the first half of
+          // this fix — this dealId needs to actually be marked, not just
+          // checked.
+          journaledDealIds.add(dealId);
+          recordJournalEvent({
+            mode: journalMode(mode), event: 'exit', symbol: name, strategy: strategyFor(st.config, probe.epic),
+            side: probe.action === 'BUY' ? 'long' : 'short', qty: probe.minDeal,
+            price: match.closeLevel ?? probe.entryLevel,
+            reason, plUsd: match.profitAndLoss,
+            plPct: probe.entryLevel > 0 ? (match.profitAndLoss / (probe.entryLevel * probe.minDeal)) * 100 : 0,
+          });
+          addLog(mode, 'info', name, `[Probe] Recovered a silent close — £${match.profitAndLoss.toFixed(2)} — epic now on the normal loss cooldown`);
+        } else {
+          addLog(mode, 'info', name, `[Probe] Vanished from positions but no matching IG transaction found — dropped without a journal record`);
+        }
+      } catch (e) {
+        addLog(mode, 'error', epicName(probe.epic), `[Probe] Silent-close recovery failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      continue;
+    }
+    const name = epicName(probe.epic);
+
+    // Cut point relative to the probe's OWN risk, not a flat £3 — changed
+    // 2026-10-03. The flat bar was very likely dead code for most probes:
+    // a probe is opened at IG's minimum stake (often 0.01/pt), so on a
+    // ~100pt stop its entire money-at-risk is about £1. A £3 cut bar sits
+    // at 3x that, i.e. the probe would hit its real broker-side stop long
+    // before this check ever fired, which defeats the whole point of the
+    // trial leg (cut early, cheaply, before committing full size). Scaling
+    // to the probe's own R makes it cut at roughly half its risk on every
+    // instrument, whatever the stake and stop happen to be. Falls back to
+    // the old flat bar when there's no usable stop distance.
+    const probeR      = probe.stopDist > 0 && p.size > 0 ? probe.stopDist * p.size : null;
+    const probeCutGbp = probeR !== null ? Math.max(0.5, probeR * 0.5) : PROBE_CUT_GBP;
+    if (p.upl <= -probeCutGbp) {
+      probingDeals.delete(dealId);
+      const reason = `Probe cut — down £${Math.abs(p.upl).toFixed(2)} on the trial size (${probeR !== null ? `${((Math.abs(p.upl) / probeR) * 100).toFixed(0)}% of its £${probeR.toFixed(2)} risk` : 'flat bar'}), thesis not confirming — closing before committing full size`;
+      addLog(mode, 'exit', name, reason);
+      try {
+        await igClosePos(st.session, dealId, p.direction, p.size);
+        recordLossExit(mode, probe.epic, p.upl, reason);
+        journalExit(mode, st.config, p, reason);
+      } catch (e) {
+        addLog(mode, 'error', name, `Probe cut close failed: ${e instanceof Error ? e.message : String(e)}. Will retry next check.`);
+        probingDeals.set(dealId, probe); // put back — retry next tick
+      }
+      continue;
+    }
+
+    const currentLevel   = probe.action === 'BUY' ? p.bid : p.offer; // conservative side, same convention as the rest of this file
+    const favorableMove  = probe.action === 'BUY' ? (currentLevel - probe.entryLevel) : (probe.entryLevel - currentLevel);
+    if (favorableMove >= probe.stopDist * PROBE_CONFIRM_FRACTION) {
+      // Affordability check — added 2026-09-30 per explicit request, real
+      // live money. Root cause of AMD opening a probe roughly every 30min
+      // for ~17h straight: this branch used to close the confirmed probe
+      // FIRST, then attempt the full-size open — and on this account
+      // (~£270 balance) the full stake routinely can't be covered even
+      // though the tiny 0.01/pt probe easily was. That left the probe
+      // closed, no full-size position opened (just an error log), no
+      // journal record connecting the two, and — critically — nothing
+      // stopping the NEXT 30min recommendation refresh from re-recommending
+      // the same instrument and starting a fresh probe, forever. The
+      // prepareRecommendationEntry margin check added earlier only covers
+      // the probe's OWN (tiny) stake, never this scale-up step, which is
+      // the one that was actually failing. Checked BEFORE closing anything
+      // this time, so an unaffordable scale-up just leaves the confirmed
+      // probe running as the real (small) position under its own stop/TP —
+      // same treatment as the timeout branch below — instead of closing a
+      // working trade and failing to replace it with anything.
+      let canAffordFullSize = true;
+      try {
+        const details = await fetchMarketDetails(st.session, [probe.epic]);
+        const detail  = details.get(probe.epic);
+        if (detail?.marginFactorPct !== undefined) {
+          const requiredMargin = probe.fullStake * currentLevel * (detail.marginFactorPct / 100);
+          const { available } = await fetchAccountFunds(st.session).catch(() => ({ balance: 0, available: 0 }));
+          if (requiredMargin > available) {
+            canAffordFullSize = false;
+            addLog(mode, 'info', name, `Probe confirmed but full size (£${requiredMargin.toFixed(0)} margin needed, only £${available.toFixed(0)} available) doesn't fit — keeping the confirmed trial running as the real position instead of closing and failing to replace it`);
+            fundsCooldownEpics.set(probe.epic, Date.now() + FUNDS_COOLDOWN_MS);
+          }
+        }
+      } catch { /* best-effort — an affordability-check failure shouldn't block a genuinely confirmed probe */ }
+
+      if (!canAffordFullSize) {
+        probingDeals.delete(dealId);
+        continue;
+      }
+
+      probingDeals.delete(dealId);
+      const confirmMsg = `Probe confirmed — moved ${favorableMove.toFixed(1)}pt the right way, banking the trial and opening full size`;
+      addLog(mode, 'exit', name, confirmMsg);
+      try {
+        await igClosePos(st.session, dealId, p.direction, p.size);
+        journalExit(mode, st.config, p, confirmMsg);
+      } catch (e) {
+        addLog(mode, 'error', name, `Probe confirm close failed: ${e instanceof Error ? e.message : String(e)}. Leaving the trial open, will retry next check.`);
+        probingDeals.set(dealId, probe);
+        continue;
+      }
+      try {
+        await finalizeRecommendationEntry(mode, probe.epic, probe.action, probe.fullStake, probe.stopDist, probe.profitDist,
+          'Full size after confirmed probe', probe.confidence);
+      } catch (e) {
+        addLog(mode, 'error', name, `Full-size entry after probe confirm failed: ${e instanceof Error ? e.message : String(e)}. Trial's gain is banked but full size wasn't opened — will need a fresh recommendation to try again.`);
+      }
+      continue;
+    }
+
+    if (Date.now() - probe.openedAt > PROBE_TIMEOUT_MS) {
+      addLog(mode, 'info', name, `Probe timed out without confirming either way — leaving it as a small position under its own stop/TP`);
+      probingDeals.delete(dealId);
+    }
+  }
+}
+
 // Auto-executes whatever's currently sitting in the Recommended list,
-// same execution path (openRecommendation) the manual "Open Position"
-// button uses — re-priced against the live market, sized off maxRiskGbp,
-// enrolled in Gemini Position Watch same as any other entry. The one real
-// difference from a manual click: this respects the same position cap
-// the main watchlist obeys (a manual click deliberately bypasses it, since
-// a human clicking is itself the override) — without that check here, an
+// via the probe-then-scale path (openRecommendationProbe) rather than
+// straight to full size — see PROBE_CUT_GBP's own comment for why. Sized
+// off maxRiskGbp same as every other entry this bot places, enrolled in
+// Gemini Position Watch same as any other entry. The one real difference
+// from a manual click: this respects the same position cap the main
+// watchlist obeys (a manual click deliberately bypasses it, since a human
+// clicking is itself the override) — without that check here, an
 // unattended loop could keep stacking positions off a recommendation list
 // that scans a much wider universe than cfg.epics.
 // Runs on both demo and live — extended to live on explicit request after
@@ -1732,7 +2261,7 @@ async function autoOpenRecommendations(mode: IgMode): Promise<void> {
     // margin, until the cooldown clears.
     const fundsCoolUntil = fundsCooldownEpics.get(rec.epic);
     if (fundsCoolUntil && Date.now() < fundsCoolUntil) continue;
-    const result = await openRecommendation(mode, rec.epic);
+    const result = await openRecommendationProbe(mode, rec.epic);
     if (result.ok) count++;
   }
 }
@@ -2444,6 +2973,34 @@ async function evaluateEpic(
       break;
     }
 
+    // Finnhub-scored momentum — see newsMomentumSignal's own comment.
+    // Mechanical throughout, no AI call at all: real today's-move + volume
+    // + headline-count numbers, the same formula T212 Momentum and the
+    // Alpaca options bot already run on, not a qualitative AI read of them.
+    case 'news_momentum': {
+      if (inPosition) {
+        const heldDays = openPos!.openedAt ? (Date.now() - new Date(openPos!.openedAt).getTime()) / 86_400_000 : 0;
+        if (openPos!.openedAt && heldDays >= NEWS_MOMENTUM_MAX_HOLD_DAYS) {
+          signal = {
+            action: side === 'long' ? 'CLOSE_LONG' : 'CLOSE_SHORT',
+            reason: `Max hold reached (${heldDays.toFixed(1)}d) — momentum trades don't get held indefinitely`,
+          };
+          break;
+        }
+        signal = { action: 'HOLD', reason: `Held ${heldDays.toFixed(1)}d — stop/TP live as broker-side bracket legs` };
+        break;
+      }
+      const ticker    = EPIC_TO_ALPACA[epic];
+      const headlines = ticker ? await fetchAllHeadlines(ticker, 8, epicName(epic)) : [];
+      const guard     = chaseGuardFor(mode, epic);
+      if (guard.buy || guard.sell) {
+        const rec = recentWinExits.get(mode)!.get(epic)!;
+        addLog(mode, 'info', epicName(epic), `Chase-guard active — ${rec.direction} closed +£${rec.plGbp.toFixed(2)} ${((Date.now() - rec.closedAt) / 3_600_000).toFixed(0)}h ago, needs a much stronger signal to re-enter ${rec.direction} side`);
+      }
+      signal = newsMomentumSignal(bars, headlines, guard);
+      break;
+    }
+
     default: return;
   }
 
@@ -2476,6 +3033,20 @@ async function evaluateEpic(
         addLog(mode, 'info', epicName(epic), `Skipped ${signal.action} — signal priced off ${refPrice.toFixed(2)} but live quote has since moved ${movePct.toFixed(2)}% against it (now ${livePrice.toFixed(2)}) — real reversal since the signal was computed, not noise, thesis looks stale`);
         return;
       }
+    }
+  }
+
+  // See IG_SB_ENTRY_MIN_VOLUME_RATIO's own comment — a real, mechanical
+  // volume floor on every fresh share entry, whichever strategy produced it.
+  if (!openPos && (signal.action === 'BUY' || signal.action === 'SELL') && classifyMarketType(epic) === 'SHARES') {
+    const recent5   = bars.slice(-5);
+    const prior20   = bars.slice(-25, -5);
+    const avgRecent = recent5.reduce((s, b) => s + b.v, 0) / Math.max(recent5.length, 1);
+    const avgPrior  = prior20.reduce((s, b) => s + b.v, 0) / Math.max(prior20.length, 1);
+    const volRatio  = prior20.length >= 10 && avgPrior > 0 ? avgRecent / avgPrior : null;
+    if (volRatio !== null && volRatio < IG_SB_ENTRY_MIN_VOLUME_RATIO) {
+      addLog(mode, 'info', epicName(epic), `Skipped ${signal.action} — real volume only ${volRatio.toFixed(2)}x this stock's own recent normal, below the ${IG_SB_ENTRY_MIN_VOLUME_RATIO}x floor (computed directly from price/volume data, not AI-judged)`);
+      return;
     }
   }
 
@@ -2706,6 +3277,41 @@ async function executeIgSignal(
   // rather than crash if one somehow didn't.
   const sizingStopDist = effectiveStopDist ?? Math.max(minStop, currentPrice * 0.015);
 
+  // ── Price/stop coherence guard ─────────────────────────────────────────
+  // Added 2026-10-03. The stop distance comes from ATR computed on BARS,
+  // while currentPrice is IG's own live quote — two different sources that
+  // must be on the same numeric scale for `stake = risk / stopDist` to mean
+  // anything. They are repeatedly not: this file already carries workarounds
+  // for Yahoo quoting GBP/USD at 1.3425 where IG quotes 13425 (x10000), for
+  // Alpaca shares needing x100, and for Nokia needing ~x69.74 — each patched
+  // in its own data path, with no check at the point the number is actually
+  // USED.
+  //
+  // The AI review layer has effectively been reporting this as a bug for a
+  // while, and it was read as model noise rather than a data problem:
+  //   "Price data shows extreme anomaly compared to actual market levels;
+  //    risk parameters are invalid"   "Implausible price level ... Brent"
+  //   "Extremely tight stop-loss of 0.64 points"   "1.5pt stop on BP"
+  // A 0.64pt stop against a ~13000 quote is 0.005% — not a tight stop, a
+  // unit mismatch. And because stake = risk / stopDist, a stop that is 100x
+  // too small produces a stake 100x too large: this is a live candidate
+  // explanation for the outsized single losses (-£42.28, -£25.53) that the
+  // 6-week audit found and could not otherwise account for.
+  //
+  // Rather than chase every scaling path, assert the invariant where it
+  // matters: a real ATR-derived stop is a sane fraction of the instrument's
+  // own price. Anything outside that band means the two sources disagree,
+  // and the correct action is to refuse to size off it — not to trade on
+  // numbers we know are inconsistent.
+  const STOP_PCT_MIN = 0.2;   // below this it cannot be a real ATR stop — spread alone would take it out
+  const STOP_PCT_MAX = 25;    // above this the "stop" is implausible for any tradeable instrument
+  const sizingStopPct = currentPrice > 0 ? (sizingStopDist / currentPrice) * 100 : 0;
+  if (!Number.isFinite(sizingStopPct) || sizingStopPct < STOP_PCT_MIN || sizingStopPct > STOP_PCT_MAX) {
+    addLog(mode, 'error', name,
+      `🚨 Skipped — stop/price mismatch: ${sizingStopDist.toFixed(2)}pt stop against a live price of ${currentPrice.toFixed(2)} is ${sizingStopPct.toFixed(3)}% (sane band ${STOP_PCT_MIN}-${STOP_PCT_MAX}%). Bar data and IG's quote are on different scales — refusing to size off it rather than trade a stake derived from a bad number.`);
+    return;
+  }
+
   // Overnight liquidity guard — outside NYSE cash hours, the 24h product's
   // spread is the concrete symptom of thinner dealing depth. A spread eating
   // a large share of the stop distance means either the "edge" the strategy
@@ -2735,7 +3341,24 @@ async function executeIgSignal(
   // and never more than 5x it (an absolute ceiling so a truly extreme
   // instrument can't balloon sizing far past what's sane).
   const RISK_TO_MARGIN_RATIO = 0.15;
-  let effectiveRiskGbp = cfg.maxRiskGbp;
+  // ── Risk base, as a share of the account rather than a fixed £ ─────────
+  // Added 2026-10-03. cfg.maxRiskGbp is a constant someone set once (£20).
+  // On the live ~£246 balance that's 8% of the account per trade; if the
+  // balance falls to £150 it silently becomes 13%, i.e. risk per trade rises
+  // exactly when the account can least afford it, and keeps rising as it
+  // loses. That is the mechanism behind a slow bleed turning into a fast
+  // one. Risk now scales WITH the account: the configured £ is treated as a
+  // ceiling, not a target, so this can only ever reduce exposure relative to
+  // the old behaviour, never increase it.
+  const ACCOUNT_RISK_PER_TRADE_FRAC = 0.04; // 4% of available funds per trade
+  const accountScaledRisk = available > 0
+    ? Math.min(cfg.maxRiskGbp, available * ACCOUNT_RISK_PER_TRADE_FRAC)
+    : cfg.maxRiskGbp;
+  if (accountScaledRisk < cfg.maxRiskGbp) {
+    addLog(mode, 'info', name,
+      `Risk base £${cfg.maxRiskGbp} → £${accountScaledRisk.toFixed(2)} (${(ACCOUNT_RISK_PER_TRADE_FRAC * 100).toFixed(0)}% of £${available.toFixed(0)} available) — sizing follows the account, not a fixed number`);
+  }
+  let effectiveRiskGbp = accountScaledRisk;
   if (detail?.marginFactorPct !== undefined) {
     const minMargin = minDeal * currentPrice * (detail.marginFactorPct / 100);
     effectiveRiskGbp = Math.min(cfg.maxRiskGbp * 5, Math.max(cfg.maxRiskGbp, minMargin * RISK_TO_MARGIN_RATIO));
@@ -2756,14 +3379,36 @@ async function executeIgSignal(
   // thing. Scales the effective target up to comfortably clear the
   // instrument's own structural floor, capped so a genuinely absurd
   // instrument still can't balloon sizing without bound.
+  // Hard account-relative cap added 2026-10-03. The old bound here was
+  // cfg.maxRiskGbp * 25 = £500, which on the live ~£246 balance is 203% of
+  // the entire account — a cap that can never bind in any meaningful way,
+  // because no single position should ever be allowed to risk twice what
+  // the account holds. Every other threshold in this file is a multiple of
+  // one hardcoded £20 and consults nothing about the real balance; this is
+  // the worst instance of it. `available` is IG's own reported available
+  // funds for this account, so capping against it ties sizing to what the
+  // account can actually absorb rather than to a constant written months
+  // ago. The 15% figure keeps a single bad trade to roughly a seventh of
+  // deployable funds, which is still aggressive but is at least bounded by
+  // something real.
+  const ACCOUNT_RISK_CAP_FRAC = 0.15;
+  const accountRiskCap  = available > 0 ? available * ACCOUNT_RISK_CAP_FRAC : cfg.maxRiskGbp * 2;
   const minPossibleLoss = minDeal * sizingStopDist;
   if (minPossibleLoss > effectiveRiskGbp) {
-    const scaledForFloor = Math.min(cfg.maxRiskGbp * 25, minPossibleLoss * 1.15);
+    const scaledForFloor = Math.min(accountRiskCap, minPossibleLoss * 1.15);
     if (scaledForFloor > effectiveRiskGbp) {
       effectiveRiskGbp = scaledForFloor;
       addLog(mode, 'info', name,
-        `Risk target scaled to £${effectiveRiskGbp.toFixed(0)} — minimum stake here produces at least £${minPossibleLoss.toFixed(0)} realized loss regardless of sizing`);
+        `Risk target scaled to £${effectiveRiskGbp.toFixed(0)} — minimum stake here produces at least £${minPossibleLoss.toFixed(0)} realized loss regardless of sizing (capped at ${(ACCOUNT_RISK_CAP_FRAC * 100).toFixed(0)}% of £${available.toFixed(0)} available)`);
     }
+  }
+  // And a backstop regardless of how effectiveRiskGbp got to where it is:
+  // the margin-proportional scale-up above can also push it past what the
+  // account should put behind one position.
+  if (effectiveRiskGbp > accountRiskCap) {
+    addLog(mode, 'info', name,
+      `Risk target trimmed £${effectiveRiskGbp.toFixed(0)} → £${accountRiskCap.toFixed(0)} — ${(ACCOUNT_RISK_CAP_FRAC * 100).toFixed(0)}% of this account's £${available.toFixed(0)} available is the ceiling for one position`);
+    effectiveRiskGbp = accountRiskCap;
   }
 
   // Real-track-record sizing — scales effectiveRiskGbp toward what this
@@ -2780,6 +3425,74 @@ async function executeIgSignal(
   if (edge.multiplier !== 1) {
     addLog(mode, 'info', name, edge.reason);
     effectiveRiskGbp *= edge.multiplier;
+  }
+
+  // ── Volatility derate ──────────────────────────────────────────────────
+  // Added 2026-10-01. The account's own 6-week instrument-level record says
+  // the damage is concentrated in high-volatility names, and the steady
+  // ones behave: worst were NVIDIA -£34.98 (one single -£42.28), Natural
+  // Gas -£20.00 (one trade), Netflix -£14.27 (one -£12.45), Japan 225
+  // -£12.24 (one -£25.53) — each dominated by a single violent move. Best
+  // was JPMorgan +£19.72 from 3 trades, 3W/0L, nothing worse than flat.
+  // sizingStopDist is ATR-derived, so stopDist as a % of price is a direct,
+  // already-available read on how volatile this instrument actually is
+  // right now — no extra fetch, no new data dependency.
+  //
+  // Deliberately a derate, not a ban. A hard volatility cutoff would be a
+  // threshold guessed from ~175 trades, and this file's history is full of
+  // guessed thresholds that then had to be walked back; scaling size down
+  // as volatility rises degrades gracefully if the number is slightly off,
+  // where a ban fails hard and silently. Note this does NOT implement
+  // "hold a quiet stock until it comes back into profit" — see the report
+  // for why that one specific idea is the one thing not to build.
+  const stopPctOfPrice = currentPrice > 0 ? (sizingStopDist / currentPrice) * 100 : 0;
+  const VOL_DERATE_START_PCT = 2.5;  // below this, full size — ordinary large-cap territory
+  const VOL_DERATE_FULL_PCT  = 6.0;  // at/above this, half size — NVIDIA/Natural-Gas territory
+  if (stopPctOfPrice > VOL_DERATE_START_PCT) {
+    const span    = VOL_DERATE_FULL_PCT - VOL_DERATE_START_PCT;
+    const over    = Math.min(stopPctOfPrice - VOL_DERATE_START_PCT, span);
+    const derate  = 1 - 0.5 * (over / span); // 1.0 -> 0.5
+    effectiveRiskGbp *= derate;
+    addLog(mode, 'info', name,
+      `Volatility derate ×${derate.toFixed(2)} — stop sits ${stopPctOfPrice.toFixed(1)}% from price (ATR-derived), risk target trimmed to £${effectiveRiskGbp.toFixed(0)}`);
+  }
+
+  // ── Two-tier volatility policy ─────────────────────────────────────────
+  // Added 2026-10-01 per explicit request: steady names are the default
+  // book; a volatile name only earns a slot on genuinely high conviction.
+  // The derate above makes a volatile position SMALLER; this decides
+  // whether it should exist at all. Both come off the same ATR-derived
+  // stopPctOfPrice read.
+  //
+  // Why the bar rather than a blanket ban: the big single losses were all
+  // high-ATR (NVIDIA -£42.28, Japan 225 -£25.53, Natural Gas -£20.00,
+  // Netflix -£12.45), while the calmest names were the only consistently
+  // clean ones (JPMorgan 3W/0L +£19.72, AT&T/UnitedHealth/NextEra all small
+  // and controlled). Volatility isn't inherently unprofitable — it's
+  // unprofitable on a marginal signal, because the adverse excursion is
+  // large enough to hit a stop before an ordinary thesis resolves.
+  //
+  // CONSEQUENCE, stated plainly: `confidence` falls back to 60 for any
+  // strategy that doesn't publish a real conviction score (rsi_mean_reversion,
+  // ema_crossover, vwap, donchian, macd, orb). Those strategies therefore
+  // stop opening volatile names entirely — they have, by definition, not
+  // demonstrated the conviction this gate asks for. That is the intended
+  // behaviour, not an oversight: rsi_mean_reversion is this account's
+  // highest-volume strategy (81 of 175 closed trades) and its churn is what
+  // produced most of the sub-£1 noise. Strategies that DO publish real
+  // conviction (news_momentum's momentum score, mean_reversion_swing's
+  // mechanical score, gemini_opinion/gemini_confirmed's AI confidence) can
+  // still take a volatile name when they genuinely rate it.
+  // Read locally rather than reusing the `confidence` const below — that one
+  // is declared further down (stake-floor section) and this gate has to run
+  // before any of the sizing work, so there's nothing to gain by waiting.
+  const VOL_HIGH_PCT            = 4.0; // above this the instrument counts as volatile for this account
+  const VOL_HIGH_MIN_CONFIDENCE = 75;  // and then needs real conviction, not a default
+  const convictionForVolGate    = signal.confidence ?? 60;
+  if (stopPctOfPrice > VOL_HIGH_PCT && convictionForVolGate < VOL_HIGH_MIN_CONFIDENCE) {
+    addLog(mode, 'wait', name,
+      `Skipped — volatile instrument (stop ${stopPctOfPrice.toFixed(1)}% from price) and conviction only ${convictionForVolGate}, below the ${VOL_HIGH_MIN_CONFIDENCE} bar these need. Steady names trade on the normal bar; this one has to earn it.`);
+    return;
   }
 
   // Size off actual data freshness, not the wall clock — "is it NYSE hours"
@@ -2834,6 +3547,25 @@ async function executeIgSignal(
     stake = minStakePerPoint;
   }
 
+  // news_momentum's own stake floor — added 2026-09-29 per explicit
+  // request ("raise the stakes even if it means opening less positions but
+  // better bigger positions"). Same mechanism as mean_reversion_swing's
+  // floor above, scaled higher (0.04-0.10 vs 0.02-0.06): this strategy
+  // already opens far more selectively since its own entry score/volume
+  // bars were raised the same request, so the positions that DO qualify
+  // should be meaningfully sized, not the same small stake a much looser
+  // bar would have produced. confidence here is newsMomentumSignal's own
+  // real 0-100 momentum score (now MIN_SCORE 60+ to even reach this point),
+  // so a barely-qualifying entry still gets a real floor and a genuinely
+  // strong one earns the full 0.10/pt.
+  const NEWS_MOMENTUM_MIN_STAKE_LOW  = 0.04;
+  const NEWS_MOMENTUM_MIN_STAKE_HIGH = 0.10;
+  const newsMomentumMinStakePerPoint = Math.round((NEWS_MOMENTUM_MIN_STAKE_LOW + Math.max(0, Math.min(confidence, 100)) / 100 * (NEWS_MOMENTUM_MIN_STAKE_HIGH - NEWS_MOMENTUM_MIN_STAKE_LOW)) * 100) / 100;
+  if (cfg.strategy === 'news_momentum' && stake < newsMomentumMinStakePerPoint) {
+    addLog(mode, 'info', name, `Stake raised to the £${newsMomentumMinStakePerPoint.toFixed(3)}/pt floor for this ${confidence}-score setup (was £${stake}/pt) — real max loss now £${(newsMomentumMinStakePerPoint * sizingStopDist).toFixed(2)}, above the £${effectiveRiskGbp.toFixed(0)} risk target`);
+    stake = newsMomentumMinStakePerPoint;
+  }
+
   // Any time the stake actually used ends up above what the target risk
   // would size — whether because IG's minDealSize forced it up, or because
   // calcStake's own internal floor (min 0.1/pt) did — the realized max loss
@@ -2859,7 +3591,20 @@ async function executeIgSignal(
   // loosens anything for a strategy that has no conviction score to earn it.
   // (confidence itself is computed above, before the stake floor, so both
   // this ceiling and that floor scale off the same number.)
-  const ceilingMult = 3 + Math.max(0, Math.min(confidence, 100) - 60) / 40 * 3; // 3x @60% conviction → 6x @100%
+  // Tightened 2026-10-01 from 3x-6x to 1.5x-2x, on the account's own 6-week
+  // record. Of £174.32 net lost Aug 20 - Sep 30, £171.23 came from just TEN
+  // trades that each lost more than £10 (NVIDIA -£42.28, Japan 225 -£25.53,
+  // Natural Gas -£20.00, Alphabet -£15.32, Netflix -£12.45...). Everything
+  // else — the other 165 closed trades — nets out to roughly flat. The tail
+  // IS the loss. This ceiling is what permitted it: at a £20 risk target the
+  // old 3-6x band authorised a £60-£120 realistic max loss per position, so
+  // a £42 loss never tripped anything. Deliberately NOT fixed by tightening
+  // stop DISTANCES (that just means getting stopped out on ordinary noise —
+  // a mistake this file has already made and documented more than once);
+  // this caps the £ at risk by refusing to open a position whose own real
+  // stop distance times its stake exceeds what the account can sanely lose
+  // on one trade.
+  const ceilingMult = 1.5 + Math.max(0, Math.min(confidence, 100) - 60) / 40 * 0.5; // 1.5x @60% conviction → 2x @100%
   const actualMaxLoss = stake * sizingStopDist;
   const lossCeiling    = effectiveRiskGbp * ceilingMult;
   if (actualMaxLoss > lossCeiling) {
@@ -3081,26 +3826,46 @@ async function executeIgSignal(
 // protect the position: if a position's actual realized loss has blown past
 // 5x the per-trade risk target regardless of why, close it immediately
 // rather than trust whatever was meant to have already stopped it out.
-async function runSevereLossGuard(mode: IgMode): Promise<void> {
+// Fetches positions once per 30s tick and feeds the same list to both fast
+// guards below — they used to each fetch independently, doubling the real
+// IG API calls this makes every 30s for no reason (most ticks have nothing
+// for either guard to actually act on).
+async function runFastGuards(mode: IgMode): Promise<void> {
   const st = ms(mode);
   if (!st.running || !st.session || !st.config) return;
-  try {
-    const positions = await fetchFullPositions(st.session);
-    const severeLossCeiling = st.config.maxRiskGbp * 5;
-    for (const p of positions) {
-      if (p.upl >= -severeLossCeiling) continue;
-      const name = epicName(p.epic);
-      const slReason = `Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing immediately, stop may have slipped`;
-      addLog(mode, 'error', name, `🚨 ${slReason}`);
-      try {
-        await igClosePos(st.session, p.dealId, p.direction, p.size);
-        recordLossExit(mode, p.epic, p.upl, slReason);
-        journalExit(mode, st.config, p, slReason);
-      } catch (e) {
-        addLog(mode, 'error', name, `🚨 Severe loss guard close FAILED: ${e instanceof Error ? e.message : String(e)}. Manual intervention needed.`);
-      }
+  let positions: FullPosition[];
+  try { positions = await fetchFullPositions(st.session); } catch { return; } // transient fetch failure — next tick retries
+  await runSevereLossGuard(mode, positions);
+  await runProbeGuard(mode, positions);
+}
+
+async function runSevereLossGuard(mode: IgMode, positions: FullPosition[]): Promise<void> {
+  const st = ms(mode);
+  if (!st.session || !st.config) return;
+  const foreign = await getForeignOwnership();
+  // 5x -> 2x 2026-10-01, same evidence as the sizing ceiling in
+  // executeIgSignal: the ten >£10 losses that produced essentially the whole
+  // 6-week net loss all sat comfortably under the old £100 (5x) trigger, so
+  // this backstop never once fired on the trades that actually did the
+  // damage. At 2x it catches a real stop-slip (NVIDIA's -£42.28 would have
+  // been cut around -£40) while still sitting far enough outside a normally
+  // -sized trade's own ATR stop that it won't pre-empt one.
+  const severeLossCeiling = st.config.maxRiskGbp * 2;
+  for (const p of positions) {
+    // Another bot's position — it has its own exit logic, see positionOwnership.ts
+    if (isForeignPosition(p.dealId, p.epic, foreign, st.botOpenedDeals.has(p.dealId))) continue;
+    if (p.upl >= -severeLossCeiling) continue;
+    const name = epicName(p.epic);
+    const slReason = `Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (2× target) — closing immediately, stop may have slipped`;
+    addLog(mode, 'error', name, `🚨 ${slReason}`);
+    try {
+      await igClosePos(st.session, p.dealId, p.direction, p.size);
+      recordLossExit(mode, p.epic, p.upl, slReason);
+      journalExit(mode, st.config, p, slReason);
+    } catch (e) {
+      addLog(mode, 'error', name, `🚨 Severe loss guard close FAILED: ${e instanceof Error ? e.message : String(e)}. Manual intervention needed.`);
     }
-  } catch { /* transient fetch failure — next tick retries */ }
+  }
 }
 
 // ── Poll loop ─────────────────────────────────────────────────────────────────
@@ -3134,6 +3899,11 @@ const STUCK_LOSS_PERSIST_MS = 20 * 60_000; // must stay unrecovered this long be
 // not a safety gap; the position's own broker-side stop/TP still protects it).
 const profitPeakByDeal = new Map<string, number>();
 
+// Peak P/L per deal, news_momentum only — see the stalled-loser override in
+// manageSwingExits for what this feeds. Same in-memory tradeoff as the
+// trackers above.
+const newsMomentumPeakUpl = new Map<string, number>();
+
 // Exit-only position management — self-heal naked stops, the stuck-loss
 // caution flag, the weak-open guard (tighten-only for mean_reversion_swing,
 // outright close for every other strategy), and the profit-lock peak-retrace
@@ -3147,6 +3917,18 @@ const profitPeakByDeal = new Map<string, number>();
 async function manageSwingExits(mode: IgMode, cfg: IgStrategyConfig, positions: FullPosition[]): Promise<void> {
   const st = ms(mode);
   if (!st.session) return;
+
+  // Filter out positions owned by other bots on this shared account before
+  // ANY of the management below runs — see positionOwnership.ts. This covers
+  // the self-heal (which would otherwise attach this bot's fallback stop over
+  // another bot's own stop management), the stuck-loss flag, the profit-lock
+  // trail and the weak-open read.
+  const foreign = await getForeignOwnership();
+  const foreignCount = positions.length;
+  positions = positions.filter(p => !isForeignPosition(p.dealId, p.epic, foreign, st.botOpenedDeals.has(p.dealId)));
+  if (positions.length !== foreignCount) {
+    addLog(mode, 'info', '—', `Exit management skipping ${foreignCount - positions.length} position(s) owned by another bot on this account`);
+  }
 
   // Self-heal naked positions — a failed SL/TP attach (at entry, or on a prior
   // poll) otherwise leaves a position with no broker-side exit until the
@@ -3276,6 +4058,7 @@ async function manageSwingExits(mode: IgMode, cfg: IgStrategyConfig, positions: 
     for (const id of stuckLossFirstSeenAt.keys()) if (!openDealIds.has(id)) stuckLossFirstSeenAt.delete(id);
     for (const id of stuckLossFlagged) if (!openDealIds.has(id)) stuckLossFlagged.delete(id);
     for (const id of profitPeakByDeal.keys()) if (!openDealIds.has(id)) profitPeakByDeal.delete(id);
+    for (const id of newsMomentumPeakUpl.keys()) if (!openDealIds.has(id)) newsMomentumPeakUpl.delete(id);
     let referenceIndexPct: number | null | undefined; // undefined = not fetched yet this poll, null = fetch failed
     const getReferenceIndexPct = async (): Promise<number | null> => {
       if (referenceIndexPct !== undefined) return referenceIndexPct;
@@ -3333,13 +4116,22 @@ async function manageSwingExits(mode: IgMode, cfg: IgStrategyConfig, positions: 
         // (currently £15/trade) still does that job.
         {
           const name = epicName(p.epic);
-          if (p.upl <= STUCK_LOSS_GBP) {
+          // Relative to the position's own risk rather than a flat -£10
+          // (changed 2026-10-03, same reasoning as the other conversions):
+          // -£10 is most of a small position's entire risk budget but barely
+          // a scratch on a large one, so the same number meant "nearly
+          // stopped out" on one trade and "normal wobble" on another. Half
+          // of the position's own money-at-risk means the same thing on both.
+          const slStopPts = p.stopLevel !== undefined ? Math.abs(p.level - p.stopLevel) : null;
+          const slR       = slStopPts !== null && p.size > 0 ? slStopPts * p.size : null;
+          const stuckBar  = slR !== null ? -Math.max(2, slR * 0.5) : STUCK_LOSS_GBP;
+          if (p.upl <= stuckBar) {
             const firstSeen = stuckLossFirstSeenAt.get(p.dealId);
             if (firstSeen === undefined) {
               stuckLossFirstSeenAt.set(p.dealId, Date.now());
             } else if (!stuckLossFlagged.has(p.dealId) && Date.now() - firstSeen >= STUCK_LOSS_PERSIST_MS) {
               stuckLossFlagged.add(p.dealId);
-              addLog(mode, 'error', name, `🚨 Caution — sitting at £${p.upl.toFixed(2)} for over ${Math.round(STUCK_LOSS_PERSIST_MS / 60_000)}min without recovering to profit (hard stop caps the loss at £${cfg.maxRiskGbp})`);
+              addLog(mode, 'error', name, `🚨 Caution — sitting at £${p.upl.toFixed(2)}${slR !== null ? ` (${((Math.abs(p.upl) / slR) * 100).toFixed(0)}% of its £${slR.toFixed(2)} risk)` : ''} for over ${Math.round(STUCK_LOSS_PERSIST_MS / 60_000)}min without recovering to profit`);
             }
           } else if (p.upl >= 0) {
             // Only a real recovery to profit clears the flag — matches the
@@ -3347,6 +4139,40 @@ async function manageSwingExits(mode: IgMode, cfg: IgStrategyConfig, positions: 
             // ticking back above -£10.
             stuckLossFirstSeenAt.delete(p.dealId);
             stuckLossFlagged.delete(p.dealId);
+          }
+        }
+
+        // Stalled-loser override — news_momentum only. Added 2026-09-28 per
+        // explicit request, same idea as alpacaBot.ts's stalled-loser
+        // override (see its own comment) but mechanical here rather than
+        // AI-confidence-gated: geminiWatch.ts already deliberately stops
+        // doing ANY discretionary AI review once a position is red (see its
+        // own "Losses: mechanical stop only" comment, from an explicit
+        // 2026-09-03 decision) — reopening AI discretion on losers for just
+        // this strategy would undo that. Instead this is purely mechanical,
+        // same spirit as the stuck-loss flag just above but scoped tighter
+        // and actually closing rather than only flagging: a news_momentum
+        // position that has NEVER once been profitable (this thesis was
+        // wrong from the start, not a winner giving something back) and has
+        // sat stuck (the flag above already fired) gets closed rather than
+        // left to ride all the way to the full hard stop on a thesis that
+        // was never confirmed even once.
+        if (strategyFor(cfg, p.epic) === 'news_momentum') {
+          const peak = Math.max(newsMomentumPeakUpl.get(p.dealId) ?? p.upl, p.upl);
+          newsMomentumPeakUpl.set(p.dealId, peak);
+          if (peak <= 0 && stuckLossFlagged.has(p.dealId)) {
+            const name = epicName(p.epic);
+            const slReason = `Stalled loser override — never been profitable (peak £${peak.toFixed(2)}), stuck at £${p.upl.toFixed(2)} for ${Math.round(STUCK_LOSS_PERSIST_MS / 60_000)}min+ — closing rather than riding a never-confirmed thesis to the full stop`;
+            try {
+              await igClosePos(st.session, p.dealId, p.direction, p.size);
+              addLog(mode, 'error', name, `🚨 ${slReason}`);
+              recordLossExit(mode, p.epic, p.upl, slReason);
+              journalExit(mode, cfg, p, slReason);
+              newsMomentumPeakUpl.delete(p.dealId);
+              continue;
+            } catch (e) {
+              addLog(mode, 'error', name, `Stalled loser override close FAILED: ${e instanceof Error ? e.message : String(e)}`);
+            }
           }
         }
 
@@ -3404,27 +4230,60 @@ async function manageSwingExits(mode: IgMode, cfg: IgStrategyConfig, positions: 
         // trendStillIntact check (see that file), which closes only when the
         // actual 200-day trend thesis this position was opened on has
         // genuinely broken, not on an ordinary same-day wobble.
-        if (cfg.strategy === 'mean_reversion_swing') {
-          // No action at all — see comment above.
-        } else if (corroborated) {
-          const woReason = `Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, market broadly weak too (${idxPct?.toFixed(2)}%) — closing before it compounds`;
-          addLog(mode, 'exit', name, `⚠️ ${woReason}`);
-          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, woReason); journalExit(mode, cfg, p, woReason); }
-          catch (e) { addLog(mode, 'error', name, `Weak-open close failed: ${e instanceof Error ? e.message : String(e)}`); }
-        } else if (p.stopLevel !== undefined && !weakOpenTightenedOnce.has(p.dealId)) {
-          const currentDist   = Math.abs(p.level - p.stopLevel);
-          const tightenedDist = currentDist * 0.4;
-          const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
-          const wouldTighten  = p.direction === 'BUY' ? newStop > p.stopLevel : newStop < p.stopLevel;
-          if (wouldTighten) {
-            try {
-              await updatePositionLevels(st.session, p.dealId, newStop, p.limitLevel ?? null);
-              weakOpenTightenedOnce.add(p.dealId);
-              addLog(mode, 'info', name, `⚠️ Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open — tightened stop as a precaution (won't re-tighten further on this position)`);
-            } catch (e) {
-              addLog(mode, 'error', name, `Weak-open stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
+        // Bug found 2026-09-24, real live money: this checked cfg.strategy
+        // (the bot's single account-wide default) rather than what strategy
+        // THIS specific epic actually resolves to — so every stock pinned to
+        // mean_reversion_swing via epicStrategyOverrides (the 21-name
+        // backtest-confirmed list, cfg.strategy itself stays
+        // 'rsi_mean_reversion') never actually matched this check and got
+        // hit by the exact "closed off at little losses within hours"
+        // pattern this exemption exists to prevent — undermining the entire
+        // redesign that moved them onto mean_reversion_swing in the first
+        // place. Confirmed live: Alphabet -£15.16, ExxonMobil -£8.20,
+        // Disney -£10.08, all "Weak open... closing before it compounds"
+        // on pinned mean_reversion_swing names within hours of opening.
+        // news_momentum exempted 2026-09-29 per explicit request, after
+        // confirmed live real trades (McDonald's -£1.16, Coinbase -£0.50 and
+        // -£0.49) got closed by THIS guard within 18-67 SECONDS of opening.
+        // Root cause: this guard's whole premise is "priced moved against
+        // the position since today's open = bad sign" — exactly backwards
+        // for a momentum strategy, whose entry thesis IS "today already
+        // moved a real amount" (often 2-6%+, per its own qualifying bar).
+        // That means pctFromOpen is almost always already past WEAK_OPEN_PCT
+        // (0.5%) the INSTANT a news_momentum position opens, and if the
+        // broader market's moving the same way too (corroborated) — likely,
+        // since real momentum is rarely fully idiosyncratic — this closed it
+        // immediately, before its own ATR-based stop/TP or the
+        // NEWS_MOMENTUM_MAX_HOLD_DAYS backstop ever got a chance to apply.
+        // Same underlying bug class as the mean_reversion_swing fix above,
+        // just never hit until this strategy existed.
+        // ── DISABLED 2026-10-01 — log-only for every strategy ──────────────
+        // Retired on its own 6-week live track record, not on a hunch. Every
+        // exit this guard produced, Aug 20 - Sep 30, real money:
+        //     26 trades · 2 wins (+£1.24) · 24 losses (-£62.46) · net -£61.22
+        // A 7.7% win rate. That is 35% of the entire account's net loss over
+        // the period (-£174.32), caused by one guard. Per strategy:
+        //     rsi_mean_reversion -£52.48 (19) · mean_reversion_swing -£4.04 (5)
+        //     gemini_confirmed   -£4.20  (1) · news_momentum        -£0.50 (1)
+        // The exemptions added over time (mean_reversion_swing 2026-09-24,
+        // news_momentum 2026-09-29) were each correct but each only treated
+        // one symptom: the premise itself is wrong. "Price is below today's
+        // open" is an ordinary intraday state, not evidence a thesis has
+        // failed — so acting on it just converts open positions into realised
+        // losses before they can resolve either way, which is precisely what
+        // the numbers above show. Two of this guard's own biggest victims
+        // (Alphabet -£15.16, -£10.10) were closed on moves of -0.70% and
+        // -0.63%, with "corroboration" from an index down 0.34% and 0.30%.
+        // The stop-tighten branch was no better: its own prior comment
+        // already documents Intel being tightened toward breakeven and then
+        // stopped out for ~£0.00 on the next poll.
+        //
+        // The position's real broker-side stop (sized off ATR at entry) is
+        // the mechanism that bounds a losing trade. This one only ever
+        // front-ran it at a worse price. Kept as a log line so the signal is
+        // still visible if it's ever worth revisiting with fresh evidence.
+        if (corroborated) {
+          addLog(mode, 'info', name, `Weak open — ${pctFromOpen >= 0 ? '+' : ''}${pctFromOpen.toFixed(2)}% vs today's open, index ${idxPct?.toFixed(2)}% — noted only, not acting (guard retired on its own -£61.22/26-trade record)`);
         }
       } catch { /* best-effort — never let a data-source hiccup block the rest of the poll cycle */ }
     }
@@ -3502,33 +4361,98 @@ async function poll(mode: IgMode) {
     st.weekendGuardDate = today;
     try {
       const positions = await fetchFullPositions(st.session);
-      const severeLossCeiling = cfg.maxRiskGbp * 5;
-      const profitLockFloor   = cfg.maxRiskGbp * 1.5;
+      // Deliberately NOT coupled to runSevereLossGuard's own ceiling, and
+      // deliberately NOT the 2x it was briefly set to on 2026-10-01. That 2x
+      // came from the tail-loss analysis, which was about capping how much a
+      // single position can lose INTRADAY while it's being actively watched —
+      // a different question from "it's Friday, should this be force-closed".
+      // At 2x (£40) a position merely having a bad week got crystallised at
+      // an arbitrary Friday-afternoon price with no chance to resolve, which
+      // is exactly the "we're just screwed, no time to get into profit"
+      // failure. Reverted to 5x: this should only fire on a position that is
+      // ALREADY a disaster going into a 48h blind window, not a normal one
+      // that happens to be red.
+      const WEEKEND_LOSS_CLOSE_MULT   = 5;
+      // Raised 1.5x -> 3x. The ratcheting profit floor (geminiWatch.ts, which
+      // keeps running through the weekend) already protects 70% of peak on
+      // any real winner, so banking every £30 gain every Friday was mostly
+      // just re-imposing the winner cap that the ratchet exists to remove.
+      // Only a genuinely large open gain is worth surrendering to a gap.
+      const WEEKEND_PROFIT_BANK_MULT  = 3;
+      const severeLossCeiling = cfg.maxRiskGbp * WEEKEND_LOSS_CLOSE_MULT;
+      const profitLockFloor   = cfg.maxRiskGbp * WEEKEND_PROFIT_BANK_MULT;
+      const wkForeign         = await getForeignOwnership();
       for (const p of positions) {
         const name = epicName(p.epic);
-        if (p.upl <= -severeLossCeiling) {
-          const wkReason = `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (5× target) — closing before the gap`;
+        // Another bot's position — see positionOwnership.ts. Carrying someone
+        // else's thesis through the weekend is their call, not this bot's.
+        if (isForeignPosition(p.dealId, p.epic, wkForeign, st.botOpenedDeals.has(p.dealId))) {
+          addLog(mode, 'info', name, 'Weekend risk guard — owned by another bot on this account, leaving it to that bot');
+          continue;
+        }
+
+        // ── What actually counts as "in trouble" ───────────────────────────
+        // Added 2026-10-03. Every other £ threshold in this file is a fixed
+        // multiple of cfg.maxRiskGbp (£20), which consults nothing about the
+        // position or the account: on the current ~£246 balance the old
+        // "close it" bar of 5x worked out at £100, i.e. 40% of the entire
+        // account, while the profit floor banks a winner at £10 (4%). That
+        // 10:1 bias toward letting losses run is the same asymmetry the
+        // 6-week trade audit found — hardcoded into the constants rather
+        // than emerging from the exits.
+        //
+        // A position's own stop distance is the one number that already
+        // encodes what a bad outcome looks like FOR THAT POSITION — it's
+        // instrument-agnostic, volatility-agnostic and size-agnostic,
+        // because it was sized from that instrument's own ATR at entry.
+        // "80% of the way to its own stop" means the same thing on Silver
+        // as on NVIDIA; "-£100" does not. Falls back to the absolute £
+        // ceiling only when IG hasn't reported a stop level.
+        const stopDistPts    = p.stopLevel !== undefined ? Math.abs(p.level - p.stopLevel) : null;
+        const maxLossAtStop  = stopDistPts !== null && p.size > 0 ? stopDistPts * p.size : null;
+        const progressToStop = maxLossAtStop && maxLossAtStop > 0 && p.upl < 0
+          ? Math.abs(p.upl) / maxLossAtStop
+          : null;
+        const WEEKEND_STOP_PROGRESS_CLOSE = 0.8; // 80% of the way to its own stop = thesis all but invalidated
+        const nearlyStoppedOut = progressToStop !== null && progressToStop >= WEEKEND_STOP_PROGRESS_CLOSE;
+
+        if (nearlyStoppedOut) {
+          const wkReason = `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} down is ${(progressToStop * 100).toFixed(0)}% of the way to this position's own stop (£${maxLossAtStop!.toFixed(2)} at risk) — thesis all but invalidated, closing rather than carrying it blind through the gap`;
+          addLog(mode, 'exit', name, wkReason);
+          try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, wkReason); journalExit(mode, cfg, p, wkReason); }
+          catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
+        } else if (p.upl <= -severeLossCeiling) {
+          const wkReason = `Weekend risk guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (${WEEKEND_LOSS_CLOSE_MULT}× target) — closing before the gap`;
           addLog(mode, 'exit', name, wkReason);
           try { await igClosePos(st.session, p.dealId, p.direction, p.size); recordLossExit(mode, p.epic, p.upl, wkReason); journalExit(mode, cfg, p, wkReason); }
           catch (e) { addLog(mode, 'error', name, `Weekend flatten failed: ${e instanceof Error ? e.message : String(e)}`); }
         } else if (p.upl >= profitLockFloor) {
-          const wkProfitReason = `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (1.5× target) — banking it before the gap`;
+          const wkProfitReason = `Weekend risk guard — £${p.upl.toFixed(2)} gain clears £${profitLockFloor.toFixed(0)} (${WEEKEND_PROFIT_BANK_MULT}× target) — banking it before the gap`;
           addLog(mode, 'exit', name, wkProfitReason);
           try { await igClosePos(st.session, p.dealId, p.direction, p.size); journalExit(mode, cfg, p, wkProfitReason); }
           catch (e) { addLog(mode, 'error', name, `Weekend profit-lock failed: ${e instanceof Error ? e.message : String(e)}`); }
-        } else if (p.stopLevel !== undefined) {
-          const currentDist   = Math.abs(p.level - p.stopLevel);
-          const tightenedDist = currentDist * 0.5;
-          const newStop       = p.direction === 'BUY' ? p.level - tightenedDist : p.level + tightenedDist;
-          const wouldTighten  = p.direction === 'BUY' ? newStop > p.stopLevel : newStop < p.stopLevel;
-          if (wouldTighten) {
-            try {
-              await updatePositionLevels(st.session, p.dealId, newStop, p.limitLevel ?? null);
-              addLog(mode, 'info', name, `Weekend risk guard — tightened stop ${currentDist.toFixed(2)}→${tightenedDist.toFixed(2)} pts ahead of the gap`);
-            } catch (e) {
-              addLog(mode, 'error', name, `Weekend stop-tighten failed: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
+        } else {
+          // Stop-HALVING removed 2026-10-03. It was applied to every position
+          // that survived the two checks above, and it was the wrong tool for
+          // the risk it claimed to address:
+          //  - It does nothing about an actual weekend gap. A gap jumps
+          //    straight through a stop wherever that stop sits — that is what
+          //    a gap IS. Moving the stop closer doesn't cap gap loss.
+          //  - What it DOES reliably do is get the position stopped out on
+          //    ordinary Monday-open noise, at half its intended room. This
+          //    file has already learned that exact lesson twice: the
+          //    weak-open guard's own tighten branch (Intel, tightened toward
+          //    breakeven then stopped for ~£0.00 on the next poll) and the
+          //    retired weak-open close path (-£61.22 over 26 trades).
+          // So: positions that aren't already a disaster now simply ride the
+          // weekend on the stop they were sized with. Genuine gap protection
+          // would need either a guaranteed stop (IG rejects these on this
+          // account's instruments — ATTACHED_ORDER_LEVEL_ERROR on essentially
+          // every attempt) or smaller size into Friday, not a tighter stop.
+          const progressNote = progressToStop !== null
+            ? `${(progressToStop * 100).toFixed(0)}% of the way to its stop`
+            : 'no stop level reported by IG';
+          addLog(mode, 'info', name, `Weekend risk guard — £${p.upl.toFixed(2)} open, ${progressNote}: still has room, leaving it to run on its own stop (no pre-weekend tighten)`);
         }
       }
       if (positions.length) addLog(mode, 'info', '—', `Weekend risk guard checked ${positions.length} position(s)`);
@@ -3893,7 +4817,7 @@ export async function startIgStrategyBot(cfg: IgStrategyConfig): Promise<{ ok: b
   st.pollTimer = setTimeout(() => { void poll(mode); }, 10_000);
   // Independent of the above — see runSevereLossGuard for why this needs
   // its own much tighter cadence than the main 15min poll.
-  st.severeLossTimer = setInterval(() => { void runSevereLossGuard(mode); }, 30_000);
+  st.severeLossTimer = setInterval(() => { void runFastGuards(mode); }, 30_000);
   // Independent of the above — see refreshWatchlist for why cfg.epics needs
   // its own periodic re-scan rather than staying fixed for the bot's whole
   // run. First refresh deliberately not immediate — the scan just run above

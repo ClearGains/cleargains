@@ -7,10 +7,10 @@ import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 
 type Mode     = 'demo' | 'live';
-type Instance = 'fx' | 'stocks' | 'japan225';
+type Instance = 'fx' | 'stocks' | 'japan225' | 'commodities';
 
 const INSTANCE_LABEL: Record<Instance, string> = {
-  fx: 'FX & Indices', stocks: 'Stocks', japan225: 'Japan 225',
+  fx: 'FX & Indices', stocks: 'Stocks', japan225: 'Japan 225', commodities: 'Commodities',
 };
 
 type Tracked = { dealId: string; epic: string; direction: 'BUY' | 'SELL'; entryLevel: number; size: number; enteredAt: number };
@@ -109,7 +109,7 @@ export default function MeanReversionPage() {
 
       {/* Instance tabs */}
       <div className="flex gap-2 flex-wrap">
-        {(['fx', 'stocks', 'japan225'] as const).map(i => (
+        {(['fx', 'stocks', 'japan225', 'commodities'] as const).map(i => (
           <button key={i}
             onClick={() => setInstance(i)}
             className={clsx(

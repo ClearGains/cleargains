@@ -29,7 +29,7 @@ import { askAlpacaDailyVerdict, askAlpacaPositionVerdict } from './xai';
 import { askGeminiPositionVerdict } from './gemini';
 import { fetchAllHeadlines } from './newsFetch';
 import { hasBreakingNews } from './alpacaNewsStream';
-import { sentimentScore } from './momentumSignal';
+import { sentimentScore, readTrend } from './momentumSignal';
 
 // ── State persistence ─────────────────────────────────────────────────────────
 // Survives a PM2 restart / crash: without this, a bot running when the process
@@ -110,6 +110,39 @@ const optionPeaks = new Map<AccountMode, Map<string, number>>([
   ['live',  loadPeaks('live')],
 ]);
 
+// "Chasing a just-banked win" tracker — added 2026-09-27 per explicit
+// request, straight after META closed at a real gain and the bot opened a
+// fresh call on the same underlying shortly after. Keyed by underlying
+// symbol (not contract — a new strike/expiry is still the same chase risk).
+// See optionsNewsBasedEntrySignal's ChaseGuard param for the actual gating
+// logic; this is just the real, confirmed-fill record it reads from.
+type RecentWinExit = { closedAt: number; plPct: number; optionType: 'call' | 'put' };
+function winExitFile(mode: AccountMode): string {
+  return path.join(__dirname, '..', `alpaca-recent-win-exits-${mode}.json`);
+}
+function loadWinExits(mode: AccountMode): Map<string, RecentWinExit> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(winExitFile(mode), 'utf8')) as Record<string, RecentWinExit>;
+    return new Map(Object.entries(raw));
+  } catch { return new Map(); }
+}
+function saveWinExits(mode: AccountMode, map: Map<string, RecentWinExit>): void {
+  try { fs.writeFileSync(winExitFile(mode), JSON.stringify(Object.fromEntries(map)), 'utf8'); } catch {}
+}
+const recentWinExits = new Map<AccountMode, Map<string, RecentWinExit>>([
+  ['paper', loadWinExits('paper')],
+  ['live',  loadWinExits('live')],
+]);
+const CHASE_COOLDOWN_MS  = 3 * 86_400_000; // 3 days — long enough that "the move already happened" is still true, short enough not to permanently blacklist a name
+const CHASE_MIN_WIN_PCT  = 15;             // only a real, meaningful gain counts as "was doing well" — a near-breakeven close isn't the pattern this guards against
+function chaseGuardFor(mode: AccountMode, underlying: string): { call: boolean; put: boolean } {
+  const rec = recentWinExits.get(mode)!.get(underlying);
+  if (!rec || rec.plPct < CHASE_MIN_WIN_PCT || Date.now() - rec.closedAt > CHASE_COOLDOWN_MS) {
+    return { call: false, put: false };
+  }
+  return { call: rec.optionType === 'call', put: rec.optionType === 'put' };
+}
+
 // Options buying-power cooldown — added 2026-09-04 per explicit request.
 // Confirmed live: once the account's options buying power is fully
 // committed to existing positions, EVERY subsequent symbol's entry attempt
@@ -125,6 +158,45 @@ const optionsBpCooldown = new Map<AccountMode, OptionsBpState>([
   ['live',  { active: false, since: 0 }],
 ]);
 const OPTIONS_BP_COOLDOWN_BACKSTOP_MS = 2 * 3_600_000; // self-clears after 2h even if the position-count check somehow misses a close
+
+// Market-regime gate for options_directional — added 2026-09-15 per explicit
+// request, after noticing most open positions were calls while the broader
+// market itself looked weak. optionsNewsBasedEntrySignal only ever looks at
+// the one stock in front of it (its own momentum/trend + its own headlines)
+// — nothing anywhere checks whether the wider market is actually going the
+// same way, so a string of individually-qualifying stocks can all fire
+// calls into a tape that's broadly rolling over, each one fighting the same
+// headwind independently. Uses SPY's own 4-week trend (readTrend, same
+// function and -3/+3 "not already extended" bar optionsNewsBasedEntrySignal
+// already applies to each stock) as the market proxy — SPY is already in
+// this bot's own traded universe, so no new data dependency. Only blocks
+// entries that run WITH the reversal that's already showing (new calls in a
+// confirmed downtrend, new puts in a confirmed uptrend) — doesn't touch
+// exits, and a stock still qualifying against a NEUTRAL or supportive tape
+// trades exactly as before. Cached briefly since this only needs to change
+// a few times a day, not be refetched for every symbol on every 5min poll.
+const MARKET_REGIME_TREND_PCT = 3;         // matches optionsNewsBasedEntrySignal's own trend4w extension bar
+const MARKET_REGIME_CACHE_MS  = 15 * 60_000;
+type MarketRegime = { trend4w: number | null; bearish: boolean; bullish: boolean };
+let marketRegimeCache: { at: number; regime: MarketRegime } | null = null;
+async function getMarketRegime(mode: AccountMode): Promise<MarketRegime | null> {
+  if (marketRegimeCache && Date.now() - marketRegimeCache.at < MARKET_REGIME_CACHE_MS) return marketRegimeCache.regime;
+  try {
+    const barsMap = await getBars(['SPY'], '1Day', 90, mode);
+    const bars    = barsMap['SPY'] ?? [];
+    if (bars.length < 60) return marketRegimeCache?.regime ?? null;
+    const trend = readTrend(bars, 'BUY').trend4w;
+    const regime: MarketRegime = {
+      trend4w: trend,
+      bearish: trend !== null && trend <= -MARKET_REGIME_TREND_PCT,
+      bullish: trend !== null && trend >= MARKET_REGIME_TREND_PCT,
+    };
+    marketRegimeCache = { at: Date.now(), regime };
+    return regime;
+  } catch {
+    return marketRegimeCache?.regime ?? null; // transient fetch failure — stale read (or none) beats blocking every entry
+  }
+}
 
 // Entry timestamp per symbol for the mean_reversion_swing strategy — the
 // pure meanReversionSwingSignal function isn't given a position's age (it
@@ -186,6 +258,11 @@ export type AlpacaBotStatus = {
   // Latest AI watch verdict per symbol currently held, if it's been
   // reviewed at least once — see reviewOpenPositions/getPositionWatchStatus.
   positionWatch: Record<string, { enabled: boolean; lastVerdict?: { action: string; confidence: number; reason: string; engine: string; at: number } }>;
+  // Symbols with a close order actually in flight right now (placed by the
+  // bot's own exit logic or a manual Close click) — distinct from the
+  // ever-present GTC protective stop every position already carries. See
+  // getAlpacaBotStatus's own comment for how this is told apart.
+  pendingCloseSymbols: string[];
 };
 
 // tradedLong/tradedShort: one breakout entry per direction per day — without
@@ -314,6 +391,96 @@ export function setPositionWatchEnabled(mode: AccountMode, symbol: string, enabl
   return { ok: true };
 }
 
+// Manual "close this now" from the dashboard — per explicit request, so a
+// position can be closed from the site directly instead of going into
+// Alpaca's own platform. Reuses the exact same options-vs-stock close path
+// executeSignal uses (limit sell for options, since a market order gets
+// rejected on illiquid contracts; a real market close for stocks) — and the
+// same journaling discipline: an option close only gets journaled once
+// reconcileSilentOptionCloses confirms the order actually filled, not the
+// moment the order is merely placed (see executeSignal's own comment for
+// why that distinction matters — this is exactly the bug that was just
+// fixed for the bot's own closes; a manual one shouldn't reintroduce it).
+export async function closePositionManually(mode: AccountMode, symbol: string): Promise<{ ok: boolean; error?: string }> {
+  let positions: AlpacaPosition[];
+  try { positions = await getPositions(mode); }
+  catch (e) { return { ok: false, error: `Position lookup failed: ${e instanceof Error ? e.message : String(e)}` }; }
+  const openPos = positions.find(p => p.symbol === symbol);
+  if (!openPos) return { ok: false, error: 'Position not found — may already be closed' };
+
+  try {
+    const cancelled = await cancelOrdersForSymbol(mode, symbol).catch(() => 0);
+    if (cancelled) addLog(mode, 'info', symbol, `Cancelled ${cancelled} open order(s) before close`);
+    // Confirmed live 2026-09-23: cancelOrdersForSymbol fires the cancel
+    // requests but never confirms they actually landed — a real GTC stop
+    // order (AAPL, resting since entry) got stuck in Alpaca's own
+    // "pending_cancel" state and never actually cleared, so the qty it held
+    // stayed unavailable. The close attempt then hit a confusing, unrelated
+    // 403 ("account not eligible to trade uncovered option contracts") —
+    // Alpaca reads a sell against 0 qty_available as opening a new
+    // uncovered short, not as closing the existing long. Re-checking here
+    // catches that state up front with a real explanation instead of
+    // letting the misleading 403 be the only thing the user sees.
+    if (cancelled) {
+      const stillOpen = await getOrders(mode, 'open').then(os => os.filter(o => o.symbol === symbol)).catch(() => []);
+      const stuck = stillOpen.filter(o => o.status === 'pending_cancel');
+      if (stuck.length) {
+        // Fallback: Alpaca's own position-close endpoint cancels/overrides
+        // conflicting orders server-side instead of us having to cancel
+        // separately first — confirmed live this gets past the stuck
+        // "pending_cancel" state entirely (the only rejection it hit was
+        // "options market orders are only allowed during market hours",
+        // nothing about the stuck order). Options still can't use this as
+        // the PRIMARY close path (a plain market order gets rejected on
+        // illiquid contracts — see the main options branch below for why),
+        // but as a fallback specifically for this stuck-order case it's
+        // worth trying before giving up. Same journaling discipline as
+        // everywhere else here: don't record the exit until it's confirmed,
+        // let reconcileSilentOptionCloses pick up the real fill once it
+        // actually settles.
+        try {
+          await closePosition(mode, symbol);
+          addLog(mode, 'exit', symbol, `Manual close order placed via Alpaca's own position-close endpoint (worked around a stuck order) — will confirm once it actually fills`);
+          return { ok: true };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return {
+            ok: false,
+            error: `Can't close yet — an existing order on this position is stuck "pending cancel" on Alpaca's own side (a known paper-trading quirk), and the fallback close attempt also failed: ${msg}`,
+          };
+        }
+      }
+      if (stillOpen.length) {
+        return { ok: false, error: `Can't close yet — ${stillOpen.length} order(s) on this position still haven't finished cancelling. Try again shortly.` };
+      }
+    }
+    if (isOptionSymbol(symbol)) {
+      const qty        = Math.abs(parseFloat(openPos.qty)) || 0;
+      const lastPrice  = parseFloat(openPos.current_price) || 0;
+      const limitPrice = Math.max(0.01, round2(lastPrice * 0.5));
+      await placeOrder(mode, { symbol, qty, side: 'sell', type: 'limit', time_in_force: 'day', limit_price: limitPrice });
+      addLog(mode, 'exit', symbol, `Manual close order placed — limit sell @ ${limitPrice} (last known ${lastPrice}) — will confirm once it actually fills`);
+    } else {
+      await closePosition(mode, symbol);
+      addLog(mode, 'exit', symbol, 'Manually closed');
+      recordJournalEvent({
+        mode, event: 'exit', symbol, strategy: 'manual',
+        side:  openPos.side,
+        qty:   Math.abs(parseFloat(openPos.qty) || 0),
+        price: parseFloat(openPos.current_price) || 0,
+        reason: 'Manually closed from the dashboard',
+        plUsd: parseFloat(openPos.unrealized_pl) || 0,
+        plPct: (parseFloat(openPos.unrealized_plpc) || 0) * 100,
+      });
+    }
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    addLog(mode, 'error', symbol, `Manual close failed: ${msg}`);
+    return { ok: false, error: msg };
+  }
+}
+
 // Recovers an options_directional contract that vanished from /positions
 // without this bot's own exit code ever running — same pattern already
 // proven in meanReversionBot.ts's recoverSilentClose and igOptionsBot.ts's
@@ -367,6 +534,15 @@ async function reconcileSilentOptionCloses(mode: AccountMode, positions: AlpacaP
         reason: `Closed outside this bot's own code (likely its own broker-side stop/TP order filling directly) — recovered from real fill history`,
         plUsd, plPct,
       });
+      // See chaseGuardFor's own comment — record every real close (win or
+      // not) so a later entry on this same underlying can check whether it'd
+      // be chasing a move that already banked its gain.
+      const optTypeMatch = symbol.match(/\d{6}([CP])\d{8}$/);
+      if (optTypeMatch) {
+        const winMap = recentWinExits.get(mode)!;
+        winMap.set(underlying, { closedAt: Date.now(), plPct, optionType: optTypeMatch[1] === 'C' ? 'call' : 'put' });
+        saveWinExits(mode, winMap);
+      }
       addLog(mode, 'exit', underlying, `Recovered a silent close — ${symbol}: ${buyPrice.toFixed(2)} → ${sellPrice.toFixed(2)}, ${plUsd >= 0 ? '+' : ''}$${plUsd.toFixed(2)} (${plPct >= 0 ? '+' : ''}${plPct.toFixed(1)}%)`);
     } catch (e) {
       addLog(mode, 'error', underlying, `Silent-close recovery failed for ${symbol}: ${e instanceof Error ? e.message : String(e)}`);
@@ -376,6 +552,22 @@ async function reconcileSilentOptionCloses(mode: AccountMode, positions: AlpacaP
     }
   }
 }
+
+// Stalled-loser override — added 2026-09-28 per explicit request, after
+// META sat at -19% (peak P/L NEVER positive — a straight bleed since entry,
+// not a winner giving something back) while this same watch kept holding on
+// Gemini's "thesis intact" reasoning. The plain -50% hard stop in
+// optionsDirectionalSignal is real but far away; PEAK_LOCK_IN there only
+// fires for a position that was actually profitable at some point
+// (peakPlPct >= 30) — a contract that's never once been green falls into
+// neither rule and can just ride Gemini's qualitative judgment call all the
+// way down. This doesn't remove Gemini from the loop, it raises the bar:
+// once a position has never been profitable and is down a real amount, a
+// HOLD needs strong, genuine conviction (a real high-confidence call) to
+// keep defending it — not just "not obviously broken" at ordinary
+// confidence, and not a passthrough (no real call happened at all).
+const STALLED_LOSER_MIN_LOSS_PCT        = -15; // meaningfully bad, well short of the -50% hard stop
+const STALLED_LOSER_MIN_HOLD_CONFIDENCE = 80;  // materially higher than any entry bar in this file — defending a loser needs more conviction than opening one did
 
 async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, positions: AlpacaPosition[]): Promise<void> {
   const watchMap = positionWatch.get(mode)!;
@@ -436,8 +628,21 @@ async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, posi
     tracked.lastVerdict = { action: verdict.action, confidence: verdict.confidence, reason: verdict.reason, engine: verdict.engine, at: Date.now() };
     addLog(mode, 'info', underlying, `${isHc ? '[HIGH CONVICTION WATCH]' : '[POSITION WATCH]'} ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
 
+    let closeReason: string | null = null;
     if (verdict.action === 'CLOSE' && verdict.engine === 'gemini') {
-      await executeSignal(mode, symbol, { action: 'CLOSE_LONG', reason: `[Position watch] ${verdict.reason}` }, pos, cfg);
+      closeReason = `[Position watch] ${verdict.reason}`;
+    } else if (isOption) {
+      // See STALLED_LOSER_MIN_LOSS_PCT's own comment.
+      const plPct = (parseFloat(pos.unrealized_plpc) || 0) * 100;
+      const peak  = optionPeaks.get(mode)!.get(symbol) ?? plPct;
+      if (peak <= 0 && plPct <= STALLED_LOSER_MIN_LOSS_PCT
+          && (verdict.engine === 'passthrough' || verdict.confidence < STALLED_LOSER_MIN_HOLD_CONFIDENCE)) {
+        closeReason = `[Stalled loser override] Never been profitable (peak ${peak.toFixed(1)}%), now ${plPct.toFixed(1)}% — AI ${verdict.engine === 'passthrough' ? "gave no real call" : `only ${verdict.confidence}% confident`} in holding, below the ${STALLED_LOSER_MIN_HOLD_CONFIDENCE}% bar needed to keep defending a straight bleed`;
+      }
+    }
+
+    if (closeReason) {
+      await executeSignal(mode, symbol, { action: 'CLOSE_LONG', reason: closeReason }, pos, cfg);
       watchMap.delete(symbol);
       if (isHc) { hcMap.delete(symbol); saveHc(mode, hcMap); }
     }
@@ -610,6 +815,7 @@ async function evaluateSymbol(
   positions: AlpacaPosition[],
   cfg:       AlpacaBotConfig,
   account?:  AlpacaAccount,
+  marketRegime?: MarketRegime | null,
 ): Promise<boolean> {
   const openPos    = positions.find(p => p.symbol === sym);
   const inPosition = !!openPos;
@@ -797,10 +1003,27 @@ async function evaluateSymbol(
 
       let entryHeadlines: string[] = [];
       try { entryHeadlines = await fetchAllHeadlines(sym, 8); } catch { /* prompt/scoring handles empty */ }
-      const entrySig = optionsNewsBasedEntrySignal(bars, entryHeadlines);
+      const chaseGuard = chaseGuardFor(mode, sym);
+      if (chaseGuard.call || chaseGuard.put) {
+        const rec = recentWinExits.get(mode)!.get(sym)!;
+        addLog(mode, 'info', sym, `Chase-guard active — ${rec.optionType} closed +${rec.plPct.toFixed(1)}% ${((Date.now() - rec.closedAt) / 3_600_000).toFixed(0)}h ago, needs a much stronger signal to re-enter ${rec.optionType} side`);
+      }
+      const entrySig = optionsNewsBasedEntrySignal(bars, entryHeadlines, chaseGuard);
       if (entrySig.action === 'BUY') {
         const currentPrice = bars[bars.length - 1].c;
         const optType      = entrySig.optionType ?? 'call';
+
+        // See getMarketRegime's own comment — this stock qualifying on its
+        // own doesn't mean it's a good idea to fight a market that's already
+        // rolling the other way.
+        if (optType === 'call' && marketRegime?.bearish) {
+          addLog(mode, 'wait', sym, `Skipping call — SPY itself is in a confirmed downtrend (${marketRegime.trend4w?.toFixed(1)}%/4w) despite this stock's own signal`);
+          return false;
+        }
+        if (optType === 'put' && marketRegime?.bullish) {
+          addLog(mode, 'wait', sym, `Skipping put — SPY itself is in a confirmed uptrend (+${marketRegime.trend4w?.toFixed(1)}%/4w) despite this stock's own signal`);
+          return false;
+        }
 
         // No AI call — see confirmOptionsEntryFinnhub's own comment. Reuses
         // entryHeadlines already fetched above for the signal itself.
@@ -828,6 +1051,41 @@ async function evaluateSymbol(
           addLog(mode, 'wait', sym, `No live quote for ${contract.symbol} — skipping (too illiquid to size safely)`);
           return false;
         }
+
+        // ── Can this actually be SOLD again? ───────────────────────────────
+        // Added 2026-10-03. The check above only asked whether a quote
+        // exists, and everything downstream prices off quote.ask — the side
+        // you BUY at. Nothing ever looked at the bid, which is the side you
+        // have to SELL at. A contract can legitimately return an ask with no
+        // bid behind it: you can get in and then cannot get out at any price.
+        //
+        // That is not hypothetical. AMD261009P00185000 is sitting in this
+        // account right now at -100% / $0 market value, unsellable, with a
+        // $0.01 limit order parked against it indefinitely — it's the
+        // contract behind the whole "the close button doesn't work" episode,
+        // and it will ride to expiry as a total loss of the premium. No
+        // conviction score would have prevented it; a bid check would have.
+        //
+        // Second test is the round-trip cost. Buying at ask and being able
+        // to sell only at bid means losing (ask-bid)/ask the instant the
+        // fill lands, before the thesis has done anything at all. At a 30%
+        // spread the underlying has to move 30% just to break even, which
+        // no longer resembles the trade the signal actually asked for.
+        // 25% is deliberately permissive — the contracts this bot has
+        // actually profited on (META, MSFT, NVDA mega-cap ATM) quote inside
+        // 10% — so this blocks the untradeable without starving the book.
+        const MAX_SPREAD_PCT_OF_MID = 25;
+        const mid = (quote.ask + quote.bid) / 2;
+        if (!(quote.bid > 0)) {
+          addLog(mode, 'wait', sym, `Skipping ${contract.symbol} — ask $${quote.ask.toFixed(2)} but NO BID. Buyable, not sellable: this is the AMD-style trap that rides to expiry as a total loss.`);
+          return false;
+        }
+        const spreadPct = mid > 0 ? ((quote.ask - quote.bid) / mid) * 100 : 100;
+        if (spreadPct > MAX_SPREAD_PCT_OF_MID) {
+          addLog(mode, 'wait', sym, `Skipping ${contract.symbol} — bid $${quote.bid.toFixed(2)} / ask $${quote.ask.toFixed(2)} is a ${spreadPct.toFixed(0)}% spread (max ${MAX_SPREAD_PCT_OF_MID}%). The round trip alone costs more than the setup is worth.`);
+          return false;
+        }
+
         const contractPrice = quote.ask;
         const hcMap = highConviction.get(mode)!;
         const isHighConviction = confirm.confidence >= HIGH_CONVICTION_MIN_CONFIDENCE && hcMap.size === 0;
@@ -939,6 +1197,27 @@ async function executeSignal(
       // last known price, so it fills against whatever bid actually exists
       // rather than requiring one at market) sidesteps that rejection; a
       // plain stock close still uses the simpler market DELETE.
+      //
+      // Bug found 2026-09-23: this used to journal the exit as DONE right
+      // here, straight after PLACING the options limit order — not after it
+      // actually filled. For a genuinely illiquid/worthless contract (no
+      // real bid even at this limit), that order just sits and expires
+      // unfilled at end of day (day order), the position never actually
+      // closes, and the NEXT poll sees the same still-open position hit the
+      // same stop-loss condition again — logging ANOTHER "closed" journal
+      // entry for a close that never happened, every cycle, forever.
+      // Confirmed live: one AMD put got logged as closed via stop-loss 8
+      // separate times over 8 days while sitting untouched in the real
+      // account the entire time, and the account's total realized P&L was
+      // overcounted by roughly $83,000 because of entries exactly like it.
+      // Fix: for options, only log the "order placed" info line here — the
+      // real, confirmed exit (correct fill price, correct P&L, logged
+      // exactly once) comes from reconcileSilentOptionCloses once the
+      // position actually disappears from /positions, same mechanism
+      // already proven for a close that happens via this bot's own broker-
+      // side stop/TP order firing directly. Plain stock closes are
+      // unaffected — closePosition() is a real market order that executes
+      // immediately, so journaling right after it succeeds is accurate.
       if (isOptionSymbol(sym)) {
         const qty         = Math.abs(parseFloat(openPos.qty)) || 0;
         const lastPrice   = parseFloat(openPos.current_price) || 0;
@@ -947,21 +1226,20 @@ async function executeSignal(
           symbol: sym, qty, side: 'sell', type: 'limit',
           time_in_force: 'day', limit_price: limitPrice,
         });
-        addLog(mode, 'exit', sym, `Close order placed — limit sell @ ${limitPrice} (last known ${lastPrice})`);
+        addLog(mode, 'exit', sym, `Close order placed — limit sell @ ${limitPrice} (last known ${lastPrice}) — will confirm once it actually fills`);
       } else {
         await closePosition(mode, sym);
         addLog(mode, 'exit', sym, 'Position closed');
+        recordJournalEvent({
+          mode, event: 'exit', symbol: sym, strategy: cfg.strategy,
+          side:  openPos.side,
+          qty:   Math.abs(parseFloat(openPos.qty) || 0),
+          price: parseFloat(openPos.current_price) || 0,
+          reason,
+          plUsd: parseFloat(openPos.unrealized_pl) || 0,
+          plPct: (parseFloat(openPos.unrealized_plpc) || 0) * 100,
+        });
       }
-
-      recordJournalEvent({
-        mode, event: 'exit', symbol: sym, strategy: cfg.strategy,
-        side:  openPos.side,
-        qty:   Math.abs(parseFloat(openPos.qty) || 0),
-        price: parseFloat(openPos.current_price) || 0,
-        reason,
-        plUsd: parseFloat(openPos.unrealized_pl) || 0,
-        plPct: (parseFloat(openPos.unrealized_plpc) || 0) * 100,
-      });
 
       // Find replacement symbol for the freed slot
       void (async () => {
@@ -1343,6 +1621,10 @@ async function poll(mode: AccountMode) {
 
   let openCount = positions.length;
 
+  // See getMarketRegime's own comment. Fetched once per poll (not per
+  // symbol) and only for the strategy that actually uses it.
+  const marketRegime = cfg.strategy === 'options_directional' ? await getMarketRegime(mode) : null;
+
   for (const sym of cfg.symbols) {
     if (!st.running) break;
     const inPos = findPositionFor(positions, sym);
@@ -1350,7 +1632,7 @@ async function poll(mode: AccountMode) {
       addLog(mode, 'wait', sym, `Max positions (${cfg.maxPositions}) reached — skipping`);
       continue;
     }
-    const opened = await evaluateSymbol(mode, sym, positions, cfg, account);
+    const opened = await evaluateSymbol(mode, sym, positions, cfg, account, marketRegime);
     if (opened) openCount++;
   }
 
@@ -1486,6 +1768,7 @@ export async function getAlpacaBotStatus(mode: AccountMode): Promise<AlpacaBotSt
   const st = s(mode);
   let positions: AlpacaPosition[] = [];
   let equity = '0', cash = '0';
+  let pendingCloseSymbols: string[] = [];
 
   if (st.running && st.config) {
     try {
@@ -1493,6 +1776,18 @@ export async function getAlpacaBotStatus(mode: AccountMode): Promise<AlpacaBotSt
       positions = pos;
       equity    = acct.equity;
       cash      = acct.cash;
+    } catch {}
+    // A close order in flight (bot-driven or a manual Close click) is a
+    // 'sell' order placed with time_in_force 'day' — distinct from the
+    // ever-present protective stop, which is always 'gtc'. Surfaced so the
+    // dashboard can show "Pending close" instead of looking like the click
+    // did nothing while the order sits queued (e.g. placed outside market
+    // hours, or an options limit order still waiting on a fill).
+    try {
+      const openOrders = await getOrders(mode, 'open');
+      pendingCloseSymbols = openOrders
+        .filter(o => o.side === 'sell' && o.time_in_force !== 'gtc')
+        .map(o => o.symbol);
     } catch {}
   }
 
@@ -1505,6 +1800,7 @@ export async function getAlpacaBotStatus(mode: AccountMode): Promise<AlpacaBotSt
     equity,
     cash,
     positions,
+    pendingCloseSymbols,
     log:       st.log.slice(0, 100),
     nextRunMs: st.nextRunMs,
     orbState:  { ...st.orbState },

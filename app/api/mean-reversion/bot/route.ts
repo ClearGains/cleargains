@@ -29,15 +29,15 @@ async function proxyTo(path: string, method: string): Promise<NextResponse> {
 function validMode(mode: string | null): mode is 'demo' | 'live' {
   return mode === 'demo' || mode === 'live';
 }
-function validInstance(instance: string | null): instance is 'fx' | 'stocks' | 'japan225' {
-  return instance === 'fx' || instance === 'stocks' || instance === 'japan225';
+function validInstance(instance: string | null): instance is 'fx' | 'stocks' | 'japan225' | 'commodities' {
+  return instance === 'fx' || instance === 'stocks' || instance === 'japan225' || instance === 'commodities';
 }
 
 export async function GET(req: NextRequest) {
   const mode     = req.nextUrl.searchParams.get('mode');
   const instance = req.nextUrl.searchParams.get('instance');
   if (!validMode(mode)) return NextResponse.json({ ok: false, error: 'mode must be "demo" or "live"' }, { status: 400 });
-  if (!validInstance(instance)) return NextResponse.json({ ok: false, error: 'instance must be "fx", "stocks", or "japan225"' }, { status: 400 });
+  if (!validInstance(instance)) return NextResponse.json({ ok: false, error: 'instance must be "fx", "stocks", "japan225", or "commodities"' }, { status: 400 });
   return proxyTo(`/mean-reversion/${instance}/${mode}/status`, 'GET');
 }
 
@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
   const instance = req.nextUrl.searchParams.get('instance');
   const action   = req.nextUrl.searchParams.get('action');
   if (!validMode(mode)) return NextResponse.json({ ok: false, error: 'mode must be "demo" or "live"' }, { status: 400 });
-  if (!validInstance(instance)) return NextResponse.json({ ok: false, error: 'instance must be "fx", "stocks", or "japan225"' }, { status: 400 });
+  if (!validInstance(instance)) return NextResponse.json({ ok: false, error: 'instance must be "fx", "stocks", "japan225", or "commodities"' }, { status: 400 });
   if (action !== 'start' && action !== 'stop') return NextResponse.json({ ok: false, error: 'action must be "start" or "stop"' }, { status: 400 });
   return proxyTo(`/mean-reversion/${instance}/${mode}/${action}`, 'POST');
 }

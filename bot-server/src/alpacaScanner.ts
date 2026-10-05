@@ -270,6 +270,9 @@ const TIMEFRAME: Record<StrategyName, { tf: Parameters<typeof getBars>[1]; limit
   // the shuffled liquid pool, this entry only exists to satisfy
   // Record<StrategyName, ...>'s exhaustiveness.
   mean_reversion_swing: { tf: '1Day', limit: 210 },
+  // IG-bot-only in practice (see igStrategyBot.ts) — same exhaustiveness-only
+  // reason as gemini_confirmed above.
+  news_momentum:        { tf: '1Day', limit: 80 },
 };
 
 /**

@@ -914,11 +914,15 @@ export type MrSafetyVerdict = {
 
 export function buildMrSafetyPrompt(req: MrSafetyRequest): string {
   const headlineBlock = req.headlines?.length
-    ? `\nRecent headlines:\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
+    ? `\nRecent headlines (may not mention ${req.instrumentName} by name — see instructions above for why that's still relevant):\n${req.headlines.map(h => `- ${h}`).join('\n')}\n`
     : '\nNo notable recent headlines.\n';
   return `A rules-based mean-reversion system holds a ${req.direction} position on ${req.instrumentName}, entered at ${req.entryLevel.toFixed(2)}, now at ${req.currentLevel.toFixed(2)} (${req.uplGbp >= 0 ? '+' : ''}£${req.uplGbp.toFixed(2)}), held ${req.heldDays.toFixed(1)} days. It already has a real stop-loss and take-profit attached, and is designed to be held through ordinary price noise and pullbacks — that is expected and normal, NOT a reason for concern.
 
-Your only job: flag whether something has gone genuinely, seriously wrong — a real emergency the stop/take-profit wouldn't itself handle well (e.g. trading halted, delisting, fraud/accounting scandal, bankruptcy filing, a change so severe the position should be pulled now rather than left to its stop). Ordinary bad news, a rough day, a downgrade, normal volatility — none of that qualifies; the stop already covers it. Only flag severe=true for something a reasonable person would call an emergency, not routine noise.
+Your only job: flag whether something has gone genuinely, seriously wrong — a real emergency the stop/take-profit wouldn't itself handle well, and act now rather than leave it to that stop. Read the headlines in two passes:
+1. WIDE — don't just look for stories that name ${req.instrumentName} directly. Think about what actually drives it (its sector, its supply chain, what regulates or taxes it, what transports it, what substitutes for it, what nations/companies produce or consume it) and scan the headlines for anything touching those, even indirectly — a policy change, a sanctions/export decision, a supply disruption, a conflict affecting a key producer or shipping route, a major infrastructure failure, a central-bank/rate decision if this is rate-sensitive.
+2. CLOSE — of what the wide pass surfaced (plus anything naming it directly), does any of it actually rise to a genuine emergency for THIS position specifically, not just "relevant" or "worth a mention"?
+
+Examples of real emergencies worth overriding the stop for: trading halted, delisting, fraud/accounting scandal, bankruptcy filing (stocks); a major supply disruption, an export ban or sanctions hitting this specific market, a war/conflict cutting off a key producer or route, a critical infrastructure failure (commodities/FX/indices); anything else a reasonable person would call an emergency for this instrument. Ordinary bad news, a rough day, a downgrade, normal volatility, a policy change that's already priced in or too distant to matter yet — none of that qualifies on its own; the stop already covers ordinary moves. Only flag severe=true for something that clears that real-emergency bar, not for "this seems tangentially relevant."
 ${headlineBlock}
 Respond with JSON only, no markdown:
 {"severe":false,"reason":"max 15 words"}`;
