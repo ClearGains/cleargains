@@ -51,6 +51,11 @@ const EXIT_SLIPPAGE_BPS        = 500;   // wider on the way out — getting out 
 // stock/options equivalents (10-30%) because meme coin swings of that size
 // are ordinary noise, not a real move worth protecting.
 const PROFIT_LOCK_FLOOR_PCT    = 50;
+// Hard stop added 2026-10-06 — there was none: the only exits were the
+// profit floor and the 48h timer, so a token bleeding out rode all the way
+// down. Confirmed in the paper journal: the last six 48h exits each lost
+// ~90-100% of the 9.5 SOL position (logged as "no real move").
+const STOP_LOSS_PCT            = -30;
 const MAX_HOLD_HOURS           = 48;   // a token that hasn't gone anywhere in 2 days isn't the hype play it looked like
 const HYPE_MIN_GALAXY_SCORE    = 60;   // only enforced when LunarCrush is actually configured — see entry logic
 // A sell quote that fails outright, or clears only at a catastrophic price
@@ -256,8 +261,10 @@ async function monitorExits(): Promise<void> {
 
       const heldHours = (Date.now() - tr.enteredAt) / 3_600_000;
       let closeReason: string | null = null;
-      if (heldHours >= MAX_HOLD_HOURS) {
-        closeReason = `Max hold reached (${heldHours.toFixed(1)}h) with no real move — freeing capital`;
+      if (plPct <= STOP_LOSS_PCT) {
+        closeReason = `Stop-loss — ${plPct.toFixed(0)}% (limit ${STOP_LOSS_PCT}%)`;
+      } else if (heldHours >= MAX_HOLD_HOURS) {
+        closeReason = `Max hold reached (${heldHours.toFixed(1)}h) at ${plPct >= 0 ? '+' : ''}${plPct.toFixed(0)}% — freeing capital`;
       } else if (tr.peakPlPct >= PROFIT_LOCK_FLOOR_PCT && plPct <= PROFIT_LOCK_FLOOR_PCT) {
         closeReason = `Retraced from +${tr.peakPlPct.toFixed(0)}% peak back down to the ${PROFIT_LOCK_FLOOR_PCT}% floor — banking +${plPct.toFixed(0)}%`;
       }

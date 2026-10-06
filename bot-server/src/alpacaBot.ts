@@ -1102,6 +1102,14 @@ async function evaluateSymbol(
         // order, catches this even on the first attempt of a fresh cooldown
         // window, and re-arms the cooldown immediately instead of waiting for
         // the broker's own 403 round-trip to do it.
+        // Budget cap added 2026-10-06 — Math.max(1, …) let one contract cost
+        // any multiple of the budget; confirmed live: META contracts at
+        // ~$29k against a $500 budget, single trades swinging -$9.7k/+$7.7k.
+        // Allow up to 2x for granularity, never more.
+        if (estimatedCost > budgetUsd * sizeMult * 2) {
+          addLog(mode, 'wait', sym, `${contract.symbol} costs ~$${estimatedCost.toFixed(0)} for 1 contract — more than 2x the $${(budgetUsd * sizeMult).toFixed(0)} budget, skipping`);
+          return false;
+        }
         if (realBp !== undefined && estimatedCost > realBp) {
           addLog(mode, 'wait', sym, `${contract.symbol} needs ~$${estimatedCost.toFixed(2)} but real options buying power is only $${realBp.toFixed(2)} — skipping, not attempting a doomed order`);
           bp.active = true;

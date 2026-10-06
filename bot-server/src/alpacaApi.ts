@@ -329,9 +329,10 @@ export type AlpacaOptionsContract = {
 };
 
 export async function getOptionsContracts(
-  underlying: string,
-  type:       'call' | 'put',
-  mode:       AccountMode,
+  underlying:   string,
+  type:         'call' | 'put',
+  mode:         AccountMode,
+  currentPrice?: number,
 ): Promise<AlpacaOptionsContract[]> {
   // Widened from 7-21d to 21-45d alongside optionsDirectionalSignal's
   // 2026-08-21 rewrite to trend-following — a multi-week trend thesis needs
@@ -346,9 +347,17 @@ export async function getOptionsContracts(
   // "genuinely no contracts right now," and the only visible symptom
   // downstream was selectOptionsContract's generic "No tradable ATM
   // contract found" with the actual cause thrown away. Log it instead.
+  // Strike window added 2026-10-06. Alpaca returns contracts lowest strike
+  // first, so limit=30 with no strike filter only ever saw the bottom of the
+  // chain — "closest to ATM" was then the least-bad of those. Confirmed live:
+  // META 390C bought with META ~$680 (~$29k/contract, deep ITM), MU 245P with
+  // MU ~$900 (far OTM, sold days later at $0.01).
+  const strikeWindow = currentPrice && currentPrice > 0
+    ? `&strike_price_gte=${(currentPrice * 0.9).toFixed(2)}&strike_price_lte=${(currentPrice * 1.1).toFixed(2)}`
+    : '';
   return alpacaFetch<{ option_contracts: AlpacaOptionsContract[] }>(mode,
     `/options/contracts?underlying_symbols=${underlying}&type=${type}` +
-    `&expiration_date_gte=${minExp}&expiration_date_lte=${maxExp}&status=active&limit=30`,
+    `&expiration_date_gte=${minExp}&expiration_date_lte=${maxExp}&status=active${strikeWindow}&limit=1000`,
   ).then(d => d.option_contracts ?? []).catch(e => {
     console.error(`[alpacaApi] getOptionsContracts failed for ${underlying} (${mode}): ${e instanceof Error ? e.message : String(e)}`);
     return [];
@@ -362,10 +371,13 @@ export async function selectOptionsContract(
   currentPrice:  number,
   mode:          AccountMode,
 ): Promise<AlpacaOptionsContract | null> {
-  const contracts = await getOptionsContracts(underlying, type, mode);
+  const contracts = await getOptionsContracts(underlying, type, mode, currentPrice);
   if (!contracts.length) return null;
 
-  const tradable = contracts.filter(c => c.tradable && c.status === 'active');
+  // Belt-and-braces with the strike window above: never accept a strike
+  // more than 10% from the underlying, whatever the API hands back.
+  const tradable = contracts.filter(c => c.tradable && c.status === 'active'
+    && Math.abs(parseFloat(c.strike_price) - currentPrice) <= currentPrice * 0.1);
   if (!tradable.length) return null;
 
   // Sort by strike closest to current price (ATM)
