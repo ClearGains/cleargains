@@ -2028,7 +2028,10 @@ async function openRecommendationProbe(mode: IgMode, epic: string): Promise<{ ok
     return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('INSUFFICIENT_FUNDS')) fundsCooldownEpics.set(epic, Date.now() + FUNDS_COOLDOWN_MS);
+    // Any broker rejection, not just INSUFFICIENT_FUNDS — confirmed live
+    // 2026-10-01/02: Apple and Amazon rejected "UNKNOWN" 13 times and Boeing
+    // MARKET_CLOSED_WITH_EDITS repeatedly, each retry re-spending an AI call.
+    if (msg.includes('REJECTED')) fundsCooldownEpics.set(epic, Date.now() + FUNDS_COOLDOWN_MS);
     addLog(mode, 'error', name, `Probe open from recommendation failed: ${msg}`);
     return { ok: false, error: msg };
   }
@@ -2239,6 +2242,9 @@ async function runProbeGuard(mode: IgMode, positions: FullPosition[]): Promise<v
 async function autoOpenRecommendations(mode: IgMode): Promise<void> {
   const st = ms(mode);
   if (!st.running || !st.session || !st.config) return;
+  // Paused = no new entries, so don't spend an AI confirmation on one —
+  // executeIgSignal's own pause check only fires after that call is made.
+  if (st.paused) return;
   const cfg = st.config;
 
   let livePositions;
@@ -4628,6 +4634,10 @@ async function poll(mode: IgMode) {
     // Every other strategy keeps the original behaviour: skip entirely
     // when there's no room, since there's nothing to act on and no
     // comparison logic that would use the extra call anyway.
+    // Paused: nothing can be opened, so skip flat epics entirely rather than
+    // running their signal (and gemini_opinion's AI call) only for
+    // executeIgSignal to discard it. Open positions still get evaluated.
+    if (!inPos && st.paused) continue;
     if (!inPos && livePositions.length >= cfg.maxPositions && epicStrategy !== 'gemini_opinion') {
       addLog(mode, 'wait', epicName(epic), `Max positions (${cfg.maxPositions}) reached`);
       continue;

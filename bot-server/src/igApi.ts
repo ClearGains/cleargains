@@ -439,17 +439,25 @@ export type IgClosedTransaction = {
 export async function fetchClosedTransactions(session: IGSession, sinceIso: string): Promise<IgClosedTransaction[]> {
   const base = BASE[session.env];
   const from = sinceIso.slice(0, 19);
-  const r = await fetch(`${base}/history/transactions?type=ALL_DEAL&from=${from}`, {
-    headers: headers(session, '2'), signal: AbortSignal.timeout(10_000),
-  });
-  if (!r.ok) return [];
-  const d = await r.json() as {
-    transactions?: Array<{
-      instrumentName?: string; openDateUtc?: string; dateUtc?: string;
-      openLevel?: string; closeLevel?: string; profitAndLoss?: string;
-    }>;
+  // Paginated 2026-10-06 — without pageSize IG returns only the newest 20,
+  // confirmed live: a since-09-28 query on the live account returned exactly
+  // 20 of 116, so any recovery window busier than that silently missed the
+  // close and journaled it at £0.
+  type RawTxn = {
+    instrumentName?: string; openDateUtc?: string; dateUtc?: string;
+    openLevel?: string; closeLevel?: string; profitAndLoss?: string;
   };
-  return (d.transactions ?? [])
+  const raw: RawTxn[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const r = await fetch(`${base}/history/transactions?type=ALL_DEAL&from=${from}&pageSize=200&pageNumber=${page}`, {
+      headers: headers(session, '2'), signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) break;
+    const d = await r.json() as { transactions?: RawTxn[]; metadata?: { pageData?: { totalPages?: number } } };
+    raw.push(...(d.transactions ?? []));
+    if (page >= (d.metadata?.pageData?.totalPages ?? 1)) break;
+  }
+  return raw
     .filter(t => t.instrumentName && t.dateUtc && t.profitAndLoss)
     .map(t => ({
       instrumentName: t.instrumentName!,
