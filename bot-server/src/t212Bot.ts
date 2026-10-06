@@ -805,6 +805,10 @@ async function pollMomentumEntries(mode: T212Mode): Promise<void> {
   const openCount = Object.keys(st.botOpenedMomentum).length;
   if (openCount > 0) return;
 
+  // Same free-cash pre-check as pollEntries — no AI call for an order T212 would reject.
+  const freeCash = await getCash(mode, { fresh: true }).then(c => c.free).catch(() => null);
+  if (freeCash !== null && freeCash < MOMENTUM_MIN_POSITION_GBP) return;
+
   const exclude = new Set([
     ...st.preExisting, ...Object.keys(st.botOpened), ...Object.keys(st.botOpenedMomentum),
   ]);
@@ -981,6 +985,16 @@ async function pollEntries(mode: T212Mode): Promise<void> {
   if (openCount > 0) {
     const currentBudgetUsed = Object.values(st.botOpened).reduce((s, e) => s + e.budgetGbp, 0);
     addLog(mode, 'wait', '—', `${openCount} position(s) open (£${currentBudgetUsed.toFixed(0)}/£${getT212Budget(mode)} budget) — monitoring only, no new-candidate scan until flat`);
+    return;
+  }
+
+  // Not enough free cash to buy even the minimum position — skip the scan
+  // and its three AI calls per candidate rather than spend them on an order
+  // T212 will reject (confirmed live 2026-10-06: NVDA/CVX/TSM
+  // insufficient-free-for-stocks-buy, each after a full AI round).
+  const freeCash = await getCash(mode, { fresh: true }).then(c => c.free).catch(() => null);
+  if (freeCash !== null && freeCash < T212_MIN_POSITION_GBP) {
+    addLog(mode, 'wait', '—', `Only £${freeCash.toFixed(0)} free cash (need £${T212_MIN_POSITION_GBP}) — skipping new-candidate scan`);
     return;
   }
 
