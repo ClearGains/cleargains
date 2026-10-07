@@ -117,3 +117,22 @@ export function isMarketOpen(epic: string): { open: boolean; reason: string } {
     ? { open: true,  reason: `${epic} within session` }
     : { open: false, reason: `${epic} outside session (${session.openH}:${String(session.openM).padStart(2,'0')}–${session.closeH}:${String(session.closeM).padStart(2,'0')} UTC)` };
 }
+
+// US single-stock CFDs on IG (the U*/S* prefixes — NASDAQ/NYSE names).
+// Their "24 Hours" variants quote pre/post-market, but the bars the bot
+// scores on are regular-session only, so outside these hours a signal is
+// built on the previous session's data.
+export function isUsStockEpic(epic: string): boolean {
+  return /^(U[A-D]|S[A-H])\.D\./.test(epic);
+}
+
+// NYSE regular session, 09:30–16:00 New York time, DST-aware.
+export function isUsRegularSession(now = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(now);
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  if (get('weekday') === 'Sat' || get('weekday') === 'Sun') return false;
+  const mins = Number(get('hour')) * 60 + Number(get('minute'));
+  return mins >= 9 * 60 + 30 && mins < 16 * 60;
+}

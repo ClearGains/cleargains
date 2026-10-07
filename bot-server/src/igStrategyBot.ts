@@ -29,6 +29,7 @@ import { askIgDailyVerdict, askIgTradeIdea, askIgConfirmStockTrade } from './ope
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchAllHeadlines } from './newsFetch';
 import { getForeignOwnership, isForeignPosition } from './positionOwnership';
+import { isUsStockEpic, isUsRegularSession } from './marketHours';
 import { createStreamManager, type StreamManager } from './igStream';
 import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
@@ -548,6 +549,11 @@ async function journalSilentCloses(mode: IgMode, session: IGSession, dealIds: st
       plPct: last.level > 0 ? (match.profitAndLoss / (last.level * last.size)) * 100 : 0,
     });
     journaledDealIds.add(dealId);
+    // Feeds the loss cooldown/streak too, as of 2026-10-06 (was journal-only).
+    // Confirmed live on demo: Intel stopped out broker-side 3 times in 90min
+    // (-£13.02 each) and was re-bought every 30min, since only the bot's own
+    // closes started a cooldown.
+    recordLossExit(mode, last.epic, match.profitAndLoss, 'Broker-side stop/close (recovered from IG history)');
     addLog(mode, 'info', name, `[Journal] Recovered a silent close — £${match.profitAndLoss.toFixed(2)} (${last.level.toFixed(2)} → ${(match.closeLevel ?? last.level).toFixed(2)}), no bot code path had closed or journaled it`);
   }
 }
@@ -1929,6 +1935,9 @@ async function finalizeRecommendationEntry(
   if (!protectionOk) addLog(mode, 'error', name, `🚨 UNPROTECTED — stop/TP attach failed: ${protectionError ?? 'unknown'}. Monitor manually.`);
 
   registerBotOpenedDeal(mode, dealId);
+  // Seeded at entry, not just on the next poll — a stop-out inside one poll
+  // interval otherwise left nothing for journalSilentCloses to match.
+  lastKnownPosition.set(dealId, { epic, direction: action, size: stake, level });
   journalEntry(mode, cfg, epic, action === 'BUY' ? 'long' : 'short', stake, level, label, confidence);
   try { const { addToWatch } = await import('./geminiWatch'); addToWatch(mode, dealId); } catch {}
 
@@ -2267,6 +2276,11 @@ async function autoOpenRecommendations(mode: IgMode): Promise<void> {
     // margin, until the cooldown clears.
     const fundsCoolUntil = fundsCooldownEpics.get(rec.epic);
     if (fundsCoolUntil && Date.now() < fundsCoolUntil) continue;
+    // See isUsRegularSession — the 5-min bars behind this rec are
+    // regular-session only, so pre/post-market they're the previous
+    // session's. Confirmed live: all four Intel entries (2026-10-07) were
+    // pre-market, each stopped out within minutes. Manual opens unaffected.
+    if (isUsStockEpic(rec.epic) && !isUsRegularSession()) continue;
     const result = await openRecommendationProbe(mode, rec.epic);
     if (result.ok) count++;
   }
@@ -3180,6 +3194,7 @@ async function executeIgSignal(
   }
 
   if (st.paused)                       { addLog(mode, 'wait', name, `⏸ Paused — skipping ${action}`); return; }
+  if (isUsStockEpic(epic) && !isUsRegularSession()) { addLog(mode, 'wait', name, `Outside US regular session — skipping ${action}`); return; }
   if (st.lossLock)                     { addLog(mode, 'wait', name, `🛑 Daily-loss limit hit — skipping ${action} (entries resume next day)`); return; }
   if (st.profitLock)                   { addLog(mode, 'wait', name, `✅ Today's profit target already banked — skipping ${action} (entries resume next day; close positions manually if you want to keep this one going)`); return; }
   const coolUntil = st.lossCooldownEpics.get(epic);
@@ -3754,6 +3769,7 @@ async function executeIgSignal(
     if (cfg.strategy === 'gemini_opinion') st.lastGeminiEntryAt = Date.now();
     st.botOpenedDeals.add(dealId);
     saveBotOpenedDeals(mode, st.botOpenedDeals);
+    lastKnownPosition.set(dealId, { epic, direction: effectiveDirection, size: stake, level });
     journalEntry(mode, cfg, epic, effectiveDirection === 'BUY' ? 'long' : 'short', stake, level, reason, signal.confidence);
     // Auto-enrol every bot-opened deal in Gemini Position Watch — previously
     // opt-in only (manually flagged via the UI), so a bot-opened position had
