@@ -194,6 +194,14 @@ const PROBE_TIMEOUT_MS       = 90 * 60_000;   // 90min undecided — stop specia
 // no AI involved, so it can't be reasoned past. Shares only (classifyMarketType
 // below) — IG's own feed doesn't carry meaningful traded volume for FX/indices.
 const IG_SB_ENTRY_MIN_VOLUME_RATIO = 1.0;
+// Last-5-bar vs prior-20-bar average volume; null when there isn't enough history.
+function entryVolumeRatio(bars: AlpacaBar[]): number | null {
+  const recent5  = bars.slice(-5);
+  const prior20  = bars.slice(-25, -5);
+  const avgRecent = recent5.reduce((s, b) => s + b.v, 0) / Math.max(recent5.length, 1);
+  const avgPrior  = prior20.reduce((s, b) => s + b.v, 0) / Math.max(prior20.length, 1);
+  return prior20.length >= 10 && avgPrior > 0 ? avgRecent / avgPrior : null;
+}
 
 // Same backstop shape as MR_SWING_MAX_HOLD_DAYS — a momentum thesis that
 // hasn't resolved in under a week has stopped being a momentum trade.
@@ -1743,6 +1751,14 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
           st.recommendations.delete(epic);
           continue;
         }
+        // Same volume floor evaluateEpic applies — this path skipped it.
+        // Confirmed live 2026-10-08: NextEra opened from a recommendation two
+        // minutes after evaluateEpic rejected it at 0.56x volume.
+        const recVol = classifyMarketType(epic) === 'SHARES' ? entryVolumeRatio(bars) : null;
+        if (recVol !== null && recVol < IG_SB_ENTRY_MIN_VOLUME_RATIO) {
+          st.recommendations.delete(epic);
+          continue;
+        }
         addRecommendation(st.recommendations, {
           epic, name, action: signal.action, reason: signal.reason,
           level: bars[bars.length - 1].c,
@@ -1854,8 +1870,14 @@ async function prepareRecommendationEntry(mode: IgMode, epic: string):
   const minStop = detail?.minStopDist || 1;
   const currentPrice = (rec.action === 'BUY' ? detail?.offer : detail?.bid) ?? rec.level;
 
-  const stopDist   = Math.max(minStop, rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : currentPrice * 0.02);
-  const profitDist = Math.max(minStop, rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : currentPrice * 0.03);
+  // Floor added 2026-10-08: the rec's stop comes from 5-min-bar ATR and can
+  // sit inside a few spreads — confirmed live, NextEra's 16pt stop (0.2%) was
+  // cut 27s after entry. At least 4x the live spread and 0.5% of price.
+  const spread     = detail?.offer && detail?.bid ? detail.offer - detail.bid : 0;
+  const stopDist   = Math.max(minStop, spread * 4, currentPrice * 0.005,
+    rec.stopPrice !== undefined ? Math.abs(rec.level - rec.stopPrice) : currentPrice * 0.02);
+  const profitDist = Math.max(minStop, stopDist * 2,
+    rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : currentPrice * 0.03);
   let fullStake   = Math.max(minDeal, calcStake(cfg.maxRiskGbp, stopDist, minDeal));
 
   // Minimum £/pt floor — added 2026-09-30 per explicit request ("solely
@@ -3059,11 +3081,7 @@ async function evaluateEpic(
   // See IG_SB_ENTRY_MIN_VOLUME_RATIO's own comment — a real, mechanical
   // volume floor on every fresh share entry, whichever strategy produced it.
   if (!openPos && (signal.action === 'BUY' || signal.action === 'SELL') && classifyMarketType(epic) === 'SHARES') {
-    const recent5   = bars.slice(-5);
-    const prior20   = bars.slice(-25, -5);
-    const avgRecent = recent5.reduce((s, b) => s + b.v, 0) / Math.max(recent5.length, 1);
-    const avgPrior  = prior20.reduce((s, b) => s + b.v, 0) / Math.max(prior20.length, 1);
-    const volRatio  = prior20.length >= 10 && avgPrior > 0 ? avgRecent / avgPrior : null;
+    const volRatio  = entryVolumeRatio(bars);
     if (volRatio !== null && volRatio < IG_SB_ENTRY_MIN_VOLUME_RATIO) {
       addLog(mode, 'info', epicName(epic), `Skipped ${signal.action} — real volume only ${volRatio.toFixed(2)}x this stock's own recent normal, below the ${IG_SB_ENTRY_MIN_VOLUME_RATIO}x floor (computed directly from price/volume data, not AI-judged)`);
       return;
@@ -3876,9 +3894,15 @@ async function runSevereLossGuard(mode: IgMode, positions: FullPosition[]): Prom
   for (const p of positions) {
     // Another bot's position — it has its own exit logic, see positionOwnership.ts
     if (isForeignPosition(p.dealId, p.epic, foreign, st.botOpenedDeals.has(p.dealId))) continue;
-    if (p.upl >= -severeLossCeiling) continue;
+    // Per-position as of 2026-10-08: entry sizing deliberately accepts more
+    // than 2x target when the minimum stake forces it (confirmed live:
+    // Broadcom entered at ~£67 risk, then this guard cut it at -£22.68 50s
+    // later). Fire only when the loss is past the position's own stop risk.
+    const ownRisk = p.stopLevel !== undefined ? Math.abs(p.level - p.stopLevel) * p.size : 0;
+    const ceiling = Math.max(severeLossCeiling, ownRisk * 1.25);
+    if (p.upl >= -ceiling) continue;
     const name = epicName(p.epic);
-    const slReason = `Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${severeLossCeiling.toFixed(0)} (2× target) — closing immediately, stop may have slipped`;
+    const slReason = `Severe loss guard — £${Math.abs(p.upl).toFixed(2)} loss exceeds £${ceiling.toFixed(0)} (past its own stop risk) — closing immediately, stop may have slipped`;
     addLog(mode, 'error', name, `🚨 ${slReason}`);
     try {
       await igClosePos(st.session, p.dealId, p.direction, p.size);
