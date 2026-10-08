@@ -18,7 +18,7 @@ import {
   type IGSession, type FullPosition,
 } from './igApi';
 import { getMeanReversionSignal, trendStillIntact, hadBigAdverseCandleToday, type MrBar, type MrSignal, MAX_HOLD_DAYS } from './meanReversionStrategy';
-import { emaCrossoverSignal, donchianBreakoutSignal, type PositionSide } from './alpacaStrategies';
+import { emaCrossoverSignal, donchianBreakoutSignal, volumeFlowAgainst, type PositionSide } from './alpacaStrategies';
 import { readTrend } from './momentumSignal';
 import { epicName } from './igStrategyScanner';
 import { resolveCredentials, calcStake, type IgMode } from './igStrategyBot';
@@ -915,6 +915,11 @@ async function scanEntries(instance: MrInstance, mode: IgMode, session: IGSessio
         const volRatio    = avgVolPrior > 0 ? recentVol / avgVolPrior : 1;
         if (volRatio < COMMODITY_BREAKOUT_MIN_VOLUME) {
           addLog(instance, mode, 'wait', epicName(epic), `[Donchian] ${donchSig.reason} — but only ${volRatio.toFixed(1)}x its own recent volume, skipping (a breakout on thin volume is more likely a fakeout)`);
+          continue;
+        }
+        // Volume must be behind the breakout's direction, not just high.
+        if ((donchSig.action === 'BUY' || donchSig.action === 'SELL') && volumeFlowAgainst(raw!, donchSig.action)) {
+          addLog(instance, mode, 'wait', epicName(epic), `[Donchian] ${donchSig.reason} — but recent volume is weighted against the breakout direction, skipping`);
           continue;
         }
       }

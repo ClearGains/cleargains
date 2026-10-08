@@ -737,6 +737,16 @@ const NEWS_MOMENTUM_MID_SCORE_MIN_VOL  = 1.5;
 const NEWS_MOMENTUM_CHASE_MIN_SCORE = 95;
 const NEWS_MOMENTUM_CHASE_MIN_VOL   = 2;
 export type DirectionalChaseGuard = { buy: boolean; sell: boolean };
+// True when the last n bars' volume is weighted against `action` — more
+// volume on down-bars for a BUY, on up-bars for a SELL. A volume surge only
+// confirms a trade in its own direction (selling volume is not support for a
+// buy). Added 2026-10-08 after Broadcom was bought into down-bar volume.
+export function volumeFlowAgainst(bars: AlpacaBar[], action: 'BUY' | 'SELL', n = 5): boolean {
+  let up = 0, down = 0;
+  for (const b of bars.slice(-n)) { if (b.c > b.o) up += b.v; else if (b.c < b.o) down += b.v; }
+  return action === 'BUY' ? down > up : up > down;
+}
+
 export function newsMomentumSignal(
   bars: AlpacaBar[], headlines: string[], chaseGuard?: DirectionalChaseGuard,
 ): StrategySignal {
@@ -802,6 +812,9 @@ export function newsMomentumSignal(
   } else if (volRatio >= ANTICIPATE_MIN_VOL && Math.abs(sentiment) >= ANTICIPATE_MIN_SENT) {
     direction = sentiment > 0 ? 'BUY' : 'SELL';
     path = 'anticipating';
+    // Direction here comes from headlines alone — the volume surge it leans
+    // on has to be flowing the same way, or it's trading into the opposite.
+    if (volumeFlowAgainst(bars, direction)) { direction = null; path = ''; }
   }
 
   const qualifies = score >= NEWS_MOMENTUM_MIN_SCORE

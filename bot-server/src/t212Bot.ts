@@ -558,6 +558,7 @@ type TrendResult = {
   // multi-week trend, not a single day's move — a brief 2-day volume spike
   // shouldn't swing a thesis built on 12 weeks of price action either way.
   volRatio:      number | null;
+  volAgainstBuy?: boolean; // more volume on down-days than up-days over the last 20 sessions
 };
 const EMPTY_TREND: TrendResult = { trend4w: null, trend12w: null, trend52w: null, pctBelowHigh: null, currentPrice: null, volRatio: null };
 
@@ -600,7 +601,18 @@ export async function fetchTrend(yahooTicker: string): Promise<TrendResult> {
       const avgPrior  = prior40.reduce((s, v) => s + v, 0) / Math.max(prior40.length, 1);
       volRatio = avgPrior > 0 ? avgRecent / avgPrior : null;
     }
-    return { trend4w, trend12w, trend52w, pctBelowHigh, currentPrice: last, volRatio };
+    // Up-day vs down-day volume over the last 20 sessions (close-to-close) —
+    // a trend buy needs buying volume behind it, not just more volume.
+    let volAgainstBuy = false;
+    const rawC = quote?.close ?? [], rawV = quote?.volume ?? [];
+    let upV = 0, downV = 0;
+    for (let i = Math.max(1, rawC.length - 20); i < rawC.length; i++) {
+      const c = rawC[i], p = rawC[i - 1], v = rawV[i];
+      if (c == null || p == null || v == null) continue;
+      if (c > p) upV += v; else if (c < p) downV += v;
+    }
+    if (upV + downV > 0) volAgainstBuy = downV > upV;
+    return { trend4w, trend12w, trend52w, pctBelowHigh, currentPrice: last, volRatio, volAgainstBuy };
   } catch {
     return EMPTY_TREND;
   }
@@ -1018,6 +1030,10 @@ async function pollEntries(mode: T212Mode): Promise<void> {
     const trend = await fetchTrend(sym);
     if (trend.trend12w === null || trend.currentPrice === null) continue;
     if (trend.trend12w < ENTRY_MIN_TREND_12W || (trend.trend4w !== null && trend.trend4w < ENTRY_MIN_TREND_4W)) continue;
+    if (trend.volAgainstBuy) {
+      addLog(mode, 'wait', sym, `Trend looks good (+${trend.trend12w.toFixed(1)}%/12w) but the last 20 sessions had more volume on down-days than up-days — selling, not buying, behind it; skipping`);
+      continue;
+    }
     if (trend.volRatio !== null && trend.volRatio < ISA_ENTRY_MIN_VOLUME_RATIO) {
       addLog(mode, 'wait', sym, `Trend looks good (+${trend.trend12w.toFixed(1)}%/12w) but recent volume is only ${trend.volRatio.toFixed(2)}x the prior 2 months' — not enough real conviction behind it yet, skipping`);
       continue;
