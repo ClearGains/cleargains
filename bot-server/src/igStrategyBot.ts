@@ -194,6 +194,16 @@ const PROBE_TIMEOUT_MS       = 90 * 60_000;   // 90min undecided — stop specia
 // no AI involved, so it can't be reasoned past. Shares only (classifyMarketType
 // below) — IG's own feed doesn't carry meaningful traded volume for FX/indices.
 const IG_SB_ENTRY_MIN_VOLUME_RATIO = 1.0;
+// Which way the recent volume is pushing: share of last-5-bar volume on
+// up-bars vs down-bars. Added 2026-10-08 — the ratio above is direction-blind,
+// so a selling surge passed as "confirmation" for a BUY. Confirmed live:
+// Broadcom bought at 1.6x volume with more of it on down-bars (28.2k vs
+// 23.2k), already -2% on the day, cut a minute later.
+function volumeAgainst(bars: AlpacaBar[], action: 'BUY' | 'SELL'): { against: boolean; up: number; down: number } {
+  let up = 0, down = 0;
+  for (const b of bars.slice(-5)) { if (b.c > b.o) up += b.v; else if (b.c < b.o) down += b.v; }
+  return { against: action === 'BUY' ? down > up : up > down, up, down };
+}
 // Last-5-bar vs prior-20-bar average volume; null when there isn't enough history.
 function entryVolumeRatio(bars: AlpacaBar[]): number | null {
   const recent5  = bars.slice(-5);
@@ -1759,6 +1769,10 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
           st.recommendations.delete(epic);
           continue;
         }
+        if (classifyMarketType(epic) === 'SHARES' && volumeAgainst(bars, signal.action).against) {
+          st.recommendations.delete(epic);
+          continue;
+        }
         addRecommendation(st.recommendations, {
           epic, name, action: signal.action, reason: signal.reason,
           level: bars[bars.length - 1].c,
@@ -3081,6 +3095,11 @@ async function evaluateEpic(
   // See IG_SB_ENTRY_MIN_VOLUME_RATIO's own comment — a real, mechanical
   // volume floor on every fresh share entry, whichever strategy produced it.
   if (!openPos && (signal.action === 'BUY' || signal.action === 'SELL') && classifyMarketType(epic) === 'SHARES') {
+    const flow = volumeAgainst(bars, signal.action);
+    if (flow.against) {
+      addLog(mode, 'info', epicName(epic), `Skipped ${signal.action} — recent volume is flowing the other way (up-bar ${flow.up.toFixed(0)} vs down-bar ${flow.down.toFixed(0)} over the last 5 bars)`);
+      return;
+    }
     const volRatio  = entryVolumeRatio(bars);
     if (volRatio !== null && volRatio < IG_SB_ENTRY_MIN_VOLUME_RATIO) {
       addLog(mode, 'info', epicName(epic), `Skipped ${signal.action} — real volume only ${volRatio.toFixed(2)}x this stock's own recent normal, below the ${IG_SB_ENTRY_MIN_VOLUME_RATIO}x floor (computed directly from price/volume data, not AI-judged)`);
