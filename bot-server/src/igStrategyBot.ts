@@ -29,7 +29,6 @@ import { askIgDailyVerdict, askIgTradeIdea, askIgConfirmStockTrade } from './ope
 import { fetchBarsWithFallback, fetchYahooBars, EPIC_TO_YAHOO, EPIC_TO_ALPACA } from './yahooFetch';
 import { fetchAllHeadlines } from './newsFetch';
 import { getForeignOwnership, isForeignPosition } from './positionOwnership';
-import { isUsStockEpic, isUsRegularSession } from './marketHours';
 import { createStreamManager, type StreamManager } from './igStream';
 import type { CandleTick } from './scalperStrategy';
 import type { AlpacaBar, Timeframe } from './alpacaApi';
@@ -205,9 +204,14 @@ function volumeAgainst(bars: AlpacaBar[], action: 'BUY' | 'SELL'): { against: bo
   return { against: action === 'BUY' ? down > up : up > down, up, down };
 }
 // Last-5-bar vs prior-20-bar average volume; null when there isn't enough history.
+// Zero-volume bars handled as of 2026-10-09: Yahoo's pre/post-market bars
+// carry prices but v=0. A recent window with no reported volume is "no
+// confirmation" (0, which fails the floor), and the baseline skips zero bars
+// so pre-market rows don't empty it out for the first ~100min of the session.
 function entryVolumeRatio(bars: AlpacaBar[]): number | null {
   const recent5  = bars.slice(-5);
-  const prior20  = bars.slice(-25, -5);
+  if (recent5.some(b => !(b.v > 0))) return 0;
+  const prior20  = bars.slice(0, -5).filter(b => b.v > 0).slice(-20);
   const avgRecent = recent5.reduce((s, b) => s + b.v, 0) / Math.max(recent5.length, 1);
   const avgPrior  = prior20.reduce((s, b) => s + b.v, 0) / Math.max(prior20.length, 1);
   return prior20.length >= 10 && avgPrior > 0 ? avgRecent / avgPrior : null;
@@ -1190,8 +1194,21 @@ const IG_RES: Record<IgStrategyName, { resolution: string; count: number }> = {
 // what makes them the most likely to burn through it (confirmed live:
 // daily-timeframe polling alone was already tripping the allowance before
 // this existed at all).
+// Newest bar must be within 3 bar-lengths for an intraday strategy to enter —
+// trades any hour, but only on metrics that are actually current. Replaced a
+// US-regular-session-only gate 2026-10-09 (user: those were missed
+// opportunities). null = daily/weekly strategy, no intraday freshness rule.
+function maxEntryBarAgeMs(strategy: IgStrategyName): number | null {
+  const mins: Record<string, number> = { '1m': 1, '5m': 5, '30m': 30, '1h': 60 };
+  const iv = FREE_DATA_PARAMS[strategy]?.yahooInterval;
+  return iv && mins[iv] ? mins[iv] * 3 * 60_000 : null;
+}
+
 const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1d' | '1wk'; includePrePost?: boolean }>> = {
-  rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
+  // includePrePost added 2026-10-09 so IG's 24h US share CFDs are scored on
+  // real pre/post-market bars rather than the previous session's (the cause
+  // of the stale pre-market Intel entries 2026-10-07).
+  rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m', includePrePost: true },
   orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },
@@ -1773,6 +1790,13 @@ export async function refreshRecommendations(mode: IgMode, force = false): Promi
           st.recommendations.delete(epic);
           continue;
         }
+        // Same freshness rule executeIgSignal applies — see maxEntryBarAgeMs.
+        const recMaxAge = maxEntryBarAgeMs(cfg.strategy);
+        const recBarAge = Date.now() - new Date(bars[bars.length - 1].t).getTime();
+        if (recMaxAge !== null && recBarAge > recMaxAge && classifyMarketType(epic) === 'SHARES') {
+          st.recommendations.delete(epic);
+          continue;
+        }
         addRecommendation(st.recommendations, {
           epic, name, action: signal.action, reason: signal.reason,
           level: bars[bars.length - 1].c,
@@ -2312,11 +2336,6 @@ async function autoOpenRecommendations(mode: IgMode): Promise<void> {
     // margin, until the cooldown clears.
     const fundsCoolUntil = fundsCooldownEpics.get(rec.epic);
     if (fundsCoolUntil && Date.now() < fundsCoolUntil) continue;
-    // See isUsRegularSession — the 5-min bars behind this rec are
-    // regular-session only, so pre/post-market they're the previous
-    // session's. Confirmed live: all four Intel entries (2026-10-07) were
-    // pre-market, each stopped out within minutes. Manual opens unaffected.
-    if (isUsStockEpic(rec.epic) && !isUsRegularSession()) continue;
     const result = await openRecommendationProbe(mode, rec.epic);
     if (result.ok) count++;
   }
@@ -3231,7 +3250,11 @@ async function executeIgSignal(
   }
 
   if (st.paused)                       { addLog(mode, 'wait', name, `⏸ Paused — skipping ${action}`); return; }
-  if (isUsStockEpic(epic) && !isUsRegularSession()) { addLog(mode, 'wait', name, `Outside US regular session — skipping ${action}`); return; }
+  const maxBarAge = maxEntryBarAgeMs(cfg.strategy);
+  if (maxBarAge !== null && barAgeMs > maxBarAge && classifyMarketType(epic) === 'SHARES') {
+    addLog(mode, 'wait', name, `Latest bar is ${Math.round(barAgeMs / 60_000)}min old — metrics not current, skipping ${action}`);
+    return;
+  }
   if (st.lossLock)                     { addLog(mode, 'wait', name, `🛑 Daily-loss limit hit — skipping ${action} (entries resume next day)`); return; }
   if (st.profitLock)                   { addLog(mode, 'wait', name, `✅ Today's profit target already banked — skipping ${action} (entries resume next day; close positions manually if you want to keep this one going)`); return; }
   const coolUntil = st.lossCooldownEpics.get(epic);
