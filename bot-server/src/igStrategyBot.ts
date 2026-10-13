@@ -1867,36 +1867,11 @@ async function prepareRecommendationEntry(mode: IgMode, epic: string):
   if (isStrategyAiPaused(mode)) {
     return { ok: false, error: 'AI paused for this bot — resume to open recommendations again' };
   }
-  const ticker    = EPIC_TO_ALPACA[epic];
-  let headlines: string[] = [];
-  try { if (ticker) headlines = await fetchAllHeadlines(ticker, 5, name); } catch {}
-  const confirmVerdict = await askIgDailyVerdict({
-    instrumentName: name,
-    direction:      rec.action,
-    strength:       70,
-    price:          rec.level,
-    changePercent:  0,
-    stopPoints:     rec.stopPrice       !== undefined ? Math.abs(rec.level - rec.stopPrice)       : rec.level * 0.02,
-    tpPoints:       rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : rec.level * 0.03,
-    headlines,
-  });
-  addLog(mode, 'info', name, `[AI] ${confirmVerdict.direction} ${confirmVerdict.confidence}% — ${confirmVerdict.reason} (${confirmVerdict.engine})`);
-  if (confirmVerdict.engine === 'passthrough') {
-    return { ok: false, error: `Gemini unavailable (${confirmVerdict.reason}) — not opening unconfirmed` };
-  }
-  // Raised 50 -> 65 2026-09-30 per explicit request ("be calculated with
-  // the amount of positions") — this was the floor for literally any idea
-  // in this account's entire recommendation universe to open a real trade,
-  // and confirmed live it was letting through a high volume of marginal
-  // setups (most actual calls here were landing well below 50 anyway and
-  // correctly getting rejected, but the ones scraping past 50 weren't
-  // meaningfully better-reasoned than the ones that didn't). 65 matches the
-  // bar used elsewhere in this account for a similar "should this actually
-  // open" AI gate (T212 Momentum, mean_reversion_swing's entry confirm).
-  if (confirmVerdict.direction !== rec.action || confirmVerdict.confidence < 65) {
-    return { ok: false, error: `Gemini vetoed — ${confirmVerdict.direction} ${confirmVerdict.confidence}%: ${confirmVerdict.reason}` };
-  }
-
+  // Stop/TP computed before the AI call (moved 2026-10-13) so it judges the
+  // stop the trade will actually use. It was shown the raw rec stop, before
+  // the floor below — confirmed live: every index rec vetoed for a "2.46pt
+  // stop" on US 500 or a "zero stop" on US Tech 100, none of which would
+  // have been the real stop. No IG-strategy trade for 3 sessions.
   const details = await fetchMarketDetails(st.session, [epic]);
   const detail  = details.get(epic);
   // `||` not `??` — confirmed live a stake of 0.05 got through despite
@@ -1916,6 +1891,37 @@ async function prepareRecommendationEntry(mode: IgMode, epic: string):
     rec.stopPrice !== undefined ? Math.abs(rec.level - rec.stopPrice) : currentPrice * 0.02);
   const profitDist = Math.max(minStop, stopDist * 2,
     rec.takeProfitPrice !== undefined ? Math.abs(rec.level - rec.takeProfitPrice) : currentPrice * 0.03);
+
+  const ticker    = EPIC_TO_ALPACA[epic];
+  let headlines: string[] = [];
+  try { if (ticker) headlines = await fetchAllHeadlines(ticker, 5, name); } catch {}
+  const confirmVerdict = await askIgDailyVerdict({
+    instrumentName: name,
+    direction:      rec.action,
+    strength:       70,
+    price:          currentPrice,
+    changePercent:  0,
+    stopPoints:     stopDist,
+    tpPoints:       profitDist,
+    headlines,
+  });
+  addLog(mode, 'info', name, `[AI] ${confirmVerdict.direction} ${confirmVerdict.confidence}% — ${confirmVerdict.reason} (${confirmVerdict.engine})`);
+  if (confirmVerdict.engine === 'passthrough') {
+    return { ok: false, error: `Gemini unavailable (${confirmVerdict.reason}) — not opening unconfirmed` };
+  }
+  // Raised 50 -> 65 2026-09-30 per explicit request ("be calculated with
+  // the amount of positions") — this was the floor for literally any idea
+  // in this account's entire recommendation universe to open a real trade,
+  // and confirmed live it was letting through a high volume of marginal
+  // setups (most actual calls here were landing well below 50 anyway and
+  // correctly getting rejected, but the ones scraping past 50 weren't
+  // meaningfully better-reasoned than the ones that didn't). 65 matches the
+  // bar used elsewhere in this account for a similar "should this actually
+  // open" AI gate (T212 Momentum, mean_reversion_swing's entry confirm).
+  if (confirmVerdict.direction !== rec.action || confirmVerdict.confidence < 65) {
+    return { ok: false, error: `Gemini vetoed — ${confirmVerdict.direction} ${confirmVerdict.confidence}%: ${confirmVerdict.reason}` };
+  }
+
   let fullStake   = Math.max(minDeal, calcStake(cfg.maxRiskGbp, stopDist, minDeal));
 
   // Minimum £/pt floor — added 2026-09-30 per explicit request ("solely
