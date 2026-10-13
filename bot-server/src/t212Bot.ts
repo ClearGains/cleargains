@@ -686,7 +686,19 @@ async function fetchTodayNews(symbol: string): Promise<{ headlines: string[]; se
   }
 }
 
-type MomentumQuote = { price: number; changePercent: number; volume: number; high: number; low: number };
+type MomentumQuote = { price: number; changePercent: number; volume: number; high: number; low: number; open: number };
+
+// Position P&L as a real price move, fixed 2026-10-13. Was pos.ppl (account
+// currency, GBP) divided by avgPrice × qty (instrument currency, USD), which
+// understated every move by ~the GBP/USD rate — the "-5%" momentum stop
+// really fired near -6.5% (SanDisk logged -5.4%, real -7.1%) and the ISA
+// "-15%" near -20%. Uses T212's own average/current price, same currency.
+function positionPlPct(pos: T212Position, fallbackAvg: number): number {
+  const avg = pos.averagePrice > 0 ? pos.averagePrice : fallbackAvg;
+  if (pos.currentPrice !== undefined && pos.currentPrice > 0 && avg > 0) return ((pos.currentPrice - avg) / avg) * 100;
+  const upl = pos.ppl ?? 0;
+  return fallbackAvg > 0 ? (upl / (fallbackAvg * pos.quantity)) * 100 : 0;
+}
 
 // UK (.L) stocks: ALWAYS priced off their US-dollar ADR (Finnhub), never the
 // LSE listing — every UK entry in this universe now executes on T212 via its
@@ -710,8 +722,8 @@ async function fetchMomentumQuote(stock: UniverseStock): Promise<MomentumQuote |
     try {
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${adr}&token=${apiKey}`, { signal: AbortSignal.timeout(5_000) });
       if (!res.ok) return null;
-      const q = await res.json() as { c: number; dp: number; h: number; l: number; v: number };
-      return q.c > 0 ? { price: q.c, changePercent: q.dp ?? 0, volume: q.v ?? 0, high: q.h ?? q.c, low: q.l ?? q.c } : null;
+      const q = await res.json() as { c: number; dp: number; h: number; l: number; o: number };
+      return q.c > 0 ? { price: q.c, changePercent: q.dp ?? 0, volume: 0, high: q.h ?? q.c, low: q.l ?? q.c, open: q.o ?? q.c } : null;
     } catch { return null; }
   }
 
@@ -720,8 +732,48 @@ async function fetchMomentumQuote(stock: UniverseStock): Promise<MomentumQuote |
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${stock.symbol}&token=${apiKey}`, { signal: AbortSignal.timeout(5_000) });
     if (!res.ok) return null;
-    const q = await res.json() as { c: number; dp: number; h: number; l: number; v: number };
-    return q.c > 0 ? { price: q.c, changePercent: q.dp ?? 0, volume: q.v ?? 0, high: q.h ?? q.c, low: q.l ?? q.c } : null;
+    // Finnhub's /quote has no volume field (confirmed 2026-10-13) — volume
+    // comes from fetchMomentumContext's daily bars instead.
+    const q = await res.json() as { c: number; dp: number; h: number; l: number; o: number };
+    return q.c > 0 ? { price: q.c, changePercent: q.dp ?? 0, volume: 0, high: q.h ?? q.c, low: q.l ?? q.c, open: q.o ?? q.c } : null;
+  } catch { return null; }
+}
+
+// Minutes into the NYSE session (09:30–16:00 ET, DST-aware), clamped to the session.
+function nyseSessionMinutes(now = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(now);
+  const h = Number(parts.find(p => p.type === 'hour')?.value), m = Number(parts.find(p => p.type === 'minute')?.value);
+  return Math.max(0, Math.min(390, h * 60 + m - 570));
+}
+
+// Daily-bar context for a momentum candidate, added 2026-10-13. Volume is
+// today's (so far) against the stock's OWN 20-day average, pro-rated for how
+// much of the session has run (floored at 15% so the first hour's front-
+// loaded volume can't fake a surge); was a cross-stock median of a Finnhub
+// field that doesn't exist, i.e. always "1.0x". Plus 20/50-day averages so
+// it doesn't buy bounces inside downtrends (Western Digital, Broadcom).
+async function fetchMomentumContext(symbol: string): Promise<{ volRatio: number; sma20: number; sma50: number } | null> {
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=6mo`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClearGains/1.0)', Accept: 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { chart?: { result?: Array<{ timestamp?: number[]; indicators?: { quote?: Array<{ close?: (number | null)[]; volume?: (number | null)[] }> } }> } };
+    const r = data.chart?.result?.[0];
+    const ts = r?.timestamp ?? [], q = r?.indicators?.quote?.[0];
+    const rows = ts.map((t, i) => ({ t, c: q?.close?.[i], v: q?.volume?.[i] }))
+      .filter((x): x is { t: number; c: number; v: number } => x.c != null && x.c > 0 && x.v != null);
+    if (rows.length < 55) return null;
+    const today = rows[rows.length - 1];
+    // Today's bar must actually be today's session, or there's no live volume to read.
+    if (new Date(today.t * 1000).toISOString().slice(0, 10) !== new Date().toISOString().slice(0, 10)) return null;
+    const prior = rows.slice(-21, -1);
+    const avgVol20 = prior.reduce((s, x) => s + x.v, 0) / prior.length;
+    const elapsed = Math.max(0.15, nyseSessionMinutes() / 390);
+    const closes = rows.map(x => x.c);
+    const sma = (n: number) => closes.slice(-n).reduce((s, c) => s + c, 0) / n;
+    return { volRatio: avgVol20 > 0 ? today.v / (avgVol20 * elapsed) : 0, sma20: sma(20), sma50: sma(50) };
   } catch { return null; }
 }
 
@@ -755,15 +807,25 @@ async function scanMomentumCandidates(exclude: Set<string>): Promise<MomentumCan
   }
   if (quotes.length === 0) return [];
 
-  const volumes = quotes.map(x => x.q.volume).filter(v => v > 0).sort((a, b) => a - b);
-  const medianVolume = volumes[Math.floor(volumes.length / 2)] || 1;
-
-  const movers = quotes.filter(x => Math.abs(x.q.changePercent) >= 0.5 || x.q.volume >= medianVolume * 2);
+  // BUY-only strategy — only today's risers are candidates.
+  const movers = quotes.filter(x => x.q.changePercent >= 0.5);
 
   const results: MomentumCandidate[] = [];
   await Promise.all(movers.map(async ({ stock, q }) => {
+    // Pullback, not chase: still up on the session (above today's open, so
+    // today's volume is buying volume) but not sitting in the top quarter
+    // of the day's range — waits for a dip off the high.
+    const dayRange = q.high - q.low;
+    if (!(q.price > q.open)) return;
+    if (dayRange > 0 && (q.high - q.price) / dayRange < 0.25) return;
+
+    const ctx = await fetchMomentumContext(stock.isUK ? (ADR_MAP[stock.symbol] ?? stock.symbol) : stock.symbol);
+    if (!ctx) return;
+    // Trend: only buy strength inside an uptrend, not a bounce in a downtrend.
+    if (!(q.price > ctx.sma20 && q.price > ctx.sma50)) return;
+    const volRatio = ctx.volRatio;
+
     const news = await fetchTodayNews(stock.symbol);
-    const volRatio = q.volume > 0 && medianVolume > 0 ? q.volume / medianVolume : 1;
     const intradayRange = q.high > 0 && q.low > 0 ? ((q.high - q.low) / q.price) * 100 : 0;
 
     const momentumScore  = Math.min(35, Math.abs(q.changePercent) * 7);
@@ -787,7 +849,8 @@ async function scanMomentumCandidates(exclude: Set<string>): Promise<MomentumCan
     const reason = [
       `${q.changePercent >= 0 ? '+' : ''}${q.changePercent.toFixed(2)}% today`,
       news.headlines.length > 0 ? `${news.headlines.length} headlines (${sentimentLabel} sentiment)` : 'no news found',
-      volRatio >= 1.5 ? `${volRatio.toFixed(1)}x volume surge` : 'normal volume',
+      `${volRatio.toFixed(1)}x its own average volume`,
+      `above 20/50-day averages, ${(((q.high - q.price) / Math.max(dayRange, 1e-9)) * 100).toFixed(0)}% off the day's high`,
     ].join(' · ');
 
     results.push({ stock, price: q.price, changePercent: q.changePercent, volRatio, profitScore, reason, headlines: news.headlines });
@@ -940,7 +1003,7 @@ async function pollMomentumExits(mode: T212Mode, positions: T212Position[]): Pro
     }
 
     const upl = pos.ppl ?? ((pos.currentPrice ?? tracked.avgPrice) - tracked.avgPrice) * pos.quantity;
-    const uplPct = tracked.avgPrice > 0 ? (upl / (tracked.avgPrice * pos.quantity)) * 100 : 0;
+    const uplPct = positionPlPct(pos, tracked.avgPrice);
     const heldDays = (Date.now() - tracked.enteredAt) / 86_400_000;
 
     let closeReason: string | null = null;
@@ -1170,7 +1233,7 @@ async function pollExits(mode: T212Mode, positions: T212Position[]): Promise<voi
     // P&L, not on trend/news, so it can't sit behind that gate.
     {
       const upl = pos.ppl ?? ((pos.currentPrice ?? tracked.avgPrice) - tracked.avgPrice) * pos.quantity;
-      const uplPct = tracked.avgPrice > 0 ? (upl / (tracked.avgPrice * pos.quantity)) * 100 : 0;
+      const uplPct = positionPlPct(pos, tracked.avgPrice);
       if (tracked.stopOrderId === undefined) {
         // No protective order on record — either the initial placement at
         // entry failed, or this position predates the feature. Retry rather
@@ -1229,7 +1292,7 @@ async function pollExits(mode: T212Mode, positions: T212Position[]): Promise<voi
     }
 
     const upl = pos.ppl ?? ((pos.currentPrice ?? tracked.avgPrice) - tracked.avgPrice) * pos.quantity;
-    const uplPct = tracked.avgPrice > 0 ? (upl / (tracked.avgPrice * pos.quantity)) * 100 : 0;
+    const uplPct = positionPlPct(pos, tracked.avgPrice);
     const thesisReq = {
       instrumentName: ticker, action: 'SELL' as const, price: pos.currentPrice ?? tracked.avgPrice,
       trend4w: trend.trend4w, trend12w: trend.trend12w, trend52w: trend.trend52w, pctBelowHigh: trend.pctBelowHigh,
