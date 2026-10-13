@@ -1184,7 +1184,15 @@ async function executeSignal(
     // every 5 minutes. It'll fill if a real bid ever shows up, or the
     // contract just expires worthless on its own, which costs nothing extra.
     if (isOptionSymbol(sym)) {
-      const stillPending = await getOrders(mode, 'open').then(os => os.some(o => o.symbol === sym)).catch(() => false);
+      // Only a resting close (limit/market sell) counts — not the protective
+      // GTC stop every entry attaches. Fixed 2026-10-13: it counted that stop,
+      // so no option with one could ever be closed by this bot (XLE logged
+      // "already pending" for 5 days; AAPL/MSFT/NVDA/XLE would have ridden
+      // past the ≤2 DTE exit into Friday's expiry). The stop is cancelled
+      // below before the close goes in.
+      const stillPending = await getOrders(mode, 'open')
+        .then(os => os.some(o => o.symbol === sym && o.side === 'sell' && (o.type === 'limit' || o.type === 'market')))
+        .catch(() => false);
       if (stillPending) {
         addLog(mode, 'wait', sym, 'Close order already pending from an earlier attempt — leaving it, not re-submitting');
         return false;
