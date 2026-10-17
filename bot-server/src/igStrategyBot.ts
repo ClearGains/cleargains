@@ -140,6 +140,11 @@ const LOSS_COOLDOWN_MS = 3 * 60 * 60_000;  // 3h — long enough to stop immedia
 // — worst case after a restart is one wasted retry, not a real gap.
 const FUNDS_COOLDOWN_MS = 2 * 60 * 60_000; // 2h — shorter than LOSS_COOLDOWN_MS since freed margin (a position closing elsewhere) can happen faster than a real thesis reset
 const fundsCooldownEpics = new Map<string, number>();
+// After the AI vetoes a recommendation, don't re-ask about the same epic and
+// direction for this long — confirmed live 2026-10-13..16: US Tech 100 was
+// sent to the AI 136 times (every 30min) and skipped every time.
+const AI_VETO_COOLDOWN_MS = 2 * 60 * 60_000;
+const aiVetoCooldown = new Map<string, number>(); // key: `${mode}:${epic}:${action}`
 
 // Probe-then-scale entry — added per explicit request 2026-09-15 after a
 // real pattern on the live account: a modest win on one auto-opened
@@ -1921,6 +1926,7 @@ async function prepareRecommendationEntry(mode: IgMode, epic: string):
   // bar used elsewhere in this account for a similar "should this actually
   // open" AI gate (T212 Momentum, mean_reversion_swing's entry confirm).
   if (confirmVerdict.direction !== rec.action || confirmVerdict.confidence < 65) {
+    aiVetoCooldown.set(`${mode}:${epic}:${rec.action}`, Date.now() + AI_VETO_COOLDOWN_MS);
     return { ok: false, error: `Gemini vetoed — ${confirmVerdict.direction} ${confirmVerdict.confidence}%: ${confirmVerdict.reason}` };
   }
 
@@ -2339,6 +2345,11 @@ async function autoOpenRecommendations(mode: IgMode): Promise<void> {
   for (const rec of ranked) {
     if (!st.running) break;
     if (count >= cfg.maxPositions) continue;
+    // Shorts off means no SELL entries on this path either — executeIgSignal
+    // already enforced allowShorts, the recommendation path never did.
+    if (rec.action === 'SELL' && !cfg.allowShorts) continue;
+    const vetoUntil = aiVetoCooldown.get(`${mode}:${rec.epic}:${rec.action}`);
+    if (vetoUntil && Date.now() < vetoUntil) continue;
     // See FUNDS_COOLDOWN_MS's own comment — skip re-attempting (and
     // re-spending a real AI call on) a recommendation that just failed on
     // margin, until the cooldown clears.
