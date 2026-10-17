@@ -567,7 +567,16 @@ async function reconcileSilentOptionCloses(mode: AccountMode, positions: AlpacaP
 // keep defending it — not just "not obviously broken" at ordinary
 // confidence, and not a passthrough (no real call happened at all).
 const STALLED_LOSER_MIN_LOSS_PCT        = -15; // meaningfully bad, well short of the -50% hard stop
-const STALLED_LOSER_MIN_HOLD_CONFIDENCE = 80;  // materially higher than any entry bar in this file — defending a loser needs more conviction than opening one did
+const STALLED_LOSER_MIN_HOLD_CONFIDENCE = 80;
+// Added 2026-10-17: an option is marked at the bid, so it opens 10-20% "down"
+// on the spread alone. Without a minimum hold this cut nearly every new entry
+// within minutes (LQD bought and sold ~9 times in two days, each round trip
+// paying the spread). A full day first, then judge it as a stalled loser.
+const STALLED_LOSER_MIN_HOLD_HOURS = 24;
+// Per-underlying re-entry pause after a losing options close (in-memory; a
+// restart just forgets it, same tradeoff as the other in-memory guards here).
+const OPTIONS_LOSS_COOLDOWN_MS = 24 * 3_600_000;
+const optionsLossCooldown = new Map<string, number>();  // materially higher than any entry bar in this file — defending a loser needs more conviction than opening one did
 
 async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, positions: AlpacaPosition[]): Promise<void> {
   const watchMap = positionWatch.get(mode)!;
@@ -635,7 +644,7 @@ async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, posi
       // See STALLED_LOSER_MIN_LOSS_PCT's own comment.
       const plPct = (parseFloat(pos.unrealized_plpc) || 0) * 100;
       const peak  = optionPeaks.get(mode)!.get(symbol) ?? plPct;
-      if (peak <= 0 && plPct <= STALLED_LOSER_MIN_LOSS_PCT
+      if (peak <= 0 && plPct <= STALLED_LOSER_MIN_LOSS_PCT && watchReq.heldHours >= STALLED_LOSER_MIN_HOLD_HOURS
           && (verdict.engine === 'passthrough' || verdict.confidence < STALLED_LOSER_MIN_HOLD_CONFIDENCE)) {
         closeReason = `[Stalled loser override] Never been profitable (peak ${peak.toFixed(1)}%), now ${plPct.toFixed(1)}% — AI ${verdict.engine === 'passthrough' ? "gave no real call" : `only ${verdict.confidence}% confident`} in holding, below the ${STALLED_LOSER_MIN_HOLD_CONFIDENCE}% bar needed to keep defending a straight bleed`;
       }
@@ -951,6 +960,11 @@ async function evaluateSymbol(
           .then(os => os.some(o => occRegex.test(o.symbol) && o.side === 'buy'))
           .catch(() => false);
         if (pendingBuy) { addLog(mode, 'wait', sym, 'Options buy order still working — not placing another'); return false; }
+        const coolUntil = optionsLossCooldown.get(`${mode}:${sym}`);
+        if (coolUntil && Date.now() < coolUntil) {
+          addLog(mode, 'wait', sym, `Closed an option here at a loss — cooling down ${((coolUntil - Date.now()) / 3_600_000).toFixed(1)}h before re-entering`);
+          return false;
+        }
       }
 
       if (optPos) {
@@ -1247,6 +1261,9 @@ async function executeSignal(
         const qty         = Math.abs(parseFloat(openPos.qty)) || 0;
         const lastPrice   = parseFloat(openPos.current_price) || 0;
         const limitPrice  = Math.max(0.01, round2(lastPrice * 0.5));
+        if ((parseFloat(openPos.unrealized_pl) || 0) < 0) {
+          optionsLossCooldown.set(`${mode}:${sym.replace(/\d{6}[CP]\d{8}$/, '')}`, Date.now() + OPTIONS_LOSS_COOLDOWN_MS);
+        }
         await placeOrder(mode, {
           symbol: sym, qty, side: 'sell', type: 'limit',
           time_in_force: 'day', limit_price: limitPrice,
@@ -1357,7 +1374,12 @@ async function executeSignal(
       // Options carry no default broker-side protection like the bracket stock
       // orders below — without this, an exit depends entirely on the next poll
       // noticing the loss, on the highest-gamma instrument in the system.
-      const entryPx = parseFloat(order.filled_avg_price ?? '') || currentPrice || 0;
+      // Disabled 2026-10-17: Alpaca triggers an option stop off the LAST
+      // TRADE, which on a thin contract can be a stale print already below the
+      // stop — confirmed live, LQD stops at $0.47 filled the same second at
+      // $0.80 (the bid), twice. The -50% rule is still enforced by
+      // optionsDirectionalSignal on every poll.
+      const entryPx = 0;
       if (entryPx > 0) {
         const stopPx = round2(entryPx * 0.5); // matches optionsDirectionalSignal's -50% exit rule
         const attachStop = () => placeOrder(mode, {
