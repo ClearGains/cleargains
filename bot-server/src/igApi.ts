@@ -752,6 +752,7 @@ export type MarketDetail = {
                               // epic can actually be dealt right now, used instead of
                               // a fixed-hours guess for strategies that trade outside
                               // the primary exchange's cash session.
+  percentageChange?: number; // IG's own % change on the day (snapshot)
   marginFactorPct?: number;  // e.g. 20 = 20% of notional exposure required as margin —
                               // confirmed live this varies a lot by instrument (higher-
                               // priced-per-point shares need far more margin at even the
@@ -785,7 +786,7 @@ export async function fetchMarketDetails(
             minControlledRiskStopDistance?: { value?: number };
             minNormalStopOrLimitDistance?:  { value?: number };
           };
-          snapshot?: { bid?: number | null; offer?: number | null; marketStatus?: string };
+          snapshot?: { bid?: number | null; offer?: number | null; marketStatus?: string; percentageChange?: number | null };
         }>;
       };
       for (const m of d.marketDetails ?? []) {
@@ -802,6 +803,7 @@ export async function fetchMarketDetails(
         result.set(epic, {
           epic, minDealSize: minDeal, minStopDist: minStop,
           bid: m.snapshot?.bid, offer: m.snapshot?.offer, marketStatus: m.snapshot?.marketStatus,
+          percentageChange: typeof m.snapshot?.percentageChange === 'number' ? m.snapshot.percentageChange : undefined,
           marginFactorPct: m.instrument?.marginFactor,
         });
       }

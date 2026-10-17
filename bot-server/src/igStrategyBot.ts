@@ -1900,7 +1900,9 @@ async function prepareRecommendationEntry(mode: IgMode, epic: string):
     direction:      rec.action,
     strength:       70,
     price:          currentPrice,
-    changePercent:  0,
+    // Real day change from IG (was hardcoded 0 — every verdict read the
+    // market as "flat, no momentum" and skipped, 2026-10-13..16).
+    changePercent:  detail?.percentageChange ?? 0,
     stopPoints:     stopDist,
     tpPoints:       profitDist,
     headlines,
@@ -3791,7 +3793,7 @@ async function executeIgSignal(
         direction,
         strength:       70,  // no granular numeric score at this layer — fixed moderate default
         price:          currentPrice,
-        changePercent:  0,   // not available at this layer; doesn't affect the direction check
+        changePercent:  st.marketDetails.get(epic)?.percentageChange ?? 0,
         stopPoints:     sizingStopDist,
         tpPoints:       profitDist ?? sizingStopDist * 2.5,
         headlines,
