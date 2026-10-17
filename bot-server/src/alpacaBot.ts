@@ -574,7 +574,11 @@ const STALLED_LOSER_MIN_HOLD_CONFIDENCE = 80;
 // on the spread alone. Without a minimum hold this cut nearly every new entry
 // within minutes (LQD bought and sold ~9 times in two days, each round trip
 // paying the spread). A full day first, then judge it as a stalled loser.
-const STALLED_LOSER_MIN_HOLD_HOURS = 24;
+const STALLED_LOSER_MIN_HOLD_HOURS = 240; // 10 days — multi-month holds (2026-10-17)
+// The AI position watch can't close an option inside this window; the -50%
+// stop still can. Stops a single day's news read from ending a months-long
+// thesis (BAC was AI-closed inside a day).
+const OPTIONS_AI_CLOSE_MIN_HOLD_HOURS = 120; // 5 days
 // Per-underlying re-entry pause after a losing options close (in-memory; a
 // restart just forgets it, same tradeoff as the other in-memory guards here).
 const OPTIONS_LOSS_COOLDOWN_MS = 24 * 3_600_000;
@@ -640,7 +644,8 @@ async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, posi
     addLog(mode, 'info', underlying, `${isHc ? '[HIGH CONVICTION WATCH]' : '[POSITION WATCH]'} ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
 
     let closeReason: string | null = null;
-    if (verdict.action === 'CLOSE' && verdict.engine === 'gemini') {
+    if (verdict.action === 'CLOSE' && verdict.engine === 'gemini'
+        && !(isOption && watchReq.heldHours < OPTIONS_AI_CLOSE_MIN_HOLD_HOURS)) {
       closeReason = `[Position watch] ${verdict.reason}`;
     } else if (isOption) {
       // See STALLED_LOSER_MIN_LOSS_PCT's own comment.

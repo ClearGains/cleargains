@@ -338,9 +338,13 @@ export async function getOptionsContracts(
   // 2026-08-21 rewrite to trend-following — a multi-week trend thesis needs
   // real time to play out, not a contract already a third of the way to
   // expiry (and its theta decay) before the position is even a day old.
+  // 90-180d as of 2026-10-17, per explicit request: positions are meant to
+  // ride a few months, not weeks. Longer-dated contracts decay far slower per
+  // day and track the underlying more like stock; the ≤21 DTE exit in
+  // optionsDirectionalSignal still closes them before the final-month decay.
   const today  = new Date();
-  const minExp = new Date(today.getTime() + 21 * 86_400_000).toISOString().split('T')[0];
-  const maxExp = new Date(today.getTime() + 45 * 86_400_000).toISOString().split('T')[0];
+  const minExp = new Date(today.getTime() + 90 * 86_400_000).toISOString().split('T')[0];
+  const maxExp = new Date(today.getTime() + 180 * 86_400_000).toISOString().split('T')[0];
 
   // Previously .catch(() => []) — any real problem (auth failure, options
   // not enabled on this account, a bad request) was indistinguishable from

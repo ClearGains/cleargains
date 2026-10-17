@@ -478,11 +478,11 @@ export function optionsDirectionalSignal(
   if (rsi === null) return { action: 'HOLD', reason: 'RSI not ready' };
 
   if (inPosition) {
-    if (dte !== undefined && dte <= 2) {
-      return { action: 'CLOSE_LONG', reason: `≤2 DTE (${dte}) — closing to avoid expiry risk` };
-    }
-    if (currentPlPct !== undefined && currentPlPct >= 75) {
-      return { action: 'CLOSE_LONG', reason: `Profit target hit: +${currentPlPct.toFixed(1)}%` };
+    // Multi-month holds (2026-10-17): exit before the last-3-weeks theta
+    // cliff rather than at ≤2 DTE, and no fixed +75% cap — winners run, with
+    // the peak-retrace lock-in below protecting what they've made.
+    if (dte !== undefined && dte <= 21) {
+      return { action: 'CLOSE_LONG', reason: `≤21 DTE (${dte}) — closing before the final-weeks time decay` };
     }
     // Peak-and-retrace lock-in — without this, a contract that ran up to
     // (say) +60% and then reversed just rides the whole round trip back
