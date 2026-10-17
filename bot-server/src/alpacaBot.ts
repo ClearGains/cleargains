@@ -943,6 +943,15 @@ async function evaluateSymbol(
       // Check for an existing options position on this underlying (OCC symbols start with underlying ticker)
       const occRegex = new RegExp(`^${sym}\\d{6}[CP]`);
       const optPos   = positions.find(p => occRegex.test(p.symbol));
+      // A buy limit that hasn't filled yet isn't a position — without this the
+      // next poll bought again. Confirmed live 2026-10-15: LQD ordered 16, 15
+      // and 17 contracts at 5-minute intervals before the first filled.
+      if (!optPos) {
+        const pendingBuy = await getOrders(mode, 'open')
+          .then(os => os.some(o => occRegex.test(o.symbol) && o.side === 'buy'))
+          .catch(() => false);
+        if (pendingBuy) { addLog(mode, 'wait', sym, 'Options buy order still working — not placing another'); return false; }
+      }
 
       if (optPos) {
         // We hold an options contract — evaluate exit conditions

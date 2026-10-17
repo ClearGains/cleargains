@@ -592,10 +592,17 @@ const OPTIONS_TREND_MIN_12W_PCT     = 8;   // matches the IG monthly strategy / 
 // exactly), blocks AMD's illiquid trap. Two modest winners (sub-40 score)
 // are collateral — deliberately accepted per explicit request to err
 // conservative rather than tune purely to this sample's exact outcomes.
-const OPTIONS_MOMENTUM_MIN_SCORE            = 40; // below this, blocked regardless of volume
-const OPTIONS_MOMENTUM_HIGH_SCORE           = 60; // at/above this, only needs the lower volume bar
-const OPTIONS_MOMENTUM_HIGH_SCORE_MIN_VOL   = 0.7;
-const OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL    = 1.2; // score 40-59 needs real volume confirmation to compensate
+// Raised 2026-10-17 per explicit request (base conviction and directional
+// volume have to go up) after LQD qualified on score 40 / 1.3x and was bought
+// as a call inside a -4.7%/12w downtrend. Below-average volume no longer
+// qualifies at any score.
+const OPTIONS_MOMENTUM_MIN_SCORE            = 55; // below this, blocked regardless of volume
+const OPTIONS_MOMENTUM_HIGH_SCORE           = 70; // at/above this, only needs the lower volume bar
+const OPTIONS_MOMENTUM_HIGH_SCORE_MIN_VOL   = 1.0;
+const OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL    = 1.5; // score 55-69 needs a real volume surge to compensate
+// Underlyings whose typical daily range is under this % of price are skipped —
+// bond ETFs (LQD, HYG ~0.4%) don't move enough for a directional option.
+const OPTIONS_MIN_ATR_PCT = 0.8; // SPY sits ~0.9%, bond ETFs 0.46-0.62%
 
 // "Chasing a just-banked win" guard — added 2026-09-27 per explicit request,
 // straight after META closed a genuine winner and the bot bought a fresh
@@ -625,14 +632,26 @@ export function optionsNewsBasedEntrySignal(
   const prev   = closes[closes.length - 2];
   const dp     = prev > 0 ? ((last - prev) / prev) * 100 : 0;
 
-  const recent20   = bars.slice(-20);
-  const priorVols   = bars.slice(0, -20).map(b => b.v);
-  const avgVolPrior = priorVols.length ? priorVols.reduce((s, v) => s + v, 0) / priorVols.length : 0;
-  const recentVol    = recent20.reduce((s, b) => s + b.v, 0) / recent20.length;
-  const volRatio      = avgVolPrior > 0 ? recentVol / avgVolPrior : 1;
+  // Last 5 sessions vs the 20 before (was a 20-day average vs everything
+  // earlier, which barely moves off 1.0x and dilutes a real surge).
+  const recent5     = bars.slice(-5);
+  const prior20     = bars.slice(-25, -5);
+  const avgVolPrior = prior20.length ? prior20.reduce((s, b) => s + b.v, 0) / prior20.length : 0;
+  const recentVol   = recent5.reduce((s, b) => s + b.v, 0) / recent5.length;
+  const volRatio    = avgVolPrior > 0 ? recentVol / avgVolPrior : 1;
+
+  const atr = calcAtr(bars);
+  if (atr !== null && last > 0 && (atr / last) * 100 < OPTIONS_MIN_ATR_PCT) {
+    return { action: 'HOLD', reason: `Typical daily range only ${((atr / last) * 100).toFixed(2)}% of price (< ${OPTIONS_MIN_ATR_PCT}%) — too little movement for a directional option` };
+  }
 
   const sentiment = sentimentScore(headlines).score;
   const score     = momentumScore({ dayChangePercent: dp, volumeSurgeMultiple: volRatio, headlineCount: headlines.length });
+  // Volume has to be flowing the trade's way, and the 12-week trend can't be against it.
+  const trendUp   = readTrend(bars, 'BUY');
+  const trendDown = readTrend(bars, 'SELL');
+  const callOk = !volumeFlowAgainst(bars, 'BUY')  && (trendUp.trend12w === null   || trendUp.trend12w >= 0);
+  const putOk  = !volumeFlowAgainst(bars, 'SELL') && (trendDown.trend12w === null || trendDown.trend12w <= 0);
   // See OPTIONS_MOMENTUM_MIN_SCORE's own comment for the two-tier reasoning.
   const momentumQualifies =
     score >= OPTIONS_MOMENTUM_MIN_SCORE &&
@@ -646,7 +665,7 @@ export function optionsNewsBasedEntrySignal(
   // stronger, fresher signal than what originally qualified the position
   // that just closed.
   if (Math.abs(dp) >= OPTIONS_MOMENTUM_MIN_MOVE_PCT && momentumQualifies) {
-    if (dp > 0 && sentiment > -0.5) {
+    if (dp > 0 && sentiment > -0.5 && callOk) {
       if (!chaseGuard?.call || (score >= CHASE_REENTRY_MIN_SCORE && volRatio >= CHASE_REENTRY_MIN_VOL)) {
         return {
           action: 'BUY', optionType: 'call',
@@ -655,7 +674,7 @@ export function optionsNewsBasedEntrySignal(
         };
       }
     }
-    if (dp < 0 && sentiment < 0.5) {
+    if (dp < 0 && sentiment < 0.5 && putOk) {
       if (!chaseGuard?.put || (score >= CHASE_REENTRY_MIN_SCORE && volRatio >= CHASE_REENTRY_MIN_VOL)) {
         return {
           action: 'BUY', optionType: 'put',
@@ -673,16 +692,14 @@ export function optionsNewsBasedEntrySignal(
   // exactly the backward-looking reasoning that leads to buying a top, so a
   // guarded re-entry can only come from the stricter, fresher momentum path
   // above, never from this one.
-  const trendUp   = readTrend(bars, 'BUY');
-  const trendDown = readTrend(bars, 'SELL');
-  if (!chaseGuard?.call && trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT && !trendUp.isExtended
+  if (!chaseGuard?.call && callOk && trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT && !trendUp.isExtended
       && (trendUp.trend4w === null || trendUp.trend4w >= -3) && sentiment > -0.3) {
     return {
       action: 'BUY', optionType: 'call',
       reason: `[Trend] +${trendUp.trend12w.toFixed(1)}%/12w, not extended, news not negative — buying call`,
     };
   }
-  if (!chaseGuard?.put && trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT && !trendDown.isExtended
+  if (!chaseGuard?.put && putOk && trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT && !trendDown.isExtended
       && (trendDown.trend4w === null || trendDown.trend4w <= 3) && sentiment < 0.3) {
     return {
       action: 'BUY', optionType: 'put',
