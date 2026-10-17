@@ -652,6 +652,8 @@ export function optionsNewsBasedEntrySignal(
   const trendDown = readTrend(bars, 'SELL');
   const callOk = !volumeFlowAgainst(bars, 'BUY')  && (trendUp.trend12w === null   || trendUp.trend12w >= 0);
   const putOk  = !volumeFlowAgainst(bars, 'SELL') && (trendDown.trend12w === null || trendDown.trend12w <= 0);
+  // IG's floor: at least normal volume (last 5 vs prior 20) behind any entry.
+  const volumeOk = volRatio >= 1.0;
   // See OPTIONS_MOMENTUM_MIN_SCORE's own comment for the two-tier reasoning.
   const momentumQualifies =
     score >= OPTIONS_MOMENTUM_MIN_SCORE &&
@@ -692,14 +694,14 @@ export function optionsNewsBasedEntrySignal(
   // exactly the backward-looking reasoning that leads to buying a top, so a
   // guarded re-entry can only come from the stricter, fresher momentum path
   // above, never from this one.
-  if (!chaseGuard?.call && callOk && trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT && !trendUp.isExtended
+  if (!chaseGuard?.call && callOk && volumeOk && trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT && !trendUp.isExtended
       && (trendUp.trend4w === null || trendUp.trend4w >= -3) && sentiment > -0.3) {
     return {
       action: 'BUY', optionType: 'call',
       reason: `[Trend] +${trendUp.trend12w.toFixed(1)}%/12w, not extended, news not negative — buying call`,
     };
   }
-  if (!chaseGuard?.put && putOk && trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT && !trendDown.isExtended
+  if (!chaseGuard?.put && putOk && volumeOk && trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT && !trendDown.isExtended
       && (trendDown.trend4w === null || trendDown.trend4w <= 3) && sentiment < 0.3) {
     return {
       action: 'BUY', optionType: 'put',

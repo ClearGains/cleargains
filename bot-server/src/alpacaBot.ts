@@ -26,7 +26,7 @@ import { MAX_HOLD_DAYS as MR_SWING_MAX_HOLD_DAYS } from './meanReversionStrategy
 // positions specifically no longer use this path at all as of 2026-09-04 —
 // see reviewOpenPositions and confirmOptionsEntryFinnhub below.
 import { askAlpacaDailyVerdict, askAlpacaPositionVerdict } from './xai';
-import { askGeminiPositionVerdict } from './gemini';
+import { askGeminiPositionVerdict, askGeminiDailyVerdict } from './gemini';
 import { fetchAllHeadlines } from './newsFetch';
 import { hasBreakingNews } from './alpacaNewsStream';
 import { sentimentScore, readTrend } from './momentumSignal';
@@ -62,6 +62,8 @@ export function loadSavedAlpacaState(mode: AccountMode): AlpacaBotConfig | null 
 // high-conviction position (across all symbols) so a good week can't
 // compound into several large bets stacking risk at once.
 const HIGH_CONVICTION_MIN_CONFIDENCE = 85;
+// Minimum directional conviction for any Alpaca entry — matches the IG bar.
+const ENTRY_MIN_CONFIDENCE = 65;
 const HIGH_CONVICTION_SIZE_USD       = 5_000;
 // 45min/±$X-move throttle, same shape as geminiWatch.ts's own — a dedicated
 // ongoing watch beyond the standard -50%/+75%/DTE exit rule, per explicit
@@ -679,7 +681,13 @@ async function confirmEntryWithNews(
   price:     number,
   strategyReason: string,
   strength?: number,
+  bars?: AlpacaBar[],
 ): Promise<{ ok: boolean; reason: string; confidence: number }> {
+  // Real day change and an ATR-framed stop/TP (was 0% and a 25%-of-price
+  // placeholder — the same inputs that had IG's AI skipping everything as flat).
+  const prevClose = bars && bars.length >= 2 ? bars[bars.length - 2].c : 0;
+  const dayChange = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
+  const atr = bars ? calcAtr(bars) : null;
   let headlines: string[] = [];
   try { headlines = await fetchAllHeadlines(sym, 5); } catch {}
   const breaking = hasBreakingNews(sym);
@@ -689,9 +697,9 @@ async function confirmEntryWithNews(
     direction,
     strength:       strength ?? 60,
     price,
-    changePercent:  0,  // not tracked at this layer — direction check doesn't depend on it
-    stopPoints:     price * 0.25,  // placeholder R:R framing only — real stop/TP for options is a % of premium, not points
-    tpPoints:       price * 0.5,
+    changePercent:  dayChange,
+    stopPoints:     atr ? atr * 1.5 : price * 0.02,
+    tpPoints:       atr ? atr * 3   : price * 0.04,
     headlines: breaking ? [`[BREAKING — flagged by real-time news stream in the last 30min]`, ...headlines] : headlines,
   });
 
@@ -705,7 +713,9 @@ async function confirmEntryWithNews(
   if (verdict.engine === 'passthrough') {
     return { ok: false, reason: `AI unavailable (${verdict.reason}) — skipping entry rather than trading unconfirmed`, confidence: 0 };
   }
-  if (verdict.direction === 'SKIP' || verdict.confidence < 50) {
+  // 65 = the IG entry bar (raised from 50, 2026-10-17, per explicit request
+  // to bring Alpaca's conviction up to the IG standard).
+  if (verdict.direction === 'SKIP' || verdict.confidence < ENTRY_MIN_CONFIDENCE) {
     return { ok: false, reason: `${verdict.engine} vetoed — ${verdict.direction} ${verdict.confidence}%: ${verdict.reason}`, confidence: verdict.confidence };
   }
   if (verdict.direction !== direction) {
@@ -728,15 +738,45 @@ async function confirmEntryWithNews(
 // has nothing on a name — but thin evidence (0-1 sentiment-bearing
 // headlines) caps confidence well below the high-conviction sizing bar so a
 // single ambiguous headline can't alone trigger the $5,000 tier.
+// Options entry conviction, 2026-10-17 — the IG standard: Gemini must agree on
+// direction at ENTRY_MIN_CONFIDENCE+, failing closed if it's unavailable.
+// Gemini directly, never xAI: the 2026-09-04 change ("drop the xai
+// completely") also removed the AI from options entries entirely, which left
+// conviction to a headline keyword count — the user's request was about xAI.
+// Only runs after every rules filter has passed, so calls stay rare.
+async function confirmOptionsEntryAi(
+  mode: AccountMode, sym: string, direction: 'BUY' | 'SELL', bars: AlpacaBar[], headlines: string[], strategyReason: string,
+): Promise<{ ok: boolean; reason: string; confidence: number }> {
+  const price = bars[bars.length - 1].c;
+  const prev  = bars.length >= 2 ? bars[bars.length - 2].c : 0;
+  const atr   = calcAtr(bars);
+  const breaking = hasBreakingNews(sym);
+  const verdict = await askGeminiDailyVerdict({
+    instrumentName: sym, direction, strength: 60, price,
+    changePercent: prev > 0 ? ((price - prev) / prev) * 100 : 0,
+    stopPoints: atr ? atr * 1.5 : price * 0.02,
+    tpPoints:   atr ? atr * 3   : price * 0.04,
+    headlines: breaking ? ['[BREAKING — flagged by real-time news stream in the last 30min]', ...headlines] : headlines,
+  });
+  addLog(mode, 'info', sym, `[AI] ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine}) | signal: ${strategyReason}`);
+  if (verdict.engine === 'passthrough') return { ok: false, reason: `AI unavailable (${verdict.reason}) — skipping rather than trading unconfirmed`, confidence: 0 };
+  if (verdict.direction !== direction) return { ok: false, reason: `AI ${verdict.direction} ${verdict.confidence}% — doesn't back the ${direction === 'BUY' ? 'call' : 'put'}: ${verdict.reason}`, confidence: verdict.confidence };
+  if (verdict.confidence < ENTRY_MIN_CONFIDENCE) return { ok: false, reason: `AI only ${verdict.confidence}% (needs ${ENTRY_MIN_CONFIDENCE}%): ${verdict.reason}`, confidence: verdict.confidence };
+  return { ok: true, reason: verdict.reason, confidence: verdict.confidence };
+}
+
 function confirmOptionsEntryFinnhub(
   direction: 'BUY' | 'SELL', headlines: string[],
 ): { ok: boolean; reason: string; confidence: number } {
+  // A cheap veto ahead of the Gemini conviction check (confirmOptionsEntryAi)
+  // — only clearly opposing news blocks here; conviction is the AI's call.
   if (headlines.length === 0) {
-    return { ok: true, reason: 'No Finnhub/Finviz headlines found — no news veto, proceeding on the technical signal alone', confidence: 50 };
+    return { ok: true, reason: 'No Finnhub/Finviz headlines found — no news veto', confidence: 50 };
   }
   const { score, bull, bear } = sentimentScore(headlines);
   const evidence = bull + bear;
-  let confidence = Math.round(50 + score * 40);
+  const dirScore = direction === 'BUY' ? score : -score;
+  let confidence = Math.round(50 + dirScore * 40);
   confidence = Math.max(5, Math.min(95, confidence));
   if (evidence < 2) confidence = Math.min(confidence, 60);
 
@@ -941,7 +981,7 @@ async function evaluateSymbol(
       const mrSig = meanReversionSwingSignal(bars);
       if (mrSig.action !== 'BUY' && mrSig.action !== 'SELL') { addLog(mode, 'wait', sym, mrSig.reason); return false; }
       const entryPrice = bars[bars.length - 1].c;
-      const confirm = await confirmEntryWithNews(mode, sym, mrSig.action, entryPrice, mrSig.reason);
+      const confirm = await confirmEntryWithNews(mode, sym, mrSig.action, entryPrice, mrSig.reason, undefined, bars);
       if (!confirm.ok) { addLog(mode, 'wait', sym, `[AI] ${confirm.reason}`); return false; }
       const opened = await executeSignal(mode, sym, mrSig, null, cfg, entryPrice, sizeMult);
       if (opened) { mrEntered.get(mode)!.set(sym, Date.now()); saveMrEntered(mode, mrEntered.get(mode)!); }
@@ -1048,12 +1088,17 @@ async function evaluateSymbol(
           return false;
         }
 
-        // No AI call — see confirmOptionsEntryFinnhub's own comment. Reuses
-        // entryHeadlines already fetched above for the signal itself.
-        const confirm = confirmOptionsEntryFinnhub(optType === 'call' ? 'BUY' : 'SELL', entryHeadlines);
-        addLog(mode, 'info', sym, `[Finnhub] ${confirm.confidence}% — ${confirm.reason}`);
+        // Headline veto first (free), then Gemini conviction — see
+        // confirmOptionsEntryAi. Reuses entryHeadlines fetched for the signal.
+        const veto = confirmOptionsEntryFinnhub(optType === 'call' ? 'BUY' : 'SELL', entryHeadlines);
+        addLog(mode, 'info', sym, `[Finnhub] ${veto.confidence}% — ${veto.reason}`);
+        if (!veto.ok) {
+          addLog(mode, 'wait', sym, `[Finnhub] ${veto.reason}`);
+          return false;
+        }
+        const confirm = await confirmOptionsEntryAi(mode, sym, optType === 'call' ? 'BUY' : 'SELL', bars, entryHeadlines, entrySig.reason);
         if (!confirm.ok) {
-          addLog(mode, 'wait', sym, `[Finnhub] ${confirm.reason}`);
+          addLog(mode, 'wait', sym, `[AI] ${confirm.reason}`);
           return false;
         }
 
@@ -1161,7 +1206,7 @@ async function evaluateSymbol(
 
   const entryPrice = bars[bars.length - 1].c;
   if (signal.action === 'BUY' || signal.action === 'SELL') {
-    const confirm = await confirmEntryWithNews(mode, sym, signal.action, entryPrice, signal.reason, signal.confidence);
+    const confirm = await confirmEntryWithNews(mode, sym, signal.action, entryPrice, signal.reason, signal.confidence, bars);
     if (!confirm.ok) {
       addLog(mode, 'wait', sym, `[AI] ${confirm.reason}`);
       return false;
