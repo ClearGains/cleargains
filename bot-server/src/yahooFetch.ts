@@ -74,7 +74,7 @@ export const EPIC_TO_YAHOO: Record<string, string> = {
   'CS.D.AUDUSD.TODAY.IP': 'AUDUSD=X',
   // Indices
   'IX.D.DOW.DAILY.IP':    '^DJI',
-  'IX.D.NASDAQ.CASH.IP':  '^IXIC',
+  'IX.D.NASDAQ.CASH.IP':  '^NDX',   // Nasdaq 100 (was ^IXIC, the Composite — ~11% off IG's price; fixed 2026-10-21)
   'IX.D.SPTRD.DAILY.IP':  '^GSPC',
   'IX.D.FTSE.DAILY.IP':   '^FTSE',
   'IX.D.STXE.CASH.IP':    '^STOXX50E',

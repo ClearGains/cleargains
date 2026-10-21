@@ -21,7 +21,7 @@ const YAHOO_MAP: Record<string, string> = {
   // Indices
   'FTSE 100':      '^FTSE',
   'S&P 500':       '^GSPC',
-  'NASDAQ 100':    '^IXIC',
+  'NASDAQ 100':    '^NDX',
   'Germany 40':    '^GDAXI',
   'Wall Street':   '^DJI',
   'Japan 225':     '^N225',

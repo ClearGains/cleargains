@@ -7,7 +7,7 @@ import { IG_STOCK_EPICS } from './ig-stock-epics';
 const NON_STOCK_EPIC_TO_YAHOO: Record<string, string> = {
   'IX.D.FTSE.DAILY.IP':    '^FTSE',
   'IX.D.SPTRD.DAILY.IP':   '^GSPC',
-  'IX.D.NASDAQ.CASH.IP':   '^IXIC',
+  'IX.D.NASDAQ.CASH.IP':   '^NDX',
   'IX.D.DAX.DAILY.IP':     '^GDAXI',
   'IX.D.DOW.DAILY.IP':     '^DJI',
   'IX.D.NIKKEI.DAILY.IP':  '^N225',
@@ -52,10 +52,9 @@ for (const [ticker, info] of Object.entries(IG_STOCK_EPICS)) {
 // bid ÷ Yahoo real price, same day): indices, gold, and Bitcoin genuinely
 // are 1:1 with Yahoo. FX majors are ×10000 (except JPY pairs, ×100 — fewer
 // JPY decimal places, standard FX convention). Oil/Silver/Brent are ×100,
-// same as shares; Natural Gas is ×1000. NASDAQ's ~1.13 ratio is NOT a scale
-// issue — IG's product tracks a different underlying than Yahoo's ^IXIC
-// cash index, so it's deliberately left unscaled rather than forcing a fake
-// correction onto a real product/quote difference.
+// same as shares; Natural Gas is ×1000. NASDAQ's old ~1.13 ratio was a wrong
+// mapping, not a scale issue: IG's US Tech 100 is the Nasdaq 100 (^NDX), but this
+// pointed at the Nasdaq Composite (^IXIC). Fixed 2026-10-21, now 1:1.
 const NON_STOCK_SCALE_FACTOR: Record<string, number> = {
   'CS.D.GBPUSD.TODAY.IP': 10000,
   'CS.D.EURUSD.TODAY.IP': 10000,

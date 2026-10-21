@@ -32,7 +32,7 @@ export type YahooCandle = {
 export const YAHOO_SYMBOL_MAP: Record<string, string> = {
   'FTSE 100':      '^FTSE',
   'S&P 500':       '^GSPC',
-  'NASDAQ 100':    '^IXIC',
+  'NASDAQ 100':    '^NDX',
   'Germany 40':    '^GDAXI',
   'Wall Street':   '^DJI',
   'Japan 225':     '^N225',

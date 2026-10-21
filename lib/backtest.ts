@@ -33,7 +33,7 @@ export const BT_UNIVERSE: Record<AssetClass, { label: string; symbol: string }[]
   index: [
     { label: 'FTSE 100',   symbol: '^FTSE' },
     { label: 'S&P 500',    symbol: '^GSPC' },
-    { label: 'NASDAQ 100', symbol: '^IXIC' },
+    { label: 'NASDAQ 100', symbol: '^NDX' },
     { label: 'Germany 40', symbol: '^GDAXI' },
     { label: 'Wall Street', symbol: '^DJI' },
     { label: 'Japan 225',  symbol: '^N225' },
