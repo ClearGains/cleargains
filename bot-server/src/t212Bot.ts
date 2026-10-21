@@ -919,7 +919,9 @@ async function pollMomentumEntries(mode: T212Mode): Promise<void> {
         price: cand.price, rsi: null, macdHist: null, lastCandles: [],
         headlines: cand.headlines, dayChangePercent: cand.changePercent, volumeSurgeMultiple: cand.volRatio,
       };
-      verdict = await askIgConfirmStockTrade(signal);
+      // Opus is the entry check (2026-10-22); previous AI only if Opus can't answer.
+      verdict = (await import('./opusTrader').then(m => m.opusConfirmStockTrade(signal)).catch(() => null))
+        ?? await askIgConfirmStockTrade(signal);
       addLog(mode, 'info', cand.stock.symbol, `[Momentum] Score ${cand.profitScore} — ${cand.reason} → AI: ${verdict.direction} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
       if (verdict.engine === 'passthrough' || verdict.direction !== 'BUY') continue;
       const counterThesis = hasCounterThesisLanguage(verdict.reason);
@@ -1133,13 +1135,12 @@ async function pollEntries(mode: T212Mode): Promise<void> {
     // comment — only the verdict actually used to trade is awaited
     // synchronously; the rest are logged fire-and-forget and never gate
     // anything.
-    const verdict = await askXaiIsaThesis(thesisReq);
-    addLog(mode, 'info', sym, `[XAI] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
-
-    // Comparison-only — never affects the trade, see logComparison's own comment.
-    void Promise.all([askGeminiIsaThesis(thesisReq), askOpenAiIsaThesis(thesisReq)])
-      .then(([geminiVerdict, openaiVerdict]) => logComparison(mode, sym, 'BUY', 'xai', geminiVerdict, openaiVerdict, verdict))
-      .catch(() => {});
+    // Opus is the one-off entry check (2026-10-22, explicit request); xAI only
+    // if Opus can't answer. The Gemini/OpenAI comparison is dropped here —
+    // OpenAI's credit had run out and Opus now judges every ISA entry.
+    const verdict = (await import('./opusTrader').then(m => m.opusIsaThesis(thesisReq)).catch(() => null))
+      ?? await askXaiIsaThesis(thesisReq);
+    addLog(mode, 'info', sym, `[${verdict.engine.toUpperCase()}] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
 
     if (verdict.engine === 'passthrough' || verdict.action !== 'BUY' || verdict.confidence < T212_MIN_CONFIRM_CONFIDENCE) continue;
 

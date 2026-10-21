@@ -29,13 +29,17 @@ import {
   fetchMarketDetails, fetchAccountFunds, type IGSession,
 } from './igApi';
 import { resolveCredentials, calcStake } from './igStrategyBot';
-import { EPIC_TO_ALPACA } from './yahooFetch';
+import { EPIC_TO_ALPACA, fetchBarsWithFallback } from './yahooFetch';
 import {
   getPortfolio, getCash, resolveT212Ticker, placeMarketOrder as t212PlaceOrder,
   placeStopLimitOrder, cancelOrder as t212CancelOrder,
 } from './t212Api';
 import { getGbpUsd } from './t212Bot';
 import { runRuleBacktest, INDICATORS, type BacktestSpec } from './ruleBacktest';
+import {
+  buildConfirmStockTradePrompt, parseConfirmStockTradeResponse, buildIsaThesisPrompt, parseIsaThesisResponse,
+  type StockConfirmSignal, type StockConfirmVerdict, type IsaThesisRequest, type IsaThesisVerdict,
+} from './gemini';
 
 // ── Config / state ──────────────────────────────────────────────────────────
 
@@ -60,7 +64,8 @@ export type OpusConfig = {
   effort:               'low' | 'medium' | 'high' | 'xhigh';
   alpacaMaxPositionUsd: number;
   alpacaMaxPositions:   number;
-  igMaxRiskGbp:         number;   // £ lost if the stop is hit
+  igMaxRiskGbp:         number;   // £ lost if the stop is hit (floor)
+  igMaxRiskPct:         number;   // …or this % of the IG balance, whichever is larger
   igMaxPositions:       number;
   t212MaxPositionGbp:   number;
   t212MaxTotalGbp:      number;
@@ -84,6 +89,7 @@ const DEFAULT_CONFIG: OpusConfig = {
   alpacaMaxPositionUsd: 5_000,
   alpacaMaxPositions: 8,
   igMaxRiskGbp: 10,
+  igMaxRiskPct: 1,
   igMaxPositions: 6,
   t212MaxPositionGbp: 100,
   t212MaxTotalGbp: 300,
@@ -216,6 +222,36 @@ const BASE_UNIVERSE = [
 const TICKER_TO_EPIC: Record<string, string> = {};
 for (const [epic, ticker] of Object.entries(EPIC_TO_ALPACA)) if (!TICKER_TO_EPIC[ticker]) TICKER_TO_EPIC[ticker] = epic;
 
+// IG-only markets — indices, FX, commodities (2026-10-22, per explicit request
+// that Opus cover IG properly). Daily bars from Yahoo via fetchBarsWithFallback;
+// these have no real exchange volume on IG, so the volume rule doesn't apply.
+// Japan 225 was this account's best-performing index on live (31 trades, +£221).
+const IG_MARKETS: Record<string, { epic: string; name: string }> = {
+  JP225:     { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225' },
+  USTECH100: { epic: 'IX.D.NASDAQ.CASH.IP',  name: 'US Tech 100' },
+  US500:     { epic: 'IX.D.SPTRD.DAILY.IP',  name: 'US 500' },
+  WALLST:    { epic: 'IX.D.DOW.DAILY.IP',    name: 'Wall Street' },
+  DE40:      { epic: 'IX.D.DAX.DAILY.IP',    name: 'Germany 40' },
+  UK100:     { epic: 'IX.D.FTSE.DAILY.IP',   name: 'FTSE 100' },
+  EU50:      { epic: 'IX.D.STXE.CASH.IP',    name: 'EU Stocks 50' },
+  GBPUSD:    { epic: 'CS.D.GBPUSD.TODAY.IP', name: 'GBP/USD' },
+  EURUSD:    { epic: 'CS.D.EURUSD.TODAY.IP', name: 'EUR/USD' },
+  USDJPY:    { epic: 'CS.D.USDJPY.TODAY.IP', name: 'USD/JPY' },
+  AUDUSD:    { epic: 'CS.D.AUDUSD.TODAY.IP', name: 'AUD/USD' },
+  SILVER:    { epic: 'CS.D.USCSI.TODAY.IP',  name: 'Silver' },
+  BRENT:     { epic: 'CC.D.LCO.USS.IP',      name: 'Brent Crude' },
+  NATGAS:    { epic: 'CC.D.NG.USS.IP',       name: 'Natural Gas' },
+};
+for (const [sym, m] of Object.entries(IG_MARKETS)) TICKER_TO_EPIC[sym] = m.epic;
+const isIgOnly = (symbol: string) => symbol in IG_MARKETS;
+
+// Epics another bot on the IG demo account currently owns (the commodities
+// mean-reversion instance) — Opus leaves those to it.
+async function igEpicsOwnedElsewhere(): Promise<Set<string>> {
+  try { const mr = await import('./meanReversionBot'); return mr.meanReversionOwnedEpics(); }
+  catch { return new Set(); }
+}
+
 type Metrics = {
   symbol: string; price: number; dayChgPct: number; aboveOpen: boolean | null; volToday: number | null;
   sma20: number; sma50: number; trend12wPct: number | null; rsi14: number | null; atrPct: number | null;
@@ -223,8 +259,12 @@ type Metrics = {
 };
 
 async function metricsFor(symbol: string): Promise<Metrics | null> {
-  let bars: AlpacaBar[] | undefined;
-  try { bars = (await getBars([symbol], '1Day', 260, 'paper'))[symbol]; } catch { return null; }
+  let bars: AlpacaBar[] | undefined | null;
+  if (isIgOnly(symbol)) {
+    try { bars = await fetchBarsWithFallback(IG_MARKETS[symbol].epic, '2y'); } catch { return null; }
+  } else {
+    try { bars = (await getBars([symbol], '1Day', 260, 'paper'))[symbol]; } catch { return null; }
+  }
   if (!bars || bars.length < 60) return null;
   const c = bars.map(b => b.c), last = bars[bars.length - 1];
   const avg = (n: number) => c.slice(-n).reduce((s, x) => s + x, 0) / n;
@@ -233,7 +273,7 @@ async function metricsFor(symbol: string): Promise<Metrics | null> {
     symbol, price: last.c,
     dayChgPct: ((last.c - c[c.length - 2]) / c[c.length - 2]) * 100,
     aboveOpen: last.c > last.o ? true : last.c < last.o ? false : null,
-    volToday: dailyVolumeRatio(bars, 'US'),
+    volToday: isIgOnly(symbol) ? null : dailyVolumeRatio(bars, 'US'),
     sma20: avg(20), sma50: avg(50),
     trend12wPct: c.length > 60 ? ((last.c - c[c.length - 61]) / c[c.length - 61]) * 100 : null,
     rsi14: calcRsi(bars),
@@ -442,7 +482,8 @@ How to work a session:
 function fmt(n: number | null, d = 1): string { return n === null || !isFinite(n) ? '—' : n.toFixed(d); }
 
 async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string; metrics: Map<string, Metrics> }> {
-  const universe = [...new Set([...BASE_UNIVERSE, ...state.watchlistExtra, ...state.positions.map(p => p.symbol)])];
+  const universe = [...new Set([...BASE_UNIVERSE, ...(config.accounts.ig_demo ? Object.keys(IG_MARKETS) : []), ...state.watchlistExtra, ...state.positions.map(p => p.symbol)])];
+  const ownedElsewhere = await igEpicsOwnedElsewhere();
   const metrics = new Map<string, Metrics>();
   for (const s of universe) { const m = await metricsFor(s); if (m) metrics.set(s, m); }
 
@@ -456,7 +497,13 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
     catch { lines.push('- alpaca_paper: balance unavailable'); }
   }
   if (config.accounts.ig_demo) {
-    try { const f = await fetchAccountFunds(await ig()); lines.push(`- ig_demo: balance £${f.balance.toFixed(0)}, available £${f.available.toFixed(0)}. Caps: ≤£${config.igMaxRiskGbp} at risk/position, ≤${config.igMaxPositions} of your positions. Tradeable: ${Object.keys(TICKER_TO_EPIC).filter(t => metrics.has(t)).join(', ')}.`); }
+    try {
+      const f = await fetchAccountFunds(await ig());
+      const cap = Math.max(config.igMaxRiskGbp, f.balance * config.igMaxRiskPct / 100);
+      const tradeable = Object.keys(TICKER_TO_EPIC).filter(t => metrics.has(t) && !ownedElsewhere.has(TICKER_TO_EPIC[t]));
+      const skipped = Object.keys(IG_MARKETS).filter(t => ownedElsewhere.has(IG_MARKETS[t].epic));
+      lines.push(`- ig_demo: balance £${f.balance.toFixed(0)}, available £${f.available.toFixed(0)}. Caps: ≤£${cap.toFixed(0)} at risk/position, ≤${config.igMaxPositions} of your positions. IG's minimum stakes are large on US shares (wide stops won't fit the cap); indices, FX and commodities usually size better. Tradeable: ${tradeable.join(', ')}.${skipped.length ? ` Managed by another bot, leave alone: ${skipped.join(', ')}.` : ''}`);
+    }
     catch { lines.push('- ig_demo: balance unavailable'); }
   }
   if (config.accounts.t212_live) {
@@ -485,8 +532,16 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   lines.push('');
   lines.push('## Market (daily bars; price USD)');
   lines.push('symbol | price | day% | vs open | vol (1.0=normal day) | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
-  for (const m of metrics.values()) {
+  for (const m of [...metrics.values()].filter(x => !isIgOnly(x.symbol))) {
     lines.push(`${m.symbol} | ${fmt(m.price, 2)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${fmt(m.volToday, 2)} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
+  }
+
+  const igOnly = [...metrics.values()].filter(x => isIgOnly(x.symbol));
+  if (igOnly.length) {
+    lines.push('');
+    lines.push('## IG markets — indices, FX, commodities (ig_demo only; daily bars, prices in market units — IG quotes some in its own points, e.g. FX ×10,000; no exchange volume, so no volume rule)');
+    lines.push('symbol (name) | price | day% | vs open | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
+    for (const m of igOnly) lines.push(`${m.symbol} (${IG_MARKETS[m.symbol].name}) | ${fmt(m.price, 4)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
   }
 
   // Headlines: open positions + the most active names today (keeps tokens bounded)
@@ -527,8 +582,9 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   const m = metrics.get(symbol);
   if (!m) return `REJECTED: no market data for ${symbol} this session.`;
   // Volume in the trade's direction — enforced in code, never by the model.
-  if (m.volToday === null || m.volToday < 1.0) return `REJECTED: today's volume is ${fmt(m.volToday, 2)}x a normal day; the rule needs at least 1.0x.`;
-  if (todayAgainstFromMetrics(m, inp.direction)) return `REJECTED: today is trading ${inp.direction === 'BUY' ? 'below' : 'above'} its open — today's volume is on the other side.`;
+  if (isIgOnly(symbol) && inp.account !== 'ig_demo') return `REJECTED: ${symbol} is an IG-only market — use ig_demo.`;
+  if (!isIgOnly(symbol) && (m.volToday === null || m.volToday < 1.0)) return `REJECTED: today's volume is ${fmt(m.volToday, 2)}x a normal day; the rule needs at least 1.0x.`;
+  if (!isIgOnly(symbol) && todayAgainstFromMetrics(m, inp.direction)) return `REJECTED: today is trading ${inp.direction === 'BUY' ? 'below' : 'above'} its open — today's volume is on the other side.`;
   const cool = state.lastClosedAt[`${inp.account}:${symbol}`];
   if (cool && Date.now() - cool < config.reentryCooldownHours * 3_600_000) return `REJECTED: closed ${symbol} on ${inp.account} ${((Date.now() - cool) / 3_600_000).toFixed(1)}h ago — cooldown is ${config.reentryCooldownHours}h.`;
   if (state.positions.some(p => p.account === inp.account && p.symbol === symbol)) return `REJECTED: you already hold ${symbol} on ${inp.account}.`;
@@ -542,7 +598,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
       if (qty < 1) return `REJECTED: $${usd} buys less than one share at $${m.price.toFixed(2)}.`;
       const stop = round2(inp.direction === 'BUY' ? m.price * (1 - inp.stop_loss_pct / 100) : m.price * (1 + inp.stop_loss_pct / 100));
       await alpacaPlaceOrder('paper', {
-        symbol, qty, side: inp.direction === 'BUY' ? 'buy' : 'sell', type: 'market', time_in_force: 'day',
+        symbol, qty, side: inp.direction === 'BUY' ? 'buy' : 'sell', type: 'market', time_in_force: 'gtc', // OTO legs inherit this — 'day' made the stop expire at the close
         order_class: 'oto', stop_loss: { stop_price: stop }, client_order_id: `opus-${symbol}-${Date.now()}`,
       });
       const p: OpusPosition = { id: newId(), account: 'alpaca_paper', symbol, brokerRef: symbol, direction: inp.direction, size: qty,
@@ -555,6 +611,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
     if (inp.account === 'ig_demo') {
       if (mine.length >= config.igMaxPositions) return `REJECTED: already at ${config.igMaxPositions} ig_demo positions.`;
       const epic = TICKER_TO_EPIC[symbol];
+      if (epic && (await igEpicsOwnedElsewhere()).has(epic)) return `REJECTED: ${symbol} is managed by another bot on this account.`;
       if (!epic) return `REJECTED: ${symbol} has no IG market mapping.`;
       const session = await ig();
       const d = (await fetchMarketDetails(session, [epic])).get(epic);
@@ -562,9 +619,10 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
       if (typeof px !== 'number' || !(px > 0)) return `REJECTED: no live IG quote for ${symbol} right now.`;
       const minStop = d?.minStopDist || 1, minDeal = d?.minDealSize || 0.5;
       const stopDist = Math.max(minStop, px * inp.stop_loss_pct / 100);
-      const riskGbp = Math.min(inp.size, config.igMaxRiskGbp);
+      const igCap = Math.max(config.igMaxRiskGbp, (await fetchAccountFunds(session).catch(() => ({ balance: 0 }))).balance * config.igMaxRiskPct / 100);
+      const riskGbp = Math.min(inp.size, igCap);
       const stake = Math.max(minDeal, calcStake(riskGbp, stopDist, minDeal));
-      if (stake * stopDist > config.igMaxRiskGbp * 1.5) return `REJECTED: IG's minimum stake (${minDeal}/pt) with a ${inp.stop_loss_pct}% stop risks £${(stake * stopDist).toFixed(0)}, above the £${config.igMaxRiskGbp} cap — try a tighter stop or another market.`;
+      if (stake * stopDist > igCap * 1.5) return `REJECTED: IG's minimum stake (${minDeal}/pt) with a ${inp.stop_loss_pct}% stop risks £${(stake * stopDist).toFixed(0)}, above the £${igCap.toFixed(0)} cap — try a tighter stop or another market.`;
       const r = await igPlaceOrder(session, epic, inp.direction, stake, stopDist, undefined, 'GBP', false);
       const stop = inp.direction === 'BUY' ? r.level - stopDist : r.level + stopDist;
       const p: OpusPosition = { id: newId(), account: 'ig_demo', symbol, brokerRef: r.dealId, epic, direction: inp.direction, size: stake,
@@ -878,6 +936,7 @@ export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; con
   if (!['low', 'medium', 'high', 'xhigh'].includes(next.effort)) return { ok: false, config, error: 'effort must be low/medium/high/xhigh' };
   if (!(next.searchesPerSession >= 0 && next.searchesPerSession <= 10)) return { ok: false, config, error: 'searchesPerSession must be 0-10' };
   if (!(next.researchSearches >= 0 && next.researchSearches <= 20)) return { ok: false, config, error: 'researchSearches must be 0-20' };
+  if (!(next.igMaxRiskPct >= 0 && next.igMaxRiskPct <= 5)) return { ok: false, config, error: 'igMaxRiskPct must be 0-5' };
   if (!(next.model in MODELS)) return { ok: false, config, error: `model must be one of ${Object.keys(MODELS).join(', ')}` };
   if (next.shadowModel !== null && !(next.shadowModel in MODELS)) return { ok: false, config, error: 'shadowModel must be a known model or null' };
   const cycleChanged = next.cycleMinutes !== config.cycleMinutes;
@@ -891,6 +950,54 @@ export async function closeOpusPositionManually(id: string): Promise<{ ok: boole
   const view = await livePositionView();
   const msg = await closePosition(id, 'Closed from the dashboard', view, true);
   return { ok: msg.startsWith('CLOSED'), message: msg };
+}
+
+// ── One-off entry checks for the T212 bots (2026-10-22) ────────────────────
+// Per explicit request: the T212 ISA and Momentum bots keep running their own
+// strategies, but each new entry gets a single Opus check (replacing the
+// OpenAI/Gemini/xAI verdicts — OpenAI's credit had run out and the logged
+// comparison showed Gemini's BUYs with no edge). Same prompts as before, so
+// the question is unchanged; only the judge is. Returns null when Opus can't
+// answer (no key, budget spent, API error) so the caller falls back to its
+// previous AI rather than stalling.
+async function opusText(prompt: string): Promise<string | null> {
+  if (!process.env.ANTHROPIC_API_KEY || budgetLeftUsd() <= 0.25) return null;
+  try {
+    client ??= new Anthropic();
+    const resp = await client.beta.messages.create({
+      model: config.model, max_tokens: 4000, output_config: { effort: 'medium' },
+      messages: [{ role: 'user', content: prompt }],
+      betas: [FALLBACK_BETA], fallbacks: 'default',
+    });
+    recordUsage(config.model, resp.usage);
+    if (resp.stop_reason === 'refusal') return null;
+    const text = resp.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text').map(b => b.text).join('').trim();
+    return text || null;
+  } catch (e) {
+    addLog('error', `T212 entry check failed: ${e instanceof Anthropic.APIError ? `${e.status} ${e.message}` : e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+export async function opusConfirmStockTrade(req: StockConfirmSignal): Promise<StockConfirmVerdict | null> {
+  const text = await opusText(buildConfirmStockTradePrompt(req));
+  if (!text) return null;
+  try {
+    const v = { ...parseConfirmStockTradeResponse(text, req, 'gemini'), engine: 'opus' as const };
+    addLog('info', `[T212 Momentum check] ${req.instrumentName}: ${v.direction} ${v.confidence}% — ${v.reason}`);
+    return v;
+  } catch { return null; }
+}
+
+export async function opusIsaThesis(req: IsaThesisRequest): Promise<IsaThesisVerdict | null> {
+  const { prompt, fallbackAction } = buildIsaThesisPrompt(req);
+  const text = await opusText(prompt);
+  if (!text) return null;
+  try {
+    const v = parseIsaThesisResponse(text, req.action, fallbackAction, 'opus');
+    addLog('info', `[T212 ISA check] ${req.instrumentName}: ${v.action} ${v.confidence}% — ${v.reason}`);
+    return v;
+  } catch { return null; }
 }
 
 // The exact briefing Opus would receive right now — no API call, no cost.

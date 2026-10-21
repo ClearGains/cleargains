@@ -1187,7 +1187,7 @@ export type StockConfirmVerdict = {
   direction:  'BUY' | 'SELL' | 'SKIP';
   confidence: number;
   reason:     string;
-  engine:     'gemini' | 'openai' | 'xai' | 'passthrough';
+  engine:     'gemini' | 'openai' | 'xai' | 'opus' | 'passthrough';
 };
 
 // Shared with xai.ts's askXaiConfirmStockTrade — same question must go to
@@ -1328,7 +1328,7 @@ export type IsaThesisVerdict = {
   action:     'BUY' | 'HOLD' | 'SELL' | 'SKIP';
   confidence: number;
   reason:     string;
-  engine:     'gemini' | 'openai' | 'xai' | 'passthrough';
+  engine:     'gemini' | 'openai' | 'xai' | 'opus' | 'passthrough';
 };
 
 // Shared with openai.ts's askOpenAiIsaThesis — the whole point of that
