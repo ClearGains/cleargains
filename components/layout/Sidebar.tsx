@@ -37,6 +37,7 @@ import {
   NotebookPen,
   Scissors,
   Flame,
+  Brain,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
@@ -93,6 +94,7 @@ const navLinks = [
   { href: '/mean-reversion',   label: 'Mean Reversion',    icon: Bot         },
   { href: '/ig-options',       label: 'IG Options Bot',    icon: Bot         },
   { href: '/meme-coin-bot',    label: 'Meme Coin Bot',     icon: Flame       },
+  { href: '/opus-trader',      label: 'Opus Trader',       icon: Brain       },
   { href: '/backtest',         label: 'Backtest Lab',      icon: FlaskConical },
   { href: '/bot-journal',      label: 'Bot Journal',       icon: NotebookPen },
   { href: '/performance',      label: 'Bot Performance',   icon: BarChart3   },
