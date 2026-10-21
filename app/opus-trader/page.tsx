@@ -10,7 +10,7 @@ type Account = 'alpaca_paper' | 'ig_demo' | 't212_live';
 type ModelId = 'claude-fable-5-1' | 'claude-opus-5-5' | 'claude-sonnet-5-5';
 type ModelInfo = { label: string; input: number; output: number };
 type Config = {
-  enabled: boolean; model: ModelId; shadowModel: ModelId | null; accounts: Record<Account, boolean>; monthlyCapUsd: number; cycleMinutes: number; offHoursMinutes: number;
+  enabled: boolean; model: ModelId; shadowModel: ModelId | null; accounts: Record<Account, boolean>; monthlyCapUsd: number; cycleMinutes: number; offHoursMinutes: number; alpacaEveryMinutes: number;
   effort: 'low' | 'medium' | 'high' | 'xhigh'; alpacaMaxPositionUsd: number; alpacaMaxPositions: number;
   igMaxRiskGbp: number; igMaxRiskPct: number; igMaxPositions: number; t212MaxPositionGbp: number; t212MaxTotalGbp: number;
   t212MaxPositions: number; minConviction: number; minHoldHours: number; reentryCooldownHours: number;
@@ -62,6 +62,7 @@ function logColor(type: LogEntry['type']): string {
 const NUMBER_FIELDS: Array<{ key: keyof Config; label: string; hint: string }> = [
   { key: 'monthlyCapUsd',        label: 'Monthly API cap ($)',        hint: 'Opus pauses once spend reaches this' },
   { key: 'cycleMinutes',         label: 'Review every (min)',         hint: '15-240, US session' },
+  { key: 'alpacaEveryMinutes',   label: 'Alpaca review every (min)',  hint: '30-390; long-term account, so less often than IG' },
   { key: 'offHoursMinutes',      label: 'Off-hours IG review (min)',  hint: '0 = off, 30-480; weekdays outside US hours' },
   { key: 'igMaxRiskPct',         label: 'IG max risk (% of balance)', hint: '0-5; the larger of this and the £ figure' },
   { key: 'minConviction',        label: 'Min conviction (%)',         hint: 'Entries below this are rejected' },

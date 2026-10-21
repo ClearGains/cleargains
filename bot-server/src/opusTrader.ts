@@ -64,6 +64,7 @@ export type OpusConfig = {
   monthlyCapUsd:        number;   // hard stop on API spend for the calendar month
   cycleMinutes:         number;   // how often Opus reviews the book during the US session
   offHoursMinutes:      number;   // outside US hours, review IG markets this often on weekdays (0 = off)
+  alpacaEveryMinutes:   number;   // Alpaca is long-term: consider new Alpaca entries only this often
   tradingviewCharts:    boolean;  // offer the tradingview_chart tool (needs TV_GATE_HOST and a logged-in chart server)
   effort:               'low' | 'medium' | 'high' | 'xhigh';
   alpacaMaxPositionUsd: number;
@@ -90,6 +91,7 @@ const DEFAULT_CONFIG: OpusConfig = {
   monthlyCapUsd: 150,          // ≈ £120
   cycleMinutes: 30,
   offHoursMinutes: 120,
+  alpacaEveryMinutes: 180,
   tradingviewCharts: false,
   effort: 'medium',
   alpacaMaxPositionUsd: 5_000,
@@ -136,6 +138,7 @@ type OpusState = {
   lastClosedAt:   Record<string, number>; // `${account}:${symbol}` → ts
   tvAlerts:       TvAlert[];            // TradingView webhook alerts, newest last
   lastResearchDay: string;              // NY date of the last daily research session
+  lastAlpacaReviewAt?: number;          // last session in which Alpaca entries were considered
 };
 
 type SpendState = { month: string; usd: number; requests: number; cycles: number;
@@ -650,6 +653,11 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
 function newId(): string { return Math.random().toString(36).slice(2, 8); }
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+// Set per session: whether new Alpaca entries are in scope (2026-10-21 — the
+// owner treats Alpaca as long-term, so it needn't be re-thought every 30 min;
+// IG/spread bets keep the full cadence). Alpaca stops stay at the broker.
+let alpacaInScope = true;
+
 async function openPosition(inp: { account: OpusAccount; symbol: string; direction: 'BUY' | 'SELL'; size: number; stop_loss_pct: number; conviction: number; reason: string },
   metrics: Map<string, Metrics>): Promise<string> {
   const symbol = inp.symbol.toUpperCase().trim();
@@ -660,6 +668,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   // Alpaca/T212 only in US hours; IG whenever IG itself says the market is
   // dealable (checked against its live marketStatus below) — per the owner,
   // IG trades can be round the clock, only Alpaca is tied to US hours.
+  if (inp.account === 'alpaca_paper' && !alpacaInScope) return `REJECTED: Alpaca isn't reviewed this session (long-term account, considered every ${config.alpacaEveryMinutes} min) — next Alpaca review around ${new Date((state.lastAlpacaReviewAt ?? 0) + config.alpacaEveryMinutes * 60_000).toISOString().slice(11, 16)} UTC.`;
   if (!isUsSessionOpen() && inp.account !== 'ig_demo') return `REJECTED: ${inp.account} only trades during US market hours — use ig_demo, or wait for the open.`;
   const m = metrics.get(symbol);
   if (!m) return `REJECTED: no market data for ${symbol} this session.`;
@@ -871,9 +880,15 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
     const searches = research ? config.researchSearches : config.searchesPerSession;
     const system = SYSTEM_PROMPT + (tvChartsOn() ? TV_PROMPT : '') + (research ? RESEARCH_PROMPT : '');
     if (trigger === 'scheduled') lastScheduledAt = Date.now();
-    addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
+    addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}${config.accounts.alpaca_paper && isUsSessionOpen() ? (alpacaInScope ? ', incl. Alpaca' : ', IG only') : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
 
-    const offNote = isUsSessionOpen() ? '' : `\n\nOFF-HOURS SESSION: the US market is closed. US-share figures above are from the last session. Alpaca can't trade now; ig_demo can trade any market IG has open (indices, FX and commodities nearly round the clock; IG's US shares only when IG offers them out of hours — an order on a closed market is rejected). Manage open IG positions as usual.`;
+    alpacaInScope = config.accounts.alpaca_paper && isUsSessionOpen()
+      && (research || trigger === 'manual' || Date.now() - (state.lastAlpacaReviewAt ?? 0) >= config.alpacaEveryMinutes * 60_000 - 60_000);
+    if (alpacaInScope) { state.lastAlpacaReviewAt = Date.now(); saveState(); }
+    const alpacaNote = alpacaInScope || !config.accounts.alpaca_paper || !isUsSessionOpen() ? '' : `
+
+ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewed every ${config.alpacaEveryMinutes} minutes, not every session. Don't analyse Alpaca entries now (they'd be rejected); its positions keep their broker stops. Only close an Alpaca position if something material broke its thesis. Focus on ig_demo.`;
+    const offNote = isUsSessionOpen() ? alpacaNote : `\n\nOFF-HOURS SESSION: the US market is closed. US-share figures above are from the last session. Alpaca can't trade now; ig_demo can trade any market IG has open (indices, FX and commodities nearly round the clock; IG's US shares only when IG offers them out of hours — an order on a closed market is rejected). Manage open IG positions as usual.`;
     const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text + offNote }];
     let backtestsLeft = MAX_BACKTESTS_PER_SESSION;
     let chartsLeft = MAX_CHARTS_PER_SESSION, shotsLeft = MAX_SCREENSHOTS_PER_SESSION;
@@ -1059,6 +1074,7 @@ export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; con
   // Sanity bounds so a typo in the UI can't remove the guard rails.
   if (!(next.monthlyCapUsd > 0 && next.monthlyCapUsd <= 500)) return { ok: false, config, error: 'monthlyCapUsd must be 1-500' };
   if (!(next.cycleMinutes >= 15 && next.cycleMinutes <= 240)) return { ok: false, config, error: 'cycleMinutes must be 15-240' };
+  if (!(next.alpacaEveryMinutes >= 30 && next.alpacaEveryMinutes <= 390)) return { ok: false, config, error: 'alpacaEveryMinutes must be 30-390' };
   if (!(next.offHoursMinutes === 0 || (next.offHoursMinutes >= 30 && next.offHoursMinutes <= 480))) return { ok: false, config, error: 'offHoursMinutes must be 0 (off) or 30-480' };
   if (!(next.t212MaxPositionGbp > 0 && next.t212MaxPositionGbp <= 1000)) return { ok: false, config, error: 't212MaxPositionGbp must be 1-1000' };
   if (!(next.t212MaxTotalGbp >= next.t212MaxPositionGbp && next.t212MaxTotalGbp <= 3000)) return { ok: false, config, error: 't212MaxTotalGbp must be ≥ per-position and ≤ 3000' };
