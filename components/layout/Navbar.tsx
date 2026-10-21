@@ -27,6 +27,7 @@ import { useRouter } from 'next/navigation';
 import { useClearGainsStore } from '@/lib/store';
 import { T212NavButton } from '@/components/t212/T212NavButton';
 import { LoadPortfolioButton } from '@/components/portfolio/LoadPortfolioModal';
+import { MobileMenu } from './MobileMenu';
 
 const navLinks = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -46,13 +47,15 @@ export function Navbar() {
   const router = useRouter();
   const { selectedCountry, syncStatus, autoSaveEnabled } = useClearGainsStore();
   const [mobileOpen, setMobileOpen] = useState(false);
-
-  if (pathname === '/login') return null;
+  const closeMobile = useCallback(() => setMobileOpen(false), []);
 
   const handleLogout = useCallback(async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
     router.push('/login');
   }, [router]);
+
+  // After the hooks, so they run in the same order on every render.
+  if (pathname === '/login') return null;
 
   return (
     <header className="sticky top-0 z-50 bg-gray-950/95 backdrop-blur border-b border-gray-800">
@@ -138,34 +141,16 @@ export function Navbar() {
           {/* Mobile menu button */}
           <button
             onClick={() => setMobileOpen(!mobileOpen)}
-            className="lg:hidden p-2 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors"
+            aria-label="Open menu"
+            className="xl:hidden p-2 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors"
           >
             {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
         </div>
       </div>
 
-      {/* Mobile menu */}
-      {mobileOpen && (
-        <div className="lg:hidden border-t border-gray-800 bg-gray-950 px-4 py-2">
-          {navLinks.map(({ href, label, icon: Icon }) => (
-            <Link
-              key={href}
-              href={href}
-              onClick={() => setMobileOpen(false)}
-              className={clsx(
-                'flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors my-0.5',
-                pathname === href || pathname.startsWith(href + '/')
-                  ? 'bg-emerald-600/20 text-emerald-400'
-                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
-              )}
-            >
-              <Icon className="h-4 w-4" />
-              {label}
-            </Link>
-          ))}
-        </div>
-      )}
+      {/* Mobile / narrow-window menu: every page, grouped (see MobileMenu.tsx). */}
+      <MobileMenu open={mobileOpen} onClose={closeMobile} onLogout={handleLogout} />
     </header>
   );
 }

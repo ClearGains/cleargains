@@ -3,44 +3,10 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import {
-  LayoutDashboard,
-  Search,
-  BookOpen,
-  Calculator,
-  Receipt,
-  ShieldCheck,
-  Globe,
-  Calendar,
-  HelpCircle,
-  Settings,
-  Wifi,
-  WifiOff,
-  FlaskConical,
-  Bookmark,
-  Newspaper,
-  BarChart3,
-  ScanLine,
-  LineChart,
-  TrendingUp,
-  TrendingDown,
-  Target,
-  Hash,
-  Bot,
-  FileText,
-  Star,
-  Rocket,
-  AlertTriangle,
-  Gem,
-  Scale,
-  Pause,
-  NotebookPen,
-  Scissors,
-  Flame,
-  Brain,
-} from 'lucide-react';
+import { Wifi, WifiOff, Bot, Pause } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useClearGainsStore } from '@/lib/store';
+import { NAV_LINKS } from './navLinks';
 
 // ── Alpaca bot sidebar status ─────────────────────────────────────────────────
 
@@ -77,47 +43,8 @@ function useAlpacaSidebarStatus(): AlpacaSidebarState {
   return state;
 }
 
-const navLinks = [
-  { href: '/dashboard',  label: 'Dashboard',      icon: LayoutDashboard },
-  { href: '/positions',  label: 'Live Positions',  icon: BarChart3 },
-  { href: '/scanner',       label: 'AI Scanner',      icon: Search },
-  { href: '/penny-scanner',    label: 'Penny Scanner',    icon: ScanLine   },
-  { href: '/graph-analysis',   label: 'Graph Analysis',   icon: LineChart  },
-  { href: '/market-movers',    label: 'Market Movers',    icon: TrendingUp  },
-  { href: '/market-depth',     label: 'Market Depth',     icon: Scale       },
-  { href: '/overvalued',        label: 'Overvalued Stocks',  icon: AlertTriangle },
-  { href: '/undervalued',       label: 'Undervalued Stocks', icon: Gem           },
-  { href: '/short-scanner',    label: 'Short Scanner',    icon: TrendingDown },
-  { href: '/auto-trader',      label: 'Auto Trader',      icon: Bot         },
-  { href: '/alpaca-trader',    label: 'Alpaca Bot',        icon: Bot         },
-  { href: '/t212-trader',      label: 'T212 ISA Bot',      icon: Bot         },
-  { href: '/mean-reversion',   label: 'Mean Reversion',    icon: Bot         },
-  { href: '/ig-options',       label: 'IG Options Bot',    icon: Bot         },
-  { href: '/meme-coin-bot',    label: 'Meme Coin Bot',     icon: Flame       },
-  { href: '/opus-trader',      label: 'Opus Trader',       icon: Brain       },
-  { href: '/backtest',         label: 'Backtest Lab',      icon: FlaskConical },
-  { href: '/bot-journal',      label: 'Bot Journal',       icon: NotebookPen },
-  { href: '/performance',      label: 'Bot Performance',   icon: BarChart3   },
-  { href: '/reputable-stocks', label: 'Reputable Stocks',  icon: Star        },
-  { href: '/future-leaders',   label: 'Future Leaders',    icon: Rocket      },
-  { href: '/trade-log',        label: 'Trade Log',        icon: FileText    },
-  { href: '/daily-brief',      label: 'Daily Brief',      icon: Target      },
-  { href: '/watchlist', label: 'Watchlist', icon: Bookmark },
-  { href: '/world-affairs', label: 'World Affairs', icon: Newspaper },
-  { href: '/trading-guide', label: 'Trading Guide', icon: BookOpen },
-  { href: '/demo-trader', label: 'Demo Trader', icon: FlaskConical },
-  { href: '/ledger', label: 'Trade Ledger', icon: BookOpen },
-  { href: '/tax-monitor', label: 'Tax Monitor', icon: ShieldCheck },
-  { href: '/harvest', label: 'Tax Harvesting', icon: Scissors },
-  { href: '/calculator',     label: 'Calculator',       icon: Hash       },
-  { href: '/cgt', label: 'CGT Calculator', icon: Calculator },
-  { href: '/tax-calculator', label: 'Tax Calculator', icon: Receipt },
-  { href: '/risk', label: 'Risk Engine', icon: ShieldCheck },
-  { href: '/tax-guides', label: 'Tax Guides', icon: Globe },
-  { href: '/deadlines', label: 'Deadlines', icon: Calendar },
-  { href: '/help', label: 'Help Centre', icon: HelpCircle },
-  { href: '/settings', label: 'Settings', icon: Settings },
-];
+// Shared with the mobile menu (navLinks.ts) so the two never drift apart.
+const navLinks = NAV_LINKS;
 
 export function Sidebar() {
   const pathname    = usePathname();
