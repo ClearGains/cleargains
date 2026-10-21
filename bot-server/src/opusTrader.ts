@@ -671,7 +671,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   // dealable (checked against its live marketStatus below) — per the owner,
   // IG trades can be round the clock, only Alpaca is tied to US hours.
   if (inp.account === 'alpaca_paper' && !alpacaInScope) return `REJECTED: Alpaca isn't reviewed this session (long-term account, considered every ${config.alpacaEveryMinutes} min) — next Alpaca review around ${new Date((state.lastAlpacaReviewAt ?? 0) + config.alpacaEveryMinutes * 60_000).toISOString().slice(11, 16)} UTC.`;
-  if (!isUsSessionOpen() && inp.account !== 'ig_demo') return `REJECTED: ${inp.account} only trades during US market hours — use ig_demo, or wait for the open.`;
+  if (!isUsSessionOpen() && inp.account === 'alpaca_paper') return `REJECTED: ${inp.account} only trades during US market hours — use ig_demo, or wait for the open.`;
   const m = metrics.get(symbol);
   if (!m) return `REJECTED: no market data for ${symbol} this session.`;
   // Volume in the trade's direction — enforced in code, never by the model.
@@ -816,10 +816,11 @@ async function closePosition(id: string, reason: string, view: Map<string, LiveP
   if (!p) return `REJECTED: no open position with id ${id}.`;
   const heldH = (Date.now() - p.openedAt) / 3_600_000;
   if (!manual && heldH < config.minHoldHours) return `REJECTED: held ${heldH.toFixed(1)}h — minimum hold is ${config.minHoldHours}h (the stop still protects it).`;
-  // Alpaca/T212 closes only while the US market is open (2026-10-21). Off
+  // Alpaca closes only while the US market is open (2026-10-21; T212 trades
+  // round the clock, per the owner, so it isn't restricted). Off
   // hours this would cancel the protective stop and leave a market sell queued
   // for the open, whatever happened overnight. Re-decide in session instead.
-  if (p.account !== 'ig_demo' && !isUsSessionOpen()) return `REJECTED: the US market is closed — ${p.account} positions can only be closed in market hours (the broker stop still protects it). Re-check this at the open.`;
+  if (p.account === 'alpaca_paper' && !isUsSessionOpen()) return `REJECTED: the US market is closed — ${p.account} positions can only be closed in market hours (the broker stop still protects it). Re-check this at the open.`;
   const pl = view.get(id)?.pl ?? null;
   try {
     if (p.account === 'alpaca_paper') {
@@ -1124,6 +1125,13 @@ export function stopOpus(): { ok: boolean } {
 }
 
 export function wasOpusRunning(): boolean { return config.enabled; }
+
+// Whether Opus is (or is about to be, on auto-resume) the decision-maker for
+// an account. Used at bot start-up so an older bot that comes back after
+// Opus has already started is paused straight away (2026-10-21: on restart
+// Opus started a few seconds before the Alpaca bot, so its pause found
+// nothing to pause and the Alpaca bot ran unpaused alongside it).
+export function opusManagesAccount(account: OpusAccount): boolean { return config.enabled && config.accounts[account]; }
 
 export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; config: OpusConfig; error?: string } {
   const next: OpusConfig = { ...config, ...patch, accounts: { ...config.accounts, ...(patch.accounts ?? {}) } };

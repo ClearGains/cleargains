@@ -33,7 +33,7 @@ import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
 import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
-import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
+import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, opusManagesAccount, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
 import { getPerformanceSummary } from './performance';
 import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
@@ -998,6 +998,8 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`[bot-server] Auto-resuming Alpaca ${mode} bot (${savedAlpaca.strategy})...`);
     void startAlpacaBot(savedAlpaca).then(r => {
       if (r.ok) console.log(`[bot-server] Alpaca ${mode} auto-resume successful`);
+      // Opus may have started first; make sure this bot doesn't trade alongside it.
+      if (r.ok && mode === 'paper' && opusManagesAccount('alpaca_paper')) pauseAlpacaBot('paper');
       else console.error(`[bot-server] Alpaca ${mode} auto-resume failed: ${r.error}`);
     });
   }
@@ -1016,6 +1018,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`[bot-server] Auto-resuming IG strategy ${mode} bot (${savedIg.strategy})...`);
     void startIgStrategyBot(savedIg).then(r => {
       if (r.ok) console.log(`[bot-server] IG strategy ${mode} auto-resume successful`);
+      if (r.ok && mode === 'demo' && opusManagesAccount('ig_demo')) pauseIgStrategyBot('demo');
       else console.error(`[bot-server] IG strategy ${mode} auto-resume failed: ${r.error}`);
     });
   }
