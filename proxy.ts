@@ -9,6 +9,9 @@ export function proxy(request: NextRequest) {
   if (
     pathname.startsWith('/login') ||
     pathname.startsWith('/api/auth') ||
+    // TradingView webhooks can't log in; authenticated by a secret in the
+    // alert body instead (checked by the bot server).
+    pathname === '/api/tradingview' ||
     pathname.startsWith('/_next') ||
     pathname.startsWith('/favicon')
   ) {

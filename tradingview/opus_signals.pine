@@ -1,0 +1,50 @@
+//@version=6
+// Opus signals — sends TradingView alerts to the Opus Trader (opusTrader.ts).
+//
+// Fires on the DAILY chart, once per bar close, when a stock:
+//   TREND_BUY  — enters the long-hold setup the 2026-10-21 backtest favoured:
+//                close above its 20- and 50-day averages, 12-week gain >= 8%,
+//                at least a normal day's volume, and closing above its open
+//                (volume on the buying side).
+//   TREND_EXIT — closes back below its 50-day average.
+// Opus sees these in its briefing (and an alert triggers an early review during
+// the US session). They are information for Opus, not orders — it decides.
+//
+// Setup: add to a daily chart → Settings → paste your webhook secret (shown on
+// the Opus Trader page) → create an alert with condition "Opus signals → Any
+// alert() function call", webhook URL https://cleargains1.vercel.app/api/tradingview
+indicator("Opus signals", overlay = true)
+
+secret   = input.string("PASTE_SECRET_FROM_OPUS_TRADER_PAGE", "Webhook secret")
+trendLen = input.int(60, "12-week lookback (bars, daily chart)", minval = 20)
+
+sma20    = ta.sma(close, 20)
+sma50    = ta.sma(close, 50)
+chg12w   = (close / close[trendLen] - 1) * 100
+rsi14    = ta.rsi(close, 14)
+volRatio = volume / ta.sma(volume[1], 20)
+
+uptrend   = close > sma20 and close > sma50 and chg12w >= 8
+buySetup  = uptrend and volRatio >= 1.0 and close > open
+exitSetup = close < sma50
+
+// Only on the bar the condition starts, so an alert means something changed.
+buySignal  = buySetup and not buySetup[1]
+exitSignal = exitSetup and not exitSetup[1]
+
+fmt(x) => str.tostring(x, "#.##")
+msg(sig) =>
+    '{"secret":"' + secret + '","symbol":"' + syminfo.ticker + '","signal":"' + sig +
+     '","timeframe":"' + timeframe.period + '","price":' + fmt(close) +
+     ',"note":"sma20 ' + fmt(sma20) + ', sma50 ' + fmt(sma50) + ', 12w ' + fmt(chg12w) +
+     '%, rsi ' + fmt(rsi14) + ', volume ' + fmt(volRatio) + 'x avg"}'
+
+if buySignal
+    alert(msg("TREND_BUY"), alert.freq_once_per_bar_close)
+if exitSignal
+    alert(msg("TREND_EXIT"), alert.freq_once_per_bar_close)
+
+plot(sma20, "SMA 20", color.orange)
+plot(sma50, "SMA 50", color.blue)
+plotshape(buySignal,  "Trend buy",  shape.triangleup,   location.belowbar, color.green, size = size.small)
+plotshape(exitSignal, "Trend exit", shape.triangledown, location.abovebar, color.red,   size = size.small)

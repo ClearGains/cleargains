@@ -33,7 +33,7 @@ import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
 import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
-import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, type OpusConfig } from './opusTrader';
+import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
 import { getPerformanceSummary } from './performance';
 import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
@@ -469,6 +469,13 @@ app.get('/meme-coin/status', auth, (_req: Request, res: Response) => {
 // Opus portfolio manager (opusTrader.ts) — dashboard controls.
 app.get('/opus/status', auth, (_req: Request, res: Response) => {
   void getOpusStatus().then(s => res.json(s)).catch(e => res.status(500).json({ ok: false, error: String(e) }));
+});
+// TradingView alert webhook — reached via the dashboard's /api/tradingview
+// (TradingView only posts to ports 80/443), which adds x-bot-secret; the
+// alert body must also carry TRADINGVIEW_SECRET.
+app.post('/tradingview/webhook', auth, (req: Request, res: Response) => {
+  const r = ingestTradingViewAlert((req.body ?? {}) as Record<string, unknown>);
+  res.status(r.ok ? 200 : 400).json(r);
 });
 app.get('/opus/briefing', auth, (_req: Request, res: Response) => {
   void previewOpusBriefing().then(r => res.json(r)).catch(e => res.status(500).json({ ok: false, error: String(e) }));

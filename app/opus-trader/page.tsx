@@ -14,7 +14,9 @@ type Config = {
   effort: 'low' | 'medium' | 'high' | 'xhigh'; alpacaMaxPositionUsd: number; alpacaMaxPositions: number;
   igMaxRiskGbp: number; igMaxPositions: number; t212MaxPositionGbp: number; t212MaxTotalGbp: number;
   t212MaxPositions: number; minConviction: number; minHoldHours: number; reentryCooldownHours: number;
+  webResearch: boolean; searchesPerSession: number; researchSearches: number;
 };
+type TvAlert = { ts: string; symbol: string; signal: string; timeframe: string | null; price: number | null; note: string | null };
 type Position = {
   id: string; account: Account; symbol: string; direction: 'BUY' | 'SELL'; size: number; entryPrice: number;
   stopPrice: number; openedAt: number; conviction: number; reason: string; livePl: number | null; liveCurrent: number | null;
@@ -25,7 +27,8 @@ type Status = {
   running: boolean; busy: boolean; apiKeyConfigured: boolean; usSessionOpen: boolean;
   nextRunAt: number | null; lastRunAt: string | null; config: Config;
   spend: { month: string; usd: number; requests: number; cycles: number };
-  budgetLeftUsd: number; models: Record<ModelId, ModelInfo>; positions: Position[]; closed: Closed[]; notes: string; watchlistExtra: string[];
+  budgetLeftUsd: number; models: Record<ModelId, ModelInfo>; positions: Position[];
+  tradingviewConfigured: boolean; tradingviewSecret: string | null; tvAlerts: TvAlert[]; closed: Closed[]; notes: string; watchlistExtra: string[];
   log: LogEntry[]; error?: string;
 };
 
@@ -69,6 +72,8 @@ const NUMBER_FIELDS: Array<{ key: keyof Config; label: string; hint: string }> =
   { key: 'alpacaMaxPositions',   label: 'Alpaca max positions',       hint: '' },
   { key: 'minHoldHours',         label: 'Min hold before closing (h)', hint: 'Stops still fire' },
   { key: 'reentryCooldownHours', label: 'Re-entry cooldown (h)',      hint: 'After closing a symbol' },
+  { key: 'searchesPerSession',   label: 'Web searches / session',     hint: '0-10, ~$0.01 each plus reading' },
+  { key: 'researchSearches',     label: 'Web searches / daily research', hint: '0-20, first session of the day' },
 ];
 
 export default function OpusTraderPage() {
@@ -77,6 +82,7 @@ export default function OpusTraderPage() {
   const [loading, setLoading]   = useState<string | null>(null);
   const [draft, setDraft]       = useState<Partial<Config>>({});
   const [briefing, setBriefing] = useState<string | null>(null);
+  const [showSecret, setShowSecret] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -261,6 +267,46 @@ export default function OpusTraderPage() {
                 <div className="flex gap-2 pt-1">
                   <Button onClick={async () => { const r = await post('config', draft); if (r?.ok) setDraft({}); }} loading={loading === 'config'} disabled={!dirty} variant="primary">Save</Button>
                   {dirty && <Button onClick={() => setDraft({})} variant="secondary">Discard</Button>}
+                </div>
+              </div>
+            )}
+          </Card>
+
+          {/* Research + TradingView */}
+          <Card>
+            <CardHeader title="Research & TradingView" icon={<FileText className="h-4 w-4" />} />
+            {cfg && (
+              <div className="space-y-2 text-xs">
+                <label className="flex items-center justify-between">
+                  <span className="text-gray-300" title="Lets Opus search the web and read pages for its own research">Web research</span>
+                  <input type="checkbox" className="accent-violet-500"
+                    checked={draft.webResearch ?? cfg.webResearch}
+                    onChange={e => setDraft(d => ({ ...d, webResearch: e.target.checked }))} />
+                </label>
+                <p className="text-[10px] text-gray-500">TradingView webhook URL:</p>
+                <code className="block text-[10px] text-gray-300 break-all">https://cleargains1.vercel.app/api/tradingview</code>
+                {status?.tradingviewConfigured ? (
+                  <p className="text-[10px] text-gray-500">
+                    Secret for the Pine script:{' '}
+                    {showSecret
+                      ? <code className="text-gray-300 break-all">{status.tradingviewSecret}</code>
+                      : <button className="text-violet-300 hover:text-white" onClick={() => setShowSecret(true)}>show</button>}
+                  </p>
+                ) : <p className="text-[10px] text-amber-400">TRADINGVIEW_SECRET not set on the server</p>}
+                <div className="pt-1">
+                  <p className="text-[10px] text-gray-500 mb-1">Recent alerts ({status?.tvAlerts.length ?? 0})</p>
+                  {!status?.tvAlerts.length ? <p className="text-[10px] text-gray-600">None received yet</p> : (
+                    <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                      {status.tvAlerts.map(a => (
+                        <p key={a.ts + a.symbol} className="text-[10px] text-gray-400">
+                          <span className="text-gray-600">{a.ts.slice(5, 16).replace('T', ' ')}</span>{' '}
+                          <span className="text-white">{a.symbol}</span>{' '}
+                          <span className={a.signal.includes('BUY') ? 'text-emerald-400' : a.signal.includes('EXIT') || a.signal.includes('SELL') ? 'text-red-400' : 'text-sky-400'}>{a.signal}</span>
+                          {a.price !== null && <> @ {a.price}</>}
+                        </p>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

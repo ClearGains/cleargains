@@ -65,6 +65,9 @@ export type OpusConfig = {
   t212MaxTotalGbp:      number;
   t212MaxPositions:     number;
   minConviction:        number;   // matches the 65% entry bar used everywhere else
+  webResearch:          boolean;  // give the model web search/fetch for its own research
+  searchesPerSession:   number;   // web searches allowed in a normal session
+  researchSearches:     number;   // web searches allowed in the daily research session
   minHoldHours:         number;   // no discretionary close sooner than this (stops still fire)
   reentryCooldownHours: number;   // after closing a symbol, no new position in it for this long
 };
@@ -87,6 +90,9 @@ const DEFAULT_CONFIG: OpusConfig = {
   minConviction: 65,
   minHoldHours: 4,
   reentryCooldownHours: 24,
+  webResearch: true,
+  searchesPerSession: 2,
+  researchSearches: 8,
 };
 
 export type OpusPosition = {
@@ -107,12 +113,16 @@ export type OpusPosition = {
 
 type ClosedRecord = OpusPosition & { closedAt: number; closeReason: string; plApprox: number | null };
 
+export type TvAlert = { ts: string; symbol: string; signal: string; timeframe: string | null; price: number | null; note: string | null };
+
 type OpusState = {
   positions:      OpusPosition[];
   closed:         ClosedRecord[];       // newest last, trimmed
   notes:          string;               // Opus's own running strategy notes
   watchlistExtra: string[];             // symbols Opus added
   lastClosedAt:   Record<string, number>; // `${account}:${symbol}` → ts
+  tvAlerts:       TvAlert[];            // TradingView webhook alerts, newest last
+  lastResearchDay: string;              // NY date of the last daily research session
 };
 
 type SpendState = { month: string; usd: number; requests: number; cycles: number;
@@ -135,7 +145,7 @@ function writeJson(file: string, data: unknown): void {
 
 let config: OpusConfig = { ...DEFAULT_CONFIG, ...readJson<Partial<OpusConfig>>(CONFIG_FILE, {}) };
 config.accounts = { ...DEFAULT_CONFIG.accounts, ...(config.accounts ?? {}) };
-let state: OpusState = { positions: [], closed: [], notes: '', watchlistExtra: [], lastClosedAt: {},
+let state: OpusState = { positions: [], closed: [], notes: '', watchlistExtra: [], lastClosedAt: {}, tvAlerts: [], lastResearchDay: '',
   ...readJson<Partial<OpusState>>(STATE_FILE, {}) };
 let log: LogEntry[] = readJson<LogEntry[]>(LOG_FILE, []);
 
@@ -173,10 +183,14 @@ export function opusOwnedAlpacaSymbols(): Set<string> {
 // Priced at the requested model's rates. A server-side fallback (rare) bills
 // at the fallback model's own rates, so this is an estimate in that case —
 // the Anthropic console's own spend limit is the backstop.
-function recordUsage(model: OpusModel, u: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null }): number {
+// Web search is billed per search on top of tokens ($10 per 1,000).
+const WEB_SEARCH_USD = 0.01;
+function recordUsage(model: OpusModel, u: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null; server_tool_use?: { web_search_requests?: number | null } | null }): number {
   const price = MODELS[model];
   const cr = u.cache_read_input_tokens ?? 0, cw = u.cache_creation_input_tokens ?? 0;
-  const usd = (u.input_tokens * price.input + u.output_tokens * price.output + cr * price.cacheRead + cw * price.cacheWrite) / 1_000_000;
+  const searches = u.server_tool_use?.web_search_requests ?? 0;
+  const usd = (u.input_tokens * price.input + u.output_tokens * price.output + cr * price.cacheRead + cw * price.cacheWrite) / 1_000_000
+    + searches * WEB_SEARCH_USD;
   if (spend.month !== thisMonth()) spend = loadSpend();
   spend.usd += usd; spend.requests++;
   spend.inputTokens += u.input_tokens; spend.outputTokens += u.output_tokens;
@@ -450,6 +464,11 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   }
 
   lines.push('');
+  const tvRecent = state.tvAlerts.filter(a => Date.now() - new Date(a.ts).getTime() < 24 * 3_600_000);
+  lines.push('## TradingView alerts (last 24h, newest last)');
+  if (!tvRecent.length) lines.push('(none)');
+  for (const a of tvRecent.slice(-25)) lines.push(`- ${a.ts.slice(5, 16).replace('T', ' ')} ${a.symbol} ${a.signal}${a.timeframe ? ` [${a.timeframe}]` : ''}${a.price !== null ? ` @ ${a.price}` : ''}${a.note ? ` — ${a.note}` : ''}`);
+  lines.push('');
   lines.push('## Your strategy notes');
   lines.push(state.notes || '(none yet)');
   lines.push(`Extra watchlist: ${state.watchlistExtra.join(', ') || '(none)'}`);
@@ -591,14 +610,25 @@ const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 // One model call. Server-side fallback ("default") is on: if the model
 // declines for policy reasons, the API re-runs the request on a suitable
 // substitute inside the same call instead of the session just stopping.
-async function callModel(model: OpusModel, system: string, messages: Anthropic.Beta.BetaMessageParam[]): Promise<Anthropic.Beta.BetaMessage> {
+function toolsFor(searches: number): Anthropic.Beta.BetaToolUnion[] {
+  if (!config.webResearch || searches <= 0) return TOOLS;
+  return [
+    ...TOOLS,
+    // Anthropic-hosted research tools (2026-10-21, per explicit request that
+    // Opus do its own research). max_uses caps cost per request.
+    { type: 'web_search_20260209', name: 'web_search', max_uses: searches },
+    { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: searches },
+  ];
+}
+
+async function callModel(model: OpusModel, system: string, messages: Anthropic.Beta.BetaMessageParam[], searches = 0): Promise<Anthropic.Beta.BetaMessage> {
   client ??= new Anthropic();
   return client.beta.messages.create({
     model,
     max_tokens: 16000,
     output_config: { effort: config.effort },
     system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-    tools: TOOLS,
+    tools: toolsFor(searches),
     messages,
     betas: [FALLBACK_BETA],
     fallbacks: 'default',
@@ -635,7 +665,13 @@ SHADOW MODE: you are being evaluated alongside another manager on the same brief
   return usd;
 }
 
-export async function runOpusSession(trigger: 'scheduled' | 'manual' = 'scheduled'): Promise<{ ok: boolean; error?: string }> {
+function nyDate(d = new Date()): string { return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(d); }
+
+const RESEARCH_PROMPT = `
+
+DAILY RESEARCH SESSION: this is your first session of the trading day. You have a larger web research allowance. Use it on what matters most: material news, earnings dates, guidance or analyst changes for your open positions, then your strongest candidates. Prefer primary or reputable sources. Record the conclusions you want to carry through the day in your notes (concisely), then manage positions as usual.`;
+
+export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingview' = 'scheduled'): Promise<{ ok: boolean; error?: string }> {
   if (busy) return { ok: false, error: 'A session is already running' };
   if (!process.env.ANTHROPIC_API_KEY) return { ok: false, error: 'ANTHROPIC_API_KEY is not set on the server' };
   if (budgetLeftUsd() <= 0.25) { addLog('wait', `Monthly cap reached ($${spend.usd.toFixed(2)} of $${config.monthlyCapUsd}) — no sessions until next month or a higher cap`); return { ok: false, error: 'Monthly budget reached' }; }
@@ -648,16 +684,29 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' = 'schedule
     await reconcile(view);
     const { text, metrics } = await buildBriefing(view);
     spend.cycles++; saveSpend();
-    addLog('info', `Session started (${trigger}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions`);
+    const research = config.webResearch && nyDate() !== state.lastResearchDay;
+    if (research) { state.lastResearchDay = nyDate(); saveState(); }
+    const searches = research ? config.researchSearches : config.searchesPerSession;
+    const system = research ? SYSTEM_PROMPT + RESEARCH_PROMPT : SYSTEM_PROMPT;
+    addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
 
     const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text }];
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       if (budgetLeftUsd() <= 0.25) { addLog('wait', 'Budget ran out mid-session — stopping here'); break; }
-      const resp = await callModel(model, SYSTEM_PROMPT, messages);
+      // Only the first turn gets the research allowance, so the cap holds per session.
+      const resp = await callModel(model, system, messages, turn === 0 ? searches : 0);
       sessionUsd += recordUsage(model, resp.usage);
       if (resp.model !== model) addLog('info', `Served by fallback model ${resp.model} this turn`);
       if (resp.stop_reason === 'refusal') { addLog('error', 'The model declined this session (refusal, fallback included)'); break; }
 
+      for (const b of resp.content) {
+        if (b.type === 'server_tool_use') {
+          const q = (b.input as Record<string, unknown>)?.query ?? (b.input as Record<string, unknown>)?.url;
+          addLog('info', `[research] ${b.name}: ${String(q ?? '').slice(0, 200)}`);
+        }
+      }
+      // A long server-side research turn can pause; hand it back to continue.
+      if (resp.stop_reason === 'pause_turn') { messages.push({ role: 'assistant', content: resp.content }); continue; }
       const toolUses = resp.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use');
       for (const b of resp.content) if (b.type === 'text' && b.text.trim()) addLog('think', b.text.trim().slice(0, 1500));
       if (resp.stop_reason === 'max_tokens') { addLog('error', 'Response hit max_tokens — tool inputs may be truncated, not running them'); break; }
@@ -698,6 +747,33 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' = 'schedule
   } finally {
     busy = false;
   }
+}
+
+// TradingView webhook alerts (2026-10-21). Stored for the briefing; a fresh
+// alert also triggers a review during the US session, at most every 15min.
+let lastTvTriggeredAt = 0;
+export function ingestTradingViewAlert(body: Record<string, unknown>): { ok: boolean; error?: string } {
+  const secret = process.env.TRADINGVIEW_SECRET;
+  if (!secret || body.secret !== secret) return { ok: false, error: 'bad secret' };
+  const symbol = String(body.symbol ?? body.ticker ?? '').toUpperCase().replace(/^[A-Z]+:/, '').trim();
+  if (!/^[A-Z.]{1,10}$/.test(symbol)) return { ok: false, error: 'symbol required' };
+  const num = (v: unknown) => { const n = Number(v); return isFinite(n) ? n : null; };
+  const alert: TvAlert = {
+    ts: new Date().toISOString(), symbol,
+    signal: String(body.signal ?? body.action ?? 'alert').slice(0, 40),
+    timeframe: body.timeframe !== undefined ? String(body.timeframe).slice(0, 10) : null,
+    price: num(body.price ?? body.close),
+    note: body.note !== undefined ? String(body.note).slice(0, 300) : null,
+  };
+  state.tvAlerts.push(alert);
+  if (state.tvAlerts.length > 300) state.tvAlerts = state.tvAlerts.slice(-300);
+  saveState();
+  addLog('info', `[TradingView] ${symbol} ${alert.signal}${alert.timeframe ? ` [${alert.timeframe}]` : ''}${alert.price !== null ? ` @ ${alert.price}` : ''}`);
+  if (running && !busy && isUsSessionOpen() && Date.now() - lastTvTriggeredAt > 15 * 60_000) {
+    lastTvTriggeredAt = Date.now();
+    void runOpusSession('tradingview');
+  }
+  return { ok: true };
 }
 
 function schedule(): void {
@@ -750,6 +826,8 @@ export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; con
   if (!(next.t212MaxTotalGbp >= next.t212MaxPositionGbp && next.t212MaxTotalGbp <= 3000)) return { ok: false, config, error: 't212MaxTotalGbp must be ≥ per-position and ≤ 3000' };
   if (!(next.minConviction >= 50 && next.minConviction <= 95)) return { ok: false, config, error: 'minConviction must be 50-95' };
   if (!['low', 'medium', 'high', 'xhigh'].includes(next.effort)) return { ok: false, config, error: 'effort must be low/medium/high/xhigh' };
+  if (!(next.searchesPerSession >= 0 && next.searchesPerSession <= 10)) return { ok: false, config, error: 'searchesPerSession must be 0-10' };
+  if (!(next.researchSearches >= 0 && next.researchSearches <= 20)) return { ok: false, config, error: 'researchSearches must be 0-20' };
   if (!(next.model in MODELS)) return { ok: false, config, error: `model must be one of ${Object.keys(MODELS).join(', ')}` };
   if (next.shadowModel !== null && !(next.shadowModel in MODELS)) return { ok: false, config, error: 'shadowModel must be a known model or null' };
   const cycleChanged = next.cycleMinutes !== config.cycleMinutes;
@@ -777,7 +855,10 @@ export async function getOpusStatus() {
   let view = new Map<string, LivePos>();
   try { view = await livePositionView(); } catch { /* best-effort */ }
   return {
-    running, busy, apiKeyConfigured: !!process.env.ANTHROPIC_API_KEY,
+    running, busy, apiKeyConfigured: !!process.env.ANTHROPIC_API_KEY, tradingviewConfigured: !!process.env.TRADINGVIEW_SECRET,
+    // Shown on the password-protected dashboard so it can be pasted into the Pine script.
+    tradingviewSecret: process.env.TRADINGVIEW_SECRET ?? null,
+    tvAlerts: state.tvAlerts.slice(-30).reverse(),
     usSessionOpen: isUsSessionOpen(), nextRunAt, lastRunAt,
     config, spend, budgetLeftUsd: budgetLeftUsd(), models: MODELS,
     positions: state.positions.map(p => ({ ...p, livePl: view.get(p.id)?.pl ?? null, liveCurrent: view.get(p.id)?.current ?? null })),
