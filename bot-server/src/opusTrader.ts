@@ -35,6 +35,7 @@ import {
   placeStopLimitOrder, cancelOrder as t212CancelOrder,
 } from './t212Api';
 import { getGbpUsd } from './t212Bot';
+import { runRuleBacktest, INDICATORS, type BacktestSpec } from './ruleBacktest';
 
 // ── Config / state ──────────────────────────────────────────────────────────
 
@@ -355,6 +356,42 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: 'run_backtest',
+    description: 'Test a rule-based strategy idea on real, split-adjusted daily history before relying on it. Signals are read at a close and entered at the next open; stops/targets checked on later highs/lows. Returns trade count, win rate, average/median return, best/worst, hold time, exit reasons, and buy-and-hold for comparison. No trading happens. Limited per session.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbols:          { type: 'array', items: { type: 'string' }, description: '1-15 US tickers' },
+        direction:        { type: 'string', enum: ['long', 'short'] },
+        entry_conditions: { type: 'array', description: 'All must hold on the signal day', items: {
+          type: 'object',
+          properties: {
+            indicator: { type: 'string', enum: [...INDICATORS] },
+            op:        { type: 'string', enum: ['>', '<', '>=', '<='] },
+            value:     { type: 'number' },
+          },
+          required: ['indicator', 'op', 'value'], additionalProperties: false,
+        } },
+        exit_conditions:  { type: 'array', description: 'Any true at a close exits (can be empty)', items: {
+          type: 'object',
+          properties: {
+            indicator: { type: 'string', enum: [...INDICATORS] },
+            op:        { type: 'string', enum: ['>', '<', '>=', '<='] },
+            value:     { type: 'number' },
+          },
+          required: ['indicator', 'op', 'value'], additionalProperties: false,
+        } },
+        stop_loss_pct:    { type: 'number' },
+        take_profit_pct:  { type: 'number', description: '0 = no take-profit' },
+        max_hold_days:    { type: 'integer' },
+        lookback_days:    { type: 'integer', description: 'Trading days of history, 120-750' },
+      },
+      required: ['symbols', 'direction', 'entry_conditions', 'exit_conditions', 'stop_loss_pct', 'take_profit_pct', 'max_hold_days', 'lookback_days'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'update_notes',
     description: 'Replace your persistent strategy notes (max ~3000 chars). Shown to you at the start of every session — record what is working, what is not, and the approach you are following, so you can adapt between sessions.',
     strict: true,
@@ -393,6 +430,8 @@ What is known about this account from its own history (treat as evidence, not do
 Data you get: every number in the briefing is computed by code from market data — price, day change, whether today trades above its open, today's volume vs that stock's normal day (vol1.0 = normal day, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, plus recent headlines for some symbols. Do not estimate or second-guess the volume figures; code already enforces the volume rule.
 
 Hard rules enforced by code (an order outside them is rejected and you'll see why): every position needs a stop-loss of 2-15%; conviction must be at least the configured minimum; a new stock entry needs today's volume ≥ a normal day AND today trading on the trade's side of its open; per-account position and size caps; no discretionary close within the minimum hold window (stops still fire); no re-entry into a symbol within the cooldown after closing it.
+
+Building your own logic: you have a run_backtest tool. Use it to test an idea before you rely on it — indicators available: ${INDICATORS.join(', ')}. Judge a rule against buy-and-hold over the same window and on enough trades (a handful proves nothing); costs aren't modelled, so prefer rules whose edge isn't razor-thin. When a rule holds up, write it into your notes as part of your approach and apply it; when live results disagree with a backtest, trust the live results and revise. Testing is most useful in the daily research session.
 
 How to work a session:
 1. Review your open positions against the thesis you recorded for each. Close only with a real reason.
@@ -604,7 +643,8 @@ let nextRunAt: number | null = null;
 let lastRunAt: string | null = null;
 let busy = false;
 
-const MAX_TURNS = 8;
+const MAX_TURNS = 10;
+const MAX_BACKTESTS_PER_SESSION = 4;
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 
 // One model call. Server-side fallback ("default") is on: if the model
@@ -691,6 +731,7 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
     addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
 
     const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text }];
+    let backtestsLeft = MAX_BACKTESTS_PER_SESSION;
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       if (budgetLeftUsd() <= 0.25) { addLog('wait', 'Budget ran out mid-session — stopping here'); break; }
       // Only the first turn gets the research allowance, so the cap holds per session.
@@ -700,7 +741,7 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
       if (resp.stop_reason === 'refusal') { addLog('error', 'The model declined this session (refusal, fallback included)'); break; }
 
       for (const b of resp.content) {
-        if (b.type === 'server_tool_use') {
+        if (b.type === 'server_tool_use' && b.name !== 'code_execution') {
           const q = (b.input as Record<string, unknown>)?.query ?? (b.input as Record<string, unknown>)?.url;
           addLog('info', `[research] ${b.name}: ${String(q ?? '').slice(0, 200)}`);
         }
@@ -720,6 +761,15 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
         try {
           if (t.name === 'open_position') out = await openPosition(input as Parameters<typeof openPosition>[0], metrics);
           else if (t.name === 'close_position') out = await closePosition(String(input.position_id), String(input.reason), view);
+          else if (t.name === 'run_backtest') {
+            if (backtestsLeft <= 0) out = `REJECTED: backtest limit for this session (${MAX_BACKTESTS_PER_SESSION}) reached.`;
+            else {
+              backtestsLeft--;
+              const spec = input as unknown as BacktestSpec;
+              out = await runRuleBacktest(spec);
+              addLog('info', `[backtest] ${spec.direction} ${(spec.symbols ?? []).slice(0, 6).join(',')}${(spec.symbols?.length ?? 0) > 6 ? '…' : ''} — ${out.split('\n')[1] ?? out.split('\n')[0]}`);
+            }
+          }
           else if (t.name === 'update_notes') { state.notes = String(input.notes).slice(0, 3000); saveState(); addLog('info', 'Updated its strategy notes'); out = 'Notes saved.'; }
           else if (t.name === 'set_watchlist_extra') {
             const syms = (Array.isArray(input.symbols) ? input.symbols : []).map(s => String(s).toUpperCase().trim()).filter(s => /^[A-Z.]{1,6}$/.test(s)).slice(0, 20);
