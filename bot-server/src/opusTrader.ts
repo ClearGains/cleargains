@@ -545,7 +545,7 @@ Accounts you control:
 
 What is known about this account from its own history (treat as evidence, not dogma — you may revise it in your notes when your own results say otherwise):
 - Short holds lost money: across 57 closed option trades, those held under a week went 2 wins / 44 trades; a week or longer went 8 / 13. The owner wants positions held for weeks to a few months. Don't trade around noise.
-- A one-day volume/price move on its own did not predict the next 20 days. Price above both its 20- and 50-day averages with a 12-week gain of 8%+ was the best long-hold entry in a 2-year backtest; strong stocks kept going (an "extended" filter made results worse). This was a strong market on names partly chosen for having done well.
+- A one-day volume/price move on its own did not predict the next 20 days. Price above both its 20- and 50-day averages with a 12-week gain of 8%+ was the best long-hold entry in a 2-year backtest; strong stocks kept going (an "extended" filter made results worse). This was a strong market on names partly chosen for having done well. That 8%-in-12-weeks threshold is for INDIVIDUAL US SHARES only. Indices, FX pairs and commodities move far less (a strong index trend can be +4% in 12 weeks; a major FX pair +1-2%), so never apply it to the IG-only markets. For those, the trend test is the code's: price beyond its 50-day average with the 20-day on the same side (that is what the setup column checks). If your notes say otherwise for indices/FX, correct them.
 - Re-asking the same question on unchanged inputs produces unstable answers. Change your mind about an open position only when something material changed (price through a level, news, thesis broken) — not because the session repeated.
 
 Data you get: every number in the briefing is computed by code from market data — price, day change, whether today trades above its open, today's volume vs that stock's normal day (vol1.0 = normal day, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, plus recent headlines for some symbols. Do not estimate or second-guess the volume figures; code already enforces the volume rule.
@@ -622,7 +622,7 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   const igOnly = [...metrics.values()].filter(x => isIgOnly(x.symbol));
   if (igOnly.length) {
     lines.push('');
-    lines.push('## IG markets — indices, FX, commodities (ig_demo only; daily bars, prices in market units — IG quotes some in its own points, e.g. FX ×10,000; no exchange volume, so no volume rule)');
+    lines.push('## IG markets — indices, FX, commodities (ig_demo only; daily bars, prices in market units — IG quotes some in its own points, e.g. FX ×10,000; no exchange volume, so no volume rule; the 8%/12-week stock threshold does NOT apply here — a setup label means the trend test passed)');
     lines.push('symbol (name) | setup (code) | price | day% | vs open | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
     for (const m of igOnly) lines.push(`${m.symbol} (${IG_MARKETS[m.symbol].name}) | ${setupLabel(m)} | ${fmt(m.price, 4)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
   }
