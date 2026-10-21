@@ -3091,7 +3091,8 @@ async function evaluateEpic(
         const rec = recentWinExits.get(mode)!.get(epic)!;
         addLog(mode, 'info', epicName(epic), `Chase-guard active — ${rec.direction} closed +£${rec.plGbp.toFixed(2)} ${((Date.now() - rec.closedAt) / 3_600_000).toFixed(0)}h ago, needs a much stronger signal to re-enter ${rec.direction} side`);
       }
-      signal = newsMomentumSignal(bars, headlines, guard);
+      // LSE names (KA.D.*) are judged against London's session, the rest New York's.
+      signal = newsMomentumSignal(bars, headlines, guard, epic.startsWith('KA.D.') ? 'UK' : 'US');
       break;
     }
 

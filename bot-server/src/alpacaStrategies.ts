@@ -632,13 +632,8 @@ export function optionsNewsBasedEntrySignal(
   const prev   = closes[closes.length - 2];
   const dp     = prev > 0 ? ((last - prev) / prev) * 100 : 0;
 
-  // Last 5 sessions vs the 20 before (was a 20-day average vs everything
-  // earlier, which barely moves off 1.0x and dilutes a real surge).
-  const recent5     = bars.slice(-5);
-  const prior20     = bars.slice(-25, -5);
-  const avgVolPrior = prior20.length ? prior20.reduce((s, b) => s + b.v, 0) / prior20.length : 0;
-  const recentVol   = recent5.reduce((s, b) => s + b.v, 0) / recent5.length;
-  const volRatio    = avgVolPrior > 0 ? recentVol / avgVolPrior : 1;
+  // Today's volume vs a normal day for this stock — see dailyVolumeRatio.
+  const volRatio = dailyVolumeRatio(bars, 'US') ?? 0;
 
   const atr = calcAtr(bars);
   if (atr !== null && last > 0 && (atr / last) * 100 < OPTIONS_MIN_ATR_PCT) {
@@ -650,8 +645,8 @@ export function optionsNewsBasedEntrySignal(
   // Volume has to be flowing the trade's way, and the 12-week trend can't be against it.
   const trendUp   = readTrend(bars, 'BUY');
   const trendDown = readTrend(bars, 'SELL');
-  const callOk = !volumeFlowAgainst(bars, 'BUY')  && (trendUp.trend12w === null   || trendUp.trend12w >= 0);
-  const putOk  = !volumeFlowAgainst(bars, 'SELL') && (trendDown.trend12w === null || trendDown.trend12w <= 0);
+  const callOk = !todayAgainst(bars, 'BUY')  && (trendUp.trend12w === null   || trendUp.trend12w >= 0);
+  const putOk  = !todayAgainst(bars, 'SELL') && (trendDown.trend12w === null || trendDown.trend12w <= 0);
   // IG's floor: at least normal volume (last 5 vs prior 20) behind any entry.
   const volumeOk = volRatio >= 1.0;
   // See OPTIONS_MOMENTUM_MIN_SCORE's own comment for the two-tier reasoning.
@@ -742,9 +737,11 @@ export function optionsNewsBasedEntrySignal(
 // volatility — see momentumScore) — 60/85 means a position only opens on a
 // genuinely strong, well-confirmed setup, not just "technically cleared the
 // bar." Volume requirements raised alongside it for the same reason.
-const NEWS_MOMENTUM_MIN_SCORE          = 60;
-const NEWS_MOMENTUM_HIGH_SCORE         = 85;
-const NEWS_MOMENTUM_HIGH_SCORE_MIN_VOL = 0.9;
+// Same standard as Alpaca options (2026-10-21): 55 floor; 55-69 needs a
+// 1.5x day, 70+ at least a normal (1.0x) day.
+const NEWS_MOMENTUM_MIN_SCORE          = 55;
+const NEWS_MOMENTUM_HIGH_SCORE         = 70;
+const NEWS_MOMENTUM_HIGH_SCORE_MIN_VOL = 1.0;
 const NEWS_MOMENTUM_MID_SCORE_MIN_VOL  = 1.5;
 // Chase-guard bar — same idea as CHASE_REENTRY_MIN_SCORE above (a much
 // higher bar than the normal tier, applied only after a recent real win on
@@ -766,8 +763,65 @@ export function volumeFlowAgainst(bars: AlpacaBar[], action: 'BUY' | 'SELL', n =
   return action === 'BUY' ? down > up : up > down;
 }
 
+// ── Daily volume read (2026-10-21, per explicit request: evaluate volume
+// daily) ─────────────────────────────────────────────────────────────────
+// "Is TODAY unusually busy for this stock?": today's volume so far against
+// its average day over the prior 20 sessions, pro-rated for how much of the
+// session has run (floored at 15% so the opening minutes can't fake a
+// surge). Replaces a 20-day-average-vs-earlier read that almost never left
+// ~1.0x and blocked every IG news-momentum setup for two weeks. If the
+// newest bar isn't today's session yet (pre-open, weekend), the last full
+// day is judged instead.
+export type Exchange = 'US' | 'UK';
+const SESSIONS: Record<Exchange, { tz: string; open: number; close: number }> = {
+  US: { tz: 'America/New_York', open: 9 * 60 + 30, close: 16 * 60 },
+  UK: { tz: 'Europe/London',    open: 8 * 60,      close: 16 * 60 + 30 },
+};
+function localParts(d: Date, tz: string): { date: string; mins: number } {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(d);
+  const g = (t: string) => p.find(x => x.type === t)?.value ?? '';
+  return { date: `${g('year')}-${g('month')}-${g('day')}`, mins: Number(g('hour')) * 60 + Number(g('minute')) };
+}
+export function dailyVolumeRatio(bars: AlpacaBar[], exchange: Exchange = 'US', now = new Date()): number | null {
+  if (bars.length < 21) return null;
+  const sess = SESSIONS[exchange];
+  const last = bars[bars.length - 1];
+  const nowL = localParts(now, sess.tz);
+  // Daily bars are stamped at local midnight-ish; compare session dates.
+  const barDate = localParts(new Date(new Date(last.t).getTime() + 12 * 3_600_000), sess.tz).date;
+  const isToday = barDate === nowL.date && nowL.mins >= sess.open;
+  const prior = bars.slice(-21, -1);
+  const avg = prior.reduce((s, b) => s + b.v, 0) / prior.length;
+  if (!(avg > 0)) return null;
+  if (!isToday) return last.v / avg;
+  return last.v / (avg * Math.max(0.15, sessionVolumeShare((nowL.mins - sess.open) / (sess.close - sess.open))));
+}
+// Typical share of a full day's volume traded by a given fraction of the
+// session — volume clusters at the open and close (U-shape), so a straight
+// line understates the first hour (~20% done 45min in) and would inflate
+// early-session ratios.
+const VOLUME_CURVE: Array<[number, number]> = [
+  [0, 0], [0.077, 0.13], [0.154, 0.20], [0.308, 0.32], [0.462, 0.42],
+  [0.615, 0.52], [0.769, 0.62], [0.923, 0.77], [1, 1],
+];
+function sessionVolumeShare(elapsed: number): number {
+  const e = Math.max(0, Math.min(1, elapsed));
+  for (let i = 1; i < VOLUME_CURVE.length; i++) {
+    const [x0, y0] = VOLUME_CURVE[i - 1], [x1, y1] = VOLUME_CURVE[i];
+    if (e <= x1) return y0 + ((e - x0) / (x1 - x0)) * (y1 - y0);
+  }
+  return 1;
+}
+
+// Today's bar against a trade: a BUY needs today trading above its open
+// (buying volume), a SELL below it.
+export function todayAgainst(bars: AlpacaBar[], action: 'BUY' | 'SELL'): boolean {
+  const b = bars[bars.length - 1];
+  return action === 'BUY' ? !(b.c > b.o) : !(b.c < b.o);
+}
+
 export function newsMomentumSignal(
-  bars: AlpacaBar[], headlines: string[], chaseGuard?: DirectionalChaseGuard,
+  bars: AlpacaBar[], headlines: string[], chaseGuard?: DirectionalChaseGuard, exchange: Exchange = 'US',
 ): StrategySignal {
   if (bars.length < 60) return { action: 'HOLD', reason: 'insufficient bars for a news-based read' };
   const closes = bars.map(b => b.c);
@@ -775,11 +829,7 @@ export function newsMomentumSignal(
   const prev   = closes[closes.length - 2];
   const dp     = prev > 0 ? ((last - prev) / prev) * 100 : 0;
 
-  const recent20    = bars.slice(-20);
-  const priorVols    = bars.slice(0, -20).map(b => b.v);
-  const avgVolPrior  = priorVols.length ? priorVols.reduce((s, v) => s + v, 0) / priorVols.length : 0;
-  const recentVol    = recent20.reduce((s, b) => s + b.v, 0) / recent20.length;
-  const volRatio     = avgVolPrior > 0 ? recentVol / avgVolPrior : 1;
+  const volRatio = dailyVolumeRatio(bars, exchange) ?? 0;
 
   const sentiment = sentimentScore(headlines).score;
 
@@ -831,10 +881,11 @@ export function newsMomentumSignal(
   } else if (volRatio >= ANTICIPATE_MIN_VOL && Math.abs(sentiment) >= ANTICIPATE_MIN_SENT) {
     direction = sentiment > 0 ? 'BUY' : 'SELL';
     path = 'anticipating';
-    // Direction here comes from headlines alone — the volume surge it leans
-    // on has to be flowing the same way, or it's trading into the opposite.
-    if (volumeFlowAgainst(bars, direction)) { direction = null; path = ''; }
   }
+  // Today's volume has to be on the trade's side of today's open, on both
+  // paths — selling volume is not support for a buy.
+  let againstToday: 'BUY' | 'SELL' | null = null;
+  if (direction && todayAgainst(bars, direction)) { againstToday = direction; direction = null; path = ''; }
 
   const qualifies = score >= NEWS_MOMENTUM_MIN_SCORE
     && volRatio >= (score >= NEWS_MOMENTUM_HIGH_SCORE ? NEWS_MOMENTUM_HIGH_SCORE_MIN_VOL : NEWS_MOMENTUM_MID_SCORE_MIN_VOL);
@@ -858,7 +909,9 @@ export function newsMomentumSignal(
   }
 
   const guardActive = direction !== null && (direction === 'BUY' ? chaseGuard?.buy : chaseGuard?.sell);
-  const reason = !direction
+  const reason = againstToday
+    ? `${againstToday} setup but today's price is ${againstToday === 'BUY' ? 'below' : 'above'} its open — today's volume is on the other side, skipping`
+    : !direction
     ? `No directional read — ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today (needs ${CONFIRM_MOVE_PCT}% to confirm) and ${volRatio.toFixed(1)}x volume / sentiment ${sentiment.toFixed(2)} not decisive enough to anticipate`
     : !qualifies
     ? `${path} setup but score ${score}/volume ${volRatio.toFixed(1)}x didn't clear its tier`
