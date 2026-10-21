@@ -9,6 +9,12 @@
 //                 has volume data, the bar also needs at least normal volume
 //                 and to close above its open (volume on the buying side).
 //   TREND_SELL  — the mirror image for a short (new 20-bar closing low).
+//   PULLBACK_BUY  — buying the dip inside an uptrend (before the next leg):
+//                 above the 50-bar average with the 20 above the 50, price back
+//                 in the zone around the 20-bar average (1.5 ATR below to 0.5
+//                 ATR above), RSI under 55, and this bar closing up. Same rule
+//                 as the bot's own PULLBACK setup (opusTrader.ts setupOf).
+//   PULLBACK_SELL — the mirror image for a short.
 //   EXIT_LONG   — closes back below its 50-bar average (a long's trend broke).
 //   EXIT_SHORT  — closes back above its 50-bar average (a short's trend broke).
 // These are information for Opus, not orders — an alert wakes Opus early (any
@@ -26,6 +32,7 @@ slowLen = input.int(50, "Slow average (bars)", minval = 10)
 smaF   = ta.sma(close, fastLen)
 smaS   = ta.sma(close, slowLen)
 rsi14  = ta.rsi(close, 14)
+atr14  = ta.atr(14)
 avgVol = ta.sma(volume[1], 20)
 hasVol = not na(avgVol) and avgVol > 0
 volRatio = hasVol ? volume / avgVol : na
@@ -35,12 +42,19 @@ newLow  = close < ta.lowest(close[1], fastLen)
 
 buySetup  = close > smaF and close > smaS and smaF > smaS and newHigh and (not hasVol or (volRatio >= 1.0 and close > open))
 sellSetup = close < smaF and close < smaS and smaF < smaS and newLow  and (not hasVol or (volRatio >= 1.0 and close < open))
+pbLongSetup  = close > smaS and smaF > smaS and close >= smaF - 1.5 * atr14 and close <= smaF + 0.5 * atr14 and rsi14 < 55 and close > open
+pbShortSetup = close < smaS and smaF < smaS and close <= smaF + 1.5 * atr14 and close >= smaF - 0.5 * atr14 and rsi14 > 45 and close < open
 belowSlow = close < smaS
 aboveSlow = close > smaS
 
 // Only on the bar the condition starts, so an alert means something changed.
 buySignal       = buySetup  and not buySetup[1]
 sellSignal      = sellSetup and not sellSetup[1]
+// Pullbacks re-qualify often on intraday bars, so allow at most one alert per
+// 6 bars (a day on the 4-hour chart). That keeps alert-driven reviews, and
+// their cost, down.
+pbLongSignal    = pbLongSetup  and not pbLongSetup[1]  and nz(ta.barssince(pbLongSetup[1]), 999)  >= 6
+pbShortSignal   = pbShortSetup and not pbShortSetup[1] and nz(ta.barssince(pbShortSetup[1]), 999) >= 6
 exitLongSignal  = belowSlow and not belowSlow[1]
 exitShortSignal = aboveSlow and not aboveSlow[1]
 
@@ -55,6 +69,10 @@ if buySignal
     alert(msg("TREND_BUY"), alert.freq_once_per_bar_close)
 if sellSignal
     alert(msg("TREND_SELL"), alert.freq_once_per_bar_close)
+if pbLongSignal
+    alert(msg("PULLBACK_BUY"), alert.freq_once_per_bar_close)
+if pbShortSignal
+    alert(msg("PULLBACK_SELL"), alert.freq_once_per_bar_close)
 if exitLongSignal
     alert(msg("EXIT_LONG"), alert.freq_once_per_bar_close)
 if exitShortSignal
@@ -66,3 +84,5 @@ plotshape(buySignal,       "Trend buy",  shape.triangleup,   location.belowbar, 
 plotshape(sellSignal,      "Trend sell", shape.triangledown, location.abovebar, color.red,    size = size.small)
 plotshape(exitLongSignal,  "Exit long",  shape.xcross,       location.abovebar, color.orange, size = size.tiny)
 plotshape(exitShortSignal, "Exit short", shape.xcross,       location.belowbar, color.teal,   size = size.tiny)
+plotshape(pbLongSignal,    "Pullback buy",  shape.circle, location.belowbar, color.lime,    size = size.tiny)
+plotshape(pbShortSignal,   "Pullback sell", shape.circle, location.abovebar, color.fuchsia, size = size.tiny)
