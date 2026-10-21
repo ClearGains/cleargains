@@ -7,9 +7,11 @@ import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 
 type Account = 'alpaca_paper' | 'ig_demo' | 't212_live';
+type ModelId = 'claude-fable-5-1' | 'claude-opus-5-5' | 'claude-sonnet-5-5';
+type ModelInfo = { label: string; input: number; output: number };
 type Config = {
-  enabled: boolean; accounts: Record<Account, boolean>; monthlyCapUsd: number; cycleMinutes: number;
-  effort: 'low' | 'medium' | 'high'; alpacaMaxPositionUsd: number; alpacaMaxPositions: number;
+  enabled: boolean; model: ModelId; shadowModel: ModelId | null; accounts: Record<Account, boolean>; monthlyCapUsd: number; cycleMinutes: number;
+  effort: 'low' | 'medium' | 'high' | 'xhigh'; alpacaMaxPositionUsd: number; alpacaMaxPositions: number;
   igMaxRiskGbp: number; igMaxPositions: number; t212MaxPositionGbp: number; t212MaxTotalGbp: number;
   t212MaxPositions: number; minConviction: number; minHoldHours: number; reentryCooldownHours: number;
 };
@@ -23,7 +25,7 @@ type Status = {
   running: boolean; busy: boolean; apiKeyConfigured: boolean; usSessionOpen: boolean;
   nextRunAt: number | null; lastRunAt: string | null; config: Config;
   spend: { month: string; usd: number; requests: number; cycles: number };
-  budgetLeftUsd: number; positions: Position[]; closed: Closed[]; notes: string; watchlistExtra: string[];
+  budgetLeftUsd: number; models: Record<ModelId, ModelInfo>; positions: Position[]; closed: Closed[]; notes: string; watchlistExtra: string[];
   log: LogEntry[]; error?: string;
 };
 
@@ -136,7 +138,8 @@ export default function OpusTraderPage() {
         <div className="flex items-center gap-2">
           <Brain className="h-5 w-5 text-violet-400" />
           <h1 className="text-xl font-bold text-white">Opus Trader</h1>
-          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">CLAUDE OPUS 5.5</span>
+          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">{(cfg && status?.models[cfg.model]?.label) ?? 'CLAUDE'}</span>
+          {cfg?.shadowModel && <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-500/20 text-gray-400 border border-gray-500/30">shadow: {status?.models[cfg.shadowModel]?.label}</span>}
         </div>
         <span className="text-xs text-gray-500">
           Opus reviews the book every {cfg?.cycleMinutes ?? 30} minutes during the US session and opens, holds or closes positions on the accounts below. Every number it sees is computed by code; hard limits it can&apos;t override are enforced by code.
@@ -227,11 +230,32 @@ export default function OpusTraderPage() {
                   </label>
                 ))}
                 <label className="flex items-center justify-between gap-2 text-xs">
+                  <span className="text-gray-400" title="The model that trades">Trading model</span>
+                  <select className="w-40 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white"
+                    value={draft.model ?? cfg.model}
+                    onChange={e => setDraft(d => ({ ...d, model: e.target.value as ModelId }))}>
+                    {status && (Object.keys(status.models) as ModelId[]).map(m => (
+                      <option key={m} value={m}>{status.models[m].label} (${status.models[m].input}/${status.models[m].output})</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-center justify-between gap-2 text-xs">
+                  <span className="text-gray-400" title="Reads the same briefing each session and logs what it would do — never trades. Adds its cost.">Shadow model</span>
+                  <select className="w-40 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white"
+                    value={(draft.shadowModel !== undefined ? draft.shadowModel : cfg.shadowModel) ?? ''}
+                    onChange={e => setDraft(d => ({ ...d, shadowModel: (e.target.value || null) as ModelId | null }))}>
+                    <option value="">off</option>
+                    {status && (Object.keys(status.models) as ModelId[]).map(m => (
+                      <option key={m} value={m}>{status.models[m].label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-center justify-between gap-2 text-xs">
                   <span className="text-gray-400" title="How hard Opus thinks each session — higher costs more">Thinking effort</span>
                   <select className="w-24 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white"
                     value={draft.effort ?? cfg.effort}
                     onChange={e => setDraft(d => ({ ...d, effort: e.target.value as Config['effort'] }))}>
-                    <option value="low">low</option><option value="medium">medium</option><option value="high">high</option>
+                    <option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option>
                   </select>
                 </label>
                 <div className="flex gap-2 pt-1">

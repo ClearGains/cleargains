@@ -40,12 +40,23 @@ import { getGbpUsd } from './t212Bot';
 
 export type OpusAccount = 'alpaca_paper' | 'ig_demo' | 't212_live';
 
+// Selectable from the dashboard (2026-10-21, per explicit request to test the
+// stronger models on real results). Prices per million tokens, Claude API.
+export const MODELS = {
+  'claude-fable-5-1':  { label: 'Claude Fable 5.1',  input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
+  'claude-opus-5-5':   { label: 'Claude Opus 5.5',   input: 4,  output: 20, cacheRead: 0.20, cacheWrite: 5 },
+  'claude-sonnet-5-5': { label: 'Claude Sonnet 5.5', input: 2,  output: 10, cacheRead: 0.20, cacheWrite: 2.5 },
+} as const;
+export type OpusModel = keyof typeof MODELS;
+
 export type OpusConfig = {
   enabled:              boolean;
+  model:                OpusModel;          // the model that trades
+  shadowModel:          OpusModel | null;   // optional second model: same briefing, decisions logged, never executed
   accounts:             Record<OpusAccount, boolean>;
   monthlyCapUsd:        number;   // hard stop on API spend for the calendar month
   cycleMinutes:         number;   // how often Opus reviews the book during the US session
-  effort:               'low' | 'medium' | 'high';
+  effort:               'low' | 'medium' | 'high' | 'xhigh';
   alpacaMaxPositionUsd: number;
   alpacaMaxPositions:   number;
   igMaxRiskGbp:         number;   // £ lost if the stop is hit
@@ -60,6 +71,8 @@ export type OpusConfig = {
 
 const DEFAULT_CONFIG: OpusConfig = {
   enabled: false,
+  model: 'claude-opus-5-5',
+  shadowModel: null,
   accounts: { alpaca_paper: true, ig_demo: true, t212_live: true },
   monthlyCapUsd: 150,          // ≈ £120
   cycleMinutes: 30,
@@ -155,14 +168,15 @@ export function opusOwnedAlpacaSymbols(): Set<string> {
   return new Set(state.positions.filter(p => p.account === 'alpaca_paper').map(p => p.brokerRef));
 }
 
-// ── Pricing (Claude Opus 5.5, per million tokens) ───────────────────────────
+// ── Spend tracking ──────────────────────────────────────────────────────────
 
-const MODEL = 'claude-opus-5-5';
-const PRICE = { input: 4, output: 20, cacheRead: 0.20, cacheWrite: 5 };
-
-function recordUsage(u: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null }): number {
+// Priced at the requested model's rates. A server-side fallback (rare) bills
+// at the fallback model's own rates, so this is an estimate in that case —
+// the Anthropic console's own spend limit is the backstop.
+function recordUsage(model: OpusModel, u: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null }): number {
+  const price = MODELS[model];
   const cr = u.cache_read_input_tokens ?? 0, cw = u.cache_creation_input_tokens ?? 0;
-  const usd = (u.input_tokens * PRICE.input + u.output_tokens * PRICE.output + cr * PRICE.cacheRead + cw * PRICE.cacheWrite) / 1_000_000;
+  const usd = (u.input_tokens * price.input + u.output_tokens * price.output + cr * price.cacheRead + cw * price.cacheWrite) / 1_000_000;
   if (spend.month !== thisMonth()) spend = loadSpend();
   spend.usd += usd; spend.requests++;
   spend.inputTokens += u.input_tokens; spend.outputTokens += u.output_tokens;
@@ -292,7 +306,7 @@ function markClosed(p: OpusPosition, reason: string, pl: number | null): void {
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-const TOOLS: Anthropic.Tool[] = [
+const TOOLS: Anthropic.Beta.BetaTool[] = [
   {
     name: 'open_position',
     description: 'Open a new position. Code enforces hard limits and will reject (with the reason) anything outside them. size: alpaca_paper = USD to invest; ig_demo = GBP you are willing to lose if the stop is hit (stake is derived from it); t212_live = GBP to invest (BUY only, real money).',
@@ -572,6 +586,54 @@ let lastRunAt: string | null = null;
 let busy = false;
 
 const MAX_TURNS = 8;
+const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
+
+// One model call. Server-side fallback ("default") is on: if the model
+// declines for policy reasons, the API re-runs the request on a suitable
+// substitute inside the same call instead of the session just stopping.
+async function callModel(model: OpusModel, system: string, messages: Anthropic.Beta.BetaMessageParam[]): Promise<Anthropic.Beta.BetaMessage> {
+  client ??= new Anthropic();
+  return client.beta.messages.create({
+    model,
+    max_tokens: 16000,
+    output_config: { effort: config.effort },
+    system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+    tools: TOOLS,
+    messages,
+    betas: [FALLBACK_BETA],
+    fallbacks: 'default',
+  });
+}
+
+// ── Shadow model ────────────────────────────────────────────────────────────
+// Same briefing, one turn, nothing executed — its intended actions are logged
+// with the price at decision time so the two models can be compared on what
+// actually happened next (2026-10-21, per explicit request).
+
+const SHADOW_FILE = path.join(ROOT, 'opus-shadow.json');
+type ShadowDecision = { ts: string; model: OpusModel; tool: string; input: Record<string, unknown>; priceAtDecision: number | null };
+
+async function runShadow(model: OpusModel, briefing: string, metrics: Map<string, Metrics>): Promise<number> {
+  const system = `${SYSTEM_PROMPT}
+
+SHADOW MODE: you are being evaluated alongside another manager on the same briefing. Your tool calls are recorded but NOT executed and you will not see their results — decide exactly as you would if they were real, in one response.`;
+  const resp = await callModel(model, system, [{ role: 'user', content: briefing }]);
+  const usd = recordUsage(model, resp.usage);
+  const decisions = readJson<ShadowDecision[]>(SHADOW_FILE, []);
+  let n = 0;
+  for (const b of resp.content) {
+    if (b.type !== 'tool_use') continue;
+    const input = b.input as Record<string, unknown>;
+    const sym = typeof input.symbol === 'string' ? input.symbol.toUpperCase() : null;
+    decisions.push({ ts: new Date().toISOString(), model, tool: b.name, input, priceAtDecision: sym ? metrics.get(sym)?.price ?? null : null });
+    n++;
+    if (b.name === 'open_position') addLog('think', `[shadow ${MODELS[model].label}] would ${input.direction} ${input.symbol} on ${input.account} (conviction ${input.conviction}) — ${input.reason}`);
+    else if (b.name === 'close_position') addLog('think', `[shadow ${MODELS[model].label}] would close ${input.position_id} — ${input.reason}`);
+  }
+  writeJson(SHADOW_FILE, decisions.slice(-1000));
+  addLog('info', `[shadow ${MODELS[model].label}] ${n} intended action(s), cost $${usd.toFixed(3)}`);
+  return usd;
+}
 
 export async function runOpusSession(trigger: 'scheduled' | 'manual' = 'scheduled'): Promise<{ ok: boolean; error?: string }> {
   if (busy) return { ok: false, error: 'A session is already running' };
@@ -579,36 +641,30 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' = 'schedule
   if (budgetLeftUsd() <= 0.25) { addLog('wait', `Monthly cap reached ($${spend.usd.toFixed(2)} of $${config.monthlyCapUsd}) — no sessions until next month or a higher cap`); return { ok: false, error: 'Monthly budget reached' }; }
   busy = true;
   const started = Date.now();
+  const model = config.model;
   let sessionUsd = 0;
   try {
-    client ??= new Anthropic();
     const view = await livePositionView();
     await reconcile(view);
     const { text, metrics } = await buildBriefing(view);
     spend.cycles++; saveSpend();
-    addLog('info', `Session started (${trigger}) — ${metrics.size} symbols, ${state.positions.length} open positions`);
+    addLog('info', `Session started (${trigger}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions`);
 
-    const messages: Anthropic.MessageParam[] = [{ role: 'user', content: text }];
+    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text }];
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       if (budgetLeftUsd() <= 0.25) { addLog('wait', 'Budget ran out mid-session — stopping here'); break; }
-      const resp = await client.messages.create({
-        model: MODEL,
-        max_tokens: 16000,
-        output_config: { effort: config.effort },
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        tools: TOOLS,
-        messages,
-      });
-      sessionUsd += recordUsage(resp.usage);
-      if (resp.stop_reason === 'refusal') { addLog('error', 'Opus declined this session (refusal)'); break; }
+      const resp = await callModel(model, SYSTEM_PROMPT, messages);
+      sessionUsd += recordUsage(model, resp.usage);
+      if (resp.model !== model) addLog('info', `Served by fallback model ${resp.model} this turn`);
+      if (resp.stop_reason === 'refusal') { addLog('error', 'The model declined this session (refusal, fallback included)'); break; }
 
-      const toolUses = resp.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+      const toolUses = resp.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use');
       for (const b of resp.content) if (b.type === 'text' && b.text.trim()) addLog('think', b.text.trim().slice(0, 1500));
       if (resp.stop_reason === 'max_tokens') { addLog('error', 'Response hit max_tokens — tool inputs may be truncated, not running them'); break; }
       if (resp.stop_reason !== 'tool_use' || toolUses.length === 0) break;
 
       messages.push({ role: 'assistant', content: resp.content });
-      const results: Anthropic.ToolResultBlockParam[] = [];
+      const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
       for (const t of toolUses) {
         let out: string;
         const input = t.input as Record<string, unknown>;
@@ -626,6 +682,12 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' = 'schedule
       }
       messages.push({ role: 'user', content: results });
     }
+
+    if (config.shadowModel && config.shadowModel !== model && budgetLeftUsd() > 1) {
+      try { sessionUsd += await runShadow(config.shadowModel, text, metrics); }
+      catch (e) { addLog('error', `Shadow run failed: ${e instanceof Anthropic.APIError ? `${e.status} ${e.message}` : e instanceof Error ? e.message : String(e)}`); }
+    }
+
     addLog('info', `Session done in ${((Date.now() - started) / 1000).toFixed(0)}s — cost $${sessionUsd.toFixed(3)}, month $${spend.usd.toFixed(2)} of $${config.monthlyCapUsd}`);
     lastRunAt = new Date().toISOString();
     return { ok: true };
@@ -687,7 +749,9 @@ export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; con
   if (!(next.t212MaxPositionGbp > 0 && next.t212MaxPositionGbp <= 1000)) return { ok: false, config, error: 't212MaxPositionGbp must be 1-1000' };
   if (!(next.t212MaxTotalGbp >= next.t212MaxPositionGbp && next.t212MaxTotalGbp <= 3000)) return { ok: false, config, error: 't212MaxTotalGbp must be ≥ per-position and ≤ 3000' };
   if (!(next.minConviction >= 50 && next.minConviction <= 95)) return { ok: false, config, error: 'minConviction must be 50-95' };
-  if (!['low', 'medium', 'high'].includes(next.effort)) return { ok: false, config, error: 'effort must be low/medium/high' };
+  if (!['low', 'medium', 'high', 'xhigh'].includes(next.effort)) return { ok: false, config, error: 'effort must be low/medium/high/xhigh' };
+  if (!(next.model in MODELS)) return { ok: false, config, error: `model must be one of ${Object.keys(MODELS).join(', ')}` };
+  if (next.shadowModel !== null && !(next.shadowModel in MODELS)) return { ok: false, config, error: 'shadowModel must be a known model or null' };
   const cycleChanged = next.cycleMinutes !== config.cycleMinutes;
   config = next; saveConfig();
   addLog('info', `Settings changed: ${Object.keys(patch).join(', ')}`);
@@ -715,7 +779,7 @@ export async function getOpusStatus() {
   return {
     running, busy, apiKeyConfigured: !!process.env.ANTHROPIC_API_KEY,
     usSessionOpen: isUsSessionOpen(), nextRunAt, lastRunAt,
-    config, spend, budgetLeftUsd: budgetLeftUsd(),
+    config, spend, budgetLeftUsd: budgetLeftUsd(), models: MODELS,
     positions: state.positions.map(p => ({ ...p, livePl: view.get(p.id)?.pl ?? null, liveCurrent: view.get(p.id)?.current ?? null })),
     closed: state.closed.slice(-50).reverse(),
     notes: state.notes, watchlistExtra: state.watchlistExtra,
