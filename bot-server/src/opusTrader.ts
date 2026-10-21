@@ -487,7 +487,7 @@ const MAX_SCREENSHOTS_PER_SESSION = 3;
 
 const TV_TOOL: Anthropic.Beta.BetaTool = {
   name: 'tradingview_chart',
-  description: 'Look at a live TradingView chart. Switches the chart to the symbol and timeframe and returns the latest quote, a 100-bar summary (change, range, average volume, last 5 bars) and the values of the indicators on the chart; with screenshot=true you also get an image of the chart to read the structure yourself (trend, support/resistance, patterns). Use TradingView symbols with an exchange prefix, e.g. NASDAQ:AAPL, NYSE:JPM, TVC:NI225 (Japan 225), NASDAQ:NDX, SP:SPX, TVC:DJI, XETR:DAX, TVC:UKX, TVC:SX5E, FX:GBPUSD, FX:EURUSD, FX:USDJPY, FX:AUDUSD, TVC:UKOIL (Brent), NYMEX:NG1! (natural gas), TVC:SILVER. Slow (20-40s) and limited per session — use it on open positions and your strongest candidates, not to scan.',
+  description: 'Look at a live TradingView chart. Switches the chart to the symbol and timeframe and returns the latest quote, a 100-bar summary (change, range, average volume, last 5 bars) and the values of the indicators on the chart; with screenshot=true you also get an image of the chart to read the structure yourself (trend, support/resistance, patterns). Use TradingView symbols with an exchange prefix, e.g. NASDAQ:AAPL, NYSE:JPM for US shares; for IG markets use the FOREX.com CFD feeds, which are live and trade nearly round the clock like IG: FOREXCOM:JP225 (Japan 225), FOREXCOM:NAS100, FOREXCOM:SPX500, FOREXCOM:US30 (Wall Street), FOREXCOM:GER40, FOREXCOM:UK100, FOREXCOM:EU50, FOREXCOM:GBPUSD, FOREXCOM:EURUSD, FOREXCOM:USDJPY, FOREXCOM:AUDUSD, FOREXCOM:UKOIL (Brent), FOREXCOM:XAGUSD (silver), PEPPERSTONE:NATGAS. Slow (20-40s) and limited per session — use it on open positions and your strongest candidates, not to scan.',
   strict: true,
   input_schema: {
     type: 'object',
@@ -969,6 +969,12 @@ const TV_TO_OPUS: Record<string, string> = {
   GBPUSD: 'GBPUSD', EURUSD: 'EURUSD', USDJPY: 'USDJPY', AUDUSD: 'AUDUSD',
   SILVER: 'SILVER', XAGUSD: 'SILVER', 'SI1!': 'SILVER', UKOIL: 'BRENT', BRENT: 'BRENT', 'BRN1!': 'BRENT',
   'NG1!': 'NATGAS', NATGAS: 'NATGAS', NATURALGAS: 'NATGAS',
+  // Broker CFD feeds (FOREX.com / OANDA / Pepperstone) — free, live and
+  // trading nearly round the clock like IG, unlike the cash indices.
+  JP225USD: 'JP225', JPN225: 'JP225', NAS100: 'USTECH100', NAS100USD: 'USTECH100', USTEC: 'USTECH100',
+  SPX500: 'US500', SPX500USD: 'US500', US500: 'US500', US30: 'WALLST', US30USD: 'WALLST',
+  DE30EUR: 'DE40', DE40EUR: 'DE40', GER30: 'DE40', UK100GBP: 'UK100', EU50EUR: 'EU50', STOXX50: 'EU50',
+  BCOUSD: 'BRENT', XBRUSD: 'BRENT', NATGASUSD: 'NATGAS',
 };
 
 export function ingestTradingViewAlert(body: Record<string, unknown>): { ok: boolean; error?: string } {
