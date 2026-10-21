@@ -657,7 +657,10 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   if (inp.conviction < config.minConviction) return `REJECTED: conviction ${inp.conviction} is below the ${config.minConviction} minimum.`;
   if (!(inp.stop_loss_pct >= 2 && inp.stop_loss_pct <= 15)) return 'REJECTED: stop_loss_pct must be between 2 and 15.';
   if (!(inp.size > 0)) return 'REJECTED: size must be positive.';
-  if (!isUsSessionOpen() && !isIgOnly(symbol)) return `REJECTED: the US market is closed — only the IG markets (indices, FX, commodities) can be opened right now.`;
+  // Alpaca/T212 only in US hours; IG whenever IG itself says the market is
+  // dealable (checked against its live marketStatus below) — per the owner,
+  // IG trades can be round the clock, only Alpaca is tied to US hours.
+  if (!isUsSessionOpen() && inp.account !== 'ig_demo') return `REJECTED: ${inp.account} only trades during US market hours — use ig_demo, or wait for the open.`;
   const m = metrics.get(symbol);
   if (!m) return `REJECTED: no market data for ${symbol} this session.`;
   // Volume in the trade's direction — enforced in code, never by the model.
@@ -695,6 +698,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
       const session = await ig();
       const d = (await fetchMarketDetails(session, [epic])).get(epic);
       const px = inp.direction === 'BUY' ? d?.offer : d?.bid;
+      if (d?.marketStatus && d.marketStatus !== 'TRADEABLE') return `REJECTED: IG says ${symbol} is ${d.marketStatus} right now.`;
       if (typeof px !== 'number' || !(px > 0)) return `REJECTED: no live IG quote for ${symbol} right now.`;
       const minStop = d?.minStopDist || 1, minDeal = d?.minDealSize || 0.5;
       const stopDist = Math.max(minStop, px * inp.stop_loss_pct / 100);
@@ -869,7 +873,7 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
     if (trigger === 'scheduled') lastScheduledAt = Date.now();
     addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
 
-    const offNote = isUsSessionOpen() ? '' : `\n\nOFF-HOURS SESSION: the US market is closed. US-share prices above are from the last close and US shares can't be opened now — this review is for the IG markets (indices, FX, commodities), which are trading, and for managing open IG positions.`;
+    const offNote = isUsSessionOpen() ? '' : `\n\nOFF-HOURS SESSION: the US market is closed. US-share figures above are from the last session. Alpaca can't trade now; ig_demo can trade any market IG has open (indices, FX and commodities nearly round the clock; IG's US shares only when IG offers them out of hours — an order on a closed market is rejected). Manage open IG positions as usual.`;
     const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text + offNote }];
     let backtestsLeft = MAX_BACKTESTS_PER_SESSION;
     let chartsLeft = MAX_CHARTS_PER_SESSION, shotsLeft = MAX_SCREENSHOTS_PER_SESSION;
