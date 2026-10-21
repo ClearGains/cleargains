@@ -39,8 +39,11 @@ export async function getForeignOwnership(): Promise<ForeignOwnership> {
     // loss guard (£20 ceiling) was trying every 30s to close the options
     // bot's NVDA/PLTR demo positions (-£468/-£842) — option premiums swing
     // far past that ceiling by design, and their exits belong to that bot.
+    const opus = await import('./opusTrader');
     const dealIds = mr.meanReversionOwnedDealIds();
     for (const id of opts.igOptionsOwnedDealIds()) dealIds.add(id);
+    // Opus's IG demo positions (2026-10-21) — its own exits, not igStrategyBot's guards.
+    for (const id of opus.opusOwnedIgDealIds()) dealIds.add(id);
     cache = {
       at: Date.now(),
       owned: { dealIds, epics: mr.meanReversionOwnedEpics() },

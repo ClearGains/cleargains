@@ -1344,7 +1344,7 @@ async function pollExits(mode: T212Mode, positions: T212Position[]): Promise<voi
 // at these position sizes (£150-500) — a few % FX drift doesn't materially
 // change the outcome the way it would on a much larger order.
 let cachedGbpUsd: { at: number; rate: number } | null = null;
-async function getGbpUsd(): Promise<number> {
+export async function getGbpUsd(): Promise<number> {
   if (cachedGbpUsd && Date.now() - cachedGbpUsd.at < 30 * 60_000) return cachedGbpUsd.rate;
   try {
     const res = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GBPUSD=X?interval=1d&range=5d', {

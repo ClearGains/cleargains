@@ -595,8 +595,11 @@ async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, posi
     if (!liveSymbols.has(symbol)) { watchMap.delete(symbol); changed = true; }
   }
 
+  // Opus manages its own Alpaca paper positions (opusTrader.ts, 2026-10-21).
+  const opusOwned = await import('./opusTrader').then(m => m.opusOwnedAlpacaSymbols()).catch(() => new Set<string>());
   for (const pos of positions) {
     const symbol = pos.symbol;
+    if (opusOwned.has(symbol)) continue;
     // Dead market — no live price to reason about (see isOptionSymbol's own
     // GLD/PLTR/GOOGL history). Nothing actionable, so don't spend a call.
     if (parseFloat(pos.current_price) === 0 && parseFloat(pos.market_value) === 0) continue;

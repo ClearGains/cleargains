@@ -33,6 +33,7 @@ import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
 import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
+import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, type OpusConfig } from './opusTrader';
 import { getPerformanceSummary } from './performance';
 import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
@@ -463,6 +464,31 @@ app.post('/meme-coin/stop', auth, (_req: Request, res: Response) => {
 });
 app.get('/meme-coin/status', auth, (_req: Request, res: Response) => {
   void getMemeCoinBotStatus().then(status => res.json(status));
+});
+
+// Opus portfolio manager (opusTrader.ts) — dashboard controls.
+app.get('/opus/status', auth, (_req: Request, res: Response) => {
+  void getOpusStatus().then(s => res.json(s)).catch(e => res.status(500).json({ ok: false, error: String(e) }));
+});
+app.get('/opus/briefing', auth, (_req: Request, res: Response) => {
+  void previewOpusBriefing().then(r => res.json(r)).catch(e => res.status(500).json({ ok: false, error: String(e) }));
+});
+app.post('/opus/start', auth, (_req: Request, res: Response) => {
+  void startOpus().then(r => res.json(r));
+});
+app.post('/opus/stop', auth, (_req: Request, res: Response) => {
+  res.json(stopOpus());
+});
+app.post('/opus/run-now', auth, (_req: Request, res: Response) => {
+  // Returns immediately; the session's progress shows in the activity log.
+  void runOpusSession('manual');
+  res.json({ ok: true, message: 'Session started' });
+});
+app.post('/opus/config', auth, (req: Request, res: Response) => {
+  res.json(updateOpusConfig((req.body ?? {}) as Partial<OpusConfig>));
+});
+app.post('/opus/positions/:id/close', auth, (req: Request, res: Response) => {
+  void closeOpusPositionManually(String(req.params.id)).then(r => res.json(r));
 });
 
 // POST /alpaca/:mode/start
@@ -1048,6 +1074,14 @@ app.listen(PORT, '0.0.0.0', () => {
     const r = startMemeCoinBot();
     if (r.ok) console.log('[bot-server] Meme coin hype bot auto-resume successful');
     else console.error(`[bot-server] Meme coin hype bot auto-resume failed: ${r.error}`);
+  }
+
+  // Auto-resume the Opus portfolio manager if it was running before restart.
+  if (wasOpusRunning()) {
+    console.log('[bot-server] Auto-resuming Opus portfolio manager...');
+    void startOpus().then(r => r.ok
+      ? console.log('[bot-server] Opus auto-resume successful')
+      : console.error(`[bot-server] Opus auto-resume failed: ${r.error}`));
   }
 
   // Auto-resume the IG CFD bot (demo/live) if it was running before restart —

@@ -252,6 +252,11 @@ export async function getBars(
     limit:     String(singleSymbol ? Math.min(10_000, limit * 20) : limit),
     feed:      'iex',     // IEX is free; switch to 'sip' with paid data plan
     sort:      'asc',
+    // Split/dividend-adjusted (2026-10-21). Alpaca's default is 'raw', which
+    // left pre-split prices in every moving average, trend and 52-week high —
+    // confirmed live: NFLX's 10:1 split made it read 94.7% off its high
+    // (raw max $1,241 vs $65 now; adjusted max $124).
+    adjustment: 'all',
   });
   if (singleSymbol) params.set('start', startDateFor(timeframe, limit));
 
