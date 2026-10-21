@@ -10,9 +10,9 @@ type Account = 'alpaca_paper' | 'ig_demo' | 't212_live';
 type ModelId = 'claude-fable-5-1' | 'claude-opus-5-5' | 'claude-sonnet-5-5';
 type ModelInfo = { label: string; input: number; output: number };
 type Config = {
-  enabled: boolean; model: ModelId; shadowModel: ModelId | null; accounts: Record<Account, boolean>; monthlyCapUsd: number; cycleMinutes: number;
+  enabled: boolean; model: ModelId; shadowModel: ModelId | null; accounts: Record<Account, boolean>; monthlyCapUsd: number; cycleMinutes: number; offHoursMinutes: number;
   effort: 'low' | 'medium' | 'high' | 'xhigh'; alpacaMaxPositionUsd: number; alpacaMaxPositions: number;
-  igMaxRiskGbp: number; igMaxPositions: number; t212MaxPositionGbp: number; t212MaxTotalGbp: number;
+  igMaxRiskGbp: number; igMaxRiskPct: number; igMaxPositions: number; t212MaxPositionGbp: number; t212MaxTotalGbp: number;
   t212MaxPositions: number; minConviction: number; minHoldHours: number; reentryCooldownHours: number;
   webResearch: boolean; searchesPerSession: number; researchSearches: number;
 };
@@ -61,7 +61,9 @@ function logColor(type: LogEntry['type']): string {
 // Editable numeric settings shown in the settings card.
 const NUMBER_FIELDS: Array<{ key: keyof Config; label: string; hint: string }> = [
   { key: 'monthlyCapUsd',        label: 'Monthly API cap ($)',        hint: 'Opus pauses once spend reaches this' },
-  { key: 'cycleMinutes',         label: 'Review every (min)',         hint: '15-240, US session only' },
+  { key: 'cycleMinutes',         label: 'Review every (min)',         hint: '15-240, US session' },
+  { key: 'offHoursMinutes',      label: 'Off-hours IG review (min)',  hint: '0 = off, 30-480; weekdays outside US hours' },
+  { key: 'igMaxRiskPct',         label: 'IG max risk (% of balance)', hint: '0-5; the larger of this and the £ figure' },
   { key: 'minConviction',        label: 'Min conviction (%)',         hint: 'Entries below this are rejected' },
   { key: 't212MaxPositionGbp',   label: 'T212 max / position (£)',    hint: 'Real money' },
   { key: 't212MaxTotalGbp',      label: 'T212 max total (£)',         hint: 'Real money, across Opus positions' },
@@ -148,7 +150,7 @@ export default function OpusTraderPage() {
           {cfg?.shadowModel && <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-500/20 text-gray-400 border border-gray-500/30">shadow: {status?.models[cfg.shadowModel]?.label}</span>}
         </div>
         <span className="text-xs text-gray-500">
-          Opus reviews the book every {cfg?.cycleMinutes ?? 30} minutes during the US session and opens, holds or closes positions on the accounts below. Every number it sees is computed by code; hard limits it can&apos;t override are enforced by code.
+          Opus reviews the book every {cfg?.cycleMinutes ?? 30} minutes during the US session (and every {cfg?.offHoursMinutes ?? 120} minutes outside it for IG indices, FX and commodities) and opens, holds or closes positions on the accounts below. Every number it sees is computed by code; hard limits it can&apos;t override are enforced by code.
         </span>
       </div>
 

@@ -63,6 +63,8 @@ export type OpusConfig = {
   accounts:             Record<OpusAccount, boolean>;
   monthlyCapUsd:        number;   // hard stop on API spend for the calendar month
   cycleMinutes:         number;   // how often Opus reviews the book during the US session
+  offHoursMinutes:      number;   // outside US hours, review IG markets this often on weekdays (0 = off)
+  tradingviewCharts:    boolean;  // offer the tradingview_chart tool (needs TV_GATE_HOST and a logged-in chart server)
   effort:               'low' | 'medium' | 'high' | 'xhigh';
   alpacaMaxPositionUsd: number;
   alpacaMaxPositions:   number;
@@ -87,6 +89,8 @@ const DEFAULT_CONFIG: OpusConfig = {
   accounts: { alpaca_paper: true, ig_demo: true, t212_live: true },
   monthlyCapUsd: 150,          // ≈ £120
   cycleMinutes: 30,
+  offHoursMinutes: 120,
+  tradingviewCharts: false,
   effort: 'medium',
   alpacaMaxPositionUsd: 5_000,
   alpacaMaxPositions: 8,
@@ -293,6 +297,19 @@ function isUsSessionOpen(now = new Date()): boolean {
   return m >= 9 * 60 + 30 && m < 16 * 60;
 }
 
+// IG's indices/FX/commodities trade nearly round the clock on weekdays
+// (Sunday ~22:00 to Friday ~21:00 UK). Japan 225 moves mostly overnight UK
+// time and FX trades 24h, so a US-hours-only Opus would sleep through most of
+// the action in the IG markets it now trades (2026-10-21).
+function isIgWindowOpen(now = new Date()): boolean {
+  const day = now.getUTCDay(), h = now.getUTCHours();
+  if (day === 6) return false;
+  if (day === 0) return h >= 22;
+  if (day === 5) return h < 20;
+  return true;
+}
+const offHours = () => !isUsSessionOpen() && isIgWindowOpen() && config.accounts.ig_demo && config.offHoursMinutes > 0;
+
 // ── Broker adapters ─────────────────────────────────────────────────────────
 
 let igSession: IGSession | null = null;
@@ -465,6 +482,7 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
 const TV_GATE_HOST = process.env.TV_GATE_HOST ?? '';
 const TV_GATE_KEY = process.env.TV_GATE_KEY ?? path.join(os.homedir(), '.ssh', 'tv_gate');
 const MAX_CHARTS_PER_SESSION = 6;
+const tvChartsOn = () => Boolean(TV_GATE_HOST) && config.tradingviewCharts;
 const MAX_SCREENSHOTS_PER_SESSION = 3;
 
 const TV_TOOL: Anthropic.Beta.BetaTool = {
@@ -639,6 +657,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   if (inp.conviction < config.minConviction) return `REJECTED: conviction ${inp.conviction} is below the ${config.minConviction} minimum.`;
   if (!(inp.stop_loss_pct >= 2 && inp.stop_loss_pct <= 15)) return 'REJECTED: stop_loss_pct must be between 2 and 15.';
   if (!(inp.size > 0)) return 'REJECTED: size must be positive.';
+  if (!isUsSessionOpen() && !isIgOnly(symbol)) return `REJECTED: the US market is closed — only the IG markets (indices, FX, commodities) can be opened right now.`;
   const m = metrics.get(symbol);
   if (!m) return `REJECTED: no market data for ${symbol} this session.`;
   // Volume in the trade's direction — enforced in code, never by the model.
@@ -769,7 +788,7 @@ const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 // declines for policy reasons, the API re-runs the request on a suitable
 // substitute inside the same call instead of the session just stopping.
 function toolsFor(searches: number): Anthropic.Beta.BetaToolUnion[] {
-  const base: Anthropic.Beta.BetaToolUnion[] = TV_GATE_HOST ? [...TOOLS, TV_TOOL] : TOOLS;
+  const base: Anthropic.Beta.BetaToolUnion[] = tvChartsOn() ? [...TOOLS, TV_TOOL] : TOOLS;
   if (!config.webResearch || searches <= 0) return base;
   return [
     ...base,
@@ -843,13 +862,15 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
     await reconcile(view);
     const { text, metrics } = await buildBriefing(view);
     spend.cycles++; saveSpend();
-    const research = config.webResearch && nyDate() !== state.lastResearchDay;
+    const research = config.webResearch && isUsSessionOpen() && nyDate() !== state.lastResearchDay;
     if (research) { state.lastResearchDay = nyDate(); saveState(); }
     const searches = research ? config.researchSearches : config.searchesPerSession;
-    const system = SYSTEM_PROMPT + (TV_GATE_HOST ? TV_PROMPT : '') + (research ? RESEARCH_PROMPT : '');
+    const system = SYSTEM_PROMPT + (tvChartsOn() ? TV_PROMPT : '') + (research ? RESEARCH_PROMPT : '');
+    if (trigger === 'scheduled') lastScheduledAt = Date.now();
     addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
 
-    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text }];
+    const offNote = isUsSessionOpen() ? '' : `\n\nOFF-HOURS SESSION: the US market is closed. US-share prices above are from the last close and US shares can't be opened now — this review is for the IG markets (indices, FX, commodities), which are trading, and for managing open IG positions.`;
+    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text + offNote }];
     let backtestsLeft = MAX_BACKTESTS_PER_SESSION;
     let chartsLeft = MAX_CHARTS_PER_SESSION, shotsLeft = MAX_SCREENSHOTS_PER_SESSION;
     for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -936,11 +957,22 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
 // TradingView webhook alerts (2026-10-21). Stored for the briefing; a fresh
 // alert also triggers a review during the US session, at most every 15min.
 let lastTvTriggeredAt = 0;
+// TradingView's names for the IG-only markets → Opus symbols.
+const TV_TO_OPUS: Record<string, string> = {
+  NI225: 'JP225', JP225: 'JP225', NKY: 'JP225', NKD1: 'JP225', 'NKD1!': 'JP225',
+  NDX: 'USTECH100', 'NQ1!': 'USTECH100', SPX: 'US500', 'ES1!': 'US500', DJI: 'WALLST', 'YM1!': 'WALLST',
+  DAX: 'DE40', DE40: 'DE40', GER40: 'DE40', UKX: 'UK100', UK100: 'UK100', SX5E: 'EU50', EU50: 'EU50',
+  GBPUSD: 'GBPUSD', EURUSD: 'EURUSD', USDJPY: 'USDJPY', AUDUSD: 'AUDUSD',
+  SILVER: 'SILVER', XAGUSD: 'SILVER', 'SI1!': 'SILVER', UKOIL: 'BRENT', BRENT: 'BRENT', 'BRN1!': 'BRENT',
+  'NG1!': 'NATGAS', NATGAS: 'NATGAS', NATURALGAS: 'NATGAS',
+};
+
 export function ingestTradingViewAlert(body: Record<string, unknown>): { ok: boolean; error?: string } {
   const secret = process.env.TRADINGVIEW_SECRET;
   if (!secret || body.secret !== secret) return { ok: false, error: 'bad secret' };
-  const symbol = String(body.symbol ?? body.ticker ?? '').toUpperCase().replace(/^[A-Z]+:/, '').trim();
-  if (!/^[A-Z.]{1,10}$/.test(symbol)) return { ok: false, error: 'symbol required' };
+  const rawSym = String(body.symbol ?? body.ticker ?? '').toUpperCase().replace(/^[A-Z0-9_]+:/, '').trim();
+  const symbol = TV_TO_OPUS[rawSym] ?? rawSym;
+  if (!/^[A-Z0-9.!]{1,12}$/.test(symbol)) return { ok: false, error: 'symbol required' };
   const num = (v: unknown) => { const n = Number(v); return isFinite(n) ? n : null; };
   const alert: TvAlert = {
     ts: new Date().toISOString(), symbol,
@@ -953,16 +985,22 @@ export function ingestTradingViewAlert(body: Record<string, unknown>): { ok: boo
   if (state.tvAlerts.length > 300) state.tvAlerts = state.tvAlerts.slice(-300);
   saveState();
   addLog('info', `[TradingView] ${symbol} ${alert.signal}${alert.timeframe ? ` [${alert.timeframe}]` : ''}${alert.price !== null ? ` @ ${alert.price}` : ''}`);
-  if (running && !busy && isUsSessionOpen() && Date.now() - lastTvTriggeredAt > 15 * 60_000) {
+  const igRelevant = isIgOnly(symbol) || state.positions.some(p => p.account === 'ig_demo' && p.symbol === symbol);
+  const canAct = isUsSessionOpen() || (isIgWindowOpen() && config.accounts.ig_demo && igRelevant);
+  if (running && !busy && canAct && Date.now() - lastTvTriggeredAt > 15 * 60_000) {
     lastTvTriggeredAt = Date.now();
     void runOpusSession('tradingview');
   }
   return { ok: true };
 }
 
+let lastScheduledAt = 0;
+
 function schedule(): void {
   if (timer) clearTimeout(timer);
   if (!running) { nextRunAt = null; return; }
+  // Off-hours the tick still fires on the US cadence (so the US open is never
+  // missed) but only runs a session once offHoursMinutes have passed.
   const delay = config.cycleMinutes * 60_000;
   nextRunAt = Date.now() + delay;
   timer = setTimeout(() => { void tick(); }, delay);
@@ -971,6 +1009,7 @@ function schedule(): void {
 async function tick(): Promise<void> {
   if (!running) return;
   if (isUsSessionOpen()) await runOpusSession('scheduled');
+  else if (offHours() && Date.now() - lastScheduledAt >= config.offHoursMinutes * 60_000 - 60_000) await runOpusSession('scheduled');
   schedule();
 }
 
@@ -984,8 +1023,8 @@ export async function startOpus(): Promise<{ ok: boolean; error?: string }> {
     if (config.accounts.ig_demo) { const m = await import('./igStrategyBot'); m.pauseIgStrategyBot('demo'); }
     if (config.accounts.alpaca_paper) { const m = await import('./alpacaBot'); m.pauseAlpacaBot('paper'); }
   } catch (e) { addLog('error', `Couldn't pause an existing bot: ${e instanceof Error ? e.message : String(e)}`); }
-  addLog('info', `Opus started — reviewing every ${config.cycleMinutes}min during the US session; existing IG demo / Alpaca paper bots paused for new entries`);
-  if (isUsSessionOpen()) void runOpusSession('scheduled');
+  addLog('info', `Opus started — reviewing every ${config.cycleMinutes}min during the US session${config.offHoursMinutes > 0 && config.accounts.ig_demo ? ` and every ${config.offHoursMinutes}min outside it for IG markets (weekdays)` : ''}; existing IG demo / Alpaca paper bots paused for new entries`);
+  if (isUsSessionOpen() || offHours()) void runOpusSession('scheduled');
   schedule();
   return { ok: true };
 }
@@ -1006,6 +1045,7 @@ export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; con
   // Sanity bounds so a typo in the UI can't remove the guard rails.
   if (!(next.monthlyCapUsd > 0 && next.monthlyCapUsd <= 500)) return { ok: false, config, error: 'monthlyCapUsd must be 1-500' };
   if (!(next.cycleMinutes >= 15 && next.cycleMinutes <= 240)) return { ok: false, config, error: 'cycleMinutes must be 15-240' };
+  if (!(next.offHoursMinutes === 0 || (next.offHoursMinutes >= 30 && next.offHoursMinutes <= 480))) return { ok: false, config, error: 'offHoursMinutes must be 0 (off) or 30-480' };
   if (!(next.t212MaxPositionGbp > 0 && next.t212MaxPositionGbp <= 1000)) return { ok: false, config, error: 't212MaxPositionGbp must be 1-1000' };
   if (!(next.t212MaxTotalGbp >= next.t212MaxPositionGbp && next.t212MaxTotalGbp <= 3000)) return { ok: false, config, error: 't212MaxTotalGbp must be ≥ per-position and ≤ 3000' };
   if (!(next.minConviction >= 50 && next.minConviction <= 95)) return { ok: false, config, error: 'minConviction must be 50-95' };
