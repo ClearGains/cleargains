@@ -13,7 +13,7 @@ type Config = {
   enabled: boolean; model: ModelId; shadowModel: ModelId | null; accounts: Record<Account, boolean>; monthlyCapUsd: number; cycleMinutes: number; offHoursMinutes: number; alpacaEveryMinutes: number;
   effort: 'low' | 'medium' | 'high' | 'xhigh'; alpacaMaxPositionUsd: number; alpacaMaxPositions: number;
   igMaxRiskGbp: number; igMaxRiskPct: number; igMaxPositions: number; t212MaxPositionGbp: number; t212MaxTotalGbp: number;
-  t212MaxPositions: number; minConviction: number; minHoldHours: number; reentryCooldownHours: number;
+  t212MaxPositions: number; minConviction: number; probeMinConviction: number; probeSizePct: number; minHoldHours: number; reentryCooldownHours: number;
   webResearch: boolean; searchesPerSession: number; researchSearches: number;
 };
 type TvAlert = { ts: string; symbol: string; signal: string; timeframe: string | null; price: number | null; note: string | null };
@@ -65,7 +65,9 @@ const NUMBER_FIELDS: Array<{ key: keyof Config; label: string; hint: string }> =
   { key: 'alpacaEveryMinutes',   label: 'Alpaca review every (min)',  hint: '30-390; long-term account, so less often than IG' },
   { key: 'offHoursMinutes',      label: 'Off-hours IG review (min)',  hint: '0 = off, 30-480; weekdays outside US hours' },
   { key: 'igMaxRiskPct',         label: 'IG max risk (% of balance)', hint: '0-5; the larger of this and the £ figure' },
-  { key: 'minConviction',        label: 'Min conviction (%)',         hint: 'Entries below this are rejected' },
+  { key: 'minConviction',        label: 'Min conviction (%)',         hint: 'Full-size entries need at least this' },
+  { key: 'probeMinConviction',   label: 'Probe min conviction (%)',   hint: 'Paper/demo: from here up to the full minimum opens a small probe (set equal to turn off)' },
+  { key: 'probeSizePct',         label: 'Probe size (% of normal)',   hint: '10-100' },
   { key: 't212MaxPositionGbp',   label: 'T212 max / position (£)',    hint: 'Real money' },
   { key: 't212MaxTotalGbp',      label: 'T212 max total (£)',         hint: 'Real money, across Opus positions' },
   { key: 't212MaxPositions',     label: 'T212 max positions',         hint: '' },

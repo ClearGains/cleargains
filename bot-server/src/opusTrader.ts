@@ -76,6 +76,8 @@ export type OpusConfig = {
   t212MaxTotalGbp:      number;
   t212MaxPositions:     number;
   minConviction:        number;   // matches the 65% entry bar used everywhere else
+  probeMinConviction:   number;   // paper/demo only: conviction from here up to minConviction opens a small PROBE
+  probeSizePct:         number;   // probe size as % of the normal size cap
   webResearch:          boolean;  // give the model web search/fetch for its own research
   searchesPerSession:   number;   // web searches allowed in a normal session
   researchSearches:     number;   // web searches allowed in the daily research session
@@ -103,6 +105,8 @@ const DEFAULT_CONFIG: OpusConfig = {
   t212MaxTotalGbp: 300,
   t212MaxPositions: 3,
   minConviction: 65,
+  probeMinConviction: 55,
+  probeSizePct: 33,
   minHoldHours: 4,
   reentryCooldownHours: 24,
   webResearch: true,
@@ -123,6 +127,7 @@ export type OpusPosition = {
   stopOrderId?: string;        // T212 stop-limit order
   openedAt:    number;
   conviction:  number;
+  probe?:      boolean;   // opened as a small probe (conviction below minConviction)
   reason:      string;
 };
 
@@ -552,6 +557,8 @@ Data you get: every number in the briefing is computed by code from market data 
 
 Entry timing — the "setup (code)" column: code labels each market BREAKOUT (trend up, today pushing higher on volume — the move is under way) or PULLBACK (trend up, price has dipped back to around its 20-day average and is turning up today — entering before the next leg), mirrored for shorts. In a 3-year backtest on 15 large caps both had a similar edge per trade (breakout +3.5% avg, pullback +3.2% avg with smaller losses), and they mostly occur on different days, so use both. Prefer a PULLBACK over chasing a stock that has already run hard (high RSI, far above its 20-day) — buying after the jump is the most common way a good trend trade starts at a loss. A setup label is a candidate, not an instruction; you still need a thesis and conviction.
 
+TEST PERIOD — PROBES: the owner is running this as a test of whether the approach makes money, and that needs trades to measure. On alpaca_paper and ig_demo, when a code-labelled setup (or another real thesis) is in front of you and your honest conviction is between the probe minimum and the full minimum, open it anyway as a PROBE: code sizes it automatically at a fraction of normal, and every other rule (stops, caps, volume/setup gates, hours) still applies. Don't skip a reasonable setup just because you're not highly confident; skip only when you see a real reason against it (e.g. earnings tomorrow, thesis contradicted). Never inflate conviction to get a full-size position. t212_live is real money: no probes there.
+
 Hard rules enforced by code (an order outside them is rejected and you'll see why): every position needs a stop-loss of 2-15%; conviction must be at least the configured minimum; a new stock entry needs EITHER today's volume ≥ a normal day with today trading on the trade's side of its open, OR a PULLBACK setup (see below); per-account position and size caps; no discretionary close within the minimum hold window (stops still fire); no re-entry into a symbol within the cooldown after closing it.
 
 Building your own logic: you have a run_backtest tool. Use it to test an idea before you rely on it — indicators available: ${INDICATORS.join(', ')}. Judge a rule against buy-and-hold over the same window and on enough trades (a handful proves nothing); costs aren't modelled, so prefer rules whose edge isn't razor-thin. When a rule holds up, write it into your notes as part of your approach and apply it; when live results disagree with a backtest, trust the live results and revise. Testing is most useful in the daily research session.
@@ -664,7 +671,20 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   metrics: Map<string, Metrics>): Promise<string> {
   const symbol = inp.symbol.toUpperCase().trim();
   if (!config.accounts[inp.account]) return `REJECTED: ${inp.account} is disabled.`;
-  if (inp.conviction < config.minConviction) return `REJECTED: conviction ${inp.conviction} is below the ${config.minConviction} minimum.`;
+  // Probes (2026-10-21, at the owner's request for this test period: "we need
+  // it to trade even at a small position"). On the paper/demo accounts, a
+  // conviction between probeMinConviction and minConviction still opens, at
+  // probeSizePct of the normal size. Every hard rule still applies, and real
+  // money (t212_live) never probes. Positions are tagged probe vs full so the
+  // two can be compared once results are in.
+  const probe = inp.conviction < config.minConviction;
+  if (probe && (inp.account === 't212_live' || inp.conviction < config.probeMinConviction)) {
+    return inp.account === 't212_live'
+      ? `REJECTED: conviction ${inp.conviction} is below the ${config.minConviction} minimum (t212_live is real money, so there are no probes there).`
+      : `REJECTED: conviction ${inp.conviction} is below the ${config.probeMinConviction} probe minimum.`;
+  }
+  const sizeFactor = probe ? config.probeSizePct / 100 : 1;
+  const tag = probe ? ' [PROBE]' : '';
   if (!(inp.stop_loss_pct >= 2 && inp.stop_loss_pct <= 15)) return 'REJECTED: stop_loss_pct must be between 2 and 15.';
   if (!(inp.size > 0)) return 'REJECTED: size must be positive.';
   // Alpaca/T212 only in US hours; IG whenever IG itself says the market is
@@ -692,7 +712,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   try {
     if (inp.account === 'alpaca_paper') {
       if (mine.length >= config.alpacaMaxPositions) return `REJECTED: already at ${config.alpacaMaxPositions} alpaca_paper positions.`;
-      const usd = Math.min(inp.size, config.alpacaMaxPositionUsd);
+      const usd = Math.min(inp.size, config.alpacaMaxPositionUsd) * sizeFactor;
       const qty = Math.floor(usd / m.price);
       if (qty < 1) return `REJECTED: $${usd} buys less than one share at $${m.price.toFixed(2)}.`;
       const stop = round2(inp.direction === 'BUY' ? m.price * (1 - inp.stop_loss_pct / 100) : m.price * (1 + inp.stop_loss_pct / 100));
@@ -701,9 +721,9 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
         order_class: 'oto', stop_loss: { stop_price: stop }, client_order_id: `opus-${symbol}-${Date.now()}`,
       });
       const p: OpusPosition = { id: newId(), account: 'alpaca_paper', symbol, brokerRef: symbol, direction: inp.direction, size: qty,
-        entryPrice: m.price, stopPrice: stop, openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason };
+        entryPrice: m.price, stopPrice: stop, openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, probe };
       state.positions.push(p); saveState();
-      addLog('enter', `alpaca_paper ${inp.direction} ${qty} ${symbol} @~$${m.price.toFixed(2)} stop $${stop} (conviction ${inp.conviction}) — ${inp.reason}`);
+      addLog('enter', `alpaca_paper${tag} ${inp.direction} ${qty} ${symbol} @~$${m.price.toFixed(2)} stop $${stop} (conviction ${inp.conviction}) — ${inp.reason}`);
       return `OPENED id=${p.id}: ${inp.direction} ${qty} ${symbol} @~$${m.price.toFixed(2)}, stop $${stop}.`;
     }
 
@@ -720,15 +740,15 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
       const minStop = d?.minStopDist || 1, minDeal = d?.minDealSize || 0.5;
       const stopDist = Math.max(minStop, px * inp.stop_loss_pct / 100);
       const igCap = Math.max(config.igMaxRiskGbp, (await fetchAccountFunds(session).catch(() => ({ balance: 0 }))).balance * config.igMaxRiskPct / 100);
-      const riskGbp = Math.min(inp.size, igCap);
+      const riskGbp = Math.min(inp.size, igCap) * sizeFactor;
       const stake = Math.max(minDeal, calcStake(riskGbp, stopDist, minDeal));
       if (stake * stopDist > igCap * 1.5) return `REJECTED: IG's minimum stake (${minDeal}/pt) with a ${inp.stop_loss_pct}% stop risks £${(stake * stopDist).toFixed(0)}, above the £${igCap.toFixed(0)} cap — try a tighter stop or another market.`;
       const r = await igPlaceOrder(session, epic, inp.direction, stake, stopDist, undefined, 'GBP', false);
       const stop = inp.direction === 'BUY' ? r.level - stopDist : r.level + stopDist;
       const p: OpusPosition = { id: newId(), account: 'ig_demo', symbol, brokerRef: r.dealId, epic, direction: inp.direction, size: stake,
-        entryPrice: r.level, stopPrice: round2(stop), openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason };
+        entryPrice: r.level, stopPrice: round2(stop), openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, probe };
       state.positions.push(p); saveState();
-      addLog('enter', `ig_demo ${inp.direction} ${symbol} £${stake}/pt @ ${r.level} stop ${round2(stop)} (risk ≈ £${(stake * stopDist).toFixed(2)}, conviction ${inp.conviction}) — ${inp.reason}`);
+      addLog('enter', `ig_demo${tag} ${inp.direction} ${symbol} £${stake}/pt @ ${r.level} stop ${round2(stop)} (risk ≈ £${(stake * stopDist).toFixed(2)}, conviction ${inp.conviction}) — ${inp.reason}`);
       return `OPENED id=${p.id}: ${inp.direction} ${symbol} £${stake}/pt @ ${r.level} (IG points), stop ${round2(stop)}, risk ≈ £${(stake * stopDist).toFixed(2)}.`;
     }
 
@@ -1143,6 +1163,8 @@ export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; con
   if (!(next.t212MaxPositionGbp > 0 && next.t212MaxPositionGbp <= 1000)) return { ok: false, config, error: 't212MaxPositionGbp must be 1-1000' };
   if (!(next.t212MaxTotalGbp >= next.t212MaxPositionGbp && next.t212MaxTotalGbp <= 3000)) return { ok: false, config, error: 't212MaxTotalGbp must be ≥ per-position and ≤ 3000' };
   if (!(next.minConviction >= 50 && next.minConviction <= 95)) return { ok: false, config, error: 'minConviction must be 50-95' };
+  if (!(next.probeMinConviction >= 40 && next.probeMinConviction <= next.minConviction)) return { ok: false, config, error: 'probeMinConviction must be 40 to minConviction (set equal to turn probes off)' };
+  if (!(next.probeSizePct >= 10 && next.probeSizePct <= 100)) return { ok: false, config, error: 'probeSizePct must be 10-100' };
   if (!['low', 'medium', 'high', 'xhigh'].includes(next.effort)) return { ok: false, config, error: 'effort must be low/medium/high/xhigh' };
   if (!(next.searchesPerSession >= 0 && next.searchesPerSession <= 10)) return { ok: false, config, error: 'searchesPerSession must be 0-10' };
   if (!(next.researchSearches >= 0 && next.researchSearches <= 20)) return { ok: false, config, error: 'researchSearches must be 0-20' };
