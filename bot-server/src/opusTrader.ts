@@ -18,6 +18,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import { execFile } from 'child_process';
 import {
   getBars, getAccount, getPositions as getAlpacaPositions, placeOrder as alpacaPlaceOrder,
   closePosition as alpacaClosePosition, cancelOrdersForSymbol, type AlpacaBar,
@@ -455,11 +457,69 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
   },
 ];
 
+// ── TradingView chart (2026-10-21) ─────────────────────────────────────────
+// A TradingView web chart runs on a separate ARM server (tradingview/
+// setup-tv-server.sh). This server reaches it over SSH with a key whose only
+// permitted command is tradingview/tv-gate.mjs ("chart <SYMBOL> <TF> [shot]"),
+// so the link can read charts and nothing else. Off unless TV_GATE_HOST is set.
+const TV_GATE_HOST = process.env.TV_GATE_HOST ?? '';
+const TV_GATE_KEY = process.env.TV_GATE_KEY ?? path.join(os.homedir(), '.ssh', 'tv_gate');
+const MAX_CHARTS_PER_SESSION = 6;
+const MAX_SCREENSHOTS_PER_SESSION = 3;
+
+const TV_TOOL: Anthropic.Beta.BetaTool = {
+  name: 'tradingview_chart',
+  description: 'Look at a live TradingView chart. Switches the chart to the symbol and timeframe and returns the latest quote, a 100-bar summary (change, range, average volume, last 5 bars) and the values of the indicators on the chart; with screenshot=true you also get an image of the chart to read the structure yourself (trend, support/resistance, patterns). Use TradingView symbols with an exchange prefix, e.g. NASDAQ:AAPL, NYSE:JPM, TVC:NI225 (Japan 225), NASDAQ:NDX, SP:SPX, TVC:DJI, XETR:DAX, TVC:UKX, TVC:SX5E, FX:GBPUSD, FX:EURUSD, FX:USDJPY, FX:AUDUSD, TVC:UKOIL (Brent), NYMEX:NG1! (natural gas), TVC:SILVER. Slow (20-40s) and limited per session — use it on open positions and your strongest candidates, not to scan.',
+  strict: true,
+  input_schema: {
+    type: 'object',
+    properties: {
+      symbol:     { type: 'string', description: 'TradingView symbol with exchange prefix' },
+      timeframe:  { type: 'string', enum: ['15', '60', '240', 'D', 'W'], description: 'Bar size: minutes, D = daily, W = weekly' },
+      screenshot: { type: 'boolean' },
+    },
+    required: ['symbol', 'timeframe', 'screenshot'],
+    additionalProperties: false,
+  },
+};
+
+type TvBar = { time: number; open: number; high: number; low: number; close: number; volume?: number };
+async function tradingviewChart(input: Record<string, unknown>, allowShot: boolean): Promise<{ text: string; image?: string }> {
+  const sym = String(input.symbol ?? '').toUpperCase().trim();
+  const tf = String(input.timeframe ?? 'D');
+  if (!/^[A-Z0-9_!.]{1,20}(:[A-Z0-9_!.]{1,24})?$/.test(sym)) return { text: `REJECTED: "${sym}" is not a valid TradingView symbol.` };
+  const shot = input.screenshot === true && allowShot;
+  const stdout = await new Promise<string>((resolve, reject) => execFile('ssh',
+    ['-i', TV_GATE_KEY, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', TV_GATE_HOST, `chart ${sym} ${tf}${shot ? ' shot' : ''}`],
+    { timeout: 120_000, maxBuffer: 20 * 1024 * 1024 },
+    (err, out) => (err && !out ? reject(err) : resolve(out))));
+  const r = JSON.parse(stdout);
+  if (r.error) return { text: `FAILED: ${r.error}` };
+  const q = r.quote ?? {}, sm = r.summary ?? {};
+  const when = (t: number) => new Date(t * 1000).toISOString().slice(0, tf === 'D' || tf === 'W' ? 10 : 16).replace('T', ' ');
+  const bars = (sm.last_5_bars ?? []) as TvBar[];
+  const studies = ((r.indicators?.studies ?? []) as { name: string; values?: Record<string, unknown> }[])
+    .map(st => `${st.name}: ${Object.entries(st.values ?? {}).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+  const lines = [
+    `TradingView ${q.symbol} (${q.description ?? ''}), timeframe ${tf}: last ${q.last}; current bar O ${q.open} H ${q.high} L ${q.low}.`,
+    `Last ${sm.bar_count} bars: change ${sm.change_pct}, low ${sm.low}, high ${sm.high}, average volume ${sm.avg_volume ?? 'n/a'}.`,
+    `Last 5 bars (time o/h/l/c vol): ${bars.map(b => `${when(b.time)} ${b.open}/${b.high}/${b.low}/${b.close} ${b.volume ?? ''}`).join('; ')}`,
+    `Indicators on chart: ${studies.join(' | ') || 'none'}`,
+  ];
+  if (input.screenshot === true && !allowShot) lines.push(`(No screenshot: limit of ${MAX_SCREENSHOTS_PER_SESSION} per session reached.)`);
+  if (r.screenshot_error) lines.push(`(Screenshot failed: ${r.screenshot_error})`);
+  return { text: lines.join('\n'), image: shot ? r.screenshot_png_base64 : undefined };
+}
+
+const TV_PROMPT = `
+
+TradingView: you can look at live TradingView charts with the tradingview_chart tool — any timeframe, with a screenshot when the picture matters (trend structure, levels, patterns). It is a second view alongside the briefing's computed numbers, not a replacement: the code-computed volume and the hard rules still decide what is allowed.`;
+
 const SYSTEM_PROMPT = `You are the portfolio manager for a small trading operation, running a one-month trial. Each session you receive a briefing and act through tools. Your goal is risk-adjusted profit over weeks to months — not activity.
 
 Accounts you control:
 - alpaca_paper: US stocks/ETFs, paper money (USD). Long or short.
-- ig_demo: UK spread bets on US shares, demo money (GBP). Long or short. You size by £ at risk; code derives the stake.
+- ig_demo: UK spread bets, demo money (GBP) — US shares plus indices, FX and commodities (see the IG markets table). Long or short. You size by £ at risk; code derives the stake.
 - t212_live: Trading 212 ISA, REAL money (GBP). Long only, small sizes. Be most selective here.
 
 What is known about this account from its own history (treat as evidence, not dogma — you may revise it in your notes when your own results say otherwise):
@@ -709,9 +769,10 @@ const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 // declines for policy reasons, the API re-runs the request on a suitable
 // substitute inside the same call instead of the session just stopping.
 function toolsFor(searches: number): Anthropic.Beta.BetaToolUnion[] {
-  if (!config.webResearch || searches <= 0) return TOOLS;
+  const base: Anthropic.Beta.BetaToolUnion[] = TV_GATE_HOST ? [...TOOLS, TV_TOOL] : TOOLS;
+  if (!config.webResearch || searches <= 0) return base;
   return [
-    ...TOOLS,
+    ...base,
     // Anthropic-hosted research tools (2026-10-21, per explicit request that
     // Opus do its own research). max_uses caps cost per request.
     { type: 'web_search_20260209', name: 'web_search', max_uses: searches },
@@ -785,11 +846,12 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
     const research = config.webResearch && nyDate() !== state.lastResearchDay;
     if (research) { state.lastResearchDay = nyDate(); saveState(); }
     const searches = research ? config.researchSearches : config.searchesPerSession;
-    const system = research ? SYSTEM_PROMPT + RESEARCH_PROMPT : SYSTEM_PROMPT;
+    const system = SYSTEM_PROMPT + (TV_GATE_HOST ? TV_PROMPT : '') + (research ? RESEARCH_PROMPT : '');
     addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
 
     const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text }];
     let backtestsLeft = MAX_BACKTESTS_PER_SESSION;
+    let chartsLeft = MAX_CHARTS_PER_SESSION, shotsLeft = MAX_SCREENSHOTS_PER_SESSION;
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       if (budgetLeftUsd() <= 0.25) { addLog('wait', 'Budget ran out mid-session — stopping here'); break; }
       // Only the first turn gets the research allowance, so the cap holds per session.
@@ -815,6 +877,7 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
       const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
       for (const t of toolUses) {
         let out: string;
+        let image: string | undefined;
         const input = t.input as Record<string, unknown>;
         try {
           if (t.name === 'open_position') out = await openPosition(input as Parameters<typeof openPosition>[0], metrics);
@@ -828,6 +891,16 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
               addLog('info', `[backtest] ${spec.direction} ${(spec.symbols ?? []).slice(0, 6).join(',')}${(spec.symbols?.length ?? 0) > 6 ? '…' : ''} — ${out.split('\n')[1] ?? out.split('\n')[0]}`);
             }
           }
+          else if (t.name === 'tradingview_chart') {
+            if (chartsLeft <= 0) out = `REJECTED: chart limit for this session (${MAX_CHARTS_PER_SESSION}) reached.`;
+            else {
+              chartsLeft--;
+              const r = await tradingviewChart(input, shotsLeft > 0);
+              out = r.text; image = r.image;
+              if (image) shotsLeft--;
+              addLog('info', `[tradingview] ${input.symbol} ${input.timeframe}${image ? ' + screenshot' : ''} — ${out.split('\n')[out.startsWith('TradingView') ? 1 : 0].slice(0, 200)}`);
+            }
+          }
           else if (t.name === 'update_notes') { state.notes = String(input.notes).slice(0, 3000); saveState(); addLog('info', 'Updated its strategy notes'); out = 'Notes saved.'; }
           else if (t.name === 'set_watchlist_extra') {
             const syms = (Array.isArray(input.symbols) ? input.symbols : []).map(s => String(s).toUpperCase().trim()).filter(s => /^[A-Z.]{1,6}$/.test(s)).slice(0, 20);
@@ -835,7 +908,10 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
           } else out = `Unknown tool ${t.name}`;
         } catch (e) { out = `ERROR: ${e instanceof Error ? e.message : String(e)}`; }
         if (out.startsWith('REJECTED')) addLog('wait', `${t.name}: ${out}`);
-        results.push({ type: 'tool_result', tool_use_id: t.id, content: out, ...(out.startsWith('REJECTED') || out.startsWith('FAILED') ? { is_error: true } : {}) });
+        const content: Anthropic.Beta.BetaToolResultBlockParam['content'] = image
+          ? [{ type: 'text', text: out }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image } }]
+          : out;
+        results.push({ type: 'tool_result', tool_use_id: t.id, content, ...(out.startsWith('REJECTED') || out.startsWith('FAILED') ? { is_error: true } : {}) });
       }
       messages.push({ role: 'user', content: results });
     }
