@@ -44,6 +44,14 @@ const [, symbol, tf, shot] = args;
 if (!/^[A-Z0-9_!.]{1,20}(:[A-Z0-9_!.]{1,24})?$/.test(symbol ?? '')) done({ error: 'bad symbol' });
 if (!['15', '60', '240', 'D', 'W'].includes(tf)) done({ error: 'bad timeframe (15, 60, 240, D, W)' });
 
+// TradingView allows one live session per account and the owner's own devices
+// take priority (see tv-session.cjs). If the session is elsewhere, report
+// that to Opus instead of reading stale data.
+{
+  let sess = { live: true };
+  try { sess = JSON.parse(execFileSync('node', ['/home/ubuntu/tv-session.cjs'], { timeout: 20000, encoding: 'utf8' })); } catch {}
+  if (!sess.live) done({ error: sess.note || 'TradingView session not available' });
+}
 tv('symbol', symbol);
 tv('timeframe', tf);
 // Wait for the new series to load. The quote's symbol flips to the request

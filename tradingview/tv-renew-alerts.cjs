@@ -16,6 +16,11 @@ const EXTEND_TO_DAYS = 59;   // just under Essential's 2-month maximum
 const dry = process.argv.includes('--dry');
 
 (async () => {
+  // If the owner is using TradingView elsewhere, skip today and retry tomorrow.
+  // Renewal starts 21 days before expiry, so a few skipped days are harmless.
+  let sess = { live: true };
+  try { sess = await require('/home/ubuntu/tv-session.cjs').ensureLive(); } catch {}
+  if (!sess.live) { console.log(new Date().toISOString(), JSON.stringify({ skipped: sess.note })); return; }
   const t = (await CDP.List({ port: 9222 })).find(x => x.type === 'page' && /tradingview\.com/.test(x.url));
   if (!t) throw new Error('no TradingView tab in the chart browser');
   const c = await CDP({ port: 9222, target: t });
