@@ -42,7 +42,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { scanForBestSymbols } from './alpacaScanner';
 import { askGeminiIsaThesis, type IsaThesisVerdict, type StockConfirmVerdict } from './gemini';
-import { askOpenAiIsaThesis, askIgConfirmStockTrade } from './openai';
+import { askIgConfirmStockTrade } from './openai';
 import { askXaiIsaThesis } from './xai';
 import { recordJournalEvent, type JournalMode } from './tradeJournal';
 import { edgeSizing } from './quant';
@@ -1309,10 +1309,8 @@ async function pollExits(mode: T212Mode, positions: T212Position[]): Promise<voi
     tracked.lastVerdict = { action: verdict.action, confidence: verdict.confidence, reason: verdict.reason, engine: verdict.engine, at: Date.now() };
     addLog(mode, 'info', underlying, `[XAI] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
 
-    // Comparison-only — never affects the trade, see logComparison's own comment.
-    void Promise.all([askGeminiIsaThesis(thesisReq), askOpenAiIsaThesis(thesisReq)])
-      .then(([geminiVerdict, openaiVerdict]) => logComparison(mode, underlying, 'SELL', 'xai', geminiVerdict, openaiVerdict, verdict))
-      .catch(() => {});
+    // The Gemini/OpenAI side-by-side comparison that used to run here was
+    // removed on 2026-10-21, along with OpenAI. The provider study had finished.
 
     if (verdict.action === 'SELL' && verdict.engine === 'xai') {
       try {
