@@ -1,50 +1,68 @@
 //@version=6
 // Opus signals — sends TradingView alerts to the Opus Trader (opusTrader.ts).
 //
-// Fires on the DAILY chart, once per bar close, when a stock:
-//   TREND_BUY  — enters the long-hold setup the 2026-10-21 backtest favoured:
-//                close above its 20- and 50-day averages, 12-week gain >= 8%,
-//                at least a normal day's volume, and closing above its open
-//                (volume on the buying side).
-//   TREND_EXIT — closes back below its 50-day average.
-// Opus sees these in its briefing (and an alert triggers an early review during
-// the US session). They are information for Opus, not orders — it decides.
+// Works on any market and timeframe (use the 4-hour chart for IG indices/FX/
+// commodities, where trades last days; daily for US stocks). Fires once per bar
+// close when something changes:
+//   TREND_BUY   — breakout long: close above its 20- and 50-bar averages, the
+//                 20 above the 50, and a new 20-bar closing high. If the market
+//                 has volume data, the bar also needs at least normal volume
+//                 and to close above its open (volume on the buying side).
+//   TREND_SELL  — the mirror image for a short (new 20-bar closing low).
+//   EXIT_LONG   — closes back below its 50-bar average (a long's trend broke).
+//   EXIT_SHORT  — closes back above its 50-bar average (a short's trend broke).
+// These are information for Opus, not orders — an alert wakes Opus early (any
+// hour for IG markets, US hours for stocks) and it decides what to do.
 //
-// Setup: add to a daily chart → Settings → paste your webhook secret (shown on
-// the Opus Trader page) → create an alert with condition "Opus signals → Any
+// Setup: add to a chart → Settings → paste your webhook secret (shown on the
+// Opus Trader page) → create an alert with condition "Opus signals → Any
 // alert() function call", webhook URL https://cleargains1.vercel.app/api/tradingview
 indicator("Opus signals", overlay = true)
 
-secret   = input.string("PASTE_SECRET_FROM_OPUS_TRADER_PAGE", "Webhook secret")
-trendLen = input.int(60, "12-week lookback (bars, daily chart)", minval = 20)
+secret  = input.string("PASTE_SECRET_FROM_OPUS_TRADER_PAGE", "Webhook secret")
+fastLen = input.int(20, "Fast average / breakout length (bars)", minval = 5)
+slowLen = input.int(50, "Slow average (bars)", minval = 10)
 
-sma20    = ta.sma(close, 20)
-sma50    = ta.sma(close, 50)
-chg12w   = (close / close[trendLen] - 1) * 100
-rsi14    = ta.rsi(close, 14)
-volRatio = volume / ta.sma(volume[1], 20)
+smaF   = ta.sma(close, fastLen)
+smaS   = ta.sma(close, slowLen)
+rsi14  = ta.rsi(close, 14)
+avgVol = ta.sma(volume[1], 20)
+hasVol = not na(avgVol) and avgVol > 0
+volRatio = hasVol ? volume / avgVol : na
 
-uptrend   = close > sma20 and close > sma50 and chg12w >= 8
-buySetup  = uptrend and volRatio >= 1.0 and close > open
-exitSetup = close < sma50
+newHigh = close > ta.highest(close[1], fastLen)
+newLow  = close < ta.lowest(close[1], fastLen)
+
+buySetup  = close > smaF and close > smaS and smaF > smaS and newHigh and (not hasVol or (volRatio >= 1.0 and close > open))
+sellSetup = close < smaF and close < smaS and smaF < smaS and newLow  and (not hasVol or (volRatio >= 1.0 and close < open))
+belowSlow = close < smaS
+aboveSlow = close > smaS
 
 // Only on the bar the condition starts, so an alert means something changed.
-buySignal  = buySetup and not buySetup[1]
-exitSignal = exitSetup and not exitSetup[1]
+buySignal       = buySetup  and not buySetup[1]
+sellSignal      = sellSetup and not sellSetup[1]
+exitLongSignal  = belowSlow and not belowSlow[1]
+exitShortSignal = aboveSlow and not aboveSlow[1]
 
-fmt(x) => str.tostring(x, "#.##")
+fmt(x) => na(x) ? "n/a" : str.tostring(x, "#.####")
 msg(sig) =>
     '{"secret":"' + secret + '","symbol":"' + syminfo.ticker + '","signal":"' + sig +
-     '","timeframe":"' + timeframe.period + '","price":' + fmt(close) +
-     ',"note":"sma20 ' + fmt(sma20) + ', sma50 ' + fmt(sma50) + ', 12w ' + fmt(chg12w) +
-     '%, rsi ' + fmt(rsi14) + ', volume ' + fmt(volRatio) + 'x avg"}'
+     '","timeframe":"' + timeframe.period + '","price":' + str.tostring(close) +
+     ',"note":"sma' + str.tostring(fastLen) + ' ' + fmt(smaF) + ', sma' + str.tostring(slowLen) + ' ' + fmt(smaS) +
+     ', rsi ' + fmt(rsi14) + ', volume ' + (hasVol ? fmt(volRatio) + 'x avg' : 'n/a') + '"}'
 
 if buySignal
     alert(msg("TREND_BUY"), alert.freq_once_per_bar_close)
-if exitSignal
-    alert(msg("TREND_EXIT"), alert.freq_once_per_bar_close)
+if sellSignal
+    alert(msg("TREND_SELL"), alert.freq_once_per_bar_close)
+if exitLongSignal
+    alert(msg("EXIT_LONG"), alert.freq_once_per_bar_close)
+if exitShortSignal
+    alert(msg("EXIT_SHORT"), alert.freq_once_per_bar_close)
 
-plot(sma20, "SMA 20", color.orange)
-plot(sma50, "SMA 50", color.blue)
-plotshape(buySignal,  "Trend buy",  shape.triangleup,   location.belowbar, color.green, size = size.small)
-plotshape(exitSignal, "Trend exit", shape.triangledown, location.abovebar, color.red,   size = size.small)
+plot(smaF, "Fast SMA", color.orange)
+plot(smaS, "Slow SMA", color.blue)
+plotshape(buySignal,       "Trend buy",  shape.triangleup,   location.belowbar, color.green,  size = size.small)
+plotshape(sellSignal,      "Trend sell", shape.triangledown, location.abovebar, color.red,    size = size.small)
+plotshape(exitLongSignal,  "Exit long",  shape.xcross,       location.abovebar, color.orange, size = size.tiny)
+plotshape(exitShortSignal, "Exit short", shape.xcross,       location.belowbar, color.teal,   size = size.tiny)

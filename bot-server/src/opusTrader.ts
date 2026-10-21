@@ -991,7 +991,11 @@ export function ingestTradingViewAlert(body: Record<string, unknown>): { ok: boo
   addLog('info', `[TradingView] ${symbol} ${alert.signal}${alert.timeframe ? ` [${alert.timeframe}]` : ''}${alert.price !== null ? ` @ ${alert.price}` : ''}`);
   const igRelevant = isIgOnly(symbol) || state.positions.some(p => p.account === 'ig_demo' && p.symbol === symbol);
   const canAct = isUsSessionOpen() || (isIgWindowOpen() && config.accounts.ig_demo && igRelevant);
-  if (running && !busy && canAct && Date.now() - lastTvTriggeredAt > 15 * 60_000) {
+  // An exit signal only matters early if Opus holds that market; otherwise it
+  // just shows in the next briefing (keeps alert-driven sessions/cost down).
+  const held = state.positions.some(p => p.symbol === symbol);
+  const worthWaking = !/EXIT/i.test(alert.signal) || held;
+  if (running && !busy && canAct && worthWaking && Date.now() - lastTvTriggeredAt > 15 * 60_000) {
     lastTvTriggeredAt = Date.now();
     void runOpusSession('tradingview');
   }
