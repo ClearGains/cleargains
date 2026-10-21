@@ -550,7 +550,9 @@ What is known about this account from its own history (treat as evidence, not do
 
 Data you get: every number in the briefing is computed by code from market data — price, day change, whether today trades above its open, today's volume vs that stock's normal day (vol1.0 = normal day, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, plus recent headlines for some symbols. Do not estimate or second-guess the volume figures; code already enforces the volume rule.
 
-Hard rules enforced by code (an order outside them is rejected and you'll see why): every position needs a stop-loss of 2-15%; conviction must be at least the configured minimum; a new stock entry needs today's volume ≥ a normal day AND today trading on the trade's side of its open; per-account position and size caps; no discretionary close within the minimum hold window (stops still fire); no re-entry into a symbol within the cooldown after closing it.
+Entry timing — the "setup (code)" column: code labels each market BREAKOUT (trend up, today pushing higher on volume — the move is under way) or PULLBACK (trend up, price has dipped back to around its 20-day average and is turning up today — entering before the next leg), mirrored for shorts. In a 3-year backtest on 15 large caps both had a similar edge per trade (breakout +3.5% avg, pullback +3.2% avg with smaller losses), and they mostly occur on different days, so use both. Prefer a PULLBACK over chasing a stock that has already run hard (high RSI, far above its 20-day) — buying after the jump is the most common way a good trend trade starts at a loss. A setup label is a candidate, not an instruction; you still need a thesis and conviction.
+
+Hard rules enforced by code (an order outside them is rejected and you'll see why): every position needs a stop-loss of 2-15%; conviction must be at least the configured minimum; a new stock entry needs EITHER today's volume ≥ a normal day with today trading on the trade's side of its open, OR a PULLBACK setup (see below); per-account position and size caps; no discretionary close within the minimum hold window (stops still fire); no re-entry into a symbol within the cooldown after closing it.
 
 Building your own logic: you have a run_backtest tool. Use it to test an idea before you rely on it — indicators available: ${INDICATORS.join(', ')}. Judge a rule against buy-and-hold over the same window and on enough trades (a handful proves nothing); costs aren't modelled, so prefer rules whose edge isn't razor-thin. When a rule holds up, write it into your notes as part of your approach and apply it; when live results disagree with a backtest, trust the live results and revise. Testing is most useful in the daily research session.
 
@@ -612,17 +614,17 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
 
   lines.push('');
   lines.push('## Market (daily bars; price USD)');
-  lines.push('symbol | price | day% | vs open | vol (1.0=normal day) | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
+  lines.push('symbol | setup (code) | price | day% | vs open | vol (1.0=normal day) | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
   for (const m of [...metrics.values()].filter(x => !isIgOnly(x.symbol))) {
-    lines.push(`${m.symbol} | ${fmt(m.price, 2)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${fmt(m.volToday, 2)} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
+    lines.push(`${m.symbol} | ${setupLabel(m)} | ${fmt(m.price, 2)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${fmt(m.volToday, 2)} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
   }
 
   const igOnly = [...metrics.values()].filter(x => isIgOnly(x.symbol));
   if (igOnly.length) {
     lines.push('');
     lines.push('## IG markets — indices, FX, commodities (ig_demo only; daily bars, prices in market units — IG quotes some in its own points, e.g. FX ×10,000; no exchange volume, so no volume rule)');
-    lines.push('symbol (name) | price | day% | vs open | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
-    for (const m of igOnly) lines.push(`${m.symbol} (${IG_MARKETS[m.symbol].name}) | ${fmt(m.price, 4)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
+    lines.push('symbol (name) | setup (code) | price | day% | vs open | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
+    for (const m of igOnly) lines.push(`${m.symbol} (${IG_MARKETS[m.symbol].name}) | ${setupLabel(m)} | ${fmt(m.price, 4)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
   }
 
   // Headlines: open positions + the most active names today (keeps tokens bounded)
@@ -674,8 +676,14 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   if (!m) return `REJECTED: no market data for ${symbol} this session.`;
   // Volume in the trade's direction — enforced in code, never by the model.
   if (isIgOnly(symbol) && inp.account !== 'ig_demo') return `REJECTED: ${symbol} is an IG-only market — use ig_demo.`;
-  if (!isIgOnly(symbol) && (m.volToday === null || m.volToday < 1.0)) return `REJECTED: today's volume is ${fmt(m.volToday, 2)}x a normal day; the rule needs at least 1.0x.`;
-  if (!isIgOnly(symbol) && todayAgainstFromMetrics(m, inp.direction)) return `REJECTED: today is trading ${inp.direction === 'BUY' ? 'below' : 'above'} its open — today's volume is on the other side.`;
+  // Shares need EITHER the volume rule (≥ a normal day's volume, today on the
+  // trade's side of the open) OR a code-verified pullback setup. A quiet dip
+  // inside a trend is healthy, so it doesn't need a volume surge. It still
+  // has to be turning the trade's way today.
+  if (!isIgOnly(symbol) && setupOf(m, inp.direction) !== 'pullback') {
+    if (m.volToday === null || m.volToday < 1.0) return `REJECTED: today's volume is ${fmt(m.volToday, 2)}x a normal day; the rule needs at least 1.0x (or a code-verified PULLBACK setup, which this isn't).`;
+    if (todayAgainstFromMetrics(m, inp.direction)) return `REJECTED: today is trading ${inp.direction === 'BUY' ? 'below' : 'above'} its open — today's volume is on the other side.`;
+  }
   const cool = state.lastClosedAt[`${inp.account}:${symbol}`];
   if (cool && Date.now() - cool < config.reentryCooldownHours * 3_600_000) return `REJECTED: closed ${symbol} on ${inp.account} ${((Date.now() - cool) / 3_600_000).toFixed(1)}h ago — cooldown is ${config.reentryCooldownHours}h.`;
   if (state.positions.some(p => p.account === inp.account && p.symbol === symbol)) return `REJECTED: you already hold ${symbol} on ${inp.account}.`;
@@ -753,6 +761,50 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
     return `FAILED at the broker: ${msg}`;
   }
 }
+
+// ── Entry setups (2026-10-21) ───────────────────────────────────────────────
+// Per the owner's request for entries that come before a move, not after it.
+// Two setups are computed by code, never by the AI:
+//   breakout: the existing style. The trend is up, price is above its 20-day
+//             average, and today is a with-trend day (for shares, also at
+//             least a normal day's volume).
+//   pullback: the trend is up, but price has dipped back into the zone around
+//             its 20-day average (between 1.5 ATR below and 0.5 ATR above),
+//             RSI is below 55, and today is turning back up (above the open).
+// Shorts mirror both. Backtest (2026-10-21, 15 large caps, 3y, exit below the
+// 50-day, 10% stop): breakout 169 trades averaging +3.5% (avg loss −4.4%);
+// pullback-turning-up 116 trades averaging +3.2% (avg loss −3.6%). Per trade
+// the edge is similar, but the pullbacks are mostly different days, so they
+// add entry opportunities rather than replacing the breakout.
+// The "trend" part: for shares, 12-week change ≥ +8% (≤ −8% for shorts) and
+// price beyond the 50-day. FX and index ranges are smaller, so the IG-only
+// markets use the 20-day vs 50-day average ordering instead.
+type Setup = 'breakout' | 'pullback';
+function setupOf(m: Metrics, dir: 'BUY' | 'SELL'): Setup | null {
+  const long = dir === 'BUY';
+  const ig = isIgOnly(m.symbol);
+  const beyond50 = long ? m.price > m.sma50 : m.price < m.sma50;
+  const trendOk = beyond50 && (ig
+    ? (long ? m.sma20 > m.sma50 : m.sma20 < m.sma50)
+    : (m.trend12wPct !== null && (long ? m.trend12wPct >= 8 : m.trend12wPct <= -8)));
+  if (!trendOk) return null;
+  const withTrendToday = m.aboveOpen === (long ? true : false);
+  if (!withTrendToday) return null;
+  const atr = m.atrPct !== null ? m.price * m.atrPct / 100 : m.price * 0.02;
+  const inZone = long
+    ? m.price >= m.sma20 - 1.5 * atr && m.price <= m.sma20 + 0.5 * atr
+    : m.price <= m.sma20 + 1.5 * atr && m.price >= m.sma20 - 0.5 * atr;
+  const rsiOk = m.rsi14 !== null && (long ? m.rsi14 < 55 : m.rsi14 > 45);
+  if (inZone && rsiOk) return 'pullback';
+  const past20 = long ? m.price > m.sma20 : m.price < m.sma20;
+  const volOk = ig || (m.volToday !== null && m.volToday >= 1.0);
+  if (past20 && volOk) return 'breakout';
+  return null;
+}
+const setupLabel = (m: Metrics): string => {
+  const l = setupOf(m, 'BUY'), sh = setupOf(m, 'SELL');
+  return l ? `${l === 'breakout' ? 'BREAKOUT' : 'PULLBACK'} long` : sh ? `${sh === 'breakout' ? 'BREAKOUT' : 'PULLBACK'} short` : '-';
+};
 
 function todayAgainstFromMetrics(m: Metrics, dir: 'BUY' | 'SELL'): boolean {
   if (m.aboveOpen === null) return true;  // flat vs open = no directional confirmation
