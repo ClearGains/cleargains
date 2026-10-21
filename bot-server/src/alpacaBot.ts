@@ -4,7 +4,7 @@ import {
   getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition, getOrders,
   cancelAllOrders, cancelOrdersForSymbol, isNYSEOpen, isInOpeningRange, isNearClose,
   sessionStartUtcMs,
-  isDailyCheckTime, isWeeklyCheckTime, isWeekend, msUntilMondayOpen,
+  isWeekend, msUntilMondayOpen, isAlpacaDailyCheckTime, isAlpacaWeeklyCheckTime, nyDateStr,
   selectOptionsContract, getOptionQuote,
   type AccountMode, type AlpacaPosition, type AlpacaBar, type AlpacaAccount,
 } from './alpacaApi';
@@ -276,6 +276,8 @@ type OrbState = { high: number; low: number; established: boolean; tradedLong?: 
 type ModeState = {
   running:    boolean;
   paused:     boolean;
+  lastDailyCheckDay?:  string;   // NY date the daily-strategy check last ran
+  lastWeeklyCheckDay?: string;   // NY date the weekly-strategy check last ran
   config:     AlpacaBotConfig | null;
   log:        AlpacaLogEntry[];
   pollTimer:  ReturnType<typeof setTimeout> | null;
@@ -404,6 +406,9 @@ export function setPositionWatchEnabled(mode: AccountMode, symbol: string, enabl
 // why that distinction matters — this is exactly the bug that was just
 // fixed for the bot's own closes; a manual one shouldn't reintroduce it).
 export async function closePositionManually(mode: AccountMode, symbol: string): Promise<{ ok: boolean; error?: string }> {
+  if (!isNYSEOpen()) {
+    return { ok: false, error: 'The US market is closed (it opens 9:30am New York / 2:30pm UK). Alpaca would only queue this until the open, so nothing was sent. Press Close again once the market is open.' };
+  }
   let positions: AlpacaPosition[];
   try { positions = await getPositions(mode); }
   catch (e) { return { ok: false, error: `Position lookup failed: ${e instanceof Error ? e.message : String(e)}` }; }
@@ -691,6 +696,9 @@ async function confirmEntryWithNews(
   strength?: number,
   bars?: AlpacaBar[],
 ): Promise<{ ok: boolean; reason: string; confidence: number }> {
+  // Don't spend an AI call on an entry that can't be placed anyway.
+  if (s(mode).paused) return { ok: false, reason: 'Paused — no new entries, so the AI wasn\'t asked', confidence: 0 };
+  if (!isNYSEOpen()) return { ok: false, reason: 'Market closed — the AI wasn\'t asked; re-checked at the open', confidence: 0 };
   // Real day change and an ATR-framed stop/TP (was 0% and a 25%-of-price
   // placeholder — the same inputs that had IG's AI skipping everything as flat).
   const prevClose = bars && bars.length >= 2 ? bars[bars.length - 2].c : 0;
@@ -755,6 +763,8 @@ async function confirmEntryWithNews(
 async function confirmOptionsEntryAi(
   mode: AccountMode, sym: string, direction: 'BUY' | 'SELL', bars: AlpacaBar[], headlines: string[], strategyReason: string,
 ): Promise<{ ok: boolean; reason: string; confidence: number }> {
+  if (s(mode).paused) return { ok: false, reason: 'Paused — no new entries, so the AI wasn\'t asked', confidence: 0 };
+  if (!isNYSEOpen()) return { ok: false, reason: 'Market closed — the AI wasn\'t asked; re-checked at the open', confidence: 0 };
   const price = bars[bars.length - 1].c;
   const prev  = bars.length >= 2 ? bars[bars.length - 2].c : 0;
   const atr   = calcAtr(bars);
@@ -1259,11 +1269,13 @@ async function executeSignal(
     // journal write — rather than re-announcing the same unresolved state
     // every 5 minutes. It'll fill if a real bid ever shows up, or the
     // contract just expires worthless on its own, which costs nothing extra.
+    // Never queue a close outside regular hours (2026-10-21). An option sell
+    // placed after the close just expires unfilled, and a stock close would
+    // sit until the open whatever happened overnight. The position stays
+    // open, so the next in-session poll re-evaluates the exit on live prices.
+    // Protective stops already resting at the broker are untouched.
+    if (!isNYSEOpen()) return false;
     if (isOptionSymbol(sym)) {
-      // Options only trade in regular hours. A sell placed after the close
-      // just expires unfilled, so wait and let the next poll in session
-      // place it (the position stays open, so the exit is re-evaluated).
-      if (!isNYSEOpen()) return false;
       // Only a resting close (limit/market sell) counts — not the protective
       // GTC stop every entry attaches. Fixed 2026-10-13: it counted that stop,
       // so no option with one could ever be closed by this bot (XLE logged
@@ -1368,6 +1380,13 @@ async function executeSignal(
 
   if (st.paused) {
     addLog(mode, 'wait', sym, `⏸ Paused — skipping ${action} signal`);
+    return false;
+  }
+
+  // Entries only with the market open and filling now, never queued for the
+  // next open (2026-10-21). The signal is re-checked on live prices then.
+  if (!isNYSEOpen()) {
+    addLog(mode, 'wait', sym, `Market closed — not queuing a ${action}; the signal is re-checked at the open`);
     return false;
   }
 
@@ -1661,17 +1680,24 @@ async function poll(mode: AccountMode) {
     return;
   }
 
-  if (meta.timeframe === 'daily' && !isDailyCheckTime()) {
-    schedule(mode, cfg);
-    return;
+  // Daily/weekly strategies decide inside market hours, once per day/week
+  // (see isAlpacaDailyCheckTime). They used to run at 21:05 UTC, after the
+  // close, so their orders sat queued overnight for the next open.
+  if (meta.timeframe === 'daily') {
+    if (!isAlpacaDailyCheckTime() || st.lastDailyCheckDay === nyDateStr()) { schedule(mode, cfg); return; }
+    st.lastDailyCheckDay = nyDateStr();
   }
 
-  if (meta.timeframe === 'weekly' && !isWeeklyCheckTime()) {
-    if (cfg.strategy === 'weekly_momentum' && isDailyCheckTime()) {
-      await checkWeeklyMomentumExits(mode, cfg);
+  if (meta.timeframe === 'weekly') {
+    if (!isAlpacaWeeklyCheckTime() || st.lastWeeklyCheckDay === nyDateStr()) {
+      if (cfg.strategy === 'weekly_momentum' && isAlpacaDailyCheckTime() && st.lastDailyCheckDay !== nyDateStr()) {
+        st.lastDailyCheckDay = nyDateStr();
+        await checkWeeklyMomentumExits(mode, cfg);
+      }
+      schedule(mode, cfg);
+      return;
     }
-    schedule(mode, cfg);
-    return;
+    st.lastWeeklyCheckDay = nyDateStr();
   }
 
   if (cfg.strategy === 'orb') {

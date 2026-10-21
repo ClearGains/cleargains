@@ -816,6 +816,10 @@ async function closePosition(id: string, reason: string, view: Map<string, LiveP
   if (!p) return `REJECTED: no open position with id ${id}.`;
   const heldH = (Date.now() - p.openedAt) / 3_600_000;
   if (!manual && heldH < config.minHoldHours) return `REJECTED: held ${heldH.toFixed(1)}h — minimum hold is ${config.minHoldHours}h (the stop still protects it).`;
+  // Alpaca/T212 closes only while the US market is open (2026-10-21). Off
+  // hours this would cancel the protective stop and leave a market sell queued
+  // for the open, whatever happened overnight. Re-decide in session instead.
+  if (p.account !== 'ig_demo' && !isUsSessionOpen()) return `REJECTED: the US market is closed — ${p.account} positions can only be closed in market hours (the broker stop still protects it). Re-check this at the open.`;
   const pl = view.get(id)?.pl ?? null;
   try {
     if (p.account === 'alpaca_paper') {

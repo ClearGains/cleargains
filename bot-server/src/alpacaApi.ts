@@ -597,6 +597,34 @@ export function isWeeklyCheckTime(): boolean {
   return utcMins >= 14 * 60 && utcMins < 14 * 60 + 5;
 }
 
+// ── Alpaca decision windows, in New York time (2026-10-21) ───────────────────
+// At the owner's request, Alpaca buy/sell decisions are made while the market
+// is open, with live prices, and filled straight away. Nothing is decided
+// after hours and left as an order waiting for the next open ("things can
+// happen during non-market hours"). The shared isDailyCheckTime/
+// isWeeklyCheckTime stay as they are for the IG bots, which trade round the
+// clock.
+function nyNow(): { weekday: string; mins: number; date: string } {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+  const g = (t: string) => p.find(x => x.type === t)?.value ?? '';
+  return { weekday: g('weekday'), mins: Number(g('hour')) * 60 + Number(g('minute')), date: `${g('year')}-${g('month')}-${g('day')}` };
+}
+export const nyDateStr = (): string => nyNow().date;
+// Daily strategies: the last trading hour (14:55–15:55 NY). The day's bar is
+// nearly complete, which is what these daily-bar rules were built on, and
+// orders fill at once. One hour wide, so even a 60-minute poll lands in it.
+// The bot runs this once per day.
+export function isAlpacaDailyCheckTime(): boolean {
+  const n = nyNow();
+  if (n.weekday === 'Sat' || n.weekday === 'Sun') return false;
+  return n.mins >= 14 * 60 + 55 && n.mins < 15 * 60 + 55;
+}
+// Weekly strategies: Monday 09:45–10:45 NY, after the opening swings settle.
+export function isAlpacaWeeklyCheckTime(): boolean {
+  const n = nyNow();
+  return n.weekday === 'Mon' && n.mins >= 9 * 60 + 45 && n.mins < 10 * 60 + 45;
+}
+
 export function isWeekend(): boolean {
   const day = new Date().getUTCDay();
   return day === 0 || day === 6;
