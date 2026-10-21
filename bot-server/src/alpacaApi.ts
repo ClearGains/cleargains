@@ -501,12 +501,16 @@ export async function getSnapshots(
 // ── Market hours ──────────────────────────────────────────────────────────────
 
 export function isNYSEOpen(): boolean {
-  const now = new Date();
-  if (now.getUTCDay() === 0 || now.getUTCDay() === 6) return false;
-  // NYSE 9:30–16:00 ET. EDT = UTC-4, so 13:30–20:00 UTC. EST = UTC-5, so 14:30–21:00 UTC.
-  // Use 13:30–21:00 to cover both seasons conservatively.
-  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
-  return utcMins >= 13 * 60 + 30 && utcMins < 21 * 60;
+  // NYSE 9:30–16:00 in New York time, so daylight saving is handled.
+  // Fixed 2026-10-21: this used a fixed 13:30–21:00 UTC window to cover both
+  // seasons, which in summer (EDT) counted 16:00–17:00 NY as open. The bot
+  // sent option exit orders a few minutes after the close (4 found in the
+  // order history, all expired unfilled, one on a contract 3 days from expiry).
+  const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+  const g = (t: string) => p.find(x => x.type === t)?.value ?? '';
+  if (g('weekday') === 'Sat' || g('weekday') === 'Sun') return false;
+  const m = Number(g('hour')) * 60 + Number(g('minute'));
+  return m >= 9 * 60 + 30 && m < 16 * 60;
 }
 
 // Start of today's NYSE session in UTC ms. Uses 13:30 UTC (EDT); during

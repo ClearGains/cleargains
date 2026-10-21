@@ -1260,6 +1260,10 @@ async function executeSignal(
     // every 5 minutes. It'll fill if a real bid ever shows up, or the
     // contract just expires worthless on its own, which costs nothing extra.
     if (isOptionSymbol(sym)) {
+      // Options only trade in regular hours. A sell placed after the close
+      // just expires unfilled, so wait and let the next poll in session
+      // place it (the position stays open, so the exit is re-evaluated).
+      if (!isNYSEOpen()) return false;
       // Only a resting close (limit/market sell) counts — not the protective
       // GTC stop every entry attaches. Fixed 2026-10-13: it counted that stop,
       // so no option with one could ever be closed by this bot (XLE logged
