@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
+/* The app is designed dark-only (gray-950 background, white/gray text).
+   The template default switched to a white background in light mode, and as
+   unlayered CSS it beat the body's bg-gray-950. That made white headings and
+   menu text invisible on light-mode phones and PCs. Always dark now. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #030712;
+  --foreground: #f3f4f6;
+  color-scheme: dark;
 }
 
 @theme inline {
@@ -12,12 +17,6 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
 
 body {
   background: var(--background);
