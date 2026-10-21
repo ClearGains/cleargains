@@ -1210,10 +1210,11 @@ function maxEntryBarAgeMs(strategy: IgStrategyName): number | null {
 }
 
 const FREE_DATA_PARAMS: Partial<Record<IgStrategyName, { range: string; alpacaTimeframe: Timeframe; yahooInterval: '1m' | '5m' | '30m' | '1h' | '1d' | '1wk'; includePrePost?: boolean }>> = {
-  // includePrePost added 2026-10-09 so IG's 24h US share CFDs are scored on
-  // real pre/post-market bars rather than the previous session's (the cause
-  // of the stale pre-market Intel entries 2026-10-07).
-  rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m', includePrePost: true },
+  // Back on Alpaca's real-time bars 2026-10-21 (per explicit request: volume
+  // from reliable sources, not Yahoo). Yahoo's pre/post bars carried prices
+  // but zero volume, so they never confirmed an entry anyway; outside the
+  // session the bar-freshness rule simply holds entries back.
+  rsi_mean_reversion: { range: '1mo', alpacaTimeframe: '5Min', yahooInterval: '5m' },
   orb:                { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   vwap:               { range: '5d',  alpacaTimeframe: '1Min', yahooInterval: '1m' },
   weekly_momentum:    { range: '5y',  alpacaTimeframe: '1Week', yahooInterval: '1wk' },

@@ -47,6 +47,21 @@ import { askXaiIsaThesis } from './xai';
 import { recordJournalEvent, type JournalMode } from './tradeJournal';
 import { edgeSizing } from './quant';
 import { UNIVERSE as MOMENTUM_UNIVERSE, ADR_MAP, type UniverseStock } from './t212MomentumUniverse';
+import { getBars, type AlpacaBar } from './alpacaApi';
+import { dailyVolumeRatio } from './alpacaStrategies';
+
+// Daily bars for volume from Alpaca's market data (real-time, consistent),
+// not Yahoo's unofficial feed — per explicit request 2026-10-21 that volume
+// come from reliable data sources, never the AI. null = no Alpaca data for
+// this symbol (e.g. a non-US listing), which callers treat as "no volume
+// confirmation", not as a pass.
+async function alpacaDailyBars(symbol: string, count: number): Promise<AlpacaBar[] | null> {
+  try {
+    const r = await getBars([symbol], '1Day', count, 'paper');
+    const bars = r[symbol];
+    return bars && bars.length ? bars : null;
+  } catch { return null; }
+}
 import { isWeekend, msUntilMondayOpen } from './marketHours';
 import {
   getPortfolio, getCash, getOrders, resolveT212Ticker, placeMarketOrder,
@@ -592,26 +607,24 @@ export async function fetchTrend(yahooTicker: string): Promise<TrendResult> {
     const high52w  = Math.max(...closes);
     const pctBelowHigh = high52w > 0 ? ((high52w - last) / high52w) * 100 : null;
 
-    const volumes = (quote?.volume ?? []).filter((v): v is number => v !== null && v !== undefined && v > 0);
+    // Volume from Alpaca (see alpacaDailyBars); prices/trend above stay on
+    // the 1y Yahoo history.
     let volRatio: number | null = null;
-    if (volumes.length >= 40) {
-      const recent20 = volumes.slice(-20);
-      const prior40  = volumes.slice(-60, -20);
-      const avgRecent = recent20.reduce((s, v) => s + v, 0) / recent20.length;
-      const avgPrior  = prior40.reduce((s, v) => s + v, 0) / Math.max(prior40.length, 1);
-      volRatio = avgPrior > 0 ? avgRecent / avgPrior : null;
-    }
-    // Up-day vs down-day volume over the last 20 sessions (close-to-close) —
-    // a trend buy needs buying volume behind it, not just more volume.
     let volAgainstBuy = false;
-    const rawC = quote?.close ?? [], rawV = quote?.volume ?? [];
-    let upV = 0, downV = 0;
-    for (let i = Math.max(1, rawC.length - 20); i < rawC.length; i++) {
-      const c = rawC[i], p = rawC[i - 1], v = rawV[i];
-      if (c == null || p == null || v == null) continue;
-      if (c > p) upV += v; else if (c < p) downV += v;
+    const vb = await alpacaDailyBars(yahooTicker, 70);
+    if (vb && vb.length >= 40) {
+      const recent20 = vb.slice(-20), prior = vb.slice(-60, -20);
+      const avgRecent = recent20.reduce((s, b) => s + b.v, 0) / recent20.length;
+      const avgPrior  = prior.reduce((s, b) => s + b.v, 0) / Math.max(prior.length, 1);
+      volRatio = avgPrior > 0 ? avgRecent / avgPrior : null;
+      // Up-day vs down-day volume over the last 20 sessions (close-to-close) —
+      // a trend buy needs buying volume behind it, not just more volume.
+      let upV = 0, downV = 0;
+      for (let i = Math.max(1, vb.length - 20); i < vb.length; i++) {
+        if (vb[i].c > vb[i - 1].c) upV += vb[i].v; else if (vb[i].c < vb[i - 1].c) downV += vb[i].v;
+      }
+      if (upV + downV > 0) volAgainstBuy = downV > upV;
     }
-    if (upV + downV > 0) volAgainstBuy = downV > upV;
     return { trend4w, trend12w, trend52w, pctBelowHigh, currentPrice: last, volRatio, volAgainstBuy };
   } catch {
     return EMPTY_TREND;
@@ -739,13 +752,6 @@ async function fetchMomentumQuote(stock: UniverseStock): Promise<MomentumQuote |
   } catch { return null; }
 }
 
-// Minutes into the NYSE session (09:30–16:00 ET, DST-aware), clamped to the session.
-function nyseSessionMinutes(now = new Date()): number {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(now);
-  const h = Number(parts.find(p => p.type === 'hour')?.value), m = Number(parts.find(p => p.type === 'minute')?.value);
-  return Math.max(0, Math.min(390, h * 60 + m - 570));
-}
-
 // Daily-bar context for a momentum candidate, added 2026-10-13. Volume is
 // today's (so far) against the stock's OWN 20-day average, pro-rated for how
 // much of the session has run (floored at 15% so the first hour's front-
@@ -754,26 +760,18 @@ function nyseSessionMinutes(now = new Date()): number {
 // it doesn't buy bounces inside downtrends (Western Digital, Broadcom).
 async function fetchMomentumContext(symbol: string): Promise<{ volRatio: number; sma20: number; sma50: number } | null> {
   try {
-    const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=6mo`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClearGains/1.0)', Accept: 'application/json' },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as { chart?: { result?: Array<{ timestamp?: number[]; indicators?: { quote?: Array<{ close?: (number | null)[]; volume?: (number | null)[] }> } }> } };
-    const r = data.chart?.result?.[0];
-    const ts = r?.timestamp ?? [], q = r?.indicators?.quote?.[0];
-    const rows = ts.map((t, i) => ({ t, c: q?.close?.[i], v: q?.volume?.[i] }))
-      .filter((x): x is { t: number; c: number; v: number } => x.c != null && x.c > 0 && x.v != null);
-    if (rows.length < 55) return null;
-    const today = rows[rows.length - 1];
-    // Today's bar must actually be today's session, or there's no live volume to read.
-    if (new Date(today.t * 1000).toISOString().slice(0, 10) !== new Date().toISOString().slice(0, 10)) return null;
-    const prior = rows.slice(-21, -1);
-    const avgVol20 = prior.reduce((s, x) => s + x.v, 0) / prior.length;
-    const elapsed = Math.max(0.15, nyseSessionMinutes() / 390);
-    const closes = rows.map(x => x.c);
+    // Alpaca daily bars (see alpacaDailyBars) and the same daily volume read
+    // IG and Alpaca use (dailyVolumeRatio: today vs an average day, U-curve).
+    const bars = await alpacaDailyBars(symbol, 80);
+    if (!bars || bars.length < 55) return null;
+    // Today's bar must be today's NY session, or there's no live volume to read.
+    const nyDate = (d: Date) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(d);
+    if (nyDate(new Date(new Date(bars[bars.length - 1].t).getTime() + 12 * 3_600_000)) !== nyDate(new Date())) return null;
+    const volRatio = dailyVolumeRatio(bars, 'US');
+    if (volRatio === null) return null;
+    const closes = bars.map(b => b.c);
     const sma = (n: number) => closes.slice(-n).reduce((s, c) => s + c, 0) / n;
-    return { volRatio: avgVol20 > 0 ? today.v / (avgVol20 * elapsed) : 0, sma20: sma(20), sma50: sma(50) };
+    return { volRatio, sma20: sma(20), sma50: sma(50) };
   } catch { return null; }
 }
 
@@ -1093,6 +1091,10 @@ async function pollEntries(mode: T212Mode): Promise<void> {
     const trend = await fetchTrend(sym);
     if (trend.trend12w === null || trend.currentPrice === null) continue;
     if (trend.trend12w < ENTRY_MIN_TREND_12W || (trend.trend4w !== null && trend.trend4w < ENTRY_MIN_TREND_4W)) continue;
+    if (trend.volRatio === null) {
+      addLog(mode, 'wait', sym, 'No reliable volume data from Alpaca for this symbol — skipping rather than buying unconfirmed');
+      continue;
+    }
     if (trend.volAgainstBuy) {
       addLog(mode, 'wait', sym, `Trend looks good (+${trend.trend12w.toFixed(1)}%/12w) but the last 20 sessions had more volume on down-days than up-days — selling, not buying, behind it; skipping`);
       continue;
