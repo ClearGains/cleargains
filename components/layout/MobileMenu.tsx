@@ -6,6 +6,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 import { NAV_GROUPS, NAV_LINKS, isActivePath } from './navLinks';
@@ -24,9 +25,12 @@ export function MobileMenu({ open, onClose, onLogout }: { open: boolean; onClose
     return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onKey); };
   }, [open, onClose]);
 
-  if (!open) return null;
+  if (!open || typeof document === 'undefined') return null;
 
-  return (
+  // Portal to <body>: the header uses backdrop-blur, and a backdrop-filter
+  // ancestor traps position:fixed children inside it (the menu was squashed
+  // into the 56px header).
+  return createPortal(
     <div className="xl:hidden fixed inset-0 z-[60]" role="dialog" aria-modal="true" aria-label="Menu">
       <button aria-label="Close menu" onClick={onClose} className="absolute inset-0 bg-black/60" />
       <nav className="absolute left-0 top-0 h-full w-72 max-w-[85vw] bg-gray-950 border-r border-gray-800 flex flex-col
@@ -67,6 +71,7 @@ export function MobileMenu({ open, onClose, onLogout }: { open: boolean; onClose
           <LogOut className="h-4 w-4" /> Sign out
         </button>
       </nav>
-    </div>
+    </div>,
+    document.body,
   );
 }
