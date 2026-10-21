@@ -162,7 +162,7 @@ export default function OpusTraderPage() {
             ? <span className="flex items-center gap-1.5 text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Running{status.busy ? ' — session in progress' : ''}</span>
             : status && <span>Stopped</span>}
           {status && <span>Last session {agoTime(status.lastRunAt)}</span>}
-          {status?.running && <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> Next in {relTime(status.nextRunAt)}{!status.usSessionOpen ? ' (waits for US session)' : ''}</span>}
+          {status?.running && <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> Next check in {relTime(status.nextRunAt)}{!status.usSessionOpen ? ` (outside US hours: IG reviewed every ${cfg?.offHoursMinutes ?? 120} min on weekdays, Alpaca waits for the open)` : ''}</span>}
           {status && !status.apiKeyConfigured && <span className="text-red-400">No Anthropic API key on the server</span>}
         </div>
         <div className="flex items-center gap-2">

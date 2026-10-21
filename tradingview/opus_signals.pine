@@ -53,8 +53,10 @@ sellSignal      = sellSetup and not sellSetup[1]
 // Pullbacks re-qualify often on intraday bars, so allow at most one alert per
 // 6 bars (a day on the 4-hour chart). That keeps alert-driven reviews, and
 // their cost, down.
-pbLongSignal    = pbLongSetup  and not pbLongSetup[1]  and nz(ta.barssince(pbLongSetup[1]), 999)  >= 6
-pbShortSignal   = pbShortSetup and not pbShortSetup[1] and nz(ta.barssince(pbShortSetup[1]), 999) >= 6
+pbLongSince     = nz(ta.barssince(pbLongSetup[1]), 999)
+pbShortSince    = nz(ta.barssince(pbShortSetup[1]), 999)
+pbLongSignal    = pbLongSetup  and not pbLongSetup[1]  and pbLongSince  >= 6
+pbShortSignal   = pbShortSetup and not pbShortSetup[1] and pbShortSince >= 6
 exitLongSignal  = belowSlow and not belowSlow[1]
 exitShortSignal = aboveSlow and not aboveSlow[1]
 
