@@ -599,7 +599,12 @@ const OPTIONS_TREND_MIN_12W_PCT     = 8;   // matches the IG monthly strategy / 
 const OPTIONS_MOMENTUM_MIN_SCORE            = 55; // below this, blocked regardless of volume
 const OPTIONS_MOMENTUM_HIGH_SCORE           = 70; // at/above this, only needs the lower volume bar
 const OPTIONS_MOMENTUM_HIGH_SCORE_MIN_VOL   = 1.0;
-const OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL    = 1.5; // score 55-69 needs a real volume surge to compensate
+// 2026-10-21, per explicit request after a backtest (25 watchlist stocks,
+// ~1y daily): raising the volume bar changed how MANY setups qualified, not
+// how good they were (~48-50% right direction after 20d at every level), so
+// the 1.5x surge tier is gone — a normal day (1.0x) in the trade's direction
+// is the floor everywhere.
+const OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL    = 1.0;
 // Underlyings whose typical daily range is under this % of price are skipped —
 // bond ETFs (LQD, HYG ~0.4%) don't move enough for a directional option.
 const OPTIONS_MIN_ATR_PCT = 0.8; // SPY sits ~0.9%, bond ETFs 0.46-0.62%
@@ -689,18 +694,27 @@ export function optionsNewsBasedEntrySignal(
   // exactly the backward-looking reasoning that leads to buying a top, so a
   // guarded re-entry can only come from the stricter, fresher momentum path
   // above, never from this one.
-  if (!chaseGuard?.call && callOk && volumeOk && trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT && !trendUp.isExtended
+  // 2026-10-21 (same backtest, 60-day forward): price above its 20 & 50-day
+  // averages plus 12w >= +8% was the best long-hold entry (+25% avg / 71% up
+  // vs +19% / 68% for any week). The "not extended" exclusion is removed —
+  // those were the WORSE entries in that data (+14.6% / 68%): strong stocks
+  // kept going. Caveat: a strong 2-year market on names partly chosen for
+  // having done well.
+  const sma = (n: number) => closes.slice(-n).reduce((s, c) => s + c, 0) / n;
+  const aboveAvgs = last > sma(20) && last > sma(50);
+  const belowAvgs = last < sma(20) && last < sma(50);
+  if (!chaseGuard?.call && callOk && volumeOk && aboveAvgs && trendUp.trend12w !== null && trendUp.trend12w >= OPTIONS_TREND_MIN_12W_PCT
       && (trendUp.trend4w === null || trendUp.trend4w >= -3) && sentiment > -0.3) {
     return {
       action: 'BUY', optionType: 'call',
-      reason: `[Trend] +${trendUp.trend12w.toFixed(1)}%/12w, not extended, news not negative — buying call`,
+      reason: `[Trend] +${trendUp.trend12w.toFixed(1)}%/12w, above its 20/50-day averages, news not negative — buying call`,
     };
   }
-  if (!chaseGuard?.put && putOk && volumeOk && trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT && !trendDown.isExtended
+  if (!chaseGuard?.put && putOk && volumeOk && belowAvgs && trendDown.trend12w !== null && trendDown.trend12w <= -OPTIONS_TREND_MIN_12W_PCT
       && (trendDown.trend4w === null || trendDown.trend4w <= 3) && sentiment < 0.3) {
     return {
       action: 'BUY', optionType: 'put',
-      reason: `[Trend] ${trendDown.trend12w.toFixed(1)}%/12w, not extended, news not positive — buying put`,
+      reason: `[Trend] ${trendDown.trend12w.toFixed(1)}%/12w, below its 20/50-day averages, news not positive — buying put`,
     };
   }
 
@@ -742,7 +756,7 @@ export function optionsNewsBasedEntrySignal(
 const NEWS_MOMENTUM_MIN_SCORE          = 55;
 const NEWS_MOMENTUM_HIGH_SCORE         = 70;
 const NEWS_MOMENTUM_HIGH_SCORE_MIN_VOL = 1.0;
-const NEWS_MOMENTUM_MID_SCORE_MIN_VOL  = 1.5;
+const NEWS_MOMENTUM_MID_SCORE_MIN_VOL  = 1.0; // see OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL
 // Chase-guard bar — same idea as CHASE_REENTRY_MIN_SCORE above (a much
 // higher bar than the normal tier, applied only after a recent real win on
 // this epic, same direction, within the cooldown window). Near the
@@ -886,6 +900,14 @@ export function newsMomentumSignal(
   // paths — selling volume is not support for a buy.
   let againstToday: 'BUY' | 'SELL' | null = null;
   if (direction && todayAgainst(bars, direction)) { againstToday = direction; direction = null; path = ''; }
+  // Trade with the trend (2026-10-21, see OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL's
+  // backtest note): buys only above the 20 & 50-day averages, sells only below.
+  let againstTrend: 'BUY' | 'SELL' | null = null;
+  if (direction) {
+    const avg = (n: number) => closes.slice(-n).reduce((s, c) => s + c, 0) / n;
+    const ok = direction === 'BUY' ? last > avg(20) && last > avg(50) : last < avg(20) && last < avg(50);
+    if (!ok) { againstTrend = direction; direction = null; path = ''; }
+  }
 
   const qualifies = score >= NEWS_MOMENTUM_MIN_SCORE
     && volRatio >= (score >= NEWS_MOMENTUM_HIGH_SCORE ? NEWS_MOMENTUM_HIGH_SCORE_MIN_VOL : NEWS_MOMENTUM_MID_SCORE_MIN_VOL);
@@ -909,7 +931,9 @@ export function newsMomentumSignal(
   }
 
   const guardActive = direction !== null && (direction === 'BUY' ? chaseGuard?.buy : chaseGuard?.sell);
-  const reason = againstToday
+  const reason = againstTrend
+    ? `${againstTrend} setup but price is ${againstTrend === 'BUY' ? 'not above' : 'not below'} both its 20 and 50-day averages — against the trend, skipping`
+    : againstToday
     ? `${againstToday} setup but today's price is ${againstToday === 'BUY' ? 'below' : 'above'} its open — today's volume is on the other side, skipping`
     : !direction
     ? `No directional read — ${dp >= 0 ? '+' : ''}${dp.toFixed(1)}% today (needs ${CONFIRM_MOVE_PCT}% to confirm) and ${volRatio.toFixed(1)}x volume / sentiment ${sentiment.toFixed(2)} not decisive enough to anticipate`

@@ -101,7 +101,7 @@ const ENTRY_MIN_TREND_4W  = -3;   // % — allow a small pullback within an inta
 // from its initial breakout volume while still being perfectly real, so this
 // only needs to catch a trend that's gone genuinely quiet/thin, not merely
 // "not accelerating."
-const ISA_ENTRY_MIN_VOLUME_RATIO = 0.8;
+const ISA_ENTRY_MIN_VOLUME_RATIO = 1.0; // normal volume floor, same as every bot (2026-10-21)
 // Exit consideration bar — same numbers as the existing position-review
 // tool's own `shouldFlag`, kept identical deliberately (already the
 // validated "this isn't noise" threshold for this exact use case).
@@ -228,8 +228,10 @@ const MOMENTUM_MIN_CONFIRM_CONFIDENCE = 65; // slightly below the ISA bot's 70 �
 // actually mean something, and holds whether or not the AI gate is on.
 const MOMENTUM_QUALIFY_MIN_SCORE          = 40; // below this, blocked regardless of volume
 const MOMENTUM_QUALIFY_HIGH_SCORE         = 60; // at/above this, only needs the lower volume bar
-const MOMENTUM_QUALIFY_HIGH_SCORE_MIN_VOL = 0.7;
-const MOMENTUM_QUALIFY_MID_SCORE_MIN_VOL  = 1.2; // score 40-59 needs real volume confirmation to compensate
+// Normal-day floor (1.0x) at every score — see alpacaStrategies.ts's
+// OPTIONS_MOMENTUM_MID_SCORE_MIN_VOL backtest note (2026-10-21).
+const MOMENTUM_QUALIFY_HIGH_SCORE_MIN_VOL = 1.0;
+const MOMENTUM_QUALIFY_MID_SCORE_MIN_VOL  = 1.0;
 
 // Counter-thesis detector — ported 2026-09-11 from igOptionsBot.ts (built
 // there the same day after a manually-overridden Palantir monthly CALL lost
