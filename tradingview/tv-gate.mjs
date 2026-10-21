@@ -10,7 +10,16 @@ const LOCK = '/tmp/tv-gate.lock';
 const args = (process.env.SSH_ORIGINAL_COMMAND ?? process.argv.slice(2).join(' ')).trim().split(/\s+/);
 
 const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const done = obj => { try { fs.unlinkSync(LOCK); } catch {} process.stdout.write(JSON.stringify(obj)); process.exit(0); };
+// Synchronous write: process.stdout.write + exit truncates large output (the
+// base64 screenshot) on a pipe. Retry on EAGAIN for non-blocking pipes.
+const writeAll = s => {
+  const buf = Buffer.from(s);
+  for (let off = 0; off < buf.length;) {
+    try { off += fs.writeSync(1, buf, off); }
+    catch (e) { if (e.code !== 'EAGAIN') throw e; sleep(10); }
+  }
+};
+const done = obj => { try { fs.unlinkSync(LOCK); } catch {} writeAll(JSON.stringify(obj)); process.exit(0); };
 const tv = (...a) => {
   try {
     const raw = execFileSync('node', [CLI, ...a], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
