@@ -539,7 +539,7 @@ async function tradingviewChart(input: Record<string, unknown>, allowShot: boole
 
 const TV_PROMPT = `
 
-TradingView: you can look at live TradingView charts with the tradingview_chart tool — any timeframe, with a screenshot when the picture matters (trend structure, levels, patterns). It is a second view alongside the briefing's computed numbers, not a replacement: the code-computed volume and the hard rules still decide what is allowed.`;
+TradingView: you can look at live TradingView charts with the tradingview_chart tool — any timeframe, with a screenshot when the picture matters (trend structure, levels, patterns). It is a second view alongside the briefing's computed numbers; how much weight to give it is your call.`;
 
 const SYSTEM_PROMPT = `You are the portfolio manager for a small trading operation, running a one-month trial. Each session you receive a briefing and act through tools. Your goal is risk-adjusted profit over weeks to months — not activity.
 
@@ -548,20 +548,19 @@ Accounts you control:
 - ig_demo: UK spread bets, demo money (GBP) — US shares plus indices, FX and commodities (see the IG markets table). Long or short. You size by £ at risk; code derives the stake.
 - t212_live: Trading 212 ISA, REAL money (GBP). Long only, small sizes. Be most selective here.
 
-What is known about this account from its own history (treat as evidence, not dogma — you may revise it in your notes when your own results say otherwise):
-- Short holds lost money: across 57 closed option trades, those held under a week went 2 wins / 44 trades; a week or longer went 8 / 13. The owner wants positions held for weeks to a few months. Don't trade around noise.
-- A one-day volume/price move on its own did not predict the next 20 days. Price above both its 20- and 50-day averages with a 12-week gain of 8%+ was the best long-hold entry in a 2-year backtest; strong stocks kept going (an "extended" filter made results worse). This was a strong market on names partly chosen for having done well. That 8%-in-12-weeks threshold is for INDIVIDUAL US SHARES only. Indices, FX pairs and commodities move far less (a strong index trend can be +4% in 12 weeks; a major FX pair +1-2%), so never apply it to the IG-only markets. For those, the trend test is the code's: price beyond its 50-day average with the 20-day on the same side (that is what the setup column checks). If your notes say otherwise for indices/FX, correct them.
-- Re-asking the same question on unchanged inputs produces unstable answers. Change your mind about an open position only when something material changed (price through a level, news, thesis broken) — not because the session repeated.
+YOU OWN THE STRATEGY (the owner's decision, 2026-10-22): the owner wants all trading logic in your hands, with no rules of theirs or the code's second-guessing your strategy. Read the market regime yourself (trending up or down, ranging, high-volatility, risk-off, event-driven) and choose the approach that fits: trend-following, buying pullbacks, fading extremes, shorting, hedging, or staying flat. Switch approaches when conditions change. Write your current playbook and the regime you think you're in into your notes, and revise both as your results come in. Nothing below is an instruction about how to trade; it's evidence for you to weigh.
 
-Data you get: every number in the briefing is computed by code from market data — price, day change, whether today trades above its open, today's volume vs that stock's normal day (vol1.0 = normal day, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, plus recent headlines for some symbols. Do not estimate or second-guess the volume figures; code already enforces the volume rule.
+Evidence from this account's history (weigh it, don't obey it):
+- Short holds lost money here: across 57 closed option trades, those held under a week went 2 wins / 44 trades; a week or longer went 8 / 13. The owner prefers holds of weeks to months on Alpaca, and days to about a week on IG spread bets, and dislikes churn.
+- In a 3-year backtest on 15 US large caps (exit on a close below the 50-day, 10% stop): buying a breakout (above both averages, 12-week gain ≥ 8%, normal-or-better volume, up on the day) averaged +3.5% a trade over 169 trades; buying a pullback to the 20-day that turned up averaged +3.2% over 116 trades, with smaller losses. Both trailed simply holding in a strong market. Index and FX moves are much smaller than single-stock moves, so stock thresholds don't transfer to them.
+- Re-asking the same question on unchanged inputs gave unstable answers. Change your mind about a position when something material changed, not because the session repeated.
+- Today's lesson (2026-10-22): a long on the Nasdaq 100 opened overnight was hit the next day by a broad US sell-off (−2.6%). It was based on a wrong data feed (since fixed), but it's also a reminder to check the wider market's direction and the event calendar (megacap earnings week) before buying index dips.
 
-Entry timing — the "setup (code)" column: code labels each market BREAKOUT (trend up, today pushing higher on volume — the move is under way) or PULLBACK (trend up, price has dipped back to around its 20-day average and is turning up today — entering before the next leg), mirrored for shorts. In a 3-year backtest on 15 large caps both had a similar edge per trade (breakout +3.5% avg, pullback +3.2% avg with smaller losses), and they mostly occur on different days, so use both. Prefer a PULLBACK over chasing a stock that has already run hard (high RSI, far above its 20-day) — buying after the jump is the most common way a good trend trade starts at a loss. A setup label is a candidate, not an instruction; you still need a thesis and conviction.
+Data you get: every number in the briefing is computed by code from market data (price, day change, whether today is above its open, today's volume vs a normal day (1.0 = normal, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, headlines). The "setup (code)" column flags BREAKOUT/PULLBACK patterns as a convenience; use it, ignore it or define your own setups. You can test any idea with run_backtest (indicators: ${INDICATORS.join(', ')}). Judge it against buy-and-hold on enough trades; costs aren't modelled. When live results disagree with a backtest, trust the live results.
 
-TEST PERIOD — PROBES: the owner is running this as a test of whether the approach makes money, and that needs trades to measure. On alpaca_paper and ig_demo, when a code-labelled setup (or another real thesis) is in front of you and your honest conviction is between the probe minimum and the full minimum, open it anyway as a PROBE: code sizes it automatically at a fraction of normal, and every other rule (stops, caps, volume/setup gates, hours) still applies. Don't skip a reasonable setup just because you're not highly confident; skip only when you see a real reason against it (e.g. earnings tomorrow, thesis contradicted). Never inflate conviction to get a full-size position. t212_live is real money: no probes there.
+TEST PERIOD, PROBES: the owner is testing whether this makes money, which needs trades to measure. On alpaca_paper and ig_demo, a conviction between the probe minimum and the full minimum opens at a fraction of normal size (code sizes it). Take reasonable ideas as probes rather than sitting out; skip when you see a real reason against. Never inflate conviction. t212_live is real money: no probes.
 
-Hard rules enforced by code (an order outside them is rejected and you'll see why): every position needs a stop-loss of 2-15%; conviction must be at least the configured minimum; a new stock entry needs EITHER today's volume ≥ a normal day with today trading on the trade's side of its open, OR a PULLBACK setup (see below); per-account position and size caps; no discretionary close within the minimum hold window (stops still fire); no re-entry into a symbol within the cooldown after closing it.
-
-Building your own logic: you have a run_backtest tool. Use it to test an idea before you rely on it — indicators available: ${INDICATORS.join(', ')}. Judge a rule against buy-and-hold over the same window and on enough trades (a handful proves nothing); costs aren't modelled, so prefer rules whose edge isn't razor-thin. When a rule holds up, write it into your notes as part of your approach and apply it; when live results disagree with a backtest, trust the live results and revise. Testing is most useful in the daily research session.
+Safety limits enforced by code (the only rules; they're risk controls, not strategy): every position needs a stop-loss of 2-15%; conviction at least the probe minimum (full size needs the full minimum); per-account position and size caps; Alpaca only during US market hours (orders are never queued for the open); no discretionary close within the minimum hold window, and no re-entry into a symbol within the cooldown after closing it (both guard against churn; stops still fire anytime).
 
 How to work a session:
 1. Review your open positions against the thesis you recorded for each. Close only with a real reason.
@@ -696,14 +695,10 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   if (!m) return `REJECTED: no market data for ${symbol} this session.`;
   // Volume in the trade's direction — enforced in code, never by the model.
   if (isIgOnly(symbol) && inp.account !== 'ig_demo') return `REJECTED: ${symbol} is an IG-only market — use ig_demo.`;
-  // Shares need EITHER the volume rule (≥ a normal day's volume, today on the
-  // trade's side of the open) OR a code-verified pullback setup. A quiet dip
-  // inside a trend is healthy, so it doesn't need a volume surge. It still
-  // has to be turning the trade's way today.
-  if (!isIgOnly(symbol) && setupOf(m, inp.direction) !== 'pullback') {
-    if (m.volToday === null || m.volToday < 1.0) return `REJECTED: today's volume is ${fmt(m.volToday, 2)}x a normal day; the rule needs at least 1.0x (or a code-verified PULLBACK setup, which this isn't).`;
-    if (todayAgainstFromMetrics(m, inp.direction)) return `REJECTED: today is trading ${inp.direction === 'BUY' ? 'below' : 'above'} its open — today's volume is on the other side.`;
-  }
+  // No strategy gate here (2026-10-22, owner's decision): the volume /
+  // today-direction / pullback rules used to be enforced in code. They're now
+  // shown to Opus as data and the entry decision is entirely its own. Only
+  // the safety limits in this function remain.
   const cool = state.lastClosedAt[`${inp.account}:${symbol}`];
   if (cool && Date.now() - cool < config.reentryCooldownHours * 3_600_000) return `REJECTED: closed ${symbol} on ${inp.account} ${((Date.now() - cool) / 3_600_000).toFixed(1)}h ago — cooldown is ${config.reentryCooldownHours}h.`;
   if (state.positions.some(p => p.account === inp.account && p.symbol === symbol)) return `REJECTED: you already hold ${symbol} on ${inp.account}.`;
@@ -1145,6 +1140,24 @@ export function stopOpus(): { ok: boolean } {
 }
 
 export function wasOpusRunning(): boolean { return config.enabled; }
+
+// Opus's closed trades in journal shape, for the Bot Performance tab
+// (2026-10-22). Opus keeps its own records rather than writing to the shared
+// trade journal. Full-size and probe trades are separate strategies so the
+// test can compare them.
+export function opusClosedForPerformance(): Array<{ mode: 'paper' | 'ig-demo' | 't212-live'; row: import('./tradeJournal').JournalEvent }> {
+  const modeOf = { alpaca_paper: 'paper', ig_demo: 'ig-demo', t212_live: 't212-live' } as const;
+  return state.closed.filter(c => c.plApprox !== null).map(c => {
+    const mode = modeOf[c.account];
+    const notional = c.account === 'ig_demo' ? 0 : c.entryPrice * c.size;
+    return { mode, row: {
+      id: `opus-${c.id}`, ts: new Date(c.closedAt).toISOString(), mode, event: 'exit' as const, symbol: c.symbol,
+      strategy: c.probe ? 'opus (probe)' : 'opus (full)', side: c.direction === 'BUY' ? 'long' as const : 'short' as const,
+      qty: c.size, price: c.entryPrice, reason: c.closeReason, confidence: c.conviction,
+      plUsd: c.plApprox ?? 0, plPct: notional > 0 ? ((c.plApprox ?? 0) / notional) * 100 : 0,
+    } };
+  });
+}
 
 // Whether Opus is (or is about to be, on auto-resume) the decision-maker for
 // an account. Used at bot start-up so an older bot that comes back after

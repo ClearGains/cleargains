@@ -15,6 +15,7 @@
 //    currentEra is omitted.
 import { getJournal, type JournalMode, type JournalEvent } from './tradeJournal';
 import { EDGE_STATS_CUTOFF } from './quant';
+import { opusClosedForPerformance } from './opusTrader';
 
 const ALL_MODES: JournalMode[] = ['paper', 'live', 'ig-demo', 'ig-live', 't212-demo', 't212-live', 'meme-paper'];
 
@@ -116,8 +117,13 @@ function computePerf(exits: JournalEvent[]): StrategyPerf {
 export function getPerformanceSummary(): { modes: ModePerf[] } {
   const modes: ModePerf[] = [];
 
+  // Opus's own trades join the account they were made on (see opusTrader.ts).
+  let opusRows: ReturnType<typeof opusClosedForPerformance> = [];
+  try { opusRows = opusClosedForPerformance(); } catch {}
+
   for (const mode of ALL_MODES) {
-    const { records } = getJournal(mode, 5000);
+    const { records: journal } = getJournal(mode, 5000);
+    const records = [...journal, ...opusRows.filter(o => o.mode === mode).map(o => o.row)];
     const exitsByStrategy = new Map<string, JournalEvent[]>();
     for (const r of records) {
       if (r.event !== 'exit' || r.plUsd === undefined) continue;

@@ -1305,14 +1305,17 @@ async function pollExits(mode: T212Mode, positions: T212Position[]): Promise<voi
       heldWeeks: (Date.now() - tracked.enteredAt) / (7 * 86_400_000),
       unrealizedPlPct: uplPct,
     };
-    const verdict = await askXaiIsaThesis(thesisReq);
+    // Opus first, xAI only if Opus can't answer (2026-10-22, owner: prioritise Opus).
+    const verdict = (await import('./opusTrader').then(m => m.opusIsaThesis(thesisReq)).catch(() => null))
+      ?? await askXaiIsaThesis(thesisReq);
     tracked.lastVerdict = { action: verdict.action, confidence: verdict.confidence, reason: verdict.reason, engine: verdict.engine, at: Date.now() };
-    addLog(mode, 'info', underlying, `[XAI] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
+    addLog(mode, 'info', underlying, `[${verdict.engine.toUpperCase()}] ${verdict.action} ${verdict.confidence}% — ${verdict.reason} (${verdict.engine})`);
 
     // The Gemini/OpenAI side-by-side comparison that used to run here was
     // removed on 2026-10-21, along with OpenAI. The provider study had finished.
 
-    if (verdict.action === 'SELL' && verdict.engine === 'xai') {
+    // A real verdict from either AI (not a passthrough when both failed).
+    if (verdict.action === 'SELL' && (verdict.engine === 'opus' || verdict.engine === 'xai')) {
       try {
         // Cancel the outstanding protective stop-limit FIRST — leaving it
         // live against a position about to be fully sold would mean a
