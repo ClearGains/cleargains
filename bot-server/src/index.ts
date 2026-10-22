@@ -33,7 +33,7 @@ import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
 import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
-import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, opusManagesAccount, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
+import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, opusManagesAccount, adoptIgPosition, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
 import { getPerformanceSummary } from './performance';
 import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
@@ -494,6 +494,13 @@ app.post('/opus/run-now', auth, (_req: Request, res: Response) => {
 app.post('/opus/config', auth, (req: Request, res: Response) => {
   res.json(updateOpusConfig((req.body ?? {}) as Partial<OpusConfig>));
 });
+// POST /opus/adopt { dealId, note } — hand an existing IG demo position to Opus.
+app.post('/opus/adopt', auth, (req: Request, res: Response) => {
+  const b = req.body as { dealId?: string; note?: string };
+  if (!b?.dealId) { res.status(400).json({ ok: false, message: 'dealId required' }); return; }
+  void adoptIgPosition(String(b.dealId), String(b.note ?? 'handed over by the owner')).then(r => res.json(r)).catch(e => res.json({ ok: false, message: e instanceof Error ? e.message : String(e) }));
+});
+
 app.post('/opus/positions/:id/close', auth, (req: Request, res: Response) => {
   void closeOpusPositionManually(String(req.params.id)).then(r => res.json(r));
 });

@@ -27,7 +27,7 @@ import {
 import { calcRsi, calcAtr, dailyVolumeRatio } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
 import {
-  authenticate, fetchFullPositions, placeMarketOrder as igPlaceOrder, closePosition as igClosePosition,
+  authenticate, fetchFullPositions, fetchPositions, placeMarketOrder as igPlaceOrder, closePosition as igClosePosition,
   fetchMarketDetails, fetchAccountFunds, type IGSession,
 } from './igApi';
 import { resolveCredentials, calcStake } from './igStrategyBot';
@@ -738,7 +738,22 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
       const riskGbp = Math.min(inp.size, igCap) * sizeFactor;
       const stake = Math.max(minDeal, calcStake(riskGbp, stopDist, minDeal));
       if (stake * stopDist > igCap * 1.5) return `REJECTED: IG's minimum stake (${minDeal}/pt) with a ${inp.stop_loss_pct}% stop risks £${(stake * stopDist).toFixed(0)}, above the £${igCap.toFixed(0)} cap — try a tighter stop or another market.`;
-      const r = await igPlaceOrder(session, epic, inp.direction, stake, stopDist, undefined, 'GBP', false);
+      let r: { dealId: string; level: number };
+      try {
+        r = await igPlaceOrder(session, epic, inp.direction, stake, stopDist, undefined, 'GBP', false);
+      } catch (e) {
+        // 2026-10-22: IG answered "Deal REJECTED: unknown" for an EU Stocks 50
+        // order that had in fact opened. Opus retried smaller and ended up with
+        // two shorts, one untracked. Before treating a rejection as final,
+        // check whether a matching deal appeared in the last two minutes.
+        await new Promise(res => setTimeout(res, 2500));
+        const known = new Set(state.positions.map(p => p.brokerRef));
+        const fresh = (await fetchPositions(session).catch(() => [])).find(x => x.epic === epic && x.direction === inp.direction && !known.has(x.dealId)
+          && (!x.createdUtc || Date.now() - Date.parse(x.createdUtc + 'Z') < 120_000));
+        if (!fresh) throw e;
+        addLog('info', `IG reported "${e instanceof Error ? e.message : String(e)}" but deal ${fresh.dealId} did open — tracking it instead of re-ordering`);
+        r = { dealId: fresh.dealId, level: fresh.level };
+      }
       const stop = inp.direction === 'BUY' ? r.level - stopDist : r.level + stopDist;
       const p: OpusPosition = { id: newId(), account: 'ig_demo', symbol, brokerRef: r.dealId, epic, direction: inp.direction, size: stake,
         entryPrice: r.level, stopPrice: round2(stop), openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, probe };
@@ -1140,6 +1155,25 @@ export function stopOpus(): { ok: boolean } {
 }
 
 export function wasOpusRunning(): boolean { return config.enabled; }
+
+// Hand an existing IG demo position to Opus (2026-10-22): used when a market
+// moves to Opus from another bot, or for a deal opened outside Opus's records.
+// Opus then manages it like its own, with its real broker stop and open time.
+export async function adoptIgPosition(dealId: string, note: string): Promise<{ ok: boolean; message: string }> {
+  if (state.positions.some(p => p.brokerRef === dealId)) return { ok: false, message: 'Opus already tracks that deal.' };
+  const session = await ig();
+  const x = (await fetchPositions(session)).find(p => p.dealId === dealId);
+  if (!x) return { ok: false, message: `No open IG demo position with deal ${dealId}.` };
+  const symbol = Object.keys(TICKER_TO_EPIC).find(t => TICKER_TO_EPIC[t] === x.epic);
+  if (!symbol) return { ok: false, message: `${x.epic} isn't one of Opus's IG markets.` };
+  const stop = x.stopLevel ?? (x.direction === 'BUY' ? x.level * 0.95 : x.level * 1.05);
+  const p: OpusPosition = { id: newId(), account: 'ig_demo', symbol, brokerRef: x.dealId, epic: x.epic, direction: x.direction, size: x.size,
+    entryPrice: x.level, stopPrice: round2(stop), openedAt: x.createdUtc ? Date.parse(x.createdUtc + 'Z') : Date.now(),
+    conviction: 0, reason: `INHERITED (not opened by you): ${note} Decide whether it fits your view; hold, or close it with a reason.` };
+  state.positions.push(p); saveState();
+  addLog('info', `Adopted IG demo ${symbol} ${x.direction} ${x.size}/pt @ ${x.level} (stop ${round2(stop)}) — ${note}`);
+  return { ok: true, message: `Opus now manages ${symbol} ${x.direction} ${x.size}/pt (id ${p.id}).` };
+}
 
 // Opus's closed trades in journal shape, for the Bot Performance tab
 // (2026-10-22). Opus keeps its own records rather than writing to the shared
