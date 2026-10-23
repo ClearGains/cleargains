@@ -130,6 +130,7 @@ export type OpusPosition = {
   probe?:      boolean;   // opened as a small probe (conviction below minConviction)
   lastPl?:     number | null;   // last P&L seen at the broker (fallback when it closes between reviews)
   reason:      string;
+  exitPlan?:   string;        // target, invalidation, when to tighten, reward:risk (2026-10-23)
 };
 
 type ClosedRecord = OpusPosition & { closedAt: number; closeReason: string; plApprox: number | null };
@@ -428,8 +429,9 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
         stop_loss_pct: { type: 'number', description: 'Stop distance from entry, % of price (2-15)' },
         conviction:    { type: 'integer', description: '0-100, your honest confidence this trade works over your intended holding period' },
         reason:        { type: 'string', description: 'Why, in 1-3 sentences — the thesis you will judge the position against later' },
+        exit_plan:     { type: 'string', description: 'Target level, what would prove you wrong before the stop, when you will tighten the stop to lock in profit, and rough reward:risk. 1-3 sentences.' },
       },
-      required: ['account', 'symbol', 'direction', 'size', 'stop_loss_pct', 'conviction', 'reason'],
+      required: ['account', 'symbol', 'direction', 'size', 'stop_loss_pct', 'conviction', 'reason', 'exit_plan'],
       additionalProperties: false,
     },
   },
@@ -495,6 +497,20 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
         lookback_days:    { type: 'integer', description: 'Trading days of history, 120-750' },
       },
       required: ['symbols', 'direction', 'entry_conditions', 'exit_conditions', 'stop_loss_pct', 'take_profit_pct', 'max_hold_days', 'lookback_days'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_exit_plan',
+    description: 'Record or revise the exit plan for one of your open positions (target, what would prove you wrong, when to tighten the stop, reward:risk). Use it for positions that have no plan yet, or when something material changed. Changes nothing at the broker.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        position_id: { type: 'string' },
+        exit_plan:   { type: 'string' },
+      },
+      required: ['position_id', 'exit_plan'],
       additionalProperties: false,
     },
   },
@@ -581,7 +597,7 @@ const TV_PROMPT = `
 
 TradingView: you can look at live TradingView charts with the tradingview_chart tool — any timeframe, with a screenshot when the picture matters (trend structure, levels, patterns). It is a second view alongside the briefing's computed numbers; how much weight to give it is your call.`;
 
-const SYSTEM_PROMPT = `You are the portfolio manager for a small trading operation, running a one-month trial. Each session you receive a briefing and act through tools. Your goal is risk-adjusted profit over weeks to months — not activity.
+const SYSTEM_PROMPT = `You are the portfolio manager for a small trading operation, running in a test period that is being reviewed after about a month. Each session you receive a briefing and act through tools. Your goal is risk-adjusted profit over weeks to months, not activity. Don't rush trades to show a result inside the test: a sound position still open at the review counts by its open P&L.
 
 Accounts you control:
 - alpaca_paper: US stocks/ETFs, paper money (USD). Long or short.
@@ -594,22 +610,28 @@ Evidence from this account's history (weigh it, don't obey it):
 - Short holds lost money here: across 57 closed option trades, those held under a week went 2 wins / 44 trades; a week or longer went 8 / 13. The owner prefers holds of weeks to months on Alpaca, and days to about a week on IG spread bets, and dislikes churn.
 - In a 3-year backtest on 15 US large caps (exit on a close below the 50-day, 10% stop): buying a breakout (above both averages, 12-week gain ≥ 8%, normal-or-better volume, up on the day) averaged +3.5% a trade over 169 trades; buying a pullback to the 20-day that turned up averaged +3.2% over 116 trades, with smaller losses. Both trailed simply holding in a strong market. Index and FX moves are much smaller than single-stock moves, so stock thresholds don't transfer to them.
 - Re-asking the same question on unchanged inputs gave unstable answers. Change your mind about a position when something material changed, not because the session repeated.
-- Today's lesson (2026-10-22): a long on the Nasdaq 100 opened overnight was hit the next day by a broad US sell-off (−2.6%). It was based on a wrong data feed (since fixed), but it's also a reminder to check the wider market's direction and the event calendar (megacap earnings week) before buying index dips.
 - The owner's view on natural gas (2026-10-23): it's worth more of your attention than its share of the market list suggests. Its patterns (trend breakouts, seasonal and inventory-driven swings) tend to be clearer than most markets', and trades here have done well when the entry was chosen carefully and the profit was locked in. Don't take the short you adopted from the old breakout bot as proof of this, though: the owner thinks its entry logic was crude and that it's in profit mostly because the market happened to move its way. Judge that position on your own reading of the chart, not on its P&L so far. Natural gas is also very volatile, with sharp reversals after big runs, so the gain depends on where you set and tighten the stop. Look at it closely every session and trade it when you see a setup you'd take. This is a pointer about where to look, not an instruction to trade it or a reason to lower your bar.
 
 Data you get: every number in the briefing is computed by code from market data (price, day change, whether today is above its open, today's volume vs a normal day (1.0 = normal, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, headlines). The "setup (code)" column flags BREAKOUT/PULLBACK patterns as a convenience; use it, ignore it or define your own setups. You can test any idea with run_backtest (indicators: ${INDICATORS.join(', ')}). Judge it against buy-and-hold on enough trades; costs aren't modelled. When live results disagree with a backtest, trust the live results.
 
 KEEP LEARNING (the owner's standing request, 2026-10-23): you're expected to get better over the test, above all from your mistakes. Your track record is in every briefing. After a trade closes at a loss, or stops out, write a one-line post-mortem in your notes: what you expected, what actually happened, and what you'll do differently. In each daily research session, look across your recent closes for patterns (which setups, markets, regimes, holding times and conviction levels win or lose, and probes vs full size) and change your playbook to match. Keep the notes compact: merge old lessons into rules rather than piling up entries. Don't repeat a mistake your notes already describe.
 
-Locking in profit: you can move a position's broker stop with tighten_stop (tighten only, so it never adds risk; it works between your reviews). Whether, when and where to use it is your call. History here: an older automatic "profit floor" closed 16 trades, all in profit (about £1,490 total), but on the ones with a recorded peak it kept only about half the peak gain. Your stops otherwise stay where they started until you close the trade.
+Plan the exit when you enter: every open_position needs an exit_plan saying where you expect the trade to go (a target level), what would prove you wrong before the stop is hit, at what point you'll tighten the stop to lock in profit, and the rough reward-to-risk (target distance ÷ stop distance). The plan is shown with the position in every briefing; at each review, check the trade against it rather than re-deciding from scratch, and act when it says to. If the plan needs changing because something material changed, say so in your notes. A trade whose realistic target is barely further away than its stop usually isn't worth taking.
 
-TEST PERIOD, PROBES: the owner is testing whether this makes money, which needs trades to measure. On alpaca_paper and ig_demo, a conviction between the probe minimum and the full minimum opens at a fraction of normal size (code sizes it). Take reasonable ideas as probes rather than sitting out; skip when you see a real reason against. Never inflate conviction. t212_live is real money: no probes.
+Locking in profit: you can move a position's broker stop with tighten_stop (tighten only, so it never adds risk; it works between your reviews). Whether, when and where to use it is your call, ideally decided in the exit plan. History here: an older automatic "profit floor" closed 16 trades, all in profit (about £1,490 total), but on the ones with a recorded peak it kept only about half the peak gain. Your stops otherwise stay where they started until you close the trade.
+
+Things that quietly cost money:
+- Related positions are one bet. Indices, the euro and European shares, oil and energy shares, or several tech names tend to move together. Before adding a position, ask what all your positions together lose if the market turns against them at once, and size or skip accordingly.
+- Trading costs. Every IG spread bet pays the spread on entry and exit, and a daily-funded bet is charged overnight funding (very roughly the base rate plus about 2.5% a year of the position's value, for each night held). On a tight stop or a small target the spread is a big share of the trade. Backtests here leave costs out, so they look better than live trading will.
+- Stops inside normal noise. A stop closer than a market's usual daily range (ATR% in the briefing) tends to get hit by ordinary swings before the idea has had a chance to play out. Volatile markets such as natural gas need room, and you should size them smaller to fit.
+
+TEST PERIOD, PROBES: the owner is testing whether this makes money, which needs trades to measure. On alpaca_paper and ig_demo, a conviction between the probe minimum and the full minimum opens at a fraction of normal size (code sizes it). When you have a real idea that falls short of full conviction, take it as a probe rather than sitting out. Don't invent ideas to have something to trade, and never inflate conviction. t212_live is real money: no probes.
 
 Safety limits enforced by code (the only rules; they're risk controls, not strategy): every position needs a stop-loss of 2-15%; conviction at least the probe minimum (full size needs the full minimum); per-account position and size caps; Alpaca only during US market hours (orders are never queued for the open); no discretionary close within the minimum hold window, and no re-entry into a symbol within the cooldown after closing it (both guard against churn; stops still fire anytime).
 
 How to work a session:
-1. Review your open positions against the thesis you recorded for each. Close only with a real reason.
-2. Consider new entries only where the setup is genuinely good. Doing nothing is a fine outcome — most sessions should be.
+1. Review your open positions against the thesis and exit plan you recorded for each. Close or tighten when the plan says to or something material changed.
+2. Look for new entries: full size where the setup is genuinely good, a probe where it's a real but less certain idea. When nothing qualifies, doing nothing is the right outcome; many sessions will be like that.
 3. If you learned something, update your notes. Keep them short and concrete.
 4. End with a brief plain-text summary of what you did and why (2-4 sentences).`;
 
@@ -653,7 +675,7 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   for (const p of state.positions) {
     const v = view.get(p.id);
     const heldH = (Date.now() - p.openedAt) / 3_600_000;
-    lines.push(`- id=${p.id} ${p.account} ${p.direction} ${p.symbol} size=${p.size} entry=${p.entryPrice} stop=${p.stopPrice} now=${fmt(v?.current ?? null, 2)} P&L=${fmt(v?.pl ?? null, 2)} held=${heldH.toFixed(1)}h conviction=${p.conviction} thesis: ${p.reason}`);
+    lines.push(`- id=${p.id} ${p.account} ${p.direction} ${p.symbol} size=${p.size} entry=${p.entryPrice} stop=${p.stopPrice} now=${fmt(v?.current ?? null, 2)} P&L=${fmt(v?.pl ?? null, 2)} held=${heldH.toFixed(1)}h conviction=${p.conviction} thesis: ${p.reason} — exit plan: ${p.exitPlan ?? '(none recorded yet; set one with set_exit_plan)'}`);
   }
 
   const recent = state.closed.slice(-15);
@@ -664,7 +686,7 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
     lines.push('## Your track record (learn from it — especially the losers)');
     lines.push(`Overall: ${score(known)} · full-size: ${score(known.filter(c => !c.probe))} · probes: ${score(known.filter(c => c.probe))}. (Mixed currencies: alpaca $, ig £.)`);
     lines.push('Recent closes, most recent last — what you expected vs what happened:');
-    for (const c of recent) lines.push(`- ${new Date(c.closedAt).toISOString().slice(0, 10)} ${c.account} ${c.direction} ${c.symbol}${c.probe ? ' [probe]' : ''} entry ${c.entryPrice}, stop ${c.stopPrice}, held ${((c.closedAt - c.openedAt) / 86_400_000).toFixed(1)}d, P&L ${fmt(c.plApprox, 2)} — closed: ${c.closeReason} — your thesis was: ${c.reason.slice(0, 160)}`);
+    for (const c of recent) lines.push(`- ${new Date(c.closedAt).toISOString().slice(0, 10)} ${c.account} ${c.direction} ${c.symbol}${c.probe ? ' [probe]' : ''} entry ${c.entryPrice}, stop ${c.stopPrice}, held ${((c.closedAt - c.openedAt) / 86_400_000).toFixed(1)}d, P&L ${fmt(c.plApprox, 2)} — closed: ${c.closeReason} — your thesis was: ${c.reason.slice(0, 160)}${c.exitPlan ? ` — your exit plan was: ${c.exitPlan.slice(0, 160)}` : ''}`);
   }
 
   lines.push('');
@@ -715,7 +737,7 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 // IG/spread bets keep the full cadence). Alpaca stops stay at the broker.
 let alpacaInScope = true;
 
-async function openPosition(inp: { account: OpusAccount; symbol: string; direction: 'BUY' | 'SELL'; size: number; stop_loss_pct: number; conviction: number; reason: string },
+async function openPosition(inp: { account: OpusAccount; symbol: string; direction: 'BUY' | 'SELL'; size: number; stop_loss_pct: number; conviction: number; reason: string; exit_plan?: string },
   metrics: Map<string, Metrics>): Promise<string> {
   const symbol = inp.symbol.toUpperCase().trim();
   if (!config.accounts[inp.account]) return `REJECTED: ${inp.account} is disabled.`;
@@ -765,7 +787,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
         order_class: 'oto', stop_loss: { stop_price: stop }, client_order_id: `opus-${symbol}-${Date.now()}`,
       });
       const p: OpusPosition = { id: newId(), account: 'alpaca_paper', symbol, brokerRef: symbol, direction: inp.direction, size: qty,
-        entryPrice: m.price, stopPrice: stop, openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, probe };
+        entryPrice: m.price, stopPrice: stop, openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, exitPlan: inp.exit_plan, probe };
       state.positions.push(p); saveState();
       addLog('enter', `alpaca_paper${tag} ${inp.direction} ${qty} ${symbol} @~$${m.price.toFixed(2)} stop $${stop} (conviction ${inp.conviction}) — ${inp.reason}`);
       return `OPENED id=${p.id}: ${inp.direction} ${qty} ${symbol} @~$${m.price.toFixed(2)}, stop $${stop}.`;
@@ -805,7 +827,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
       }
       const stop = inp.direction === 'BUY' ? r.level - stopDist : r.level + stopDist;
       const p: OpusPosition = { id: newId(), account: 'ig_demo', symbol, brokerRef: r.dealId, epic, direction: inp.direction, size: stake,
-        entryPrice: r.level, stopPrice: round2(stop), openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, probe };
+        entryPrice: r.level, stopPrice: round2(stop), openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, exitPlan: inp.exit_plan, probe };
       state.positions.push(p); saveState();
       addLog('enter', `ig_demo${tag} ${inp.direction} ${symbol} £${stake}/pt @ ${r.level} stop ${round2(stop)} (risk ≈ £${(stake * stopDist).toFixed(2)}, conviction ${inp.conviction}) — ${inp.reason}`);
       return `OPENED id=${p.id}: ${inp.direction} ${symbol} £${stake}/pt @ ${r.level} (IG points), stop ${round2(stop)}, risk ≈ £${(stake * stopDist).toFixed(2)}.`;
@@ -830,7 +852,7 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
     try { const o = await placeStopLimitOrder('live', ticker, -qty, stop, round2(stop * 0.97)); stopOrderId = o.id !== undefined ? String(o.id) : undefined; }
     catch (e) { addLog('error', `t212_live ${symbol} stop-limit failed (position open without a broker stop until retried): ${e instanceof Error ? e.message : String(e)}`); }
     const p: OpusPosition = { id: newId(), account: 't212_live', symbol, brokerRef: ticker, direction: 'BUY', size: qty,
-      entryPrice: m.price, stopPrice: stop, stopOrderId, openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason };
+      entryPrice: m.price, stopPrice: stop, stopOrderId, openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, exitPlan: inp.exit_plan };
     state.positions.push(p); saveState();
     addLog('enter', `t212_live BUY ${qty} ${symbol} (£${gbp}) @~$${m.price.toFixed(2)} stop $${stop} (conviction ${inp.conviction}) — ${inp.reason}`);
     return `OPENED id=${p.id}: BUY ${qty} ${symbol} (£${gbp}) on T212 (real money), stop $${stop}.`;
@@ -1096,6 +1118,11 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
         try {
           if (t.name === 'open_position') out = await openPosition(input as Parameters<typeof openPosition>[0], metrics);
           else if (t.name === 'close_position') out = await closePosition(String(input.position_id), String(input.reason), view);
+          else if (t.name === 'set_exit_plan') {
+            const p = state.positions.find(x => x.id === String(input.position_id));
+            if (!p) out = 'No open position with that id.';
+            else { p.exitPlan = String(input.exit_plan).slice(0, 600); saveState(); addLog('info', `Exit plan for ${p.symbol}: ${p.exitPlan}`); out = 'Exit plan saved.'; }
+          }
           else if (t.name === 'tighten_stop') out = await tightenStop(String(input.position_id), Number(input.new_stop), String(input.reason), view);
           else if (t.name === 'run_backtest') {
             if (backtestsLeft <= 0) out = `REJECTED: backtest limit for this session (${MAX_BACKTESTS_PER_SESSION}) reached.`;
