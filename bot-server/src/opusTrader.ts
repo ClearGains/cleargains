@@ -22,12 +22,12 @@ import * as os from 'os';
 import { execFile } from 'child_process';
 import {
   getBars, getAccount, getPositions as getAlpacaPositions, placeOrder as alpacaPlaceOrder,
-  closePosition as alpacaClosePosition, cancelOrdersForSymbol, getOrders as alpacaGetOrders, cancelOrder as alpacaCancelOrder, type AlpacaBar,
+  closePosition as alpacaClosePosition, cancelOrdersForSymbol, getOrders as alpacaGetOrders, cancelOrder as alpacaCancelOrder, getFillsSince, type AlpacaBar,
 } from './alpacaApi';
 import { calcRsi, calcAtr, dailyVolumeRatio } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
 import {
-  authenticate, fetchFullPositions, fetchPositions, updatePositionLevels, placeMarketOrder as igPlaceOrder, closePosition as igClosePosition,
+  authenticate, fetchFullPositions, fetchPositions, updatePositionLevels, fetchClosedTransactions, placeMarketOrder as igPlaceOrder, closePosition as igClosePosition,
   fetchMarketDetails, fetchAccountFunds, type IGSession,
 } from './igApi';
 import { resolveCredentials, calcStake } from './igStrategyBot';
@@ -128,6 +128,7 @@ export type OpusPosition = {
   openedAt:    number;
   conviction:  number;
   probe?:      boolean;   // opened as a small probe (conviction below minConviction)
+  lastPl?:     number | null;   // last P&L seen at the broker (fallback when it closes between reviews)
   reason:      string;
 };
 
@@ -341,6 +342,7 @@ async function livePositionView(): Promise<Map<string, LivePos>> {
       for (const p of state.positions.filter(x => x.account === 'alpaca_paper')) {
         const lp = ps.find(x => x.symbol === p.brokerRef);
         view.set(p.id, lp ? { pl: parseFloat(lp.unrealized_pl), current: parseFloat(lp.current_price), exists: true } : { pl: null, current: null, exists: false });
+        if (lp) p.lastPl = parseFloat(lp.unrealized_pl);
       }
     } catch { /* leave unknown */ }
   }
@@ -350,6 +352,7 @@ async function livePositionView(): Promise<Map<string, LivePos>> {
       for (const p of state.positions.filter(x => x.account === 'ig_demo')) {
         const lp = ps.find(x => x.dealId === p.brokerRef);
         view.set(p.id, lp ? { pl: lp.upl, current: p.direction === 'BUY' ? lp.bid : lp.offer, exists: true } : { pl: null, current: null, exists: false });
+        if (lp) p.lastPl = lp.upl;
       }
     } catch { /* leave unknown */ }
   }
@@ -372,9 +375,31 @@ async function reconcile(view: Map<string, LivePos>): Promise<void> {
     if (v && !v.exists) {
       // Grace for a just-placed order that hasn't shown up yet.
       if (Date.now() - p.openedAt < 10 * 60_000) continue;
-      markClosed(p, 'Closed at the broker (stop-loss hit or closed outside Opus)', null);
+      const real = await realisedPl(p).catch(() => null);
+      markClosed(p, `Closed at the broker (stop-loss hit, profit target, or closed outside Opus)${real ? '' : ' — P&L is the last value seen before it closed'}`, real ?? p.lastPl ?? null);
     }
   }
+}
+
+// The broker's own P&L for a position that closed between reviews
+// (2026-10-23: these were booked with no P&L, which hid the stop-outs Opus
+// most needs to learn from). IG: transaction history matched on open time.
+// Alpaca: the closing fills after the position opened.
+async function realisedPl(p: OpusPosition): Promise<number | null> {
+  if (p.account === 'ig_demo') {
+    const tx = await fetchClosedTransactions(await ig(), new Date(p.openedAt - 3_600_000).toISOString());
+    const t = tx.find(x => x.openDateUtc && Math.abs(Date.parse(x.openDateUtc + 'Z') - p.openedAt) < 5 * 60_000 && Math.abs((x.openLevel ?? 0) - p.entryPrice) < Math.max(1, p.entryPrice * 0.002));
+    return t ? t.profitAndLoss : null;
+  }
+  if (p.account === 'alpaca_paper') {
+    const fills = (await getFillsSince('paper', new Date(p.openedAt).toISOString())).filter(x => x.symbol === p.brokerRef && x.side === (p.direction === 'BUY' ? 'sell' : 'buy'));
+    let qty = 0, value = 0;
+    for (const x of fills) { const q = Math.min(parseFloat(x.qty), p.size - qty); if (q <= 0) break; qty += q; value += q * parseFloat(x.price); }
+    if (qty < p.size - 1e-9) return null;
+    const exit = value / qty;
+    return Math.round((p.direction === 'BUY' ? exit - p.entryPrice : p.entryPrice - exit) * p.size * 100) / 100;
+  }
+  return null;
 }
 
 function markClosed(p: OpusPosition, reason: string, pl: number | null): void {
@@ -573,6 +598,8 @@ Evidence from this account's history (weigh it, don't obey it):
 
 Data you get: every number in the briefing is computed by code from market data (price, day change, whether today is above its open, today's volume vs a normal day (1.0 = normal, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, headlines). The "setup (code)" column flags BREAKOUT/PULLBACK patterns as a convenience; use it, ignore it or define your own setups. You can test any idea with run_backtest (indicators: ${INDICATORS.join(', ')}). Judge it against buy-and-hold on enough trades; costs aren't modelled. When live results disagree with a backtest, trust the live results.
 
+KEEP LEARNING (the owner's standing request, 2026-10-23): you're expected to get better over the test, above all from your mistakes. Your track record is in every briefing. After a trade closes at a loss, or stops out, write a one-line post-mortem in your notes: what you expected, what actually happened, and what you'll do differently. In each daily research session, look across your recent closes for patterns (which setups, markets, regimes, holding times and conviction levels win or lose, and probes vs full size) and change your playbook to match. Keep the notes compact: merge old lessons into rules rather than piling up entries. Don't repeat a mistake your notes already describe.
+
 Locking in profit: you can move a position's broker stop with tighten_stop (tighten only, so it never adds risk; it works between your reviews). Whether, when and where to use it is your call. History here: an older automatic "profit floor" closed 16 trades, all in profit (about £1,490 total), but on the ones with a recorded peak it kept only about half the peak gain. Your stops otherwise stay where they started until you close the trade.
 
 TEST PERIOD, PROBES: the owner is testing whether this makes money, which needs trades to measure. On alpaca_paper and ig_demo, a conviction between the probe minimum and the full minimum opens at a fraction of normal size (code sizes it). Take reasonable ideas as probes rather than sitting out; skip when you see a real reason against. Never inflate conviction. t212_live is real money: no probes.
@@ -628,11 +655,15 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
     lines.push(`- id=${p.id} ${p.account} ${p.direction} ${p.symbol} size=${p.size} entry=${p.entryPrice} stop=${p.stopPrice} now=${fmt(v?.current ?? null, 2)} P&L=${fmt(v?.pl ?? null, 2)} held=${heldH.toFixed(1)}h conviction=${p.conviction} thesis: ${p.reason}`);
   }
 
-  const recent = state.closed.slice(-12);
+  const recent = state.closed.slice(-15);
   if (recent.length) {
+    const known = state.closed.filter(c => c.plApprox !== null);
+    const score = (xs: ClosedRecord[]) => `${xs.length} closed, ${xs.filter(c => (c.plApprox ?? 0) > 0).length} won, net ${fmt(xs.reduce((t, c) => t + (c.plApprox ?? 0), 0), 2)}`;
     lines.push('');
-    lines.push('## Your recent closes (most recent last)');
-    for (const c of recent) lines.push(`- ${new Date(c.closedAt).toISOString().slice(0, 10)} ${c.account} ${c.direction} ${c.symbol} held ${((c.closedAt - c.openedAt) / 86_400_000).toFixed(1)}d P&L≈${fmt(c.plApprox, 2)} — ${c.closeReason}`);
+    lines.push('## Your track record (learn from it — especially the losers)');
+    lines.push(`Overall: ${score(known)} · full-size: ${score(known.filter(c => !c.probe))} · probes: ${score(known.filter(c => c.probe))}. (Mixed currencies: alpaca $, ig £.)`);
+    lines.push('Recent closes, most recent last — what you expected vs what happened:');
+    for (const c of recent) lines.push(`- ${new Date(c.closedAt).toISOString().slice(0, 10)} ${c.account} ${c.direction} ${c.symbol}${c.probe ? ' [probe]' : ''} entry ${c.entryPrice}, stop ${c.stopPrice}, held ${((c.closedAt - c.openedAt) / 86_400_000).toFixed(1)}d, P&L ${fmt(c.plApprox, 2)} — closed: ${c.closeReason} — your thesis was: ${c.reason.slice(0, 160)}`);
   }
 
   lines.push('');
@@ -1211,6 +1242,11 @@ export function stopOpus(): { ok: boolean } {
 }
 
 export function wasOpusRunning(): boolean { return config.enabled; }
+
+// Opus's closed trades, for labelling the brokers' closed-positions lists.
+export function opusClosedRefs(): Array<{ account: OpusAccount; symbol: string; openedAt: number; closedAt: number; probe?: boolean }> {
+  return [...state.closed, ...state.positions.map(p => ({ ...p, closedAt: 0 }))].map(c => ({ account: c.account, symbol: c.brokerRef && c.account === 'alpaca_paper' ? c.brokerRef : c.symbol, openedAt: c.openedAt, closedAt: c.closedAt, probe: c.probe }));
+}
 
 // Hand an existing IG demo position to Opus (2026-10-22): used when a market
 // moves to Opus from another bot, or for a deal opened outside Opus's records.

@@ -8,6 +8,7 @@ import {
   Server, WifiOff, Wifi,
 } from 'lucide-react';
 import { clsx } from 'clsx';
+import { ClosedPositionsCard } from '@/components/trading/ClosedPositionsCard';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -969,6 +970,9 @@ function IgSpreadBetTab() {
 
   return (
     <div className="space-y-5">
+      {/* Closed positions, from IG's own transaction history */}
+      <ClosedPositionsCard broker="ig" mode={igMode} />
+
       {/* Error */}
       {error && (
         <div className="bg-rose-500/10 border border-rose-500/30 rounded-lg p-3 text-sm text-rose-400 flex items-start gap-2">
@@ -2657,6 +2661,9 @@ export default function AlpacaTraderPage() {
 
         {/* Server health */}
         <ServerStatusBanner {...serverHealth} />
+
+        {/* Closed positions, from Alpaca's own fills */}
+        <ClosedPositionsCard broker="alpaca" mode={mode} />
 
         {/* ── AI Recommendation panel — full width at top ── */}
         <RecommendationPanel onApply={applyRecommendation} isRunning={isRunning} />

@@ -165,6 +165,21 @@ export function getOrders(mode: AccountMode, status: 'open' | 'closed' | 'all' =
   return alpacaFetch<AlpacaOrder[]>(mode, `/orders?status=${status}&limit=100`);
 }
 
+// Every fill since a date (oldest first), paginated. Used to rebuild closed
+// trades from the broker's own record (closedPositions.ts).
+export type AlpacaFill = { id: string; symbol: string; side: 'buy' | 'sell' | 'sell_short'; qty: string; price: string; transaction_time: string; order_id: string };
+export async function getFillsSince(mode: AccountMode, sinceIso: string): Promise<AlpacaFill[]> {
+  const out: AlpacaFill[] = [];
+  let token = '';
+  for (let page = 0; page < 30; page++) {
+    const batch = await alpacaFetch<AlpacaFill[]>(mode, `/account/activities/FILL?after=${encodeURIComponent(sinceIso)}&direction=asc&page_size=100${token ? `&page_token=${token}` : ''}`);
+    out.push(...batch);
+    if (batch.length < 100) break;
+    token = batch[batch.length - 1].id;
+  }
+  return out;
+}
+
 export function placeOrder(mode: AccountMode, params: OrderParams): Promise<AlpacaOrder> {
   return alpacaFetch<AlpacaOrder>(mode, '/orders', {
     method: 'POST',

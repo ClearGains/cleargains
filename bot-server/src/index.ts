@@ -35,6 +35,7 @@ import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOption
 import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
 import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, opusManagesAccount, adoptIgPosition, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
 import { getPerformanceSummary } from './performance';
+import { getClosedPositions } from './closedPositions';
 import type { T212Mode } from './t212Api';
 import { scanCfdIdeas } from './cfdIdeas';
 
@@ -422,6 +423,15 @@ app.get('/mean-reversion/:instance/:mode/status', auth, (req: Request, res: Resp
 });
 
 // ── Cross-bot performance summary (all journals rolled up) ──────────────────
+// GET /closed-positions?broker=alpaca|ig&mode=paper|live|demo&days=7, from the brokers' own records.
+app.get('/closed-positions', auth, (req: Request, res: Response) => {
+  const broker = req.query.broker === 'ig' ? 'ig' : 'alpaca';
+  const days = Number(req.query.days) || 7;
+  void getClosedPositions(broker, String(req.query.mode ?? ''), days)
+    .then(r => res.json({ ok: true, ...r }))
+    .catch(e => res.status(502).json({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+});
+
 app.get('/performance', auth, (_req: Request, res: Response) => {
   res.json(getPerformanceSummary());
 });
