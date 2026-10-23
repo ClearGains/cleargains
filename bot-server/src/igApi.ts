@@ -20,6 +20,7 @@ export type IGPosition = {
   size:      number;
   level:     number;
   stopLevel?:   number | null;   // the position's broker stop, when IG reports one
+  limitLevel?:  number | null;   // the position's broker profit target, if any
   createdUtc?:  string;          // open time (UTC ISO, no zone suffix from IG)
 };
 
@@ -355,7 +356,7 @@ export async function fetchPositions(session: IGSession): Promise<IGPosition[]> 
   for (const ep of endpoints) {
     const r = await fetch(ep.url, { headers: headers(session, ep.version), signal: AbortSignal.timeout(8_000) });
     if (!r.ok) continue;
-    const d = await r.json() as { positions?: Array<{ position: { dealId: string; size: number; direction: string; level: number; stopLevel?: number | null; createdDateUTC?: string }; market: { epic: string } }> };
+    const d = await r.json() as { positions?: Array<{ position: { dealId: string; size: number; direction: string; level: number; stopLevel?: number | null; limitLevel?: number | null; createdDateUTC?: string }; market: { epic: string } }> };
     if (!d.positions) continue;
     return d.positions.map(p => ({
       dealId:    p.position.dealId,
@@ -364,6 +365,7 @@ export async function fetchPositions(session: IGSession): Promise<IGPosition[]> 
       size:      p.position.size,
       level:     p.position.level,
       stopLevel: p.position.stopLevel ?? null,
+      limitLevel: p.position.limitLevel ?? null,
       createdUtc: p.position.createdDateUTC,
     }));
   }

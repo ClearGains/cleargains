@@ -22,12 +22,12 @@ import * as os from 'os';
 import { execFile } from 'child_process';
 import {
   getBars, getAccount, getPositions as getAlpacaPositions, placeOrder as alpacaPlaceOrder,
-  closePosition as alpacaClosePosition, cancelOrdersForSymbol, type AlpacaBar,
+  closePosition as alpacaClosePosition, cancelOrdersForSymbol, getOrders as alpacaGetOrders, cancelOrder as alpacaCancelOrder, type AlpacaBar,
 } from './alpacaApi';
 import { calcRsi, calcAtr, dailyVolumeRatio } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
 import {
-  authenticate, fetchFullPositions, fetchPositions, placeMarketOrder as igPlaceOrder, closePosition as igClosePosition,
+  authenticate, fetchFullPositions, fetchPositions, updatePositionLevels, placeMarketOrder as igPlaceOrder, closePosition as igClosePosition,
   fetchMarketDetails, fetchAccountFunds, type IGSession,
 } from './igApi';
 import { resolveCredentials, calcStake } from './igStrategyBot';
@@ -423,6 +423,21 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: 'tighten_stop',
+    description: 'Move an open position\'s broker stop-loss to lock in profit or cut risk, e.g. to break-even or a profit floor once a trade has run. Tighten only: a long\'s stop can only move UP and a short\'s only DOWN, and it must stay on the losing side of the current price. Allowed any time (no minimum hold). The new stop is placed at the broker, so it works between your reviews.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        position_id: { type: 'string' },
+        new_stop:    { type: 'number', description: 'New stop level, in the same units as the position\'s entry/stop in the briefing (IG points for ig_demo)' },
+        reason:      { type: 'string' },
+      },
+      required: ['position_id', 'new_stop', 'reason'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'run_backtest',
     description: 'Test a rule-based strategy idea on real, split-adjusted daily history before relying on it. Signals are read at a close and entered at the next open; stops/targets checked on later highs/lows. Returns trade count, win rate, average/median return, best/worst, hold time, exit reasons, and buy-and-hold for comparison. No trading happens. Limited per session.',
     strict: true,
@@ -557,6 +572,8 @@ Evidence from this account's history (weigh it, don't obey it):
 - Today's lesson (2026-10-22): a long on the Nasdaq 100 opened overnight was hit the next day by a broad US sell-off (−2.6%). It was based on a wrong data feed (since fixed), but it's also a reminder to check the wider market's direction and the event calendar (megacap earnings week) before buying index dips.
 
 Data you get: every number in the briefing is computed by code from market data (price, day change, whether today is above its open, today's volume vs a normal day (1.0 = normal, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, headlines). The "setup (code)" column flags BREAKOUT/PULLBACK patterns as a convenience; use it, ignore it or define your own setups. You can test any idea with run_backtest (indicators: ${INDICATORS.join(', ')}). Judge it against buy-and-hold on enough trades; costs aren't modelled. When live results disagree with a backtest, trust the live results.
+
+Locking in profit: you can move a position's broker stop with tighten_stop (tighten only, so it never adds risk; it works between your reviews). Whether, when and where to use it is your call. History here: an older automatic "profit floor" closed 16 trades, all in profit (about £1,490 total), but on the ones with a recorded peak it kept only about half the peak gain. Your stops otherwise stay where they started until you close the trade.
 
 TEST PERIOD, PROBES: the owner is testing whether this makes money, which needs trades to measure. On alpaca_paper and ig_demo, a conviction between the probe minimum and the full minimum opens at a fraction of normal size (code sizes it). Take reasonable ideas as probes rather than sitting out; skip when you see a real reason against. Never inflate conviction. t212_live is real money: no probes.
 
@@ -841,6 +858,44 @@ function todayAgainstFromMetrics(m: Metrics, dir: 'BUY' | 'SELL'): boolean {
   return dir === 'BUY' ? !m.aboveOpen : m.aboveOpen;
 }
 
+// Opus's lock-in-profit tool (2026-10-23, owner: "lock in profit" for winners,
+// decided by Opus rather than an automatic floor). Code only checks the stop
+// moves in the safe direction and stays on the losing side of the price.
+async function tightenStop(id: string, newStop: number, reason: string, view: Map<string, LivePos>): Promise<string> {
+  const p = state.positions.find(x => x.id === id);
+  if (!p) return `REJECTED: no open position with id ${id}.`;
+  if (!(newStop > 0)) return 'REJECTED: new_stop must be a positive price.';
+  const long = p.direction === 'BUY';
+  if (long ? newStop <= p.stopPrice : newStop >= p.stopPrice) return `REJECTED: that would loosen the stop (now ${p.stopPrice}); stops can only be tightened.`;
+  const now = view.get(id)?.current ?? null;
+  if (now !== null && (long ? newStop >= now : newStop <= now)) return `REJECTED: a stop at ${newStop} is already through the current price (${now}), so it would close the position at once. Use close_position instead.`;
+  const stop = round2(newStop);
+  try {
+    if (p.account === 'ig_demo') {
+      const session = await ig();
+      const x = (await fetchPositions(session)).find(q => q.dealId === p.brokerRef);
+      if (!x) return 'REJECTED: the position is no longer open at IG.';
+      await updatePositionLevels(session, p.brokerRef, stop, x.limitLevel ?? null);   // keep any profit target
+    } else if (p.account === 'alpaca_paper') {
+      if (!isUsSessionOpen()) return 'REJECTED: the US market is closed. Alpaca stops can be moved in market hours (the current stop stays active).';
+      const old = (await alpacaGetOrders('paper', 'open')).filter(o => o.symbol === p.brokerRef && o.side === (long ? 'sell' : 'buy') && /stop/.test(o.type));
+      for (const o of old) await alpacaCancelOrder('paper', o.id);
+      await alpacaPlaceOrder('paper', { symbol: p.brokerRef, qty: p.size, side: long ? 'sell' : 'buy', type: 'stop', stop_price: stop, time_in_force: 'gtc', client_order_id: `opus-stop-${p.brokerRef}-${Date.now()}` });
+    } else {
+      // t212_live (real money): replace the stop-limit order.
+      if (p.stopOrderId) await t212CancelOrder('live', p.stopOrderId).catch(() => undefined);
+      const o = await placeStopLimitOrder('live', p.brokerRef, -p.size, stop, round2(stop * 0.97));
+      p.stopOrderId = o.id !== undefined ? String(o.id) : undefined;
+    }
+  } catch (e) {
+    return `FAILED: couldn't move the stop at the broker (${e instanceof Error ? e.message : String(e)}). The old stop is still in place.`;
+  }
+  const prev = p.stopPrice;
+  p.stopPrice = stop; saveState();
+  addLog('info', `Stop tightened: ${p.account} ${p.symbol} ${prev} → ${stop} — ${reason}`);
+  return `OK: ${p.symbol} stop moved ${prev} → ${stop} at the broker.`;
+}
+
 async function closePosition(id: string, reason: string, view: Map<string, LivePos>, manual = false): Promise<string> {
   const p = state.positions.find(x => x.id === id);
   if (!p) return `REJECTED: no open position with id ${id}.`;
@@ -1009,6 +1064,7 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
         try {
           if (t.name === 'open_position') out = await openPosition(input as Parameters<typeof openPosition>[0], metrics);
           else if (t.name === 'close_position') out = await closePosition(String(input.position_id), String(input.reason), view);
+          else if (t.name === 'tighten_stop') out = await tightenStop(String(input.position_id), Number(input.new_stop), String(input.reason), view);
           else if (t.name === 'run_backtest') {
             if (backtestsLeft <= 0) out = `REJECTED: backtest limit for this session (${MAX_BACKTESTS_PER_SESSION}) reached.`;
             else {
