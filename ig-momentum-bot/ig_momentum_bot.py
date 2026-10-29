@@ -65,6 +65,10 @@ losses"). On top of the original signal, a trade also needs:
   - for indices, not in the first OPENING_SKIP_MINUTES (30) of the exchange's
     session, the noisiest part of the day.
 Each can be switched off in .env.
+  - after a trade hits its profit target, no new trade in that market for
+    WAIT_AFTER_WIN_MINUTES (45): on 29 Oct it bought Germany 40 straight back
+    after every target (25,894 -> 25,940 -> 26,016 -> 26,054), chasing an
+    already stretched move.
 
 Left out on purpose (never fired in the IG history, or not part of the signal):
   - +50% size boost on correlated markets
@@ -104,6 +108,7 @@ OPENING_SKIP_MINUTES = int(os.getenv("OPENING_SKIP_MINUTES", "30"))
 AUTO_CLOSE = os.getenv("AUTO_CLOSE", "true").strip().lower() in ("1", "true", "yes")
 COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "60"))
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
+WAIT_AFTER_WIN_MINUTES = int(os.getenv("WAIT_AFTER_WIN_MINUTES", "45"))
 MAX_QUOTE_AGE_MINUTES = int(os.getenv("MAX_QUOTE_AGE_MINUTES", "30"))
 RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "20"))
 INDEX_STOP_PCT = float(os.getenv("INDEX_STOP_PCT", "0.3"))
@@ -449,6 +454,16 @@ def record_loss(market):
              + ("; done for the day" if m["losses"] >= MAX_LOSSES_PER_DAY else f"; pausing {COOLDOWN_MINUTES} min"))
 
 
+def record_win(market):
+    g = read_json(CHOP_GUARD, {})
+    if g.get("date") != today_utc():
+        g = {"date": today_utc(), "markets": {}}
+    m = g["markets"].setdefault(market, {"losses": 0, "last_loss": 0})
+    m["last_win"] = time.time()
+    write_json(CHOP_GUARD, g)
+    log.info(f"{market}: target hit; waiting {WAIT_AFTER_WIN_MINUTES} min before re-entering")
+
+
 def chop_block(market):
     """Reason this market is blocked by the choppy-day guard, or None."""
     g = read_json(CHOP_GUARD, {})
@@ -462,6 +477,9 @@ def chop_block(market):
     left = COOLDOWN_MINUTES - (time.time() - m["last_loss"]) / 60
     if left > 0:
         return f"cooling off after a loss, {left:.0f} min left"
+    left = WAIT_AFTER_WIN_MINUTES - (time.time() - m.get("last_win", 0)) / 60
+    if left > 0:
+        return f"waiting after a target hit (no chasing), {left:.0f} min left"
     return None
 
 
@@ -535,6 +553,8 @@ def scan(ig, markets, dry_run, http=requests):
                       "", "", exit_px, "", "", "CLOSED", f"stop/limit hit or closed outside the bot: {outcome}", deal_id])
         if lost:
             record_loss(o["market"])
+        elif lost is False:
+            record_win(o["market"])
     write_json(OWN_DEALS, own)
     open_pos = [p for p in all_pos if p["dealId"] in own]
 

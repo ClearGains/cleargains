@@ -70,6 +70,7 @@ export type OpusConfig = {
   alpacaMaxPositionUsd: number;
   alpacaMaxPositions:   number;
   igMaxRiskGbp:         number;   // £ lost if the stop is hit (floor)
+  igMinRiskGbp:         number;   // smallest £ at risk per IG trade, probes included (owner, 2026-10-29)
   igMaxRiskPct:         number;   // …or this % of the IG balance, whichever is larger
   igMaxPositions:       number;
   t212MaxPositionGbp:   number;
@@ -106,6 +107,7 @@ const DEFAULT_CONFIG: OpusConfig = {
   alpacaMaxPositionUsd: 5_000,
   alpacaMaxPositions: 8,
   igMaxRiskGbp: 10,
+  igMinRiskGbp: 20,
   igMaxRiskPct: 1,
   igMaxPositions: 6,
   t212MaxPositionGbp: 100,
@@ -731,7 +733,7 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
       const cap = Math.max(config.igMaxRiskGbp, f.balance * config.igMaxRiskPct / 100);
       const tradeable = Object.keys(TICKER_TO_EPIC).filter(t => metrics.has(t) && !ownedElsewhere.has(TICKER_TO_EPIC[t]));
       const skipped = Object.keys(IG_MARKETS).filter(t => ownedElsewhere.has(IG_MARKETS[t].epic));
-      lines.push(`- ig_demo: balance £${f.balance.toFixed(0)}, available £${f.available.toFixed(0)}. Caps: ≤£${cap.toFixed(0)} at risk/position, ≤${config.igMaxPositions} of your positions. IG's minimum stakes are large on US shares (wide stops won't fit the cap); indices, FX and commodities usually size better. Tradeable: ${tradeable.join(', ')}.${skipped.length ? ` Managed by another bot, leave alone: ${skipped.join(', ')}.` : ''}`);
+      lines.push(`- ig_demo: balance £${f.balance.toFixed(0)}, available £${f.available.toFixed(0)}. Risk per position: at least £${config.igMinRiskGbp} (code raises smaller sizes, probes included), at most £${cap.toFixed(0)}; ≤${config.igMaxPositions} of your positions. IG's minimum stakes are large on US shares (wide stops won't fit the cap); indices, FX and commodities usually size better. Tradeable: ${tradeable.join(', ')}.${skipped.length ? ` Managed by another bot, leave alone: ${skipped.join(', ')}.` : ''}`);
     }
     catch { lines.push('- ig_demo: balance unavailable'); }
   }
@@ -897,7 +899,9 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
       const minStop = d?.minStopDist || 1, minDeal = d?.minDealSize || 0.5;
       const stopDist = Math.max(minStop, px * inp.stop_loss_pct / 100);
       const igCap = Math.max(config.igMaxRiskGbp, (await fetchAccountFunds(session).catch(() => ({ balance: 0 }))).balance * config.igMaxRiskPct / 100);
-      const riskGbp = Math.min(inp.size, igCap) * sizeFactor;
+      // Floor at igMinRiskGbp (2026-10-29: probes were going on at ~0.05/pt,
+      // too small to show anything; the Momentum Testbot risks ~£20 a trade).
+      const riskGbp = Math.min(igCap, Math.max(config.igMinRiskGbp, Math.min(inp.size, igCap) * sizeFactor));
       const stake = Math.max(minDeal, calcStake(riskGbp, stopDist, minDeal));
       if (stake * stopDist > igCap * 1.5) return `REJECTED: IG's minimum stake (${minDeal}/pt) with a ${inp.stop_loss_pct}% stop risks £${(stake * stopDist).toFixed(0)}, above the £${igCap.toFixed(0)} cap — try a tighter stop or another market.`;
       let r: { dealId: string; level: number };
