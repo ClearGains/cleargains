@@ -39,6 +39,7 @@ import {
 import { getGbpUsd } from './t212Bot';
 import { runRuleBacktest, INDICATORS, type BacktestSpec } from './ruleBacktest';
 import { getIgSentiment } from './igSentiment';
+import { getCot } from './cot';
 import {
   buildConfirmStockTradePrompt, parseConfirmStockTradeResponse, buildIsaThesisPrompt, parseIsaThesisResponse,
   type StockConfirmSignal, type StockConfirmVerdict, type IsaThesisRequest, type IsaThesisVerdict,
@@ -691,7 +692,7 @@ async function tradingviewChart(input: Record<string, unknown>, allowShot: boole
 
 const TV_PROMPT = `
 
-TradingView: you can look at live TradingView charts with the tradingview_chart tool — any timeframe, with a screenshot when the picture matters (trend structure, levels, patterns). It is a second view alongside the briefing's computed numbers; how much weight to give it is your call.`;
+TradingView: you can look at live TradingView charts with the tradingview_chart tool — any timeframe, with a screenshot when the picture matters (trend structure, levels, patterns). It is a second view alongside the briefing's computed numbers; how much weight to give it is your call. The chart carries a visible-range volume profile: horizontal bars on the right showing how much volume traded at each price over the bars on screen. The longest bar (point of control) and the high-volume zones tend to act as support and resistance, and thin zones are where price can move fast. It only shows on screenshots, so take one when those levels matter (entries, stop placement). Index and FX CFD feeds carry tick volume, not exchange volume, so for those it shows activity rather than true volume.`;
 
 const SYSTEM_PROMPT = `You are the portfolio manager for a small trading operation, running in a test period that is being reviewed after about a month. Each session you receive a briefing and act through tools. Your goal is risk-adjusted profit over weeks to months, not activity. Don't rush trades to show a result inside the test: a sound position still open at the review counts by its open P&L.
 
@@ -826,7 +827,7 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
     lines.push('## IG markets — indices, FX, commodities (ig_demo only; daily bars, prices in market units — IG quotes some in its own points, e.g. FX ×10,000; no exchange volume, so no volume rule; the 8%/12-week stock threshold does NOT apply here — a setup label means the trend test passed)');
     // IG client sentiment (2026-10-29): crowd positioning, shown as data.
     const sent = new Map((await getIgSentiment(IG_MARKETS).catch(() => [])).map(r => [r.key, r.longPct]));
-    lines.push('IG clients long% = share of IG clients holding a long bet in that market (mostly retail traders; very one-sided crowds, e.g. 75%+ one way, are often read as a contrary signal). Weigh it, do not obey it.');
+    lines.push('IG clients long% = share of IG clients long that market. These are retail traders: small, mostly short-term, and they barely move these markets next to institutions. Treat it as minor background at most (an extreme reading is a tie-breaker, never a reason on its own to open, close or flip a trade). The institutional positioning further down (CFTC) carries far more weight.');
     lines.push('symbol (name) | setup (code) | price | day% | vs open | >20d | >50d | 12w% | RSI | ATR% | off 52w high% | IG clients long%');
     for (const m of igOnly) lines.push(`${m.symbol} (${IG_MARKETS[m.symbol].name}) | ${setupLabel(m)} | ${fmt(m.price, 4)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)} | ${sent.has(m.symbol) ? sent.get(m.symbol)!.toFixed(0) : '—'}`);
   }
@@ -845,6 +846,15 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   }
 
   lines.push('');
+  // Big-speculator positioning from the CFTC (2026-10-29), weekly.
+  const cotRows = await getCot().catch(() => [] as Awaited<ReturnType<typeof getCot>>);
+  if (cotRows.length) {
+    lines.push('');
+    lines.push(`## Big-speculator positioning (CFTC Commitments of Traders, weekly, positions as of ${cotRows[0].reportDate})`);
+    lines.push('Funds and large traders (non-commercials) in the US futures behind each IG market: % of their positions that are long, net contracts, and the change over the week. This is where the big money is positioned, so it matters far more than the retail IG numbers above, and the weekly change shows which way it is moving. It is still slow context, not a timing signal: weigh it with price, trend and news, and note that very lopsided positioning can unwind sharply.');
+    for (const c of cotRows) lines.push(`- ${c.key} (${c.market}): ${c.specLongPct}% long, net ${c.specNet >= 0 ? '+' : ''}${c.specNet.toLocaleString('en-US')}, week ${c.netChangeWeek >= 0 ? '+' : ''}${c.netChangeWeek.toLocaleString('en-US')}${c.note ? ` (${c.note})` : ''}`);
+  }
+
   const tvRecent = state.tvAlerts.filter(a => Date.now() - new Date(a.ts).getTime() < 24 * 3_600_000);
   lines.push('## TradingView alerts (last 24h, newest last)');
   if (!tvRecent.length) lines.push('(none)');

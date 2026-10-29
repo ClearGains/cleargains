@@ -428,7 +428,8 @@ app.get('/mean-reversion/:instance/:mode/status', auth, (req: Request, res: Resp
 // GET /closed-positions?broker=alpaca|ig&mode=paper|live|demo&days=7, from the brokers' own records.
 // IG client sentiment for the markets the bots trade (2026-10-29).
 app.get('/ig/sentiment', auth, (_req: Request, res: Response) => {
-  void import('./igSentiment').then(m => m.getIgSentiment(IG_MARKETS)).then(rows => res.json({ ok: true, rows, at: new Date().toISOString() }))
+  void Promise.all([import('./igSentiment').then(m => m.getIgSentiment(IG_MARKETS)), import('./cot').then(m => m.getCot()).catch(() => [])])
+    .then(([rows, cot]) => res.json({ ok: true, rows, cot, at: new Date().toISOString() }))
     .catch(e => res.status(502).json({ ok: false, error: e instanceof Error ? e.message : String(e) }));
 });
 
