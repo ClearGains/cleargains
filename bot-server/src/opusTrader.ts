@@ -851,8 +851,11 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   if (cotRows.length) {
     lines.push('');
     lines.push(`## Big-speculator positioning (CFTC Commitments of Traders, weekly, positions as of ${cotRows[0].reportDate})`);
-    lines.push('Funds and large traders (non-commercials) in the US futures behind each IG market: % of their positions that are long, net contracts, and the change over the week. This is where the big money is positioned, so it matters far more than the retail IG numbers above, and the weekly change shows which way it is moving. It is still slow context, not a timing signal: weigh it with price, trend and news, and note that very lopsided positioning can unwind sharply.');
-    for (const c of cotRows) lines.push(`- ${c.key} (${c.market}): ${c.specLongPct}% long, net ${c.specNet >= 0 ? '+' : ''}${c.specNet.toLocaleString('en-US')}, week ${c.netChangeWeek >= 0 ? '+' : ''}${c.netChangeWeek.toLocaleString('en-US')}${c.note ? ` (${c.note})` : ''}`);
+    lines.push('Where the big players are positioned in the US futures behind each IG market. Indices and FX: ASSET MANAGERS (pensions, mutual funds: slow, real money) first, then hedge funds (faster, trend-following money). Commodities and silver: large speculators (funds). Each shows % of positions long, net contracts and the change over the week. This is where the big money is positioned, so it matters far more than the retail IG numbers above, and the weekly change shows which way it is moving. It is still slow context, not a timing signal: weigh it with price, trend and news, and note that very lopsided positioning can unwind sharply.');
+    const sg = (n: number) => `${n >= 0 ? '+' : ''}${n.toLocaleString('en-US')}`;
+    for (const c of cotRows) lines.push(c.source === 'tff'
+      ? `- ${c.key} (${c.market}): asset managers ${c.specLongPct}% long (net ${sg(c.specNet)}, week ${sg(c.netChangeWeek)}); hedge funds ${c.hfLongPct}% long (week ${sg(c.hfNetChangeWeek ?? 0)})${c.note ? ` (${c.note})` : ''}`
+      : `- ${c.key} (${c.market}): large speculators ${c.specLongPct}% long (net ${sg(c.specNet)}, week ${sg(c.netChangeWeek)})${c.note ? ` (${c.note})` : ''}`);
   }
 
   const tvRecent = state.tvAlerts.filter(a => Date.now() - new Date(a.ts).getTime() < 24 * 3_600_000);

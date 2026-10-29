@@ -11,7 +11,7 @@ import { ChevronDown, ChevronUp, RefreshCw, Users } from 'lucide-react';
 import { clsx } from 'clsx';
 
 type Row = { key: string; name: string; epic: string; longPct: number; shortPct: number };
-type Cot = { key: string; market: string; reportDate: string; specLongPct: number; specNet: number; netChangeWeek: number; note?: string };
+type Cot = { key: string; market: string; reportDate: string; specLongPct: number; specNet: number; netChangeWeek: number; note?: string; source?: 'legacy' | 'tff'; hfLongPct?: number; hfNetChangeWeek?: number };
 
 function Bar({ longPct }: { longPct: number }) {
   return (
@@ -70,7 +70,7 @@ export function IgSentimentCard() {
           {cot.length > 0 && (
             <div className="space-y-2">
               <div className="text-xs font-semibold text-slate-300">
-                Big money <span className="font-normal text-slate-500">· funds and large traders in US futures (CFTC, weekly, as of {cot[0].reportDate})</span>
+                Big money <span className="font-normal text-slate-500">· US futures positioning from the CFTC, weekly, as of {cot[0].reportDate}. Indices &amp; FX: asset managers (pensions, funds), with hedge funds underneath. Commodities: large speculators.</span>
               </div>
               <div className="grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
                 {cot.map(c => (
@@ -83,6 +83,9 @@ export function IgSentimentCard() {
                       </span>
                     </div>
                     <Bar longPct={c.specLongPct} />
+                    {c.source === 'tff' && c.hfLongPct !== undefined && (
+                      <div className="text-[11px] text-slate-500 mt-0.5">{c.source === 'tff' ? 'Asset managers above' : ''} · hedge funds {c.hfLongPct}% long <span className={(c.hfNetChangeWeek ?? 0) >= 0 ? 'text-emerald-500' : 'text-rose-500'}>{(c.hfNetChangeWeek ?? 0) >= 0 ? '▲' : '▼'} wk</span></div>
+                    )}
                   </div>
                 ))}
               </div>
