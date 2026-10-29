@@ -880,6 +880,7 @@ function IgSpreadBetTab() {
   };
 
   const [closeBusy, setCloseBusy] = useState<string | null>(null);
+  const [igRowMsg, setIgRowMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
   const closeIgPosition = async (dealId: string, name: string, upl: number) => {
     const plStr  = `${upl >= 0 ? '+' : ''}£${upl.toFixed(2)}`;
     const prompt = igMode === 'live'
@@ -893,11 +894,11 @@ function IgSpreadBetTab() {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ dealId }),
       });
-      const data = await res.json() as { ok: boolean; error?: string };
-      if (!data.ok && data.error) setError(data.error);
+      const data = await res.json() as { ok: boolean; error?: string; message?: string };
+      setIgRowMsg(m => ({ ...m, [dealId]: { ok: data.ok, text: data.ok ? (data.message ?? `Closed ${name}.`) : (data.error ?? 'Close failed') } }));
       await fetchStatus();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Close failed');
+      setIgRowMsg(m => ({ ...m, [dealId]: { ok: false, text: `Couldn't reach the bot server: ${e instanceof Error ? e.message : 'Close failed'}. Check IG before trying again.` } }));
     } finally {
       setCloseBusy(null);
     }
@@ -1563,6 +1564,9 @@ function IgSpreadBetTab() {
                           {closeBusy === p.dealId ? 'Closing…' : 'Close'}
                         </button>
                       </div>
+                      {igRowMsg[p.dealId] && (
+                        <div className={clsx('mt-1 text-[11px] text-right', igRowMsg[p.dealId].ok ? 'text-emerald-300' : 'text-rose-300')}>{igRowMsg[p.dealId].text}</div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -2521,20 +2525,30 @@ export default function AlpacaTraderPage() {
 
   useEffect(() => { startPolling(); }, [mode, startPolling]);
 
+  // Per-position result of the last Close click, shown under that row
+  // (2026-10-29: success showed nothing and errors only at the top of the page).
+  const [rowMsg, setRowMsg] = useState<Record<string, { ok: boolean; pending?: boolean; text: string }>>({});
+
   const post = async (action: string, body?: object) => {
     setLoading(true);
     setError(null);
+    const sym = (body as { symbol?: string } | undefined)?.symbol;
+    if (action === 'close-position' && sym) setRowMsg(m => ({ ...m, [sym]: { ok: true, pending: true, text: 'Sending the close order to Alpaca and waiting for a fill…' } }));
     try {
       const res  = await fetch(`/api/alpaca?mode=${mode}&action=${action}`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    body ? JSON.stringify(body) : undefined,
       });
-      const data = await res.json() as { ok: boolean; error?: string };
-      if (!data.ok && data.error) setError(data.error);
+      const data = await res.json() as { ok: boolean; error?: string; message?: string; pending?: boolean };
+      if (action === 'close-position' && sym) {
+        setRowMsg(m => ({ ...m, [sym]: { ok: data.ok, pending: data.pending, text: data.ok ? (data.message ?? 'Close order sent.') : (data.error ?? data.message ?? 'Close failed') } }));
+      } else if (!data.ok && data.error) setError(data.error);
       await fetchStatus();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Request failed');
+      const msg = e instanceof Error ? e.message : 'Request failed';
+      if (action === 'close-position' && sym) setRowMsg(m => ({ ...m, [sym]: { ok: false, text: `Couldn't reach the bot server: ${msg}. Nothing may have been sent; check Alpaca before trying again.` } }));
+      else setError(msg);
     } finally {
       setLoading(false);
     }
@@ -2918,8 +2932,10 @@ export default function AlpacaTraderPage() {
                     // position just looks unchanged after clicking Close,
                     // like the click did nothing.
                     const pendingClose = status.pendingCloseSymbols?.includes(p.symbol) ?? false;
+                    const msg = rowMsg[p.symbol];
                     return (
-                      <div key={p.symbol} className="px-4 py-3 flex items-center justify-between">
+                      <div key={p.symbol}>
+                      <div className="px-4 py-3 flex items-center justify-between">
                         <div className="flex items-center gap-3">
                           {isBullish
                             ? <TrendingUp   className="w-4 h-4 text-green-400" />
@@ -3008,6 +3024,14 @@ export default function AlpacaTraderPage() {
                             {pendingClose ? 'Pending…' : 'Close'}
                           </button>
                         </div>
+                      </div>
+                      {msg && (
+                        <div className={clsx('mx-4 mb-3 -mt-1 px-3 py-2 rounded text-xs flex items-start justify-between gap-2',
+                          !msg.ok ? 'bg-rose-500/10 text-rose-300' : msg.pending ? 'bg-amber-500/10 text-amber-300' : 'bg-emerald-500/10 text-emerald-300')}>
+                          <span>{msg.text}</span>
+                          <button onClick={() => setRowMsg(m => { const n = { ...m }; delete n[p.symbol]; return n; })} className="text-slate-500 hover:text-slate-300">✕</button>
+                        </div>
+                      )}
                       </div>
                     );
                   })}

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+export const maxDuration = 60;
+
 const BOT_URL    = process.env.BOT_SERVER_URL ?? '';
 const BOT_SECRET = process.env.BOT_SECRET     ?? '';
 
@@ -10,7 +12,7 @@ function missingConfig(): NextResponse {
   );
 }
 
-async function proxyTo(path: string, method: string, body?: unknown): Promise<NextResponse> {
+async function proxyTo(path: string, method: string, body?: unknown, timeoutMs = 15_000): Promise<NextResponse> {
   if (!BOT_URL) return missingConfig();
   try {
     const res = await fetch(`${BOT_URL}${path}`, {
@@ -20,7 +22,7 @@ async function proxyTo(path: string, method: string, body?: unknown): Promise<Ne
         'x-bot-secret':  BOT_SECRET,
       },
       body:   body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const data = await res.json();
     return NextResponse.json(data, { status: res.status });
@@ -77,7 +79,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (action === 'close-position') {
     const { symbol } = await req.json() as { symbol?: string };
     if (!symbol) return NextResponse.json({ ok: false, error: 'symbol required' }, { status: 400 });
-    return proxyTo(`/alpaca/${mode}/positions/${encodeURIComponent(symbol)}/close`, 'POST');
+    // Up to ~30s: the bot server waits for the fill so it can say what happened.
+    return proxyTo(`/alpaca/${mode}/positions/${encodeURIComponent(symbol)}/close`, 'POST', undefined, 30_000);
   }
 
   return NextResponse.json({ ok: false, error: `Unknown action: ${action}` }, { status: 400 });

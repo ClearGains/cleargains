@@ -1109,24 +1109,43 @@ export function holdDeal(mode: IgMode, dealId: string): void {
 // into IG's own platform. Looks the position up fresh (not from any local
 // cache) since it needs the real, current direction/size IG will actually
 // accept a close order against.
-export async function closeIgPositionManually(mode: IgMode, dealId: string): Promise<{ ok: boolean; error?: string }> {
+export async function closeIgPositionManually(mode: IgMode, dealId: string): Promise<{ ok: boolean; error?: string; message?: string }> {
   const st = ms(mode);
-  if (!st.session || !st.config) return { ok: false, error: 'Bot not running' };
+  // Opus's own trades close through Opus so its records stay right (2026-10-29).
+  if (mode === 'demo') {
+    const op = await import('./opusTrader').catch(() => null);
+    const id = op?.opusPositionIdForIgDeal(dealId);
+    if (op && id) {
+      const r = await op.closeOpusPositionManually(id);
+      return r.ok ? { ok: true, message: `Opus position: ${r.message}` } : { ok: false, error: `Opus position not closed: ${r.message}` };
+    }
+  }
+  // Works whether or not this strategy bot is running (it used to fail with
+  // 'Bot not running', so the Close button did nothing for other bots' trades).
+  let session = st.session;
+  if (!session) {
+    try { const c = resolveCredentials(mode); session = await authenticate(c.apiKey, c.username, c.password, c.env, `manual-close:${mode}`); }
+    catch (e) { return { ok: false, error: `Couldn't log in to IG: ${e instanceof Error ? e.message : String(e)}` }; }
+  }
   let position: FullPosition | undefined;
   try {
-    position = (await fetchFullPositions(st.session)).find(p => p.dealId === dealId);
+    position = (await fetchFullPositions(session)).find(p => p.dealId === dealId);
   } catch (e) {
     return { ok: false, error: `Position lookup failed: ${e instanceof Error ? e.message : String(e)}` };
   }
   if (!position) return { ok: false, error: 'Position not found at IG — may already be closed' };
   const name = epicName(position.epic);
   try {
-    await igClosePos(st.session, position.dealId, position.direction, position.size);
+    await igClosePos(session, position.dealId, position.direction, position.size);
     const reason = 'Manually closed from the dashboard';
-    recordLossExit(mode, position.epic, position.upl, reason);
-    journalExit(mode, st.config, position, reason);
+    const testbot = mode === 'demo' && (await import('./momentumBot').then(m => m.forgetMomentumDeal(dealId, 'closed from the IG tab')).catch(() => false));
+    if (st.config) { recordLossExit(mode, position.epic, position.upl, reason); journalExit(mode, st.config, position, reason); }
     addLog(mode, 'exit', name, `Closed manually — £${position.upl.toFixed(2)}`);
-    return { ok: true };
+    // Confirm it's actually gone at IG before saying so.
+    await new Promise(r => setTimeout(r, 1500));
+    const still = (await fetchFullPositions(session).catch(() => [])).some(p => p.dealId === dealId);
+    if (still) return { ok: true, message: `Close sent for ${name}, but IG still shows it open a moment later. Refresh shortly; if it's still there, IG didn't accept the close.` };
+    return { ok: true, message: `Closed ${name}${testbot ? ' (Momentum Testbot trade)' : ''} at about ${position.upl >= 0 ? '+' : '−'}£${Math.abs(position.upl).toFixed(2)}.` };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     addLog(mode, 'error', name, `Manual close failed: ${msg}`);

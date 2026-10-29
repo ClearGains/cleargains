@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition, getOrders, getFillsSince,
+  getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition, getOrders, getFillsSince, getOrder,
   cancelAllOrders, cancelOrdersForSymbol, isNYSEOpen, isInOpeningRange, isNearClose,
   sessionStartUtcMs,
   isWeekend, msUntilMondayOpen, isAlpacaDailyCheckTime, isAlpacaWeeklyCheckTime, nyDateStr,
@@ -405,9 +405,35 @@ export function setPositionWatchEnabled(mode: AccountMode, symbol: string, enabl
 // moment the order is merely placed (see executeSignal's own comment for
 // why that distinction matters — this is exactly the bug that was just
 // fixed for the bot's own closes; a manual one shouldn't reintroduce it).
-export async function closePositionManually(mode: AccountMode, symbol: string): Promise<{ ok: boolean; error?: string }> {
+// Waits up to ~8s for a close order to fill and says what actually happened
+// (2026-10-29: the dashboard showed nothing on success, so a click looked like
+// it did nothing).
+async function closeOutcome(mode: AccountMode, orderId: string | undefined, symbol: string, qty: number, limit?: number): Promise<{ ok: boolean; message: string; pending?: boolean }> {
+  if (!orderId) return { ok: true, message: `Close order sent for ${symbol}. Refresh in a moment to see it settle.`, pending: true };
+  let o: Awaited<ReturnType<typeof getOrder>> | null = null;
+  for (let i = 0; i < 8; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    o = await getOrder(mode, orderId).catch(() => null);
+    if (o && ['filled', 'canceled', 'expired', 'rejected'].includes(o.status)) break;
+  }
+  if (o?.status === 'filled') return { ok: true, message: `Closed: sold ${o.filled_qty} ${symbol} at $${parseFloat(o.filled_avg_price ?? '0').toFixed(2)}.` };
+  if (o && ['canceled', 'expired', 'rejected'].includes(o.status)) return { ok: false, message: `Alpaca ${o.status} the close order for ${symbol}. Nothing was sold.` };
+  const part = o && parseFloat(o.filled_qty) > 0 ? ` ${o.filled_qty} of ${qty} filled so far.` : '';
+  return { ok: true, pending: true, message: `Close order placed for ${symbol}${limit ? ` (limit sell at $${limit})` : ''} but not filled yet.${part} It shows as Pending until it fills; a day order expires at today's close if it doesn't.` };
+}
+
+export async function closePositionManually(mode: AccountMode, symbol: string): Promise<{ ok: boolean; error?: string; message?: string; pending?: boolean }> {
   if (!isNYSEOpen()) {
     return { ok: false, error: 'The US market is closed (it opens 9:30am New York / 2:30pm UK). Alpaca would only queue this until the open, so nothing was sent. Press Close again once the market is open.' };
+  }
+  // Opus's own positions close through Opus, so its records stay right.
+  if (mode === 'paper') {
+    const op = await import('./opusTrader').catch(() => null);
+    const id = op?.opusPositionIdForAlpacaSymbol(symbol);
+    if (op && id) {
+      const r = await op.closeOpusPositionManually(id);
+      return r.ok ? { ok: true, message: `Opus position: ${r.message}` } : { ok: false, error: `Opus position not closed: ${r.message}` };
+    }
   }
   let positions: AlpacaPosition[];
   try { positions = await getPositions(mode); }
@@ -446,9 +472,9 @@ export async function closePositionManually(mode: AccountMode, symbol: string): 
         // let reconcileSilentOptionCloses pick up the real fill once it
         // actually settles.
         try {
-          await closePosition(mode, symbol);
+          const o = await closePosition(mode, symbol);
           addLog(mode, 'exit', symbol, `Manual close order placed via Alpaca's own position-close endpoint (worked around a stuck order) — will confirm once it actually fills`);
-          return { ok: true };
+          return await closeOutcome(mode, o?.id, symbol, Math.abs(parseFloat(openPos.qty)) || 0);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           return {
@@ -465,10 +491,11 @@ export async function closePositionManually(mode: AccountMode, symbol: string): 
       const qty        = Math.abs(parseFloat(openPos.qty)) || 0;
       const lastPrice  = parseFloat(openPos.current_price) || 0;
       const limitPrice = Math.max(0.01, round2(lastPrice * 0.5));
-      await placeOrder(mode, { symbol, qty, side: 'sell', type: 'limit', time_in_force: 'day', limit_price: limitPrice });
+      const o = await placeOrder(mode, { symbol, qty, side: 'sell', type: 'limit', time_in_force: 'day', limit_price: limitPrice });
       addLog(mode, 'exit', symbol, `Manual close order placed — limit sell @ ${limitPrice} (last known ${lastPrice}) — will confirm once it actually fills`);
+      return await closeOutcome(mode, o?.id, symbol, qty, limitPrice);
     } else {
-      await closePosition(mode, symbol);
+      const o = await closePosition(mode, symbol);
       addLog(mode, 'exit', symbol, 'Manually closed');
       recordJournalEvent({
         mode, event: 'exit', symbol, strategy: 'manual',
@@ -479,8 +506,8 @@ export async function closePositionManually(mode: AccountMode, symbol: string): 
         plUsd: parseFloat(openPos.unrealized_pl) || 0,
         plPct: (parseFloat(openPos.unrealized_plpc) || 0) * 100,
       });
+      return await closeOutcome(mode, o?.id, symbol, Math.abs(parseFloat(openPos.qty)) || 0);
     }
-    return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     addLog(mode, 'error', symbol, `Manual close failed: ${msg}`);

@@ -1759,6 +1759,15 @@ export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; con
   return { ok: true, config };
 }
 
+// The Alpaca tab's Close button routes Opus's own positions here (2026-10-29),
+// so Opus's records stay right instead of finding out later.
+export function opusPositionIdForIgDeal(dealId: string): string | null {
+  return state.positions.find(p => p.account === 'ig_demo' && p.brokerRef === dealId)?.id ?? null;
+}
+export function opusPositionIdForAlpacaSymbol(symbol: string): string | null {
+  return state.positions.find(p => p.account === 'alpaca_paper' && p.brokerRef === symbol)?.id ?? null;
+}
+
 export async function closeOpusPositionManually(id: string): Promise<{ ok: boolean; message: string }> {
   const view = await livePositionView();
   const msg = await closePosition(id, 'Closed from the dashboard', view, true);

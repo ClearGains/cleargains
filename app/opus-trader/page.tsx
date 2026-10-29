@@ -109,6 +109,24 @@ export default function OpusTraderPage() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [fetchStatus]);
 
+  // Close needs a second click, and its result shows on the position
+  // (2026-10-29: one click closed at once, and success showed nothing).
+  const [confirmClose, setConfirmClose] = useState<string | null>(null);
+  const [closeMsg, setCloseMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const closeOpusPos = async (id: string) => {
+    if (confirmClose !== id) { setConfirmClose(id); return; }
+    setConfirmClose(null);
+    setCloseMsg(m => ({ ...m, [id]: { ok: true, text: 'Closing at the broker…' } }));
+    const data = await post('close', undefined, `&id=${id}`);
+    setError(null);
+    setCloseMsg(m => ({
+      ...m,
+      [id]: data
+        ? { ok: data.ok, text: data.message ?? data.error ?? (data.ok ? 'Closed.' : 'Close failed') }
+        : { ok: false, text: "Couldn't reach the server. Check the broker before trying again." },
+    }));
+  };
+
   const post = async (action: string, body?: unknown, extra = '') => {
     setLoading(action);
     setError(null);
@@ -344,12 +362,22 @@ export default function OpusTraderPage() {
                         <span className={clsx('text-xs font-semibold tabular-nums', (p.livePl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                           {p.livePl === null ? '—' : `${p.livePl >= 0 ? '+' : ''}${p.livePl.toFixed(2)}`}
                         </span>
-                        <button className="text-gray-500 hover:text-red-400" title="Close this position now"
-                          onClick={() => void post('close', undefined, `&id=${p.id}`)}>
-                          <X className="h-4 w-4" />
-                        </button>
+                        {confirmClose === p.id ? (
+                          <span className="flex items-center gap-1">
+                            <button className="text-[11px] px-2 py-0.5 rounded bg-red-600 text-white" onClick={() => void closeOpusPos(p.id)}>Confirm close</button>
+                            <button className="text-[11px] text-gray-400 hover:text-gray-200" onClick={() => setConfirmClose(null)}>Cancel</button>
+                          </span>
+                        ) : (
+                          <button className="text-gray-500 hover:text-red-400" title="Close this position now (asks to confirm)"
+                            onClick={() => void closeOpusPos(p.id)}>
+                            <X className="h-4 w-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
+                    {closeMsg[p.id] && (
+                      <p className={clsx('text-[11px] mt-1', closeMsg[p.id].ok ? 'text-emerald-300' : 'text-rose-300')}>{closeMsg[p.id].text}</p>
+                    )}
                     <p className="text-[10px] text-gray-500 mt-0.5">
                       size {p.size} · entry {p.entryPrice} · stop {p.stopPrice} · now {p.liveCurrent ?? '—'} · conviction {p.conviction}% · {((Date.now() - p.openedAt) / 3_600_000).toFixed(1)}h held
                     </p>

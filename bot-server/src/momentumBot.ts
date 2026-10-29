@@ -113,6 +113,22 @@ export async function momentumControl(action: string): Promise<{ ok: boolean; me
   }
 }
 
+// A Testbot deal closed from the IG tab's own Close button (2026-10-29):
+// drop it from the bot's list and record it, so the bot doesn't count it as a
+// stop-out. Returns false if the deal isn't the Testbot's.
+export function forgetMomentumDeal(dealId: string, reason: string): boolean {
+  const own = readJson<Record<string, OwnDeal>>(OWN_FILE, {});
+  const d = own[dealId];
+  if (!d) return false;
+  delete own[dealId];
+  fs.writeFileSync(OWN_FILE, JSON.stringify(own, null, 1));
+  fs.appendFileSync(TRADES_CSV, `${new Date().toISOString().slice(0, 19)}+00:00,CLOSE_UI,${d.market},${d.epic},${d.direction},${d.size},,,,,,ACCEPTED,${reason},${dealId}\n`);
+  return true;
+}
+export function isMomentumDeal(dealId: string): boolean {
+  return dealId in readJson<Record<string, OwnDeal>>(OWN_FILE, {});
+}
+
 // Closes only the deals the Testbot recorded as its own, then removes them from
 // its list so it doesn't count them as stop-outs.
 async function closeAllOwn(): Promise<{ ok: boolean; message: string }> {
