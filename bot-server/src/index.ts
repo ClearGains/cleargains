@@ -34,7 +34,7 @@ import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus,
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
 import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
 import { momentumStatus, momentumControl } from './momentumBot';
-import { opusVetsOldOptionsBot } from './opusTrader';
+import { opusVetsOldOptionsBot, IG_MARKETS } from './opusTrader';
 import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, opusManagesAccount, adoptIgPosition, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
 import { getPerformanceSummary } from './performance';
 import { getClosedPositions } from './closedPositions';
@@ -426,6 +426,12 @@ app.get('/mean-reversion/:instance/:mode/status', auth, (req: Request, res: Resp
 
 // ── Cross-bot performance summary (all journals rolled up) ──────────────────
 // GET /closed-positions?broker=alpaca|ig&mode=paper|live|demo&days=7, from the brokers' own records.
+// IG client sentiment for the markets the bots trade (2026-10-29).
+app.get('/ig/sentiment', auth, (_req: Request, res: Response) => {
+  void import('./igSentiment').then(m => m.getIgSentiment(IG_MARKETS)).then(rows => res.json({ ok: true, rows, at: new Date().toISOString() }))
+    .catch(e => res.status(502).json({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+});
+
 // Momentum Testbot (separate Python service) — status and switches.
 app.get('/momentum/status', auth, (_req: Request, res: Response) => {
   void momentumStatus().then(r => res.json({ ok: true, ...r })).catch(e => res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) }));

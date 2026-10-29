@@ -38,6 +38,7 @@ import {
 } from './t212Api';
 import { getGbpUsd } from './t212Bot';
 import { runRuleBacktest, INDICATORS, type BacktestSpec } from './ruleBacktest';
+import { getIgSentiment } from './igSentiment';
 import {
   buildConfirmStockTradePrompt, parseConfirmStockTradeResponse, buildIsaThesisPrompt, parseIsaThesisResponse,
   type StockConfirmSignal, type StockConfirmVerdict, type IsaThesisRequest, type IsaThesisVerdict,
@@ -281,7 +282,7 @@ for (const [epic, ticker] of Object.entries(EPIC_TO_ALPACA)) if (!TICKER_TO_EPIC
 // that Opus cover IG properly). Daily bars from Yahoo via fetchBarsWithFallback;
 // these have no real exchange volume on IG, so the volume rule doesn't apply.
 // Japan 225 was this account's best-performing index on live (31 trades, +£221).
-const IG_MARKETS: Record<string, { epic: string; name: string }> = {
+export const IG_MARKETS: Record<string, { epic: string; name: string }> = {
   JP225:     { epic: 'IX.D.NIKKEI.DAILY.IP', name: 'Japan 225' },
   USTECH100: { epic: 'IX.D.NASDAQ.CASH.IP',  name: 'US Tech 100' },
   US500:     { epic: 'IX.D.SPTRD.DAILY.IP',  name: 'US 500' },
@@ -823,8 +824,11 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   if (igOnly.length) {
     lines.push('');
     lines.push('## IG markets — indices, FX, commodities (ig_demo only; daily bars, prices in market units — IG quotes some in its own points, e.g. FX ×10,000; no exchange volume, so no volume rule; the 8%/12-week stock threshold does NOT apply here — a setup label means the trend test passed)');
-    lines.push('symbol (name) | setup (code) | price | day% | vs open | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
-    for (const m of igOnly) lines.push(`${m.symbol} (${IG_MARKETS[m.symbol].name}) | ${setupLabel(m)} | ${fmt(m.price, 4)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
+    // IG client sentiment (2026-10-29): crowd positioning, shown as data.
+    const sent = new Map((await getIgSentiment(IG_MARKETS).catch(() => [])).map(r => [r.key, r.longPct]));
+    lines.push('IG clients long% = share of IG clients holding a long bet in that market (mostly retail traders; very one-sided crowds, e.g. 75%+ one way, are often read as a contrary signal). Weigh it, do not obey it.');
+    lines.push('symbol (name) | setup (code) | price | day% | vs open | >20d | >50d | 12w% | RSI | ATR% | off 52w high% | IG clients long%');
+    for (const m of igOnly) lines.push(`${m.symbol} (${IG_MARKETS[m.symbol].name}) | ${setupLabel(m)} | ${fmt(m.price, 4)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)} | ${sent.has(m.symbol) ? sent.get(m.symbol)!.toFixed(0) : '—'}`);
   }
 
   // Headlines: open positions + the most active names today (keeps tokens bounded)

@@ -10,6 +10,7 @@ import {
 import { clsx } from 'clsx';
 import { ClosedPositionsCard } from '@/components/trading/ClosedPositionsCard';
 import { MomentumBotCard } from '@/components/trading/MomentumBotCard';
+import { IgSentimentCard } from '@/components/trading/IgSentimentCard';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -972,6 +973,9 @@ function IgSpreadBetTab() {
   return (
     <div className="space-y-5">
       {/* Closed positions, from IG's own transaction history */}
+      {/* IG client sentiment: buyers vs sellers */}
+      <IgSentimentCard />
+
       {/* Momentum Testbot: separate bot on the same demo account */}
       {igMode === 'demo' && <MomentumBotCard />}
 
