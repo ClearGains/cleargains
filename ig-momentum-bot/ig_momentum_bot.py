@@ -71,6 +71,16 @@ Each can be switched off in .env.
     after every target (25,894 -> 25,940 -> 26,016 -> 26,054), chasing an
     already stretched move.
 
+Stops sized to each market's swings (2026-10-29, owner: the US 500 is
+choppy with rapid moves that hit tight stops). An index stop is the larger of
+INDEX_STOP_PCT and STOP_ATR_FRAC (0.5) x the market's 14-day average daily
+range, so a market that typically moves 1.2% a day gets a 0.6% stop, not 0.3%.
+Size still targets ~RISK_PER_TRADE_GBP, so a wider stop means a smaller stake.
+
+Per-market rules (MARKET_RULES, JSON in .env), stricter for the US 500 by
+default: a 1%+ day move (strength 85), no trades in the first 60 minutes of
+the US session, and a stop of 0.6 x the daily range.
+
 Left out on purpose (never fired in the IG history, or not part of the signal):
   - +50% size boost on correlated markets
   - Closing other markets' positions to make room for a "15% stronger" signal
@@ -114,6 +124,11 @@ WAIT_AFTER_WIN_MINUTES = int(os.getenv("WAIT_AFTER_WIN_MINUTES", "45"))
 MAX_QUOTE_AGE_MINUTES = int(os.getenv("MAX_QUOTE_AGE_MINUTES", "30"))
 RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "20"))
 INDEX_STOP_PCT = float(os.getenv("INDEX_STOP_PCT", "0.3"))
+STOP_ATR_FRAC = float(os.getenv("STOP_ATR_FRAC", "0.5"))
+try:
+    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_atr_frac": 0.6}}'))
+except ValueError:
+    MARKET_RULES = {}
 SIGNAL_THRESHOLD_PCT = 0.3
 CURRENCY = "GBP"
 
@@ -249,9 +264,25 @@ def yahoo_change(symbol: str, http=requests):
         "price": price,
         "today_open": opens[-1] if opens else None,
         "sma20": sum(closes[-20:]) / 20 if len(closes) >= 20 else None,
+        "atr_pct": atr_pct(quote),
         "session_start": ((meta.get("currentTradingPeriod") or {}).get("regular") or {}).get("start"),
     }
     return (price - prev) / prev * 100, staleness(meta), extra
+
+
+def atr_pct(quote):
+    """14-day average true range as % of the last close, or None."""
+    hs, ls, cs = quote.get("high") or [], quote.get("low") or [], quote.get("close") or []
+    bars = [(h, l, c) for h, l, c in zip(hs, ls, cs) if None not in (h, l, c)]
+    if len(bars) < 15:
+        return None
+    trs = []
+    for i in range(1, len(bars)):
+        h, l, _ = bars[i]
+        pc = bars[i - 1][2]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    atr = sum(trs[-14:]) / 14
+    return atr / bars[-1][2] * 100
 
 
 def staleness(meta):
@@ -486,12 +517,13 @@ def chop_block(market):
     return None
 
 
-def conviction_block(mtype, direction, extra):
+def conviction_block(mtype, direction, extra, opening_skip=None):
     """Why the move isn't convincing enough to trade, or None."""
     price, today_open, sma20 = extra.get("price"), extra.get("today_open"), extra.get("sma20")
     start = extra.get("session_start")
-    if mtype == "INDEX" and OPENING_SKIP_MINUTES > 0 and start and time.time() - start < OPENING_SKIP_MINUTES * 60:
-        return f"first {OPENING_SKIP_MINUTES} min of the session (opening noise)"
+    skip = OPENING_SKIP_MINUTES if opening_skip is None else opening_skip
+    if mtype == "INDEX" and skip > 0 and start and time.time() - start < skip * 60:
+        return f"first {skip} min of the session (opening noise)"
     if CONFIRM_INTRADAY and today_open:
         if direction == "BUY" and price <= today_open:
             return f"fading: price {price:g} is not above today's open {today_open:g}"
@@ -583,7 +615,8 @@ def scan(ig, markets, dry_run, http=requests):
             log.info(f"{name:13} {change:+.2f}% not traded: {stale}")
             continue
 
-        direction, strength = decide(mtype, change)
+        rules = MARKET_RULES.get(name, {})
+        direction, strength = decide(mtype, change, rules.get("min_strength"))
         tag = f"{name:13} {change:+.2f}% strength {strength:>2}"
         if not direction:
             log.info(f"{tag} HOLD")
@@ -592,7 +625,7 @@ def scan(ig, markets, dry_run, http=requests):
         if any(p["direction"] == direction for p in mine):
             log.info(f"{tag} {direction} already open, skip")
             continue
-        blocked = chop_block(name) or conviction_block(mtype, direction, extra)
+        blocked = chop_block(name) or conviction_block(mtype, direction, extra, rules.get("opening_skip"))
         if blocked:
             log.info(f"{tag} {direction} skipped: {blocked}")
             continue
@@ -628,7 +661,10 @@ def scan(ig, markets, dry_run, http=requests):
             snap = (info or {}).get("snapshot", {})
             px = snap.get("offer") if direction == "BUY" else snap.get("bid")
             if px:
-                stop = max(round(px * INDEX_STOP_PCT / 100), 1)
+                atr = (extra or {}).get("atr_pct")
+                frac = rules.get("stop_atr_frac", STOP_ATR_FRAC)
+                stop_pct = max(INDEX_STOP_PCT, frac * atr) if atr else INDEX_STOP_PCT
+                stop = max(round(px * stop_pct / 100), 1)
                 limit = stop * 2
                 rules = (info or {}).get("dealingRules", {})
                 min_size = (rules.get("minDealSize") or {}).get("value") or 0.04
