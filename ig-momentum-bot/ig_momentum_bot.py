@@ -54,6 +54,18 @@ target = twice that (the original's 1:2), and the size is set so a stop-out
 loses about RISK_PER_TRADE_GBP (£20, the original's £1/pt x 20 pts). FX keeps
 the original 20/40 pips, which already fit FX's smaller moves.
 
+Conviction filters (2026-10-29, owner: "more conviction to minimise the
+losses"). On top of the original signal, a trade also needs:
+  - strength >= MIN_STRENGTH, now 75 by default (an index must be up or down
+    0.5% on the day, not 0.3%; FX already needs 0.3%, which scores 85);
+  - the move still holding: price above today's open for a BUY, below for a
+    SELL (CONFIRM_INTRADAY);
+  - the trend agreeing: price above its 20-day average for a BUY, below for a
+    SELL (TREND_FILTER);
+  - for indices, not in the first OPENING_SKIP_MINUTES (30) of the exchange's
+    session, the noisiest part of the day.
+Each can be switched off in .env.
+
 Left out on purpose (never fired in the IG history, or not part of the signal):
   - +50% size boost on correlated markets
   - Closing other markets' positions to make room for a "15% stronger" signal
@@ -85,7 +97,10 @@ BOT_SERVER_ENV = os.path.expanduser(os.getenv("BOT_SERVER_ENV", "~/nexustrade/bo
 # ── Settings ────────────────────────────────────────────────────────────────
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
 SIZE_PER_POINT = float(os.getenv("SIZE_PER_POINT", "1"))
-MIN_STRENGTH = int(os.getenv("MIN_STRENGTH", "60"))
+MIN_STRENGTH = int(os.getenv("MIN_STRENGTH", "75"))
+CONFIRM_INTRADAY = os.getenv("CONFIRM_INTRADAY", "true").strip().lower() in ("1", "true", "yes")
+TREND_FILTER = os.getenv("TREND_FILTER", "true").strip().lower() in ("1", "true", "yes")
+OPENING_SKIP_MINUTES = int(os.getenv("OPENING_SKIP_MINUTES", "30"))
 AUTO_CLOSE = os.getenv("AUTO_CLOSE", "true").strip().lower() in ("1", "true", "yes")
 COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "60"))
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
@@ -206,7 +221,7 @@ def dynamic_size(requested: float, available: float) -> float:
 # ── Market data (same Yahoo request as the original) ────────────────────────
 def yahoo_change(symbol: str, http=requests):
     url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
-           + requests.utils.quote(symbol, safe="") + "?interval=1d&range=2d")
+           + requests.utils.quote(symbol, safe="") + "?interval=1d&range=2mo")
     r = http.get(url, headers=YAHOO_HEADERS, timeout=15)
     if r.status_code != 200:
         return None
@@ -215,10 +230,21 @@ def yahoo_change(symbol: str, http=requests):
         return None
     meta = result.get("meta", {})
     price = meta.get("regularMarketPrice")
-    prev = meta.get("previousClose") or meta.get("chartPreviousClose")
+    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+    opens = quote.get("open") or []
+    closes = [c for c in (quote.get("close") or []) if c is not None]
+    # Previous close: Yahoo's own figure when given, else the bar before today
+    # (with a 2-month range Yahoo omits previousClose).
+    prev = meta.get("previousClose") or (closes[-2] if len(closes) >= 2 else None)
     if not price or not prev:
         return None
-    return (price - prev) / prev * 100, staleness(meta)
+    extra = {
+        "price": price,
+        "today_open": opens[-1] if opens else None,
+        "sma20": sum(closes[-20:]) / 20 if len(closes) >= 20 else None,
+        "session_start": ((meta.get("currentTradingPeriod") or {}).get("regular") or {}).get("start"),
+    }
+    return (price - prev) / prev * 100, staleness(meta), extra
 
 
 def staleness(meta):
@@ -439,6 +465,25 @@ def chop_block(market):
     return None
 
 
+def conviction_block(mtype, direction, extra):
+    """Why the move isn't convincing enough to trade, or None."""
+    price, today_open, sma20 = extra.get("price"), extra.get("today_open"), extra.get("sma20")
+    start = extra.get("session_start")
+    if mtype == "INDEX" and OPENING_SKIP_MINUTES > 0 and start and time.time() - start < OPENING_SKIP_MINUTES * 60:
+        return f"first {OPENING_SKIP_MINUTES} min of the session (opening noise)"
+    if CONFIRM_INTRADAY and today_open:
+        if direction == "BUY" and price <= today_open:
+            return f"fading: price {price:g} is not above today's open {today_open:g}"
+        if direction == "SELL" and price >= today_open:
+            return f"fading: price {price:g} is not below today's open {today_open:g}"
+    if TREND_FILTER and sma20:
+        if direction == "BUY" and price <= sma20:
+            return f"against the trend: price {price:g} is below its 20-day average {sma20:.5g}"
+        if direction == "SELL" and price >= sma20:
+            return f"against the trend: price {price:g} is above its 20-day average {sma20:.5g}"
+    return None
+
+
 def find_unconfirmed_open(ig, epic, direction, known_ids):
     """IG sometimes answers an order with an error or no confirmation even
     though it opened. Look for a deal in that market and direction, opened in
@@ -510,7 +555,7 @@ def scan(ig, markets, dry_run, http=requests):
         if quote is None:
             log.warning(f"{name:13} no Yahoo price, skipped this scan")
             continue
-        change, stale = quote
+        change, stale, extra = quote
         if stale and mtype != "FOREX":
             log.info(f"{name:13} {change:+.2f}% not traded: {stale}")
             continue
@@ -524,7 +569,7 @@ def scan(ig, markets, dry_run, http=requests):
         if any(p["direction"] == direction for p in mine):
             log.info(f"{tag} {direction} already open, skip")
             continue
-        blocked = chop_block(name)
+        blocked = chop_block(name) or conviction_block(mtype, direction, extra)
         if blocked:
             log.info(f"{tag} {direction} skipped: {blocked}")
             continue
