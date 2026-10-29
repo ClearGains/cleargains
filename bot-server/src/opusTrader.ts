@@ -1797,11 +1797,11 @@ export async function opusVetOptionEntry(req: {
 The owner's rule: chart analysis alone isn't enough for an option. Approve only with news AND macro backing. Use web_search (a few searches) to check:
 1. The company's latest news and catalysts, and whether earnings or another big event falls before expiry (and which way it's likely to cut).
 2. The macro backdrop: rates and the Fed, the dollar, where money is rotating (sectors), market risk appetite, and scheduled data (CPI, jobs, FOMC) that could swing it.
-Then decide. Approve only if news and macro support the direction and your conviction is at least 65. Reject when they conflict, when a binary event makes it a coin flip, or when you can't find enough to judge.
+Also weigh the volume: buying should be heavy on up days for a call (selling heavy on down days for a put); a big move on thin volume is weaker. Then decide. Approve only if news and macro support the direction and your conviction is at least 65. Reject when they conflict, when a binary event makes it a coin flip, or when you can't find enough to judge.
 
 Proposed: BUY a ${kind} on ${req.symbol}.
 Bot's signal: ${req.signal}
-Price ${req.price.toFixed(2)}, today ${req.changePct >= 0 ? '+' : ''}${req.changePct.toFixed(2)}%${m ? `, 20d avg ${m.sma20.toFixed(2)}, 50d avg ${m.sma50.toFixed(2)}, 12-week ${fmt(m.trend12wPct)}%, RSI ${fmt(m.rsi14, 0)}, ATR ${fmt(m.atrPct)}%, ${fmt(m.offHigh52wPct)}% off the 52-week high` : ''}.
+Price ${req.price.toFixed(2)}, today ${req.changePct >= 0 ? '+' : ''}${req.changePct.toFixed(2)}%${m ? `, today's volume ${fmt(m.volToday, 2)}× a normal day (pro-rated), today ${m.aboveOpen === null ? 'flat' : m.aboveOpen ? 'above' : 'below'} its open (heavy volume only confirms a move in its own direction), 20d avg ${m.sma20.toFixed(2)}, 50d avg ${m.sma50.toFixed(2)}, 12-week ${fmt(m.trend12wPct)}%, RSI ${fmt(m.rsi14, 0)}, ATR ${fmt(m.atrPct)}%, ${fmt(m.offHigh52wPct)}% off the 52-week high` : ''}.
 Headlines the bot saw: ${req.headlines.slice(0, 8).join(' | ') || '(none)'}
 
 Finish by calling verdict.`;
