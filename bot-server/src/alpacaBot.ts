@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition, getOrders, getFillsSince, getOrder,
+  getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition, getOrders, getFillsSince, getOrder, cancelOrdersAndWait, restoreStops,
   cancelAllOrders, cancelOrdersForSymbol, isNYSEOpen, isInOpeningRange, isNearClose,
   sessionStartUtcMs,
   isWeekend, msUntilMondayOpen, isAlpacaDailyCheckTime, isAlpacaWeeklyCheckTime, nyDateStr,
@@ -441,77 +441,49 @@ export async function closePositionManually(mode: AccountMode, symbol: string): 
   const openPos = positions.find(p => p.symbol === symbol);
   if (!openPos) return { ok: false, error: 'Position not found — may already be closed' };
 
+  // Cancel the position's open orders (its stop) and WAIT until Alpaca has
+  // actually cancelled them before selling (2026-10-29: the old code fired the
+  // cancels, found them still pending, and gave up with the stop already gone,
+  // leaving PLTR/TSLA/XLE unprotected). If the sale then fails, the stop is
+  // put back, so a click can never leave a position naked.
+  const { cancelled, cleared } = await cancelOrdersAndWait(mode, symbol).catch(() => ({ cancelled: [] as import('./alpacaApi').AlpacaOrder[], cleared: false }));
+  if (cancelled.length) addLog(mode, 'info', symbol, `Cancelled ${cancelled.length} open order(s) before close${cleared ? '' : ' (Alpaca still finishing the cancel)'}`);
+  const qty = Math.abs(parseFloat(openPos.qty)) || 0;
   try {
-    const cancelled = await cancelOrdersForSymbol(mode, symbol).catch(() => 0);
-    if (cancelled) addLog(mode, 'info', symbol, `Cancelled ${cancelled} open order(s) before close`);
-    // Confirmed live 2026-09-23: cancelOrdersForSymbol fires the cancel
-    // requests but never confirms they actually landed — a real GTC stop
-    // order (AAPL, resting since entry) got stuck in Alpaca's own
-    // "pending_cancel" state and never actually cleared, so the qty it held
-    // stayed unavailable. The close attempt then hit a confusing, unrelated
-    // 403 ("account not eligible to trade uncovered option contracts") —
-    // Alpaca reads a sell against 0 qty_available as opening a new
-    // uncovered short, not as closing the existing long. Re-checking here
-    // catches that state up front with a real explanation instead of
-    // letting the misleading 403 be the only thing the user sees.
-    if (cancelled) {
-      const stillOpen = await getOrders(mode, 'open').then(os => os.filter(o => o.symbol === symbol)).catch(() => []);
-      const stuck = stillOpen.filter(o => o.status === 'pending_cancel');
-      if (stuck.length) {
-        // Fallback: Alpaca's own position-close endpoint cancels/overrides
-        // conflicting orders server-side instead of us having to cancel
-        // separately first — confirmed live this gets past the stuck
-        // "pending_cancel" state entirely (the only rejection it hit was
-        // "options market orders are only allowed during market hours",
-        // nothing about the stuck order). Options still can't use this as
-        // the PRIMARY close path (a plain market order gets rejected on
-        // illiquid contracts — see the main options branch below for why),
-        // but as a fallback specifically for this stuck-order case it's
-        // worth trying before giving up. Same journaling discipline as
-        // everywhere else here: don't record the exit until it's confirmed,
-        // let reconcileSilentOptionCloses pick up the real fill once it
-        // actually settles.
-        try {
-          const o = await closePosition(mode, symbol);
-          addLog(mode, 'exit', symbol, `Manual close order placed via Alpaca's own position-close endpoint (worked around a stuck order) — will confirm once it actually fills`);
-          return await closeOutcome(mode, o?.id, symbol, Math.abs(parseFloat(openPos.qty)) || 0);
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          return {
-            ok: false,
-            error: `Can't close yet — an existing order on this position is stuck "pending cancel" on Alpaca's own side (a known paper-trading quirk), and the fallback close attempt also failed: ${msg}`,
-          };
-        }
-      }
-      if (stillOpen.length) {
-        return { ok: false, error: `Can't close yet — ${stillOpen.length} order(s) on this position still haven't finished cancelling. Try again shortly.` };
-      }
-    }
-    if (isOptionSymbol(symbol)) {
-      const qty        = Math.abs(parseFloat(openPos.qty)) || 0;
-      const lastPrice  = parseFloat(openPos.current_price) || 0;
-      const limitPrice = Math.max(0.01, round2(lastPrice * 0.5));
-      const o = await placeOrder(mode, { symbol, qty, side: 'sell', type: 'limit', time_in_force: 'day', limit_price: limitPrice });
-      addLog(mode, 'exit', symbol, `Manual close order placed — limit sell @ ${limitPrice} (last known ${lastPrice}) — will confirm once it actually fills`);
-      return await closeOutcome(mode, o?.id, symbol, qty, limitPrice);
+    let o: import('./alpacaApi').AlpacaOrder;
+    let limit: number | undefined;
+    if (isOptionSymbol(symbol) && cleared) {
+      const lastPrice = parseFloat(openPos.current_price) || 0;
+      limit = Math.max(0.01, round2(lastPrice * 0.5));
+      o = await placeOrder(mode, { symbol, qty, side: 'sell', type: 'limit', time_in_force: 'day', limit_price: limit });
+      addLog(mode, 'exit', symbol, `Manual close order placed — limit sell @ ${limit} (last known ${lastPrice}) — will confirm once it actually fills`);
     } else {
-      const o = await closePosition(mode, symbol);
-      addLog(mode, 'exit', symbol, 'Manually closed');
+      // Stocks, or any order still stuck cancelling: Alpaca's own
+      // position-close endpoint, which handles a stuck order server-side.
+      o = await closePosition(mode, symbol);
+      addLog(mode, 'exit', symbol, 'Manual close order placed');
+    }
+    const outcome = await closeOutcome(mode, o?.id, symbol, qty, limit);
+    if (!outcome.ok) {
+      const n = await restoreStops(mode, cancelled);
+      return { ok: false, error: `${outcome.message}${n ? ` The stop-loss was put back.` : cancelled.length ? ' WARNING: the stop-loss could not be put back; check Alpaca.' : ''}` };
+    }
+    if (!isOptionSymbol(symbol) && !outcome.pending) {
       recordJournalEvent({
         mode, event: 'exit', symbol, strategy: 'manual',
-        side:  openPos.side,
-        qty:   Math.abs(parseFloat(openPos.qty) || 0),
+        side:  openPos.side, qty,
         price: parseFloat(openPos.current_price) || 0,
         reason: 'Manually closed from the dashboard',
         plUsd: parseFloat(openPos.unrealized_pl) || 0,
         plPct: (parseFloat(openPos.unrealized_plpc) || 0) * 100,
       });
-      return await closeOutcome(mode, o?.id, symbol, Math.abs(parseFloat(openPos.qty)) || 0);
     }
+    return outcome;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    addLog(mode, 'error', symbol, `Manual close failed: ${msg}`);
-    return { ok: false, error: msg };
+    const n = await restoreStops(mode, cancelled);
+    addLog(mode, 'error', symbol, `Manual close failed: ${msg}${n ? ' (stop-loss put back)' : ''}`);
+    return { ok: false, error: `Close failed: ${msg}.${n ? ' The stop-loss was put back, so the position is still protected.' : cancelled.length ? ' WARNING: the stop-loss could not be put back; check Alpaca.' : ''}` };
   }
 }
 
@@ -1371,7 +1343,8 @@ async function executeSignal(
       // Cancel bracket legs / stops first — Alpaca rejects a close while
       // shares are held for open orders, and orphaned GTC stops would later
       // fill into an unwanted reverse position.
-      const cancelled = await cancelOrdersForSymbol(mode, sym).catch(() => 0);
+      // Wait until the cancels have landed (2026-10-29, same race as the manual close).
+      const cancelled = await cancelOrdersAndWait(mode, sym).then(r => r.cancelled.length).catch(() => 0);
       if (cancelled) addLog(mode, 'info', sym, `Cancelled ${cancelled} open order(s) before close`);
       // Options: closePosition's market-order liquidation gets rejected on
       // thin/illiquid contracts ("no available quote for symbol, please

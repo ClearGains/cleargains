@@ -207,6 +207,37 @@ export async function cancelOrdersForSymbol(mode: AccountMode, symbol: string): 
   return mine.length;
 }
 
+// Cancel a symbol's open orders and WAIT until Alpaca has actually cancelled
+// them (2026-10-29). Firing the cancels and closing straight away raced: the
+// close found the shares still held by the stop, so the close was abandoned
+// with the stop already gone, leaving three positions unprotected. Returns the
+// cancelled orders so a failed close can put the stops back.
+export async function cancelOrdersAndWait(mode: AccountMode, symbol: string, timeoutMs = 8000): Promise<{ cancelled: AlpacaOrder[]; cleared: boolean }> {
+  const mine = (await getOrders(mode, 'open')).filter(o => o.symbol === symbol);
+  for (const o of mine) { try { await cancelOrder(mode, o.id); } catch { /* checked below */ } }
+  if (!mine.length) return { cancelled: [], cleared: true };
+  const ids = new Set(mine.map(o => o.id));
+  for (let waited = 0; waited < timeoutMs; waited += 500) {
+    await new Promise(r => setTimeout(r, 500));
+    const still = (await getOrders(mode, 'open').catch(() => [])).filter(o => ids.has(o.id));
+    if (!still.length) return { cancelled: mine, cleared: true };
+  }
+  return { cancelled: mine, cleared: false };
+}
+
+// Put protective stop orders back after a close that didn't go through.
+export async function restoreStops(mode: AccountMode, orders: AlpacaOrder[]): Promise<number> {
+  let n = 0;
+  for (const o of orders) {
+    if (!/stop/.test(o.type) || !o.stop_price) continue;
+    try {
+      await placeOrder(mode, { symbol: o.symbol, qty: parseFloat(o.qty ?? '0'), side: o.side, type: 'stop', stop_price: parseFloat(o.stop_price), time_in_force: 'gtc', client_order_id: `restore-${o.symbol}-${Date.now()}`.slice(0, 48) });
+      n++;
+    } catch { /* reported by the caller's message */ }
+  }
+  return n;
+}
+
 export function closePosition(mode: AccountMode, symbol: string): Promise<AlpacaOrder> {
   return alpacaFetch<AlpacaOrder>(mode, `/positions/${symbol}`, { method: 'DELETE' });
 }

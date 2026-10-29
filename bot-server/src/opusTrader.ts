@@ -22,7 +22,7 @@ import * as os from 'os';
 import { execFile } from 'child_process';
 import {
   getBars, getAccount, getPositions as getAlpacaPositions, placeOrder as alpacaPlaceOrder,
-  closePosition as alpacaClosePosition, cancelOrdersForSymbol, getOrders as alpacaGetOrders, cancelOrder as alpacaCancelOrder, getFillsSince, getOptionChain, getOptionQuote, getOrder as alpacaGetOrder, type AlpacaBar,
+  closePosition as alpacaClosePosition, cancelOrdersForSymbol, getOrders as alpacaGetOrders, cancelOrder as alpacaCancelOrder, getFillsSince, getOptionChain, cancelOrdersAndWait, restoreStops, getOptionQuote, getOrder as alpacaGetOrder, type AlpacaBar,
 } from './alpacaApi';
 import { calcRsi, calcAtr, dailyVolumeRatio } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
@@ -1249,8 +1249,11 @@ async function closePosition(id: string, reason: string, view: Map<string, LiveP
   const pl = view.get(id)?.pl ?? null;
   try {
     if (p.account === 'alpaca_paper') {
-      await cancelOrdersForSymbol('paper', p.brokerRef).catch(() => 0);
-      await alpacaClosePosition('paper', p.brokerRef);
+      // Wait for the stop to be cancelled, and put it back if the sale fails
+      // (2026-10-29: a raced close left positions without their stops).
+      const { cancelled } = await cancelOrdersAndWait('paper', p.brokerRef).catch(() => ({ cancelled: [] as Awaited<ReturnType<typeof cancelOrdersAndWait>>['cancelled'] }));
+      try { await alpacaClosePosition('paper', p.brokerRef); }
+      catch (e) { const n = await restoreStops('paper', cancelled); throw new Error(`${e instanceof Error ? e.message : String(e)}${n ? ' (stop-loss put back)' : ''}`); }
     } else if (p.account === 'ig_demo') {
       await igClosePosition(await ig(), p.brokerRef, p.direction, p.size);
     } else {
