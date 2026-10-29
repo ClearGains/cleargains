@@ -163,6 +163,7 @@ type OpusState = {
   lastClosedAt:   Record<string, number>; // `${account}:${symbol}` → ts
   tvAlerts:       TvAlert[];            // TradingView webhook alerts, newest last
   lastResearchDay: string;              // NY date of the last daily research session
+  lastScheduledAt?: number;             // last scheduled session start (survives restarts)
   lastAlpacaReviewAt?: number;          // last session in which Alpaca entries were considered
 };
 
@@ -1308,7 +1309,7 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
     // day, allowance, scope) goes in the user message instead.
     const system = SYSTEM_PROMPT + (tvChartsOn() ? TV_PROMPT : '');
     const allowanceNote = config.webResearch && searches > 0 ? `\n\nWEB RESEARCH ALLOWANCE THIS SESSION: ${searches} searches/fetches in total. Stay within it.` : '';
-    if (trigger === 'scheduled') lastScheduledAt = Date.now();
+    if (trigger === 'scheduled') { lastScheduledAt = Date.now(); state.lastScheduledAt = lastScheduledAt; saveState(); }
     addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}${config.accounts.alpaca_paper && isUsSessionOpen() ? (alpacaInScope ? ', incl. Alpaca' : ', IG only') : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
     const alpacaNote = alpacaInScope || !config.accounts.alpaca_paper || !isUsSessionOpen() ? '' : `
 
@@ -1513,7 +1514,12 @@ export async function startOpus(): Promise<{ ok: boolean; error?: string }> {
     if (config.accounts.alpaca_paper) { const m = await import('./alpacaBot'); m.pauseAlpacaBot('paper'); }
   } catch (e) { addLog('error', `Couldn't pause an existing bot: ${e instanceof Error ? e.message : String(e)}`); }
   addLog('info', `Opus started — reviewing every ${config.cycleMinutes}min during the US session${config.offHoursMinutes > 0 && config.accounts.ig_demo ? ` and every ${config.offHoursMinutes}min outside it for IG markets (weekdays)` : ''}; existing IG demo / Alpaca paper bots paused for new entries`);
-  if (isUsSessionOpen() || offHours()) void runOpusSession('scheduled');
+  // Run straight away only if a session is actually due (2026-10-29: every
+  // restart used to start one, ~$0.12 each, even minutes after the last).
+  lastScheduledAt = state.lastScheduledAt ?? 0;
+  const since = Date.now() - lastScheduledAt;
+  const due = isUsSessionOpen() ? since >= scheduleMinutes() * 60_000 - 60_000 : offHours() && since >= config.offHoursMinutes * 60_000 - 60_000;
+  if (due) void runOpusSession('scheduled');
   schedule();
   if (optionWatchTimer) clearInterval(optionWatchTimer);
   optionWatchTimer = setInterval(() => { watchOptions().catch(e => addLog('error', `Option watch failed: ${e instanceof Error ? e.message : String(e)}`)); }, 5 * 60_000);
