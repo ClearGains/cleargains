@@ -123,7 +123,8 @@ LONG_PAUSE_MINUTES = int(os.getenv("LONG_PAUSE_MINUTES", "180"))
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
 WAIT_AFTER_WIN_MINUTES = int(os.getenv("WAIT_AFTER_WIN_MINUTES", "45"))
 MAX_QUOTE_AGE_MINUTES = int(os.getenv("MAX_QUOTE_AGE_MINUTES", "30"))
-RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "20"))
+RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "25"))
+TARGET_R = float(os.getenv("TARGET_R", "1.8"))   # £45 target / £25 risk
 INDEX_STOP_PCT = float(os.getenv("INDEX_STOP_PCT", "0.3"))
 STOP_ATR_FRAC = float(os.getenv("STOP_ATR_FRAC", "0"))   # 0 = off for all markets except those with their own rule (owner: US 500 only)
 try:
@@ -158,7 +159,10 @@ ALL_MARKETS = [
     ("Bitcoin",       "CS.D.BITCOIN.TODAY.IP", "CRYPTO",    "BTC-USD",   False),
 ]
 
-STOP_LIMIT = {"INDEX": (20, 40), "FOREX": (20, 40), "COMMODITY": (2, 4), "CRYPTO": (50, 100)}
+# Owner, 29 Oct: every trade risks £25 and targets £45 (was £20/£40), for more
+# room. FX at £1/pt: 25/45 pips. Indices keep their stop distance; the stake is
+# sized for a £25 loss and the target set for a £45 win (TARGET_R = 1.8).
+STOP_LIMIT = {"INDEX": (25, 45), "FOREX": (25, 45), "COMMODITY": (2, 4), "CRYPTO": (50, 100)}
 
 # (band threshold %, strength) high to low, plus the scale used below the lowest band
 BANDS = {
@@ -673,7 +677,7 @@ def scan(ig, markets, dry_run, http=requests):
                 frac = rules.get("stop_atr_frac", STOP_ATR_FRAC)
                 stop_pct = max(INDEX_STOP_PCT, frac * atr) if atr else INDEX_STOP_PCT
                 stop = max(round(px * stop_pct / 100), 1)
-                limit = stop * 2
+                limit = max(round(stop * TARGET_R), stop + 1)
                 rules = (info or {}).get("dealingRules", {})
                 min_size = (rules.get("minDealSize") or {}).get("value") or 0.04
                 requested = max(min_size, math.floor(RISK_PER_TRADE_GBP / stop * 100) / 100)
