@@ -127,7 +127,10 @@ RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "20"))
 INDEX_STOP_PCT = float(os.getenv("INDEX_STOP_PCT", "0.3"))
 STOP_ATR_FRAC = float(os.getenv("STOP_ATR_FRAC", "0"))   # 0 = off for all markets except those with their own rule (owner: US 500 only)
 try:
-    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_atr_frac": 0.6}}'))
+    # Owner, 29 Oct: US 500 at £1/pt with a 25-point stop and 45-point target
+    # (£25 loss / £45 profit): the 23-point stop was hit before correct calls
+    # had time to play out.
+    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_pts": 25, "target_pts": 45, "size": 1}}'))
 except ValueError:
     MARKET_RULES = {}
 SIGNAL_THRESHOLD_PCT = 0.3
@@ -658,7 +661,11 @@ def scan(ig, markets, dry_run, http=requests):
 
         stop, limit = STOP_LIMIT[mtype]
         requested = SIZE_PER_POINT
-        if mtype == "INDEX":
+        if rules.get("stop_pts"):
+            # Fixed points and stake for this market (owner's choice).
+            stop, limit = rules["stop_pts"], rules.get("target_pts", rules["stop_pts"] * 2)
+            requested = rules.get("size", SIZE_PER_POINT)
+        elif mtype == "INDEX":
             snap = (info or {}).get("snapshot", {})
             px = snap.get("offer") if direction == "BUY" else snap.get("bid")
             if px:
