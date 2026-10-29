@@ -10,7 +10,7 @@ import { clsx } from 'clsx';
 type ClosedTrade = {
   market: string; direction: 'long' | 'short'; qty: number | null;
   openedAt: string | null; closedAt: string; entry: number | null; exit: number | null;
-  pl: number; heldHours: number | null; openedBy: 'opus' | 'other'; probe?: boolean;
+  pl: number; heldHours: number | null; openedBy: 'opus' | 'momentum' | 'other'; probe?: boolean;
 };
 
 const fmtTime = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -96,7 +96,9 @@ export function ClosedPositionsCard({ broker, mode }: { broker: 'alpaca' | 'ig';
                       <td className="px-1 py-1.5">
                         {t.openedBy === 'opus'
                           ? <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300">Opus{t.probe ? ' (probe)' : ''}</span>
-                          : <span className="text-slate-500">Other bot / manual</span>}
+                          : t.openedBy === 'momentum'
+                            ? <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">Momentum Testbot</span>
+                            : <span className="text-slate-500">Other bot / manual</span>}
                       </td>
                     </tr>
                   ))}

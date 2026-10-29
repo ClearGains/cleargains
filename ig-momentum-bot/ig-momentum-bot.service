@@ -1,0 +1,14 @@
+[Unit]
+Description=IG Momentum Testbot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ig-momentum-bot
+ExecStart=/home/ubuntu/ig-momentum-bot/venv/bin/python ig_momentum_bot.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

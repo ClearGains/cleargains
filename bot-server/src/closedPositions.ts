@@ -11,7 +11,7 @@
 import { getFillsSince } from './alpacaApi';
 import { authenticate, fetchClosedTransactions } from './igApi';
 import { resolveCredentials } from './igStrategyBot';
-import { opusClosedRefs } from './opusTrader';
+import { opusClosedRefs, momentumBotDeals } from './opusTrader';
 
 export type ClosedTrade = {
   market:     string;
@@ -23,7 +23,7 @@ export type ClosedTrade = {
   exit:       number | null;
   pl:         number;          // account currency (USD Alpaca, GBP IG)
   heldHours:  number | null;
-  openedBy:   'opus' | 'other';
+  openedBy:   'opus' | 'momentum' | 'other';
   probe?:     boolean;
 };
 
@@ -72,6 +72,8 @@ async function igClosed(mode: 'demo' | 'live', days: number): Promise<ClosedTrad
   const session = await authenticate(c.apiKey, c.username, c.password, mode, 'closed-positions');
   const tx = await fetchClosedTransactions(session, new Date(Date.now() - days * DAY).toISOString());
   const opus = mode === 'demo' ? opusClosedRefs().filter(r => r.account === 'ig_demo') : [];
+  // Momentum Testbot (same demo account, own process): matched on open time and level.
+  const momentum = mode === 'demo' ? momentumBotDeals() : [];
   return tx.map(t => {
     const opened = t.openDateUtc ? Date.parse(t.openDateUtc + 'Z') : null;
     const closed = Date.parse(t.closeDateUtc + 'Z');
@@ -79,13 +81,14 @@ async function igClosed(mode: 'demo' | 'live', days: number): Promise<ClosedTrad
     // loss with a falling one) means it was a long.
     const moved = (t.closeLevel ?? 0) - (t.openLevel ?? 0);
     const direction: 'long' | 'short' = moved === 0 ? 'long' : (moved > 0) === (t.profitAndLoss >= 0) ? 'long' : 'short';
-    const ref = opened !== null ? opus.find(r => Math.abs(r.openedAt - opened) < 5 * 60_000) : undefined;
+    const mom = opened !== null ? momentum.find(d => Math.abs(Date.parse(d.opened_utc) - opened) < 3 * 60_000 && (d.level === null || t.openLevel == null || Math.abs(d.level - t.openLevel) <= Math.max(1, d.level * 0.001))) : undefined;
+    const ref = !mom && opened !== null ? opus.find(r => Math.abs(r.openedAt - opened) < 5 * 60_000) : undefined;
     return {
       market: t.instrumentName, direction, qty: null,
       openedAt: opened !== null ? new Date(opened).toISOString() : null, closedAt: new Date(closed).toISOString(),
       entry: t.openLevel ?? null, exit: t.closeLevel ?? null, pl: round2(t.profitAndLoss),
       heldHours: opened !== null ? round2((closed - opened) / 3_600_000) : null,
-      openedBy: ref ? 'opus' as const : 'other' as const, probe: ref?.probe,
+      openedBy: mom ? 'momentum' as const : ref ? 'opus' as const : 'other' as const, probe: ref?.probe,
     };
   });
 }

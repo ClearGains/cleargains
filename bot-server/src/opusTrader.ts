@@ -265,6 +265,16 @@ const isIgOnly = (symbol: string) => symbol in IG_MARKETS;
 
 // Epics another bot on the IG demo account currently owns (the commodities
 // mean-reversion instance) — Opus leaves those to it.
+// The Momentum Testbot (2026-10-29, ~/ig-momentum-bot, Python, own process)
+// trades the same IG demo account. Its deal history is its own record of
+// every deal it opened; Opus must never adopt or touch those.
+export const MOMENTUM_HISTORY_FILE = path.join(os.homedir(), 'ig-momentum-bot', 'deal_history.json');
+export type MomentumDeal = { dealId: string; market: string; epic: string; direction: string; size: number; level: number | null; opened_utc: string };
+export function momentumBotDeals(): MomentumDeal[] {
+  try { return JSON.parse(fs.readFileSync(MOMENTUM_HISTORY_FILE, 'utf8')) as MomentumDeal[]; } catch { return []; }
+}
+function momentumBotDealIds(): string[] { return momentumBotDeals().map(d => d.dealId); }
+
 async function igEpicsOwnedElsewhere(): Promise<Set<string>> {
   try { const mr = await import('./meanReversionBot'); return mr.meanReversionOwnedEpics(); }
   catch { return new Set(); }
@@ -832,8 +842,9 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
         // two shorts, one untracked. Before treating a rejection as final,
         // check whether a matching deal appeared in the last two minutes.
         await new Promise(res => setTimeout(res, 2500));
-        const known = new Set(state.positions.map(p => p.brokerRef));
-        const fresh = (await fetchPositions(session).catch(() => [])).find(x => x.epic === epic && x.direction === inp.direction && !known.has(x.dealId)
+        // Never mistake the Momentum Testbot's deal (same account) for this one.
+        const known = new Set([...state.positions.map(p => p.brokerRef), ...momentumBotDealIds()]);
+        const fresh = (await fetchPositions(session).catch(() => [])).find(x => x.epic === epic && x.direction === inp.direction && !known.has(x.dealId) && x.size === stake
           && (!x.createdUtc || Date.now() - Date.parse(x.createdUtc + 'Z') < 120_000));
         if (!fresh) throw e;
         addLog('info', `IG reported "${e instanceof Error ? e.message : String(e)}" but deal ${fresh.dealId} did open — tracking it instead of re-ordering`);
