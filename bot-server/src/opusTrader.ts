@@ -1626,7 +1626,7 @@ export async function startOpus(): Promise<{ ok: boolean; error?: string }> {
     // The old options bot keeps running when Opus vets its entries (2026-10-29).
     if (config.accounts.alpaca_paper && !config.oldOptionsBot) { const m = await import('./alpacaBot'); m.pauseAlpacaBot('paper'); }
   } catch (e) { addLog('error', `Couldn't pause an existing bot: ${e instanceof Error ? e.message : String(e)}`); }
-  addLog('info', `Opus started — reviewing every ${config.cycleMinutes}min during the US session${config.offHoursMinutes > 0 && config.accounts.ig_demo ? ` and every ${config.offHoursMinutes}min outside it for IG markets (weekdays)` : ''}; existing IG demo / Alpaca paper bots paused for new entries`);
+  addLog('info', `Opus started — reviewing every ${config.cycleMinutes}min during the US session${config.offHoursMinutes > 0 && config.accounts.ig_demo ? ` and every ${config.offHoursMinutes}min outside it for IG markets (weekdays)` : ''}; existing IG demo bot paused for new entries${config.oldOptionsBot ? '; the Alpaca options bot keeps running with Opus vetting its entries' : ' and Alpaca paper bot paused'}`);
   // Run straight away only if a session is actually due (2026-10-29: every
   // restart used to start one, ~$0.12 each, even minutes after the last).
   lastScheduledAt = state.lastScheduledAt ?? 0;
