@@ -59,6 +59,11 @@ export type OpusModel = keyof typeof MODELS;
 export type OpusConfig = {
   enabled:              boolean;
   model:                OpusModel;          // the model that trades
+  routineModel:         OpusModel | null;   // cheaper model for routine check-ins; entries escalate to `model` (2026-10-29)
+  changeGate:           boolean;            // skip scheduled sessions when nothing material changed (2026-10-29)
+  quietMaxHoursUs:      number;             // ...but always run at least this often in US hours
+  quietMaxHoursOff:     number;             // ...and outside them
+  gateMovePct:          number;             // a market move since the last session that counts as material
   shadowModel:          OpusModel | null;   // optional second model: same briefing, decisions logged, never executed
   accounts:             Record<OpusAccount, boolean>;
   monthlyCapUsd:        number;   // hard stop on API spend for the calendar month
@@ -97,6 +102,11 @@ export type OpusConfig = {
 const DEFAULT_CONFIG: OpusConfig = {
   enabled: false,
   model: 'claude-opus-5-5',
+  routineModel: 'claude-sonnet-5-5',
+  changeGate: true,
+  quietMaxHoursUs: 3,
+  quietMaxHoursOff: 8,
+  gateMovePct: 1,
   shadowModel: null,
   accounts: { alpaca_paper: true, ig_demo: true, t212_live: true },
   monthlyCapUsd: 150,          // ≈ £120
@@ -168,6 +178,8 @@ type OpusState = {
   tvAlerts:       TvAlert[];            // TradingView webhook alerts, newest last
   lastResearchDay: string;              // NY date of the last daily research session
   lastScheduledAt?: number;             // last scheduled session start (survives restarts)
+  lastSessionAt?: number;               // last session of any kind
+  priceSnap?: Record<string, number>;   // prices at the last session, for the change gate
   lastAlpacaReviewAt?: number;          // last session in which Alpaca entries were considered
 };
 
@@ -497,8 +509,20 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
         conviction:    { type: 'integer', description: '0-100, your honest confidence this trade works over your intended holding period' },
         reason:        { type: 'string', description: 'Why, in 1-3 sentences: the thesis you will judge the position against later' },
         exit_plan:     { type: 'string', description: 'Target (underlying level or option price), what would prove you wrong, when you will tighten the stop, and rough reward:risk. 1-3 sentences.' },
+        news_and_macro:{ type: 'string', description: 'The news/catalyst and macro backdrop (rates and the Fed, sector flows, upcoming events such as earnings or CPI) that support this trade, from research done in this session. 1-3 sentences.' },
       },
-      required: ['contract', 'contracts', 'stop_loss_pct', 'conviction', 'reason', 'exit_plan'],
+      required: ['contract', 'contracts', 'stop_loss_pct', 'conviction', 'reason', 'exit_plan', 'news_and_macro'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'escalate',
+    description: 'Routine check-ins only (run on a cheaper model): hand over to Opus when you see a new entry worth taking or something that needs deeper judgment. Opus runs a full session straight after this one, with your note.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: { reason: { type: 'string', description: 'What you saw and why it needs Opus, 1-2 sentences' } },
+      required: ['reason'],
       additionalProperties: false,
     },
   },
@@ -684,6 +708,7 @@ OPTIONS ON ALPACA (the owner's decision, 2026-10-29): you only buy calls (to pro
 - Strike: near-the-money (delta ~0.4-0.6) behaves most like the stock; far out-of-the-money is cheap but needs a big move and often expires worthless.
 - Price: implied volatility (IV) is what you're paying for expected movement; high IV (e.g. just before earnings) makes options dear and they deflate after the event.
 - Cost: wide bid/ask spreads cost you on the way in and out; code refuses spreads over 15%.
+- News and macro (the owner's rule): chart data alone isn't enough for an option. Before buying one, search this session for the company's latest news and catalysts and for the macro backdrop (rates and the Fed, where money is rotating, upcoming events like earnings or CPI that could move it), and summarise them in news_and_macro. Code rejects an option entry if you haven't researched in the session.
 - Stops: your stop is on the option's own price (stop_loss_pct of what you paid) and code checks it every 5 minutes in US hours. Option prices swing far more than the stock's, so a tight stop gets hit by noise.
 - History here (weigh it): the old options bot lost about $13k on this account, mostly on short-dated contracts and quick in-and-out trades. Holds of a week or more did much better than shorter ones.
 
@@ -820,6 +845,7 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   lines.push('## Your strategy notes');
   lines.push(state.notes || '(none yet)');
   lines.push(`Extra watchlist: ${state.watchlistExtra.join(', ') || '(none)'}`);
+  state.priceSnap = Object.fromEntries([...metrics.values()].map(m => [m.symbol, m.price]));
   return { text: lines.join('\n'), metrics };
 }
 
@@ -1047,8 +1073,12 @@ async function optionChainTool(input: Record<string, unknown>): Promise<string> 
   return out.join('\n');
 }
 
-async function openOption(inp: { contract: string; contracts: number; stop_loss_pct: number; conviction: number; reason: string; exit_plan: string }, metrics: Map<string, Metrics>): Promise<string> {
+async function openOption(inp: { contract: string; contracts: number; stop_loss_pct: number; conviction: number; reason: string; exit_plan: string; news_and_macro?: string }, metrics: Map<string, Metrics>): Promise<string> {
   if (!config.accounts.alpaca_paper) return 'REJECTED: alpaca_paper is disabled.';
+  // Owner, 2026-10-29: chart analysis alone isn't enough for options; each
+  // entry needs news and macro backing from research done this session.
+  if (config.webResearch && sessionResearchUsed < 1) return 'REJECTED: option entries need news and macro backing. Search this session for the company\'s latest news/catalysts and the macro backdrop first, then try again.';
+  if (!inp.news_and_macro || inp.news_and_macro.trim().length < 40) return 'REJECTED: news_and_macro must summarise the news catalyst and macro backdrop behind this trade.';
   if (!alpacaInScope) return `REJECTED: Alpaca isn't reviewed this session (considered every ${config.alpacaEveryMinutes} min).`;
   if (!isUsSessionOpen()) return 'REJECTED: options only trade during US market hours.';
   const occ = String(inp.contract ?? '').toUpperCase().trim();
@@ -1087,7 +1117,7 @@ async function openOption(inp: { contract: string; contracts: number; stop_loss_
     const paid = parseFloat(o.filled_avg_price ?? String(q.ask));
     const stop = round2(paid * (1 - inp.stop_loss_pct / 100));
     const p: OpusPosition = { id: newId(), account: 'alpaca_paper', symbol: underlying, brokerRef: occ, direction: 'BUY', size: filled,
-      entryPrice: paid, stopPrice: stop, openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, exitPlan: inp.exit_plan, probe,
+      entryPrice: paid, stopPrice: stop, openedAt: Date.now(), conviction: inp.conviction, reason: `${inp.reason} | News/macro: ${inp.news_and_macro}`, exitPlan: inp.exit_plan, probe,
       option: { type, strike, expiry } };
     state.positions.push(p); saveState();
     const tag = probe ? ' [PROBE]' : '';
@@ -1211,6 +1241,12 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 let nextRunAt: number | null = null;
 let lastRunAt: string | null = null;
 let busy = false;
+// Per-session flags (2026-10-29): routine check-ins run on the cheaper model
+// and can't open trades (they escalate to Opus); option entries need research
+// done in the same session.
+let routineSession = false;
+let escalateReason: string | null = null;
+let sessionResearchUsed = 0;
 
 const MAX_TURNS = 10;
 const MAX_BACKTESTS_PER_SESSION = 4;
@@ -1296,18 +1332,23 @@ const RESEARCH_PROMPT = `
 
 DAILY RESEARCH SESSION: this is your first session of the trading day. You have a larger web research allowance. Use it on what matters most: material news, earnings dates, guidance or analyst changes for your open positions, then your strongest candidates. Prefer primary or reputable sources. Record the conclusions you want to carry through the day in your notes (concisely), then manage positions as usual.`;
 
-export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingview' = 'scheduled'): Promise<{ ok: boolean; error?: string }> {
+export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingview' | 'escalated' = 'scheduled', why = ''): Promise<{ ok: boolean; error?: string }> {
   if (busy) return { ok: false, error: 'A session is already running' };
   if (!process.env.ANTHROPIC_API_KEY) return { ok: false, error: 'ANTHROPIC_API_KEY is not set on the server' };
   if (budgetLeftUsd() <= 0.25) { addLog('wait', `Monthly cap reached ($${spend.usd.toFixed(2)} of $${config.monthlyCapUsd}) — no sessions until next month or a higher cap`); return { ok: false, error: 'Monthly budget reached' }; }
   busy = true;
   const started = Date.now();
-  const model = config.model;
+  let model = config.model;
   let sessionUsd = 0;
+  routineSession = false; escalateReason = null; sessionResearchUsed = 0;
   try {
     const view = await livePositionView();
     await reconcile(view);
     const research = config.webResearch && isUsSessionOpen() && nyDate() !== state.lastResearchDay;
+    // Routine scheduled check-ins run on the cheaper model; research, TradingView
+    // alerts, manual runs and escalations get the full model.
+    if (trigger === 'scheduled' && !research && config.routineModel && config.routineModel !== config.model) { model = config.routineModel; routineSession = true; }
+    state.lastSessionAt = Date.now();
     alpacaInScope = config.accounts.alpaca_paper && isUsSessionOpen()
       && (research || trigger === 'manual' || Date.now() - (state.lastAlpacaReviewAt ?? 0) >= config.alpacaEveryMinutes * 60_000 - 60_000);
     const { text, metrics } = await buildBriefing(view);
@@ -1326,7 +1367,9 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
 
 ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewed every ${config.alpacaEveryMinutes} minutes, not every session. Don't analyse Alpaca entries now (they'd be rejected); its positions keep their broker stops. Only close an Alpaca position if something material broke its thesis. Focus on ig_demo.`;
     const offNote = isUsSessionOpen() ? alpacaNote : `\n\nOFF-HOURS SESSION: the US market is closed. US-share figures above are from the last session. Alpaca can't trade now; ig_demo can trade any market IG has open (indices, FX and commodities nearly round the clock; IG's US shares only when IG offers them out of hours — an order on a closed market is rejected). Manage open IG positions as usual.`;
-    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text + offNote + (research ? RESEARCH_PROMPT : '') + allowanceNote }];
+    const whyNote = why ? `\n\nWHY THIS SESSION: ${why}` : '';
+    const routineNote = routineSession ? `\n\nROUTINE CHECK-IN (you are ${MODELS[model].label}, the cheaper model): manage open positions (close, tighten stops, set exit plans, update notes) as usual. You can't open new trades in this session: if you see an entry worth taking, or anything needing deeper judgment, call escalate with the reason and Opus will run a full session straight after.` : '';
+    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text + offNote + (research ? RESEARCH_PROMPT : '') + allowanceNote + whyNote + routineNote }];
     let backtestsLeft = MAX_BACKTESTS_PER_SESSION;
     let researchUsed = 0, researchCapNoted = false;
     const tok = { fresh: 0, read: 0, write: 0 };
@@ -1339,6 +1382,7 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
       const resp = await callModel(model, system, messages, searches, cacheTtl());
       sessionUsd += recordUsage(model, resp.usage);
       tok.fresh += resp.usage.input_tokens; tok.read += resp.usage.cache_read_input_tokens ?? 0; tok.write += resp.usage.cache_creation_input_tokens ?? 0;
+      sessionResearchUsed += (resp.usage.server_tool_use?.web_search_requests ?? 0) + (resp.usage.server_tool_use?.web_fetch_requests ?? 0);
       researchUsed += (resp.usage.server_tool_use?.web_search_requests ?? 0) + (resp.usage.server_tool_use?.web_fetch_requests ?? 0);
       if (resp.model !== model) addLog('info', `Served by fallback model ${resp.model} this turn`);
       if (resp.stop_reason === 'refusal') { addLog('error', 'The model declined this session (refusal, fallback included)'); break; }
@@ -1365,6 +1409,11 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
         try {
           if (t.name === 'open_position') out = await openPosition(input as Parameters<typeof openPosition>[0], metrics);
           else if (t.name === 'close_position') out = await closePosition(String(input.position_id), String(input.reason), view);
+          else if (routineSession && (t.name === 'open_position' || t.name === 'open_option')) out = 'REJECTED: this is a routine check-in on a cheaper model; new entries are decided by Opus. If this is a real entry, call escalate with the reason and Opus will look at it straight after.';
+          else if (t.name === 'escalate') {
+            if (!routineSession) out = 'Not needed: this is already a full Opus session.';
+            else { escalateReason = String(input.reason ?? '').slice(0, 500); addLog('info', `Escalated to Opus: ${escalateReason}`); out = 'OK: Opus will run a full session right after this one.'; }
+          }
           else if (t.name === 'option_chain') out = await optionChainTool(input);
           else if (t.name === 'open_option') out = await openOption(input as Parameters<typeof openOption>[0], metrics);
           else if (t.name === 'set_exit_plan') {
@@ -1419,6 +1468,10 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
 
     addLog('info', `Session done in ${((Date.now() - started) / 1000).toFixed(0)}s — cost $${sessionUsd.toFixed(3)} (input tokens: ${tok.read} from cache, ${tok.write} written to cache, ${tok.fresh} uncached), month $${spend.usd.toFixed(2)} of $${config.monthlyCapUsd}`);
     lastRunAt = new Date().toISOString();
+    if (escalateReason && trigger !== 'escalated') {
+      const r = escalateReason;
+      setTimeout(() => { void runOpusSession('escalated', `escalated by the routine check-in: ${r}`); }, 3000);
+    }
     return { ok: true };
   } catch (e) {
     const msg = e instanceof Anthropic.APIError ? `Anthropic API ${e.status}: ${e.message}` : e instanceof Error ? e.message : String(e);
@@ -1509,9 +1562,53 @@ function schedule(): void {
 
 async function tick(): Promise<void> {
   if (!running) return;
-  if (isUsSessionOpen()) await runOpusSession('scheduled');
-  else if (offHours() && Date.now() - lastScheduledAt >= config.offHoursMinutes * 60_000 - 60_000) await runOpusSession('scheduled');
+  const due = isUsSessionOpen() || (offHours() && Date.now() - lastScheduledAt >= config.offHoursMinutes * 60_000 - 60_000);
+  if (due) {
+    const why = await materialChange().catch(e => `change check failed (${e instanceof Error ? e.message : String(e)}), running anyway`);
+    if (why) await runOpusSession('scheduled', why);
+    else addLog('info', 'Check-in skipped: nothing material changed since the last session (no AI call)');
+  }
   schedule();
+}
+
+// The change gate (2026-10-29, owner: usage vs effect on a demo). Plain code,
+// no AI: a scheduled session only runs when one of these is true. TradingView
+// alerts and manual runs bypass it.
+const gateNotified = new Map<string, number>();
+async function materialChange(): Promise<string | null> {
+  if (!config.changeGate) return 'change gate off';
+  const us = isUsSessionOpen();
+  if (us && config.webResearch && nyDate() !== state.lastResearchDay) return 'first US session of the day (daily research)';
+  if (us && config.accounts.alpaca_paper && Date.now() - (state.lastAlpacaReviewAt ?? 0) >= config.alpacaEveryMinutes * 60_000 - 60_000) return 'Alpaca review due';
+  const quietH = (Date.now() - (state.lastSessionAt ?? 0)) / 3_600_000;
+  if (quietH >= (us ? config.quietMaxHoursUs : config.quietMaxHoursOff)) return `no session for ${quietH.toFixed(1)}h`;
+  const view = await livePositionView();
+  for (const p of state.positions) {
+    const v = view.get(p.id);
+    if (v && !v.exists && Date.now() - p.openedAt > 10 * 60_000) return `${p.symbol} is no longer open at the broker`;
+    const cur = v?.current;
+    if (cur == null) continue;
+    const risk = Math.abs(p.entryPrice - p.stopPrice);
+    if (!(risk > 0)) continue;
+    const toStop = Math.abs(cur - p.stopPrice) / risk;
+    const gain = (p.direction === 'BUY' ? cur - p.entryPrice : p.entryPrice - cur) / risk;
+    // Each fires once per position per level, so a position sitting near its
+    // stop or in profit doesn't wake the model every hour.
+    const stopKey = `${p.id}:stop`;
+    if (toStop < 0.35 && Date.now() - (gateNotified.get(stopKey) ?? 0) > 6 * 3_600_000) { gateNotified.set(stopKey, Date.now()); return `${p.symbol} is close to its stop`; }
+    const level = Math.floor(gain * 2) / 2;   // 1.5R, 2R, 2.5R ...
+    if (level >= 1.5 && level > (gateNotified.get(`${p.id}:gain`) ?? 0)) { gateNotified.set(`${p.id}:gain`, level); return `${p.symbol} is well in profit (${gain.toFixed(1)}× its risk): consider locking in`; }
+  }
+  const snap = state.priceSnap ?? {};
+  const watch = [...new Set([...Object.keys(IG_MARKETS), ...state.positions.map(p => p.symbol)])].filter(sym => snap[sym]);
+  for (const sym of watch) {
+    if (!us && !isIgOnly(sym)) continue;
+    const m = await metricsFor(sym);
+    if (!m) continue;
+    const move = (m.price / snap[sym] - 1) * 100;
+    if (Math.abs(move) >= config.gateMovePct) return `${sym} moved ${move >= 0 ? '+' : ''}${move.toFixed(1)}% since the last session`;
+  }
+  return null;
 }
 
 export async function startOpus(): Promise<{ ok: boolean; error?: string }> {
