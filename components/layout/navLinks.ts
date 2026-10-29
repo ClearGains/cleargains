@@ -33,6 +33,7 @@ export const NAV_LINKS: NavLink[] = [
   { href: '/ig-options',       label: 'IG Options Bot',     icon: Bot,             group: 'Bots & AI trading' },
   { href: '/meme-coin-bot',    label: 'Meme Coin Bot',      icon: Flame,           group: 'Bots & AI trading' },
   { href: '/opus-trader',      label: 'Opus Trader',        icon: Brain,           group: 'Bots & AI trading' },
+  { href: '/strategy-lab',     label: 'Strategy Lab',       icon: FlaskConical,    group: 'Bots & AI trading' },
   { href: '/backtest',         label: 'Backtest Lab',       icon: FlaskConical,    group: 'Bots & AI trading' },
   { href: '/bot-journal',      label: 'Bot Journal',        icon: NotebookPen,     group: 'Bots & AI trading' },
   { href: '/performance',      label: 'Bot Performance',    icon: BarChart3,       group: 'Bots & AI trading' },

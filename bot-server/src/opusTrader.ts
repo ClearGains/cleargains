@@ -190,6 +190,7 @@ type OpusState = {
   lastResearchDay: string;              // NY date of the last daily research session
   lastScheduledAt?: number;             // last scheduled session start (survives restarts)
   lastSessionAt?: number;               // last session of any kind
+  vetDay?: string; vetCount?: number;   // options-bot vets today (persisted: an in-memory count reset on every restart)
   priceSnap?: Record<string, number>;   // prices at the last session, for the change gate
   lastAlpacaReviewAt?: number;          // last session in which Alpaca entries were considered
 };
@@ -1828,14 +1829,13 @@ const VET_TOOL: Anthropic.Beta.BetaTool = {
   },
 };
 
-let vetDay = '', vetCount = 0;
 export async function opusVetOptionEntry(req: {
   symbol: string; direction: 'BUY' | 'SELL'; price: number; changePct: number; signal: string; headlines: string[];
 }): Promise<{ approve: boolean; conviction: number; reason: string; newsAndMacro: string } | null> {
   if (!opusVetsOldOptionsBot() || !process.env.ANTHROPIC_API_KEY || budgetLeftUsd() <= 0.5) return null;
-  if (vetDay !== nyDate()) { vetDay = nyDate(); vetCount = 0; }
-  if (vetCount >= config.optionVetsPerDay) return { approve: false, conviction: 0, reason: `daily vetting limit (${config.optionVetsPerDay}) reached`, newsAndMacro: '' };
-  vetCount++;
+  if (state.vetDay !== nyDate()) { state.vetDay = nyDate(); state.vetCount = 0; }
+  if ((state.vetCount ?? 0) >= config.optionVetsPerDay) return { approve: false, conviction: 0, reason: `daily vetting limit (${config.optionVetsPerDay}) reached`, newsAndMacro: '' };
+  state.vetCount = (state.vetCount ?? 0) + 1; saveState();
   const kind = req.direction === 'BUY' ? 'CALL (betting it rises)' : 'PUT (betting it falls)';
   const m = await metricsFor(req.symbol).catch(() => null);
   const flowText = await getOptionsFlow(req.symbol, req.price).then(describeFlow).catch(() => '(options positioning unavailable)');
@@ -1880,6 +1880,23 @@ Finish by calling verdict.`;
     addLog('error', `Options vet failed: ${e instanceof Anthropic.APIError ? `${e.status} ${e.message}` : e instanceof Error ? e.message : String(e)}`);
     return null;
   }
+}
+
+// Strategy Lab's AI chart reader (2026-10-29): one short call on the main
+// model, counted against the same monthly cap. Returns null when unavailable.
+export async function labAsk(prompt: string): Promise<{ text: string; usd: number } | null> {
+  if (!process.env.ANTHROPIC_API_KEY || budgetLeftUsd() <= 0.5) return null;
+  try {
+    client ??= new Anthropic();
+    const resp = await client.beta.messages.create({
+      model: config.model, max_tokens: 1500, output_config: { effort: 'low' },
+      messages: [{ role: 'user', content: prompt }],
+      betas: [FALLBACK_BETA], fallbacks: 'default',
+    });
+    const usd = recordUsage(config.model, resp.usage);
+    const text = resp.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text').map(b => b.text).join('').trim();
+    return { text, usd };
+  } catch { return null; }
 }
 
 export async function opusConfirmStockTrade(req: StockConfirmSignal): Promise<StockConfirmVerdict | null> {

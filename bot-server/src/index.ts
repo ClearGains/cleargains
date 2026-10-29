@@ -426,6 +426,40 @@ app.get('/mean-reversion/:instance/:mode/status', auth, (req: Request, res: Resp
 
 // ── Cross-bot performance summary (all journals rolled up) ──────────────────
 // GET /closed-positions?broker=alpaca|ig&mode=paper|live|demo&days=7, from the brokers' own records.
+// ── Strategy Lab (2026-10-29): sandbox backtesting and prediction training.
+// Nothing here trades or changes a live bot.
+app.get('/lab/meta', auth, (_req: Request, res: Response) => {
+  void import('./lab/runner').then(async r => { const d = await import('./lab/data'); res.json({ ok: true, strategies: r.strategyList(), markets: Object.entries(d.LAB_MARKETS).map(([key, m]) => ({ key, name: m.name })) }); });
+});
+app.get('/lab/runs', auth, (_req: Request, res: Response) => {
+  void import('./lab/runner').then(r => res.json({ ok: true, runs: r.listRuns().slice(0, 40).map(x => ({ ...x, result: x.result ? { ...x.result, equity: undefined } : undefined })) }));
+});
+app.get('/lab/runs/:id', auth, (req: Request, res: Response) => {
+  void import('./lab/runner').then(r => { const run = r.getRun(req.params.id); res.json(run ? { ok: true, run } : { ok: false, error: 'not found' }); });
+});
+app.post('/lab/run', auth, (req: Request, res: Response) => {
+  const b = req.body as { kind?: string; strategy?: string; market?: string; timeframe?: string; params?: Record<string, number | boolean> };
+  void import('./lab/runner').then(r => {
+    try { res.json({ ok: true, run: r.startRun({ kind: b.kind === 'train' ? 'train' : 'test', strategy: String(b.strategy ?? ''), market: String(b.market ?? ''), timeframe: (b.timeframe ?? '5m') as '5m', params: b.params }) }); }
+    catch (e) { res.status(400).json({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
+  });
+});
+app.get('/lab/predict', auth, (_req: Request, res: Response) => {
+  void import('./lab/predict').then(p => res.json({ ok: true, runs: p.listPredictRuns().slice(0, 30) }));
+});
+app.get('/lab/predict/:id', auth, (req: Request, res: Response) => {
+  void import('./lab/predict').then(p => { const run = p.getPredictRun(req.params.id); res.json(run ? { ok: true, run } : { ok: false, error: 'not found' }); });
+});
+app.post('/lab/predict', auth, (req: Request, res: Response) => {
+  const b = req.body as { market?: string; timeframe?: string; aiSamples?: number };
+  const tf = String(b.timeframe ?? '1h');
+  if (!['1m', '5m', '1h', '1d', '1wk'].includes(tf)) { res.status(400).json({ ok: false, error: 'timeframe must be 1m, 5m, 1h, 1d or 1wk' }); return; }
+  void Promise.all([import('./lab/predict'), import('./opusTrader')]).then(([p, o]) => {
+    try { res.json({ ok: true, run: p.startPredictRun({ market: String(b.market ?? ''), timeframe: tf as '1h', aiSamples: Number(b.aiSamples) || 0 }, o.labAsk) }); }
+    catch (e) { res.status(400).json({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
+  });
+});
+
 // Options positioning for a US stock (2026-10-29): GET /options/flow?symbols=V,PLTR
 app.get('/options/flow', auth, (req: Request, res: Response) => {
   let syms = String(req.query.symbols ?? '').toUpperCase().split(',').map(x => x.trim()).filter(x => /^[A-Z.]{1,6}$/.test(x)).slice(0, 8);
