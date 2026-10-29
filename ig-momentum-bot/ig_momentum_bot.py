@@ -32,6 +32,14 @@ at, and closes, deals it opened itself (own_deals.json). Every deal it opens
 is also appended to deal_history.json, which the bot server reads to label
 these trades "Momentum Testbot" and to keep Opus from ever adopting them.
 
+Choppy-day guard (2026-10-29, owner's request): on a day with no clear
+direction the original kept re-entering and getting stopped out. Per market:
+  - after a losing trade, no new trade in that market for COOLDOWN_MINUTES (60);
+  - after MAX_LOSSES_PER_DAY (2) losing trades in a UTC day, that market is
+    done for the day.
+A trade closed by IG (stop or limit) counts as a loss when the market's
+current price is on the losing side of the entry.
+
 Left out on purpose (never fired in the IG history, or not part of the signal):
   - +50% size boost on correlated markets
   - Closing other markets' positions to make room for a "15% stronger" signal
@@ -65,6 +73,8 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
 SIZE_PER_POINT = float(os.getenv("SIZE_PER_POINT", "1"))
 MIN_STRENGTH = int(os.getenv("MIN_STRENGTH", "60"))
 AUTO_CLOSE = os.getenv("AUTO_CLOSE", "true").strip().lower() in ("1", "true", "yes")
+COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "60"))
+MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
 SIGNAL_THRESHOLD_PCT = 0.3
 CURRENCY = "GBP"
 
@@ -111,6 +121,7 @@ LOG_FILE = os.path.join(BASE_DIR, "ig_momentum_bot.log")
 TRADES_CSV = os.path.join(BASE_DIR, "trades.csv")
 OWN_DEALS = os.path.join(BASE_DIR, "own_deals.json")        # deals this bot has open now
 DEAL_HISTORY = os.path.join(BASE_DIR, "deal_history.json")  # every deal it ever opened
+CHOP_GUARD = os.path.join(BASE_DIR, "chop_guard.json")      # losses per market today
 
 logging.basicConfig(
     level=logging.INFO,
@@ -366,6 +377,38 @@ def remember_deal(name, epic, direction, size, level, deal_id):
     write_json(DEAL_HISTORY, hist)
 
 
+def today_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def record_loss(market):
+    g = read_json(CHOP_GUARD, {})
+    if g.get("date") != today_utc():
+        g = {"date": today_utc(), "markets": {}}
+    m = g["markets"].setdefault(market, {"losses": 0, "last_loss": 0})
+    m["losses"] += 1
+    m["last_loss"] = time.time()
+    write_json(CHOP_GUARD, g)
+    log.info(f"{market}: loss {m['losses']} of {MAX_LOSSES_PER_DAY} allowed today"
+             + ("; done for the day" if m["losses"] >= MAX_LOSSES_PER_DAY else f"; pausing {COOLDOWN_MINUTES} min"))
+
+
+def chop_block(market):
+    """Reason this market is blocked by the choppy-day guard, or None."""
+    g = read_json(CHOP_GUARD, {})
+    if g.get("date") != today_utc():
+        return None
+    m = g.get("markets", {}).get(market)
+    if not m:
+        return None
+    if m["losses"] >= MAX_LOSSES_PER_DAY:
+        return f"{m['losses']} losses today, done until tomorrow (UTC)"
+    left = COOLDOWN_MINUTES - (time.time() - m["last_loss"]) / 60
+    if left > 0:
+        return f"cooling off after a loss, {left:.0f} min left"
+    return None
+
+
 def find_unconfirmed_open(ig, epic, direction, known_ids):
     """IG sometimes answers an order with an error or no confirmation even
     though it opened. Look for a deal in that market and direction, opened in
@@ -406,9 +449,17 @@ def scan(ig, markets, dry_run, http=requests):
     own = read_json(OWN_DEALS, {})
     for deal_id in [d for d in own if d not in open_ids]:
         o = own.pop(deal_id)
-        log.info(f"{o['market']}: {o['direction']} {deal_id} closed at the broker (stop/limit or manual)")
+        snap = (ig_info.get(o["epic"]) or {}).get("snapshot", {})
+        exit_px = snap.get("bid") if o["direction"] == "BUY" else snap.get("offer")
+        lost = None
+        if exit_px is not None and o.get("level") is not None:
+            lost = exit_px < o["level"] if o["direction"] == "BUY" else exit_px > o["level"]
+        outcome = "loss (stop)" if lost else "win (limit)" if lost is False else "unknown"
+        log.info(f"{o['market']}: {o['direction']} {deal_id} closed at the broker, {outcome}")
         record_trade([now_utc(), "CLOSED_AT_BROKER", o["market"], o["epic"], o["direction"], o["size"],
-                      "", "", "", "", "", "CLOSED", "stop/limit hit or closed outside the bot", deal_id])
+                      "", "", exit_px, "", "", "CLOSED", f"stop/limit hit or closed outside the bot: {outcome}", deal_id])
+        if lost:
+            record_loss(o["market"])
     write_json(OWN_DEALS, own)
     open_pos = [p for p in all_pos if p["dealId"] in own]
 
@@ -439,6 +490,10 @@ def scan(ig, markets, dry_run, http=requests):
         if any(p["direction"] == direction for p in mine):
             log.info(f"{tag} {direction} already open, skip")
             continue
+        blocked = chop_block(name)
+        if blocked:
+            log.info(f"{tag} {direction} skipped: {blocked}")
+            continue
         if env_flag("KILL_SWITCH"):
             log.warning("Kill switch on, not placing new bets")
             return
@@ -457,6 +512,9 @@ def scan(ig, markets, dry_run, http=requests):
                               strength, round(change, 3), res.get("level"), None, None,
                               res.get("dealStatus"), res.get("reason"), opp["dealId"]])
                 if res.get("dealStatus") == "ACCEPTED":
+                    profit = res.get("profit")
+                    if isinstance(profit, (int, float)) and profit < 0:
+                        record_loss(name)
                     open_pos = [p for p in open_pos if p["dealId"] != opp["dealId"]]
                     own = read_json(OWN_DEALS, {})
                     own.pop(opp["dealId"], None)
