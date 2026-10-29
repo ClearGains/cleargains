@@ -22,7 +22,7 @@ import * as os from 'os';
 import { execFile } from 'child_process';
 import {
   getBars, getAccount, getPositions as getAlpacaPositions, placeOrder as alpacaPlaceOrder,
-  closePosition as alpacaClosePosition, cancelOrdersForSymbol, getOrders as alpacaGetOrders, cancelOrder as alpacaCancelOrder, getFillsSince, type AlpacaBar,
+  closePosition as alpacaClosePosition, cancelOrdersForSymbol, getOrders as alpacaGetOrders, cancelOrder as alpacaCancelOrder, getFillsSince, getOptionChain, getOptionQuote, getOrder as alpacaGetOrder, type AlpacaBar,
 } from './alpacaApi';
 import { calcRsi, calcAtr, dailyVolumeRatio } from './alpacaStrategies';
 import { fetchAllHeadlines } from './newsFetch';
@@ -78,6 +78,12 @@ export type OpusConfig = {
   minConviction:        number;   // matches the 65% entry bar used everywhere else
   probeMinConviction:   number;   // paper/demo only: conviction from here up to minConviction opens a small PROBE
   probeSizePct:         number;   // probe size as % of the normal size cap
+  alpacaStocks:         boolean;  // false = Alpaca is options-only for new entries (owner, 2026-10-29)
+  optionMaxPremiumUsd:  number;   // max premium paid per option position
+  optionMaxTotalUsd:    number;   // max premium across all open option positions
+  optionMaxPositions:   number;
+  optionMinDte:         number;   // shortest expiry allowed at entry (days)
+  optionCloseDte:       number;   // code closes an option this close to expiry
   webResearch:          boolean;  // give the model web search/fetch for its own research
   searchesPerSession:   number;   // web searches allowed in a normal session
   researchSearches:     number;   // web searches allowed in the daily research session
@@ -108,6 +114,12 @@ const DEFAULT_CONFIG: OpusConfig = {
   minConviction: 65,
   probeMinConviction: 55,
   probeSizePct: 33,
+  alpacaStocks: false,
+  optionMaxPremiumUsd: 3_000,
+  optionMaxTotalUsd: 10_000,
+  optionMaxPositions: 5,
+  optionMinDte: 45,
+  optionCloseDte: 7,
   minHoldHours: 4,
   reentryCooldownHours: 24,
   webResearch: true,
@@ -133,6 +145,10 @@ export type OpusPosition = {
   lastPl?:     number | null;   // last P&L seen at the broker (fallback when it closes between reviews)
   reason:      string;
   exitPlan?:   string;        // target, invalidation, when to tighten, reward:risk (2026-10-23)
+  // Alpaca option (2026-10-29): brokerRef is the OCC contract, symbol the
+  // underlying, size the number of contracts, entry/stop are premium per share.
+  // The stop is watched by code (Alpaca has no option stop orders).
+  option?:     { type: 'call' | 'put'; strike: number; expiry: string };
 };
 
 type ClosedRecord = OpusPosition & { closedAt: number; closeReason: string; plApprox: number | null };
@@ -410,7 +426,7 @@ async function realisedPl(p: OpusPosition): Promise<number | null> {
     for (const x of fills) { const q = Math.min(parseFloat(x.qty), p.size - qty); if (q <= 0) break; qty += q; value += q * parseFloat(x.price); }
     if (qty < p.size - 1e-9) return null;
     const exit = value / qty;
-    return Math.round((p.direction === 'BUY' ? exit - p.entryPrice : p.entryPrice - exit) * p.size * 100) / 100;
+    return Math.round((p.direction === 'BUY' ? exit - p.entryPrice : p.entryPrice - exit) * p.size * (p.option ? 100 : 1) * 100) / 100;
   }
   return null;
 }
@@ -444,6 +460,40 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
         exit_plan:     { type: 'string', description: 'Target level, what would prove you wrong before the stop, when you will tighten the stop to lock in profit, and rough reward:risk. 1-3 sentences.' },
       },
       required: ['account', 'symbol', 'direction', 'size', 'stop_loss_pct', 'conviction', 'reason', 'exit_plan'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'option_chain',
+    description: 'Look up Alpaca option contracts for a US stock or ETF in the briefing: live bid/ask, delta and implied volatility for strikes around the current price, at a few expiries. Use it before open_option. Read-only.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol:  { type: 'string', description: 'Underlying US ticker from the briefing' },
+        type:    { type: 'string', enum: ['call', 'put'] },
+        min_dte: { type: 'integer', description: 'Shortest days to expiry to show (code minimum applies)' },
+        max_dte: { type: 'integer', description: 'Longest days to expiry to show' },
+      },
+      required: ['symbol', 'type', 'min_dte', 'max_dte'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'open_option',
+    description: 'Buy to open an option contract on alpaca_paper (long calls or puts only, so the most it can lose is the premium paid). Use a contract symbol from option_chain. Fills at the current ask with a limit order or not at all. The stop is on the option\'s own price and is watched by code every 5 minutes in US hours; code also sells it a week before expiry.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        contract:      { type: 'string', description: 'OCC option symbol from option_chain, e.g. AAPL270115C00250000' },
+        contracts:     { type: 'integer', description: 'Number of contracts (each is 100 shares)' },
+        stop_loss_pct: { type: 'number', description: 'Sell if the option\'s bid falls this % below what you paid (20-70)' },
+        conviction:    { type: 'integer', description: '0-100, your honest confidence this trade works over your intended holding period' },
+        reason:        { type: 'string', description: 'Why, in 1-3 sentences: the thesis you will judge the position against later' },
+        exit_plan:     { type: 'string', description: 'Target (underlying level or option price), what would prove you wrong, when you will tighten the stop, and rough reward:risk. 1-3 sentences.' },
+      },
+      required: ['contract', 'contracts', 'stop_loss_pct', 'conviction', 'reason', 'exit_plan'],
       additionalProperties: false,
     },
   },
@@ -612,7 +662,7 @@ TradingView: you can look at live TradingView charts with the tradingview_chart 
 const SYSTEM_PROMPT = `You are the portfolio manager for a small trading operation, running in a test period that is being reviewed after about a month. Each session you receive a briefing and act through tools. Your goal is risk-adjusted profit over weeks to months, not activity. Don't rush trades to show a result inside the test: a sound position still open at the review counts by its open P&L.
 
 Accounts you control:
-- alpaca_paper: US stocks/ETFs, paper money (USD). Long or short.
+- alpaca_paper: paper money (USD). The owner wants this account trading OPTIONS (as it did before you took it over), not stocks: new entries are long calls or puts only, via option_chain then open_option. Stock positions you already hold there stay yours to manage until you close them.
 - ig_demo: UK spread bets, demo money (GBP) — US shares plus indices, FX and commodities (see the IG markets table). Long or short. You size by £ at risk; code derives the stake.
 - t212_live: Trading 212 ISA, REAL money (GBP). Long only, small sizes. Be most selective here.
 
@@ -623,6 +673,14 @@ Evidence from this account's history (weigh it, don't obey it):
 - In a 3-year backtest on 15 US large caps (exit on a close below the 50-day, 10% stop): buying a breakout (above both averages, 12-week gain ≥ 8%, normal-or-better volume, up on the day) averaged +3.5% a trade over 169 trades; buying a pullback to the 20-day that turned up averaged +3.2% over 116 trades, with smaller losses. Both trailed simply holding in a strong market. Index and FX moves are much smaller than single-stock moves, so stock thresholds don't transfer to them.
 - Re-asking the same question on unchanged inputs gave unstable answers. Change your mind about a position when something material changed, not because the session repeated.
 - The owner's view on natural gas (2026-10-23): it's worth more of your attention than its share of the market list suggests. Its patterns (trend breakouts, seasonal and inventory-driven swings) tend to be clearer than most markets', and trades here have done well when the entry was chosen carefully and the profit was locked in. Don't take the short you adopted from the old breakout bot as proof of this, though: the owner thinks its entry logic was crude and that it's in profit mostly because the market happened to move its way. Judge that position on your own reading of the chart, not on its P&L so far. Natural gas is also very volatile, with sharp reversals after big runs, so the gain depends on where you set and tighten the stop. Look at it closely every session and trade it when you see a setup you'd take. This is a pointer about where to look, not an instruction to trade it or a reason to lower your bar.
+
+OPTIONS ON ALPACA (the owner's decision, 2026-10-29): you only buy calls (to profit from a rise) or puts (from a fall), so the most a position can lose is the premium paid. Pick the underlying from the briefing's US shares and the direction from your own read, then use option_chain to choose the contract and open_option to buy it. How you choose strike and expiry is your call; things to weigh:
+- Time: an option loses value every day (faster in its last weeks), so the move has to come before expiry. Your holds are weeks to months; expiries well beyond your intended hold give the idea room. Code won't buy under 45 days to expiry and sells a week before expiry.
+- Strike: near-the-money (delta ~0.4-0.6) behaves most like the stock; far out-of-the-money is cheap but needs a big move and often expires worthless.
+- Price: implied volatility (IV) is what you're paying for expected movement; high IV (e.g. just before earnings) makes options dear and they deflate after the event.
+- Cost: wide bid/ask spreads cost you on the way in and out; code refuses spreads over 15%.
+- Stops: your stop is on the option's own price (stop_loss_pct of what you paid) and code checks it every 5 minutes in US hours. Option prices swing far more than the stock's, so a tight stop gets hit by noise.
+- History here (weigh it): the old options bot lost about $13k on this account, mostly on short-dated contracts and quick in-and-out trades. Holds of a week or more did much better than shorter ones.
 
 Data you get: every number in the briefing is computed by code from market data (price, day change, whether today is above its open, today's volume vs a normal day (1.0 = normal, pro-rated for time of day), 20/50-day averages, 12-week trend, RSI(14), ATR% (typical daily range), distance off the 52-week high, headlines). The "setup (code)" column flags BREAKOUT/PULLBACK patterns as a convenience; use it, ignore it or define your own setups. You can test any idea with run_backtest (indicators: ${INDICATORS.join(', ')}). Judge it against buy-and-hold on enough trades; costs aren't modelled. When live results disagree with a backtest, trust the live results.
 
@@ -661,7 +719,9 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   lines.push('');
   lines.push('## Accounts');
   if (config.accounts.alpaca_paper) {
-    try { const a = await getAccount('paper'); lines.push(`- alpaca_paper: equity $${parseFloat(a.equity).toFixed(0)}, cash $${parseFloat(a.cash).toFixed(0)}. Caps: ≤$${config.alpacaMaxPositionUsd}/position, ≤${config.alpacaMaxPositions} of your positions.`); }
+    try { const a = await getAccount('paper'); const optOpen = state.positions.filter(p => p.option);
+      const optSpent = optOpen.reduce((t, p) => t + p.entryPrice * p.size * 100, 0);
+      lines.push(`- alpaca_paper: equity $${parseFloat(a.equity).toFixed(0)}, cash $${parseFloat(a.cash).toFixed(0)}. ${config.alpacaStocks ? `Stocks: ≤$${config.alpacaMaxPositionUsd}/position, ≤${config.alpacaMaxPositions} positions. ` : 'New entries: OPTIONS ONLY (no new stock positions). '}Options: ≤$${config.optionMaxPremiumUsd} premium/position, ≤$${config.optionMaxTotalUsd} total ($${optSpent.toFixed(0)} in use), ≤${config.optionMaxPositions} positions (${optOpen.length} open), expiry ≥${config.optionMinDte} days at entry, auto-sold ${config.optionCloseDte} days before expiry.`); }
     catch { lines.push('- alpaca_paper: balance unavailable'); }
   }
   if (config.accounts.ig_demo) {
@@ -687,6 +747,11 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   for (const p of state.positions) {
     const v = view.get(p.id);
     const heldH = (Date.now() - p.openedAt) / 3_600_000;
+    if (p.option) {
+      const dte = Math.round((Date.parse(p.option.expiry + 'T21:00:00Z') - Date.now()) / 86_400_000);
+      lines.push(`- id=${p.id} ${p.account} OPTION long ${p.symbol} ${p.option.type.toUpperCase()} strike ${p.option.strike} exp ${p.option.expiry} (${dte}d left) contract=${p.brokerRef} contracts=${p.size} paid=${p.entryPrice} stop=${p.stopPrice} (option price, code-watched) now=${fmt(v?.current ?? null, 2)} P&L=${fmt(v?.pl ?? null, 2)} underlying=${fmt(metrics.get(p.symbol)?.price ?? null, 2)} held=${heldH.toFixed(1)}h conviction=${p.conviction} thesis: ${p.reason} — exit plan: ${p.exitPlan ?? '(none recorded yet; set one with set_exit_plan)'}`);
+      continue;
+    }
     lines.push(`- id=${p.id} ${p.account} ${p.direction} ${p.symbol} size=${p.size} entry=${p.entryPrice} stop=${p.stopPrice} now=${fmt(v?.current ?? null, 2)} P&L=${fmt(v?.pl ?? null, 2)} held=${heldH.toFixed(1)}h conviction=${p.conviction} thesis: ${p.reason} — exit plan: ${p.exitPlan ?? '(none recorded yet; set one with set_exit_plan)'}`);
   }
 
@@ -796,7 +861,8 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
   // the safety limits in this function remain.
   const cool = state.lastClosedAt[`${inp.account}:${symbol}`];
   if (cool && Date.now() - cool < config.reentryCooldownHours * 3_600_000) return `REJECTED: closed ${symbol} on ${inp.account} ${((Date.now() - cool) / 3_600_000).toFixed(1)}h ago — cooldown is ${config.reentryCooldownHours}h.`;
-  if (state.positions.some(p => p.account === inp.account && p.symbol === symbol)) return `REJECTED: you already hold ${symbol} on ${inp.account}.`;
+  if (inp.account === 'alpaca_paper' && !config.alpacaStocks) return 'REJECTED: alpaca_paper is for options now (the owner\'s decision, 2026-10-29). Use option_chain and open_option.';
+  if (state.positions.some(p => p.account === inp.account && p.symbol === symbol && !p.option)) return `REJECTED: you already hold ${symbol} on ${inp.account}.`;
   const mine = state.positions.filter(p => p.account === inp.account);
 
   try {
@@ -937,6 +1003,120 @@ function todayAgainstFromMetrics(m: Metrics, dir: 'BUY' | 'SELL'): boolean {
   return dir === 'BUY' ? !m.aboveOpen : m.aboveOpen;
 }
 
+// ── Options on Alpaca (2026-10-29, owner: Alpaca should trade options) ──────
+
+function dteOf(expiry: string): number { return Math.round((Date.parse(expiry + 'T21:00:00Z') - Date.now()) / 86_400_000); }
+
+async function optionChainTool(input: Record<string, unknown>): Promise<string> {
+  const symbol = String(input.symbol ?? '').toUpperCase().trim();
+  const type = input.type === 'put' ? 'put' : 'call';
+  if (isIgOnly(symbol) || !/^[A-Z.]{1,6}$/.test(symbol)) return 'REJECTED: option chains are for US stocks/ETFs only.';
+  const m = await metricsFor(symbol);
+  if (!m) return `REJECTED: no market data for ${symbol}.`;
+  const minDte = Math.max(config.optionMinDte, Number(input.min_dte) || config.optionMinDte);
+  const maxDte = Math.max(minDte + 7, Math.min(400, Number(input.max_dte) || 180));
+  const day = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString().slice(0, 10);
+  let rows;
+  try { rows = await getOptionChain(symbol, type, day(minDte), day(maxDte), m.price * 0.85, m.price * 1.15, 'paper'); }
+  catch (e) { return `FAILED: ${e instanceof Error ? e.message : String(e)}`; }
+  rows = rows.filter(r => r.ask > 0);
+  if (!rows.length) return `No quoted ${type}s for ${symbol} between ${minDte} and ${maxDte} days.`;
+  // Up to 4 expiries spread across the window, 7 strikes nearest the money each.
+  const expiries = [...new Set(rows.map(r => r.expiry))].sort();
+  const pick = expiries.length <= 4 ? expiries : [0, 1, 2, 3].map(i => expiries[Math.round(i * (expiries.length - 1) / 3)]);
+  const out = [`${symbol} ${type}s, underlying $${m.price.toFixed(2)} (contract = 100 shares; cost = ask × 100):`, 'contract | expiry (days) | strike | bid | ask | spread% | delta | IV'];
+  for (const e of [...new Set(pick)]) {
+    const near = rows.filter(r => r.expiry === e).sort((a, b) => Math.abs(a.strike - m.price) - Math.abs(b.strike - m.price)).slice(0, 7).sort((a, b) => a.strike - b.strike);
+    for (const r of near) {
+      const mid = (r.bid + r.ask) / 2;
+      out.push(`${r.symbol} | ${r.expiry} (${dteOf(r.expiry)}) | ${r.strike} | ${r.bid.toFixed(2)} | ${r.ask.toFixed(2)} | ${mid > 0 ? ((r.ask - r.bid) / mid * 100).toFixed(0) : '—'} | ${r.delta !== null ? r.delta.toFixed(2) : '—'} | ${r.iv !== null ? (r.iv * 100).toFixed(0) + '%' : '—'}`);
+    }
+  }
+  return out.join('\n');
+}
+
+async function openOption(inp: { contract: string; contracts: number; stop_loss_pct: number; conviction: number; reason: string; exit_plan: string }, metrics: Map<string, Metrics>): Promise<string> {
+  if (!config.accounts.alpaca_paper) return 'REJECTED: alpaca_paper is disabled.';
+  if (!alpacaInScope) return `REJECTED: Alpaca isn't reviewed this session (considered every ${config.alpacaEveryMinutes} min).`;
+  if (!isUsSessionOpen()) return 'REJECTED: options only trade during US market hours.';
+  const occ = String(inp.contract ?? '').toUpperCase().trim();
+  const mm = occ.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
+  if (!mm) return 'REJECTED: contract must be an OCC symbol from option_chain.';
+  const underlying = mm[1], expiry = `20${mm[2]}-${mm[3]}-${mm[4]}`, type = mm[5] === 'C' ? 'call' as const : 'put' as const, strike = parseInt(mm[6], 10) / 1000;
+  if (inp.conviction < config.probeMinConviction) return `REJECTED: conviction ${inp.conviction} is below the minimum (${config.probeMinConviction}).`;
+  const probe = inp.conviction < config.minConviction;
+  const sizeFactor = probe ? config.probeSizePct / 100 : 1;
+  if (!(inp.stop_loss_pct >= 20 && inp.stop_loss_pct <= 70)) return 'REJECTED: stop_loss_pct for an option must be between 20 and 70.';
+  if (!(Number.isInteger(inp.contracts) && inp.contracts >= 1)) return 'REJECTED: contracts must be a whole number ≥ 1.';
+  const dte = dteOf(expiry);
+  if (dte < config.optionMinDte) return `REJECTED: ${dte} days to expiry; the minimum is ${config.optionMinDte}.`;
+  if (!metrics.get(underlying) && !(await metricsFor(underlying))) return `REJECTED: no market data for ${underlying}.`;
+  const optOpen = state.positions.filter(p => p.option);
+  if (optOpen.length >= config.optionMaxPositions) return `REJECTED: already at ${config.optionMaxPositions} option positions.`;
+  if (optOpen.some(p => p.brokerRef === occ)) return 'REJECTED: you already hold that contract.';
+  const cool = state.lastClosedAt[`alpaca_paper:${occ}`];
+  if (cool && Date.now() - cool < config.reentryCooldownHours * 3_600_000) return `REJECTED: closed that contract ${((Date.now() - cool) / 3_600_000).toFixed(1)}h ago; cooldown is ${config.reentryCooldownHours}h.`;
+  const q = await getOptionQuote(occ, 'paper');
+  if (!q || !(q.ask > 0)) return 'REJECTED: no live quote for that contract.';
+  const mid = (q.ask + q.bid) / 2;
+  if (!(q.bid > 0) || (q.ask - q.bid) / mid > 0.15) return `REJECTED: too illiquid to trade fairly (bid ${q.bid}, ask ${q.ask}; spread over 15% of the price). Pick a contract with a tighter spread.`;
+  const cap = config.optionMaxPremiumUsd * sizeFactor;
+  const perContract = q.ask * 100;
+  const spent = optOpen.reduce((t, p) => t + p.entryPrice * p.size * 100, 0);
+  const qty = Math.min(inp.contracts, Math.floor(cap / perContract), Math.floor((config.optionMaxTotalUsd - spent) / perContract));
+  if (qty < 1) return `REJECTED: one contract costs $${perContract.toFixed(0)}; the limit allows $${Math.min(cap, config.optionMaxTotalUsd - spent).toFixed(0)}${probe ? ' (probe size)' : ''}. Pick a cheaper contract.`;
+  try {
+    const order = await alpacaPlaceOrder('paper', { symbol: occ, qty, side: 'buy', type: 'limit', limit_price: q.ask, time_in_force: 'day', client_order_id: `opus-opt-${occ}-${Date.now()}` });
+    let o = order;
+    for (let i = 0; i < 8 && o.status !== 'filled'; i++) { await new Promise(r => setTimeout(r, 1500)); o = await alpacaGetOrder('paper', order.id); }
+    const filled = parseFloat(o.filled_qty || '0');
+    if (o.status !== 'filled') await alpacaCancelOrder('paper', order.id).catch(() => undefined);
+    if (!(filled >= 1)) return `REJECTED: not filled at the ask ($${q.ask}) within 12s; order cancelled. The price may have moved; try again later or another contract.`;
+    const paid = parseFloat(o.filled_avg_price ?? String(q.ask));
+    const stop = round2(paid * (1 - inp.stop_loss_pct / 100));
+    const p: OpusPosition = { id: newId(), account: 'alpaca_paper', symbol: underlying, brokerRef: occ, direction: 'BUY', size: filled,
+      entryPrice: paid, stopPrice: stop, openedAt: Date.now(), conviction: inp.conviction, reason: inp.reason, exitPlan: inp.exit_plan, probe,
+      option: { type, strike, expiry } };
+    state.positions.push(p); saveState();
+    const tag = probe ? ' [PROBE]' : '';
+    addLog('enter', `alpaca_paper${tag} OPTION bought ${filled} × ${underlying} ${expiry} ${strike} ${type} (${occ}) @ $${paid} = $${(paid * filled * 100).toFixed(0)}, stop $${stop} (conviction ${inp.conviction}) — ${inp.reason}`);
+    return `OPENED id=${p.id}: ${filled} × ${occ} @ $${paid} ($${(paid * filled * 100).toFixed(0)} total), stop $${stop} on the option price, ${dte} days to expiry.`;
+  } catch (e) {
+    return `FAILED at the broker: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+// Code-watched option stops and the pre-expiry sale. Alpaca has no stop
+// orders for options, so this checks every 5 minutes in US hours. A stop
+// needs two checks in a row at or below it, so one bad quote can't trigger it.
+const optionStopHits = new Map<string, number>();
+let optionWatchTimer: ReturnType<typeof setInterval> | null = null;
+async function watchOptions(): Promise<void> {
+  if (!running || busy || !isUsSessionOpen()) return;
+  const opts = state.positions.filter(p => p.option);
+  if (!opts.length) return;
+  const view = await livePositionView().catch(() => new Map<string, LivePos>());
+  for (const p of opts) {
+    const dte = dteOf(p.option!.expiry);
+    if (dte <= config.optionCloseDte) {
+      const r = await closePosition(p.id, `[code] ${dte} days to expiry: sold before the final week`, view, true);
+      addLog('exit', `Option ${p.brokerRef}: ${r}`);
+      continue;
+    }
+    const q = await getOptionQuote(p.brokerRef, 'paper').catch(() => null);
+    if (!q || !(q.bid > 0)) continue;
+    if (q.bid <= p.stopPrice) {
+      const hits = (optionStopHits.get(p.id) ?? 0) + 1;
+      optionStopHits.set(p.id, hits);
+      if (hits >= 2) {
+        const r = await closePosition(p.id, `[code stop] option bid $${q.bid} at or below the stop $${p.stopPrice}`, view, true);
+        addLog('exit', `Option ${p.brokerRef}: ${r}`);
+        optionStopHits.delete(p.id);
+      }
+    } else optionStopHits.delete(p.id);
+  }
+}
+
 // Opus's lock-in-profit tool (2026-10-23, owner: "lock in profit" for winners,
 // decided by Opus rather than an automatic floor). Code only checks the stop
 // moves in the safe direction and stays on the losing side of the price.
@@ -949,6 +1129,12 @@ async function tightenStop(id: string, newStop: number, reason: string, view: Ma
   const now = view.get(id)?.current ?? null;
   if (now !== null && (long ? newStop >= now : newStop <= now)) return `REJECTED: a stop at ${newStop} is already through the current price (${now}), so it would close the position at once. Use close_position instead.`;
   const stop = round2(newStop);
+  if (p.option) {
+    const prevO = p.stopPrice;
+    p.stopPrice = stop; saveState();
+    addLog('info', `Option stop tightened: ${p.brokerRef} ${prevO} → ${stop} — ${reason}`);
+    return `OK: ${p.brokerRef} stop moved ${prevO} → ${stop} (option price; code sells if the bid reaches it).`;
+  }
   try {
     if (p.account === 'ig_demo') {
       const session = await ig();
@@ -1167,6 +1353,8 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
         try {
           if (t.name === 'open_position') out = await openPosition(input as Parameters<typeof openPosition>[0], metrics);
           else if (t.name === 'close_position') out = await closePosition(String(input.position_id), String(input.reason), view);
+          else if (t.name === 'option_chain') out = await optionChainTool(input);
+          else if (t.name === 'open_option') out = await openOption(input as Parameters<typeof openOption>[0], metrics);
           else if (t.name === 'set_exit_plan') {
             const p = state.positions.find(x => x.id === String(input.position_id));
             if (!p) out = 'No open position with that id.';
@@ -1317,6 +1505,8 @@ export async function startOpus(): Promise<{ ok: boolean; error?: string }> {
   addLog('info', `Opus started — reviewing every ${config.cycleMinutes}min during the US session${config.offHoursMinutes > 0 && config.accounts.ig_demo ? ` and every ${config.offHoursMinutes}min outside it for IG markets (weekdays)` : ''}; existing IG demo / Alpaca paper bots paused for new entries`);
   if (isUsSessionOpen() || offHours()) void runOpusSession('scheduled');
   schedule();
+  if (optionWatchTimer) clearInterval(optionWatchTimer);
+  optionWatchTimer = setInterval(() => { watchOptions().catch(e => addLog('error', `Option watch failed: ${e instanceof Error ? e.message : String(e)}`)); }, 5 * 60_000);
   return { ok: true };
 }
 
@@ -1325,6 +1515,8 @@ export function stopOpus(): { ok: boolean } {
   config.enabled = false; saveConfig();
   if (timer) clearTimeout(timer);
   timer = null; nextRunAt = null;
+  if (optionWatchTimer) clearInterval(optionWatchTimer);
+  optionWatchTimer = null;
   addLog('info', 'Opus stopped — its open positions stay open with their broker stops; resume the other bots from their own pages if wanted');
   return { ok: true };
 }

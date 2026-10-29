@@ -884,6 +884,10 @@ async function evaluateSymbol(
   account?:  AlpacaAccount,
   marketRegime?: MarketRegime | null,
 ): Promise<boolean> {
+  // Opus's own Alpaca positions (stocks and, since 2026-10-29, options) are
+  // invisible here, so this bot never manages or closes them.
+  const opusOwned = await import('./opusTrader').then(m => m.opusOwnedAlpacaSymbols()).catch(() => new Set<string>());
+  positions = positions.filter(p => !opusOwned.has(p.symbol));
   const openPos    = positions.find(p => p.symbol === sym);
   const inPosition = !!openPos;
   const side       = openPos?.side;

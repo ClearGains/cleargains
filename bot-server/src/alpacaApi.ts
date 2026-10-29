@@ -481,6 +481,44 @@ export async function getOptionQuote(symbol: string, mode: AccountMode): Promise
   }
 }
 
+// A slice of the option chain with live quotes and greeks (2026-10-29, for
+// Opus's option_chain tool). Filtered server-side by type, expiry window and
+// strike window, following next_page_token.
+export type OptionChainRow = { symbol: string; expiry: string; strike: number; bid: number; ask: number; delta: number | null; iv: number | null };
+export async function getOptionChain(
+  underlying: string, type: 'call' | 'put', minExpiry: string, maxExpiry: string,
+  strikeLo: number, strikeHi: number, mode: AccountMode,
+): Promise<OptionChainRow[]> {
+  const { key, secret } = getKeys(mode);
+  if (!key || !secret) throw new Error('Alpaca credentials not configured');
+  const params = new URLSearchParams({
+    feed: 'indicative', type, limit: '1000',
+    expiration_date_gte: minExpiry, expiration_date_lte: maxExpiry,
+    strike_price_gte: strikeLo.toFixed(2), strike_price_lte: strikeHi.toFixed(2),
+  });
+  const out: OptionChainRow[] = [];
+  for (let page = 0; page < 5; page++) {
+    const res = await fetch(`https://data.alpaca.markets/v1beta1/options/snapshots/${underlying}?${params}`, {
+      headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret }, signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`Alpaca option chain ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const data = await res.json() as { snapshots?: Record<string, { latestQuote?: { ap?: number; bp?: number }; greeks?: { delta?: number }; impliedVolatility?: number }>; next_page_token?: string | null };
+    for (const [sym, s] of Object.entries(data.snapshots ?? {})) {
+      const m = sym.match(/^[A-Z]+(\d{2})(\d{2})(\d{2})[CP](\d{8})$/);
+      if (!m) continue;
+      out.push({ symbol: sym, expiry: `20${m[1]}-${m[2]}-${m[3]}`, strike: parseInt(m[4], 10) / 1000,
+        bid: s.latestQuote?.bp ?? 0, ask: s.latestQuote?.ap ?? 0, delta: s.greeks?.delta ?? null, iv: s.impliedVolatility ?? null });
+    }
+    if (!data.next_page_token) break;
+    params.set('page_token', data.next_page_token);
+  }
+  return out;
+}
+
+export async function getOrder(mode: AccountMode, orderId: string): Promise<AlpacaOrder> {
+  return alpacaFetch<AlpacaOrder>(mode, `/orders/${orderId}`);
+}
+
 export type AlpacaSnapshot = {
   latestTrade?: { p: number };
   dailyBar?:    { v: number; vw: number; o: number; c: number };
