@@ -1480,8 +1480,18 @@ function schedule(): void {
   if (!running) { nextRunAt = null; return; }
   // Off-hours the tick still fires on the US cadence (so the US open is never
   // missed) but only runs a session once offHoursMinutes have passed.
-  const delay = scheduleMinutes() * 60_000;
-  nextRunAt = Date.now() + delay;
+  let delay = scheduleMinutes() * 60_000;
+  // If the US market opens before the next tick, run at the open (+3 min, so
+  // opening prices exist) instead: Alpaca options/stocks can only trade then,
+  // and a tick just before the open would otherwise push the first US session
+  // ~an hour late (2026-10-29).
+  const now = Date.now();
+  if (!isUsSessionOpen(new Date(now))) {
+    for (let m = 1; m * 60_000 < delay; m++) {
+      if (isUsSessionOpen(new Date(now + m * 60_000))) { delay = (m + 3) * 60_000; break; }
+    }
+  }
+  nextRunAt = now + delay;
   timer = setTimeout(() => { void tick(); }, delay);
 }
 
