@@ -24,6 +24,11 @@ export type Strategy = {
   defaults: Params;
   signal: (c: Ctx, p: Params) => 1 | -1 | null;
   stopPct: (c: Ctx, p: Params) => number;
+  // 'flip' (trend strategies): no profit target; hold until the signal turns
+  // the other way (then reverse), with a wide protective stop. Default: fixed
+  // stop and target.
+  exit?: 'flip';
+  recommended?: string;   // suggested bar size
 };
 
 const num = (p: Params, k: string) => Number(p[k]);
@@ -124,12 +129,64 @@ export const STRATEGIES: Strategy[] = [
     },
     stopPct: stopFrom,
   },
+  {
+    id: 'trend_months',
+    name: 'Trend following over months (time-series momentum)',
+    description: 'Long while the market is up over the lookback, short while it is down; flips when the trend turns. No profit target: winners run. A wide stop (× daily range) guards against a crash. The approach managed-futures funds use; backed by ~100 years of data across indices, FX and commodities. Use daily or weekly bars.',
+    recommended: '1d',
+    exit: 'flip',
+    params: [
+      { key: 'lookback', label: 'Trend lookback (bars)', values: [21, 63, 126, 252] },
+      { key: 'longOnly', label: 'Long only (no shorts)', values: [false, true] },
+      { key: 'stopAtrFrac', label: 'Protective stop (× daily range)', values: [2, 3, 4] },
+      { key: 'stopPct', label: 'Stop (% of price) if no range data', values: [5] },
+    ],
+    defaults: { lookback: 126, longOnly: false, stopAtrFrac: 3, stopPct: 5 },
+    signal: (c, p) => {
+      const n = num(p, 'lookback');
+      if (c.i < n) return null;
+      const r = c.bars[c.i].c / c.bars[c.i - n].c - 1;
+      if (r > 0) return 1;
+      return flag(p, 'longOnly') ? null : (r < 0 ? -1 : null);
+    },
+    stopPct: stopFrom,
+  },
+  {
+    id: 'ma_trend',
+    name: 'Moving-average trend (e.g. 50/200)',
+    description: 'Long when the fast average is above the slow one and price is above the slow average; short in the mirror case; flips when that changes. The classic "golden cross / death cross" trend filter. Use daily bars.',
+    recommended: '1d',
+    exit: 'flip',
+    params: [
+      { key: 'fast', label: 'Fast average (bars)', values: [20, 50] },
+      { key: 'slow', label: 'Slow average (bars)', values: [100, 200] },
+      { key: 'longOnly', label: 'Long only (no shorts)', values: [false, true] },
+      { key: 'stopAtrFrac', label: 'Protective stop (× daily range)', values: [2, 3, 4] },
+      { key: 'stopPct', label: 'Stop (% of price) if no range data', values: [5] },
+    ],
+    defaults: { fast: 50, slow: 200, longOnly: false, stopAtrFrac: 3, stopPct: 5 },
+    signal: (c, p) => {
+      const f = num(p, 'fast'), sl = num(p, 'slow');
+      if (c.i < sl) return null;
+      let sf = 0, ss = 0;
+      for (let j = c.i - f + 1; j <= c.i; j++) sf += c.bars[j].c;
+      for (let j = c.i - sl + 1; j <= c.i; j++) ss += c.bars[j].c;
+      sf /= f; ss /= sl;
+      const price = c.bars[c.i].c;
+      if (sf > ss && price > ss) return 1;
+      if (sf < ss && price < ss) return flag(p, 'longOnly') ? null : -1;
+      return null;
+    },
+    stopPct: stopFrom,
+  },
 ];
 
-export type Trade = { entryT: number; exitT: number; dir: 1 | -1; entry: number; exit: number; r: number };
+export type Trade = { entryT: number; exitT: number; dir: 1 | -1; entry: number; exit: number; r: number; pct: number };
 export type Metrics = {
   trades: number; wins: number; winRate: number; netR: number; avgR: number;
   netGbp: number; profitFactor: number | null; maxDrawdownR: number;
+  movePct: number;       // sum of the market moves captured, % before costs (compare with buy-and-hold)
+  avgDaysHeld: number;
 };
 export type SimResult = { metrics: Metrics; trades: Trade[] };
 
@@ -182,33 +239,49 @@ export function prepare(series: Series, spreadPct: number): Prepared {
   return { series, spreadPct, day, prevClose, dayOpen, dayStart, sma20, atrPct, rsi };
 }
 
+// Overnight funding on IG's daily spread bets: roughly the base rate plus
+// ~2.5% a year of the position's value, about 0.018% a day (counted on shorts
+// too, to stay cautious). Quarterly spread bets avoid it but cost more spread.
+export const FUNDING_PCT_PER_DAY = 0.018;
+
+type Pos = { dir: 1 | -1; entry: number; stop: number; target: number; t: number; costR: number; stopPctAtEntry: number };
+
 export function simulate(prep: Prepared, strat: Strategy, p: Params, from = 0, to = Infinity, guards: Guards = DEFAULT_GUARDS): SimResult {
   const bars = prep.series.bars;
   const end = Math.min(bars.length, to);
   const trades: Trade[] = [];
-  let pos: { dir: 1 | -1; entry: number; stop: number; target: number; t: number; costR: number } | null = null;
+  const flip = strat.exit === 'flip';
+  let pos: Pos | null = null;
+  const close = (open: Pos, t: number, exit: number): number => {
+    const days = (t - open.t) / 86_400;
+    const fundR = days * FUNDING_PCT_PER_DAY / open.stopPctAtEntry;
+    const r = (exit - open.entry) * open.dir / Math.abs(open.entry - open.stop) - open.costR - fundR;
+    trades.push({ entryT: open.t, exitT: t, dir: open.dir, entry: open.entry, exit, r, pct: (exit / open.entry - 1) * 100 * open.dir });
+    return r;
+  };
   let lastLossT = 0, lastWinT = 0, lossesDay = '', lossesToday = 0;
   for (let i = Math.max(from, 1); i < end; i++) {
     const b = bars[i];
     if (pos) {
       const hitStop = pos.dir === 1 ? b.l <= pos.stop : b.h >= pos.stop;
       const hitTgt = pos.dir === 1 ? b.h >= pos.target : b.l <= pos.target;
-      if (hitStop || hitTgt) {
-        const exit = hitStop ? pos.stop : pos.target;
-        const r = (hitStop ? -1 : (Math.abs(pos.target - pos.entry) / Math.abs(pos.entry - pos.stop))) - pos.costR;
-        trades.push({ entryT: pos.t, exitT: b.t, dir: pos.dir, entry: pos.entry, exit, r });
+      if (hitStop || (hitTgt && !flip)) {
+        const r = close(pos, b.t, hitStop ? pos.stop : pos.target);
+        pos = null;
         if (r < 0) { lastLossT = b.t; if (lossesDay !== prep.day[i]) { lossesDay = prep.day[i]; lossesToday = 0; } lossesToday++; }
         else lastWinT = b.t;
-        pos = null;
+        continue;
       }
-      continue;
+      if (!flip) continue;
     }
-    // Guards (same as the live Testbot).
+    // Guards (same as the live Testbot); trend strategies don't use them.
     const today = prep.day[i];
     const nLoss = lossesDay === today ? lossesToday : 0;
-    if (nLoss >= guards.maxLossesPerDay && b.t - lastLossT < guards.longPauseMin * 60) continue;
-    if (nLoss >= 1 && b.t - lastLossT < guards.cooldownLossMin * 60) continue;
-    if (b.t - lastWinT < guards.waitWinMin * 60) continue;
+    if (!flip) {
+      if (nLoss >= guards.maxLossesPerDay && b.t - lastLossT < guards.longPauseMin * 60) continue;
+      if (nLoss >= 1 && b.t - lastLossT < guards.cooldownLossMin * 60) continue;
+      if (b.t - lastWinT < guards.waitWinMin * 60) continue;
+    }
     const ctx: Ctx = {
       bars, i, prevClose: prep.prevClose[i], dayOpen: prep.dayOpen[i], minutesIntoDay: (b.t - prep.dayStart[i]) / 60,
       sma20: prep.sma20[i], atrPct: prep.atrPct[i], rsi: prep.rsi[i], rsiPrev: prep.rsi[i - 1],
@@ -216,15 +289,18 @@ export function simulate(prep: Prepared, strat: Strategy, p: Params, from = 0, t
       loN: n => { if (i < n) return null; let m = Infinity; for (let j = i - n; j < i; j++) m = Math.min(m, bars[j].l); return m; },
     };
     const dir = strat.signal(ctx, p);
+    if (flip && pos) {
+      // Hold while the trend agrees; exit (and reverse if it points the other way) when it turns.
+      if (dir === pos.dir) continue;
+      close(pos, b.t, b.c);
+      pos = null;
+    }
     if (!dir) continue;
     const sp = strat.stopPct(ctx, p);
     const risk = b.c * sp / 100;
-    pos = { dir, entry: b.c, stop: b.c - dir * risk, target: b.c + dir * risk * Number(p.targetR), t: b.t, costR: prep.spreadPct / sp };
+    pos = { dir, entry: b.c, stop: b.c - dir * risk, target: flip ? NaN : b.c + dir * risk * Number(p.targetR), t: b.t, costR: prep.spreadPct / sp, stopPctAtEntry: sp };
   }
-  if (pos) {  // still open at the end: mark at the last close
-    const last = bars[end - 1];
-    trades.push({ entryT: pos.t, exitT: last.t, dir: pos.dir, entry: pos.entry, exit: last.c, r: (last.c - pos.entry) * pos.dir / Math.abs(pos.entry - pos.stop) - pos.costR });
-  }
+  if (pos) close(pos, bars[end - 1].t, bars[end - 1].c);   // still open at the end: mark at the last close
   return { metrics: metricsOf(trades), trades };
 }
 
@@ -240,5 +316,7 @@ export function metricsOf(trades: Trade[]): Metrics {
   return {
     trades: n, wins, winRate: n ? r2(wins / n * 100) : 0, netR: r2(netR), avgR: n ? r2(netR / n) : 0,
     netGbp: r2(netR * 20), profitFactor: loss > 0 ? r2(gross / loss) : null, maxDrawdownR: r2(dd),
+    movePct: r2(trades.reduce((s, t) => s + t.pct, 0)),
+    avgDaysHeld: n ? r2(trades.reduce((s, t) => s + (t.exitT - t.entryT) / 86_400, 0) / n) : 0,
   };
 }

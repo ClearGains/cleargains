@@ -444,6 +444,15 @@ app.post('/lab/run', auth, (req: Request, res: Response) => {
     catch (e) { res.status(400).json({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
   });
 });
+app.get('/lab/portfolio', auth, (_req: Request, res: Response) => {
+  void import('./lab/portfolio').then(p => res.json({ ok: true, runs: p.listPortfolioRuns(), universe: p.MOMENTUM_UNIVERSE }));
+});
+app.get('/lab/portfolio/:id', auth, (req: Request, res: Response) => {
+  void import('./lab/portfolio').then(p => { const run = p.getPortfolioRun(req.params.id); res.json(run ? { ok: true, run } : { ok: false, error: 'not found' }); });
+});
+app.post('/lab/portfolio', auth, (req: Request, res: Response) => {
+  void import('./lab/portfolio').then(p => res.json({ ok: true, run: p.startPortfolioRun(req.body ?? {}) }));
+});
 app.get('/lab/predict', auth, (_req: Request, res: Response) => {
   void import('./lab/predict').then(p => res.json({ ok: true, runs: p.listPredictRuns().slice(0, 30) }));
 });

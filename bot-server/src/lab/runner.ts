@@ -19,6 +19,7 @@ export type LabRun = {
     baseline?: { params: Params; train: Metrics; test: Metrics };
     top?: Array<{ params: Params; train: Metrics; test: Metrics }>;
     combosTried?: number;
+    buyHoldPct?: number;       // holding the market over the same stretch (test: whole; train: the unseen part)
   };
 };
 
@@ -29,7 +30,7 @@ const save = () => { try { fs.writeFileSync(FILE, JSON.stringify(runs.slice(0, 1
 export function listRuns(): LabRun[] { return runs; }
 export function getRun(id: string): LabRun | undefined { return runs.find(r => r.id === id); }
 export function strategyList() {
-  return STRATEGIES.map(s => ({ id: s.id, name: s.name, description: s.description, params: s.params, defaults: s.defaults }));
+  return STRATEGIES.map(s => ({ id: s.id, name: s.name, description: s.description, params: s.params, defaults: s.defaults, recommended: s.recommended, trend: s.exit === 'flip' }));
 }
 
 function combos(s: Strategy, cap = 500): Params[] {
@@ -46,7 +47,7 @@ const iso = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace
 export function startRun(req: { kind: 'test' | 'train'; strategy: string; market: string; timeframe: Timeframe; params?: Params }): LabRun {
   const strat = STRATEGIES.find(s => s.id === req.strategy);
   if (!strat) throw new Error(`Unknown strategy ${req.strategy}`);
-  if (!['5m', '1h', '1d'].includes(req.timeframe)) throw new Error('timeframe must be 5m, 1h or 1d');
+  if (!['5m', '1h', '1d', '1wk'].includes(req.timeframe)) throw new Error('timeframe must be 5m, 1h, 1d or 1wk');
   const m = resolveMarket(req.market);
   const run: LabRun = {
     id: Math.random().toString(36).slice(2, 10), createdAt: new Date().toISOString(), status: 'running',
@@ -65,7 +66,8 @@ export function startRun(req: { kind: 'test' | 'train'; strategy: string; market
         const params = { ...strat.defaults, ...(req.params ?? {}) };
         const r = simulate(prep, strat, params);
         let eq = 0;
-        run.result = { params, metrics: r.metrics, equity: r.trades.map(t => Math.round((eq += t.r) * 100) / 100) };
+        run.result = { params, metrics: r.metrics, equity: r.trades.map(t => Math.round((eq += t.r) * 100) / 100),
+          buyHoldPct: Math.round((bars[bars.length - 1].c / bars[0].c - 1) * 1000) / 10 };
       } else {
         const split = Math.floor(bars.length * 0.7);
         run.splitAt = iso(bars[split].t);
@@ -78,6 +80,7 @@ export function startRun(req: { kind: 'test' | 'train'; strategy: string; market
         const base = strat.defaults;
         run.result = {
           combosTried: all.length,
+          buyHoldPct: Math.round((bars[bars.length - 1].c / bars[split].c - 1) * 1000) / 10,
           baseline: { params: base, train: simulate(prep, strat, base, 0, split).metrics, test: simulate(prep, strat, base, split).metrics },
           top,
         };

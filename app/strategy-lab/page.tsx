@@ -10,8 +10,8 @@ import { clsx } from 'clsx';
 
 type ParamValue = number | boolean;
 type ParamSpec = { key: string; label: string; values: ParamValue[] };
-type StrategyMeta = { id: string; name: string; description: string; params: ParamSpec[]; defaults: Record<string, ParamValue> };
-type Metrics = { trades: number; wins: number; winRate: number; netR: number; avgR: number; netGbp: number; profitFactor: number | null; maxDrawdownR: number };
+type StrategyMeta = { id: string; name: string; description: string; params: ParamSpec[]; defaults: Record<string, ParamValue>; recommended?: string; trend?: boolean };
+type Metrics = { trades: number; wins: number; winRate: number; netR: number; avgR: number; netGbp: number; profitFactor: number | null; maxDrawdownR: number; movePct?: number; avgDaysHeld?: number };
 type LabRun = {
   id: string; createdAt: string; status: 'running' | 'done' | 'error'; error?: string;
   kind: 'test' | 'train'; strategy: string; market: string; marketName: string; timeframe: string;
@@ -20,7 +20,7 @@ type LabRun = {
     params?: Record<string, ParamValue>; metrics?: Metrics; equity?: number[];
     baseline?: { params: Record<string, ParamValue>; train: Metrics; test: Metrics };
     top?: Array<{ params: Record<string, ParamValue>; train: Metrics; test: Metrics }>;
-    combosTried?: number;
+    combosTried?: number; buyHoldPct?: number;
   };
 };
 type Score = { n: number; accuracy: number; edgePct: number; z: number; confident?: { n: number; accuracy: number } };
@@ -60,6 +60,8 @@ function MetricsRow({ m, label }: { m: Metrics; label: string }) {
       <td className={clsx('px-2 py-1.5 text-right', m.netGbp >= 0 ? 'text-emerald-400' : 'text-rose-400')}>{money(m.netGbp)}</td>
       <td className="px-2 py-1.5 text-right">{m.profitFactor ?? '—'}</td>
       <td className="px-2 py-1.5 text-right text-slate-400">{m.maxDrawdownR}R</td>
+      <td className={clsx('px-2 py-1.5 text-right', (m.movePct ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400')}>{m.movePct !== undefined ? `${m.movePct >= 0 ? '+' : ''}${m.movePct}%` : '—'}</td>
+      <td className="px-2 py-1.5 text-right text-slate-400">{m.avgDaysHeld ?? '—'}</td>
     </tr>
   );
 }
@@ -68,6 +70,7 @@ const MetricsHead = () => (
     <th className="px-2 py-1.5 font-medium" /><th className="px-2 py-1.5 font-medium text-right">Trades</th><th className="px-2 py-1.5 font-medium text-right">Won</th>
     <th className="px-2 py-1.5 font-medium text-right">Net</th><th className="px-2 py-1.5 font-medium text-right">£ at £20/trade</th>
     <th className="px-2 py-1.5 font-medium text-right" title="Total won ÷ total lost; above 1 makes money">Profit factor</th><th className="px-2 py-1.5 font-medium text-right" title="Worst peak-to-trough losing run">Worst run</th>
+    <th className="px-2 py-1.5 font-medium text-right" title="Sum of the market moves the trades caught, before costs. Compare with buy-and-hold.">Move caught</th><th className="px-2 py-1.5 font-medium text-right">Avg days held</th>
   </tr></thead>
 );
 
@@ -84,7 +87,7 @@ function Equity({ eq }: { eq: number[] }) {
 }
 
 export default function StrategyLabPage() {
-  const [tab, setTab] = useState<'strategy' | 'predict'>('strategy');
+  const [tab, setTab] = useState<'strategy' | 'predict' | 'momentum'>('strategy');
   const [strategies, setStrategies] = useState<StrategyMeta[]>([]);
   const [markets, setMarkets] = useState<Array<{ key: string; name: string }>>([]);
   const [error, setError] = useState<string | null>(null);
@@ -122,7 +125,7 @@ export default function StrategyLabPage() {
     void refresh();
   }, [refresh]);
 
-  useEffect(() => { if (strat) setParams(strat.defaults); }, [strat]);
+  useEffect(() => { if (strat) { setParams(strat.defaults); if (strat.recommended) setTf(strat.recommended); } }, [strat]);
 
   // Poll whichever run is open while it's still running.
   useEffect(() => {
@@ -171,6 +174,7 @@ export default function StrategyLabPage() {
       <div className="flex gap-2">
         <button onClick={() => setTab('strategy')} className={clsx('px-3 py-1.5 rounded-lg text-sm', tab === 'strategy' ? 'bg-violet-600 text-white' : 'bg-slate-800 text-slate-300')}>Strategy tester</button>
         <button onClick={() => setTab('predict')} className={clsx('px-3 py-1.5 rounded-lg text-sm', tab === 'predict' ? 'bg-violet-600 text-white' : 'bg-slate-800 text-slate-300')}>Prediction trainer</button>
+        <button onClick={() => setTab('momentum')} className={clsx('px-3 py-1.5 rounded-lg text-sm', tab === 'momentum' ? 'bg-violet-600 text-white' : 'bg-slate-800 text-slate-300')}>Stock momentum</button>
         <button onClick={() => void refresh()} className="ml-auto p-2 rounded bg-slate-800 text-slate-400" title="Refresh"><RefreshCw className="w-4 h-4" /></button>
       </div>
       {error && <div className="text-sm text-rose-400">{error}</div>}
@@ -200,6 +204,7 @@ export default function StrategyLabPage() {
                   <option value="5m">5 minutes (last 60 days)</option>
                   <option value="1h">1 hour (last ~2 years)</option>
                   <option value="1d">1 day (last 5 years)</option>
+                  <option value="1wk">1 week (last 20 years)</option>
                 </select>
               </label>
               {strat && (
@@ -247,11 +252,13 @@ export default function StrategyLabPage() {
               {selected.status === 'running' && <div className="text-sm text-amber-300">Running… (training can take a minute)</div>}
               {selected.status === 'error' && <div className="text-sm text-rose-400">{selected.error}</div>}
               {selected.status === 'done' && selected.result?.metrics && (<>
-                <div className="overflow-x-auto"><table className="w-full text-xs min-w-[520px]"><MetricsHead /><tbody><MetricsRow m={selected.result.metrics} label="Whole history" /></tbody></table></div>
+                <div className="overflow-x-auto"><table className="w-full text-xs min-w-[640px]"><MetricsHead /><tbody><MetricsRow m={selected.result.metrics} label="Whole history" /></tbody></table></div>
+                {selected.result.buyHoldPct !== undefined && <p className="text-xs text-slate-400">Simply holding the market over the same period: <b className={selected.result.buyHoldPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{selected.result.buyHoldPct >= 0 ? '+' : ''}{selected.result.buyHoldPct}%</b>. A strategy has to beat that, or match it with smaller drops, to be worth running.</p>}
                 {selected.result.equity && <div><div className="text-xs text-slate-500 mb-1">Running total (R) trade by trade</div><Equity eq={selected.result.equity} /></div>}
                 <div className="text-xs text-slate-500">Settings: {Object.entries(selected.result.params ?? {}).map(([k, v]) => `${strat?.params.find(p => p.key === k)?.label ?? k}: ${fmtParam(v)}`).join(' · ')}</div>
               </>)}
               {selected.status === 'done' && selected.result?.top && (<>
+                {selected.result.buyHoldPct !== undefined && <p className="text-xs text-slate-400">Holding the market through the unseen part: <b>{selected.result.buyHoldPct >= 0 ? '+' : ''}{selected.result.buyHoldPct}%</b>.</p>}
                 <p className="text-xs text-slate-400">Tried {selected.result.combosTried} setting combinations on the older part. The real test is the <b>unseen</b> column: a setting that only shines in training is fitted to the past, not an edge.</p>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs min-w-[640px]">
@@ -286,6 +293,8 @@ export default function StrategyLabPage() {
           </div>
         </div>
       )}
+
+      {tab === 'momentum' && <MomentumTab />}
 
       {tab === 'predict' && (
         <div className="grid gap-5 lg:grid-cols-[380px_1fr]">
@@ -373,5 +382,127 @@ export default function StrategyLabPage() {
         </div>
       )}
     </main>
+  );
+}
+
+type PStats = { totalPct: number; cagrPct: number; maxDrawdownPct: number; months: number };
+type PRun = {
+  id: string; createdAt: string; status: 'running' | 'done' | 'error'; error?: string;
+  params: { lookback: number; skip: number; topN: number }; from?: string; to?: string; stocksUsed?: number;
+  isa?: PStats; spreadBet?: PStats; benchmark?: PStats;
+  equity?: Array<{ d: string; strat: number; bench: number }>;
+  holdingsNow?: Array<{ symbol: string; momentumPct: number }>;
+  recentPicks?: Array<{ d: string; symbols: string[] }>;
+};
+
+function TwoLines({ eq }: { eq: Array<{ d: string; strat: number; bench: number }> }) {
+  if (eq.length < 2) return null;
+  const all = eq.flatMap(e => [e.strat, e.bench]);
+  const min = Math.min(...all), max = Math.max(...all), w = 600, h = 140;
+  const x = (i: number) => (i / (eq.length - 1)) * w, y = (v: number) => h - ((v - min) / (max - min || 1)) * h;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-32 bg-slate-950/50 rounded">
+      <polyline fill="none" stroke="#64748b" strokeWidth={1.5} points={eq.map((e, i) => `${x(i)},${y(e.bench)}`).join(' ')} />
+      <polyline fill="none" stroke="#a78bfa" strokeWidth={2} points={eq.map((e, i) => `${x(i)},${y(e.strat)}`).join(' ')} />
+    </svg>
+  );
+}
+
+// Stock momentum tab (2026-10-29): rank big US stocks by their rise over past
+// months, hold the strongest for a month, repeat. Sandbox only.
+function MomentumTab() {
+  const [lookback, setLookback] = useState(252);
+  const [skip, setSkip] = useState(21);
+  const [topN, setTopN] = useState(5);
+  const [runs, setRuns] = useState<PRun[]>([]);
+  const [sel, setSel] = useState<PRun | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch('/api/lab?path=portfolio', { cache: 'no-store' }).then(x => x.json()) as { ok: boolean; runs?: PRun[]; error?: string };
+      if (r.ok) setRuns(r.runs ?? []); else setErr(r.error ?? 'failed');
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (sel?.status !== 'running') return;
+    const t = setInterval(async () => {
+      const r = await fetch(`/api/lab?path=portfolio/${sel.id}`, { cache: 'no-store' }).then(x => x.json()) as { ok: boolean; run?: PRun };
+      if (r.ok && r.run) setSel(r.run);
+      void load();
+    }, 4000);
+    return () => clearInterval(t);
+  }, [sel, load]);
+  const start = async () => {
+    setErr(null);
+    const r = await fetch('/api/lab?path=portfolio', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lookback, skip, topN }) }).then(x => x.json()) as { ok: boolean; run?: PRun; error?: string };
+    if (r.ok && r.run) { setSel(r.run); void load(); } else setErr(r.error ?? 'failed');
+  };
+  const open = async (id: string) => {
+    const r = await fetch(`/api/lab?path=portfolio/${id}`, { cache: 'no-store' }).then(x => x.json()) as { ok: boolean; run?: PRun };
+    if (r.ok && r.run) setSel(r.run);
+  };
+  const sel2 = 'px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-sm text-slate-200';
+  const Stat = ({ label, s }: { label: string; s?: PStats }) => s ? (
+    <tr className="border-t border-slate-800/70">
+      <td className="px-2 py-1.5 text-slate-300">{label}</td>
+      <td className={clsx('px-2 py-1.5 text-right font-medium', s.totalPct >= 0 ? 'text-emerald-400' : 'text-rose-400')}>{s.totalPct >= 0 ? '+' : ''}{s.totalPct}%</td>
+      <td className="px-2 py-1.5 text-right">{s.cagrPct}% a year</td>
+      <td className="px-2 py-1.5 text-right text-slate-400">−{s.maxDrawdownPct}%</td>
+    </tr>
+  ) : null;
+  return (
+    <div className="grid gap-5 lg:grid-cols-[380px_1fr]">
+      <div className="space-y-4">
+        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-3">
+          <p className="text-xs text-slate-400">Each month, rank 40 large US stocks by how much they rose over the past months (skipping the latest month, which tends to reverse), hold the strongest few equally for a month, then repeat. Compared with simply holding all 40. Long-proven (Jegadeesh &amp; Titman, 1993), but it has sharp losing spells.</p>
+          <label className="flex items-center justify-between text-xs text-slate-400">Rank by rise over
+            <select value={lookback} onChange={e => setLookback(Number(e.target.value))} className={sel2}><option value={63}>3 months</option><option value={126}>6 months</option><option value={252}>12 months</option></select>
+          </label>
+          <label className="flex items-center justify-between text-xs text-slate-400">Skip the latest month
+            <select value={skip} onChange={e => setSkip(Number(e.target.value))} className={sel2}><option value={21}>yes</option><option value={0}>no</option></select>
+          </label>
+          <label className="flex items-center justify-between text-xs text-slate-400">Hold the top
+            <select value={topN} onChange={e => setTopN(Number(e.target.value))} className={sel2}><option value={3}>3</option><option value={5}>5</option><option value={10}>10</option></select>
+          </label>
+          <button onClick={() => void start()} className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-sm text-white"><Play className="w-4 h-4" />Run</button>
+          {err && <div className="text-xs text-rose-400">{err}</div>}
+        </div>
+        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3">
+          <div className="text-xs font-semibold text-slate-300 mb-2">Past runs</div>
+          <div className="space-y-1 max-h-72 overflow-y-auto">
+            {runs.map(r => (
+              <button key={r.id} onClick={() => void open(r.id)} className={clsx('w-full text-left text-xs px-2 py-1.5 rounded hover:bg-slate-800', sel?.id === r.id && 'bg-slate-800')}>
+                Top {r.params.topN} by {Math.round(r.params.lookback / 21)}-month rise{r.params.skip ? ', skip 1m' : ''}
+                <span className={clsx('float-right', r.status === 'error' ? 'text-rose-400' : r.status === 'running' ? 'text-amber-400' : 'text-slate-500')}>{r.status === 'done' ? (r.isa ? `+${r.isa.totalPct}%` : '') : r.status}</span>
+              </button>
+            ))}
+            {!runs.length && <div className="text-xs text-slate-500">No runs yet.</div>}
+          </div>
+        </div>
+      </div>
+      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-4 min-w-0">
+        {!sel && <p className="text-sm text-slate-500">Choose the settings and run. Results appear here.</p>}
+        {sel?.status === 'running' && <div className="text-sm text-amber-300">Running… (loads 5 years for 40 stocks; about a minute the first time)</div>}
+        {sel?.status === 'error' && <div className="text-sm text-rose-400">{sel.error}</div>}
+        {sel?.status === 'done' && (<>
+          <div className="text-xs text-slate-500">{sel.from} → {sel.to} · {sel.stocksUsed} stocks · monthly rebalance</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs min-w-[460px]">
+              <thead><tr className="text-slate-500 text-left"><th className="px-2 py-1.5 font-medium" /><th className="px-2 py-1.5 font-medium text-right">Total</th><th className="px-2 py-1.5 font-medium text-right">Per year</th><th className="px-2 py-1.5 font-medium text-right">Worst drop</th></tr></thead>
+              <tbody>
+                <Stat label="Momentum, as shares / in an ISA" s={sel.isa} />
+                <Stat label="Momentum, as spread bets (incl. funding)" s={sel.spreadBet} />
+                <Stat label="Holding all 40 equally" s={sel.benchmark} />
+              </tbody>
+            </table>
+          </div>
+          {sel.equity && <div><div className="text-xs text-slate-500 mb-1"><span className="text-violet-300">Momentum</span> vs <span className="text-slate-400">holding all 40</span> (start = 100)</div><TwoLines eq={sel.equity} /></div>}
+          {sel.holdingsNow && <div className="text-xs text-slate-300">It would hold now: {sel.holdingsNow.map(h => <span key={h.symbol} className="mr-3"><b>{h.symbol}</b> <span className="text-emerald-400">+{h.momentumPct}%</span></span>)}</div>}
+          {sel.recentPicks && <div className="text-[11px] text-slate-500 space-y-0.5">{sel.recentPicks.map(p => <div key={p.d}>{p.d}: {p.symbols.join(', ')}</div>)}</div>}
+          <p className="text-[11px] text-slate-500">Caveats: the 40 stocks are today&apos;s giants, which flatters the past (survivorship bias), and these years were strong for big tech. Treat it as evidence the idea works, not a forecast of returns.</p>
+        </>)}
+      </div>
+    </div>
   );
 }
