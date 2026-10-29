@@ -63,6 +63,7 @@ export type OpusConfig = {
   enabled:              boolean;
   model:                OpusModel;          // the model that trades
   routineModel:         OpusModel | null;   // cheaper model for routine check-ins; entries escalate to `model` (2026-10-29)
+  researchModel:        OpusModel | null;   // model for the daily research session, if different from `model` (2026-10-29)
   changeGate:           boolean;            // skip scheduled sessions when nothing material changed (2026-10-29)
   quietMaxHoursUs:      number;             // ...but always run at least this often in US hours
   quietMaxHoursOff:     number;             // ...and outside them
@@ -108,6 +109,7 @@ const DEFAULT_CONFIG: OpusConfig = {
   enabled: false,
   model: 'claude-opus-5-5',
   routineModel: 'claude-sonnet-5-5',
+  researchModel: null,
   changeGate: true,
   quietMaxHoursUs: 3,
   quietMaxHoursOff: 8,
@@ -1371,6 +1373,8 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
     // Routine scheduled check-ins run on the cheaper model; research, TradingView
     // alerts, manual runs and escalations get the full model.
     if (trigger === 'scheduled' && !research && config.routineModel && config.routineModel !== config.model) { model = config.routineModel; routineSession = true; }
+    // Owner, 2026-10-29: Sonnet for everything except the daily research session.
+    if (research && config.researchModel && config.researchModel in MODELS) model = config.researchModel;
     state.lastSessionAt = Date.now();
     alpacaInScope = config.accounts.alpaca_paper && isUsSessionOpen()
       && (research || trigger === 'manual' || Date.now() - (state.lastAlpacaReviewAt ?? 0) >= config.alpacaEveryMinutes * 60_000 - 60_000);
@@ -1738,6 +1742,8 @@ export function updateOpusConfig(patch: Partial<OpusConfig>): { ok: boolean; con
   if (!(next.igMaxRiskPct >= 0 && next.igMaxRiskPct <= 5)) return { ok: false, config, error: 'igMaxRiskPct must be 0-5' };
   if (!(next.model in MODELS)) return { ok: false, config, error: `model must be one of ${Object.keys(MODELS).join(', ')}` };
   if (next.shadowModel !== null && !(next.shadowModel in MODELS)) return { ok: false, config, error: 'shadowModel must be a known model or null' };
+  if (next.routineModel !== null && !(next.routineModel in MODELS)) return { ok: false, config, error: 'routineModel must be a known model or null' };
+  if (next.researchModel !== null && !(next.researchModel in MODELS)) return { ok: false, config, error: 'researchModel must be a known model or null' };
   const cycleChanged = next.cycleMinutes !== config.cycleMinutes;
   config = next; saveConfig();
   addLog('info', `Settings changed: ${Object.keys(patch).join(', ')}`);
