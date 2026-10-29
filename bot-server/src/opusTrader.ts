@@ -81,6 +81,7 @@ export type OpusConfig = {
   igMaxRiskGbp:         number;   // £ lost if the stop is hit (floor)
   igMinRiskGbp:         number;   // smallest £ at risk per IG trade, probes included (owner, 2026-10-29)
   igStakePerPoint:      number;   // fixed IG stake £/pt for new trades, 0 = size by risk (owner, 2026-10-29)
+  igShareMaxRiskPct:    number;   // risk cap for IG US-share spread bets, % of balance (owner wants IG share bets, 2026-10-29)
   igMaxRiskPct:         number;   // …or this % of the IG balance, whichever is larger
   igMaxPositions:       number;
   t212MaxPositionGbp:   number;
@@ -127,6 +128,7 @@ const DEFAULT_CONFIG: OpusConfig = {
   igMaxRiskGbp: 10,
   igMinRiskGbp: 20,
   igStakePerPoint: 1,
+  igShareMaxRiskPct: 2,
   igMaxRiskPct: 1,
   igMaxPositions: 6,
   t212MaxPositionGbp: 100,
@@ -769,7 +771,7 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
       const cap = Math.max(config.igMaxRiskGbp, f.balance * config.igMaxRiskPct / 100);
       const tradeable = Object.keys(TICKER_TO_EPIC).filter(t => metrics.has(t) && !ownedElsewhere.has(TICKER_TO_EPIC[t]));
       const skipped = Object.keys(IG_MARKETS).filter(t => ownedElsewhere.has(IG_MARKETS[t].epic));
-      lines.push(`- ig_demo: balance £${f.balance.toFixed(0)}, available £${f.available.toFixed(0)}. ${config.igStakePerPoint > 0 ? `Stake: fixed at £${config.igStakePerPoint}/pt for every new trade (the owner's choice; your size field is ignored here), so the £ lost if the stop is hit = stop distance in points × £${config.igStakePerPoint}. If that would exceed £${cap.toFixed(0)}, code lowers the stake to fit, so choose the stop with this in mind.` : `Risk per position: at least £${config.igMinRiskGbp}, at most £${cap.toFixed(0)}.`} ≤${config.igMaxPositions} of your positions. IG's minimum stakes are large on US shares (wide stops won't fit the cap); indices, FX and commodities usually size better. Tradeable: ${tradeable.join(', ')}.${skipped.length ? ` Managed by another bot, leave alone: ${skipped.join(', ')}.` : ''}`);
+      lines.push(`- ig_demo: balance £${f.balance.toFixed(0)}, available £${f.available.toFixed(0)}. ${config.igStakePerPoint > 0 ? `Stake: fixed at £${config.igStakePerPoint}/pt for every new trade (the owner's choice; your size field is ignored here), so the £ lost if the stop is hit = stop distance in points × £${config.igStakePerPoint}. If that would exceed £${cap.toFixed(0)}, code lowers the stake to fit, so choose the stop with this in mind.` : `Risk per position: at least £${config.igMinRiskGbp}, at most £${cap.toFixed(0)}.`} ≤${config.igMaxPositions} of your positions. US shares are tradeable here too as spread bets (the owner wants these used): IG quotes them in cents, so 1 point = 1 cent and a stake of £1/pt = £100 per $1 move. For shares the stake is sized from your size field (£ at risk, at least £${config.igMinRiskGbp}), not the fixed £/pt, with a cap of £${Math.max(config.igMaxRiskGbp, f.balance * config.igShareMaxRiskPct / 100).toFixed(0)} (${config.igShareMaxRiskPct}% of balance). IG's minimum stake is about 0.24/pt, so a 5% stop on a $350 share already risks ~£420 and is rejected; a 3% stop on it, or a 5% stop on a share under ~$250, fits. Share spread bets hold days to weeks like the rest of IG; overnight funding applies. Tradeable: ${tradeable.join(', ')}.${skipped.length ? ` Managed by another bot, leave alone: ${skipped.join(', ')}.` : ''}`);
     }
     catch { lines.push('- ig_demo: balance unavailable'); }
   }
@@ -950,17 +952,23 @@ async function openPosition(inp: { account: OpusAccount; symbol: string; directi
       if (typeof px !== 'number' || !(px > 0)) return `REJECTED: no live IG quote for ${symbol} right now.`;
       const minStop = d?.minStopDist || 1, minDeal = d?.minDealSize || 0.5;
       const stopDist = Math.max(minStop, px * inp.stop_loss_pct / 100);
-      const igCap = Math.max(config.igMaxRiskGbp, (await fetchAccountFunds(session).catch(() => ({ balance: 0 }))).balance * config.igMaxRiskPct / 100);
+      // US shares (2026-10-29): IG quotes them in cents, so £1/pt = £100 per $1
+      // move and IG's minimum stake (~0.24/pt) already risks a few hundred pounds
+      // on a normal stop. Shares are sized by risk under their own, wider cap; the
+      // fixed £/pt stake applies to indices, FX and commodities only.
+      const isShare = !isIgOnly(symbol);
+      const bal = (await fetchAccountFunds(session).catch(() => ({ balance: 0 }))).balance;
+      const igCap = Math.max(config.igMaxRiskGbp, bal * (isShare ? config.igShareMaxRiskPct : config.igMaxRiskPct) / 100);
       // Floor at igMinRiskGbp (2026-10-29: probes were going on at ~0.05/pt,
       // too small to show anything; the Momentum Testbot risks ~£20 a trade).
       const riskGbp = Math.min(igCap, Math.max(config.igMinRiskGbp, Math.min(inp.size, igCap) * sizeFactor));
       // Owner, 2026-10-29: open IG trades at a fixed £/pt (like the Testbot's
       // GBP/USD at £1/pt) rather than tiny risk-sized stakes. If that stake with
       // this stop would risk more than the cap, it is lowered to fit the cap.
-      const stake = config.igStakePerPoint > 0
+      const stake = config.igStakePerPoint > 0 && !isShare
         ? Math.max(minDeal, Math.min(config.igStakePerPoint, Math.floor(igCap / stopDist * 100) / 100))
         : Math.max(minDeal, calcStake(riskGbp, stopDist, minDeal));
-      if (stake * stopDist > igCap * 1.5) return `REJECTED: IG's minimum stake (${minDeal}/pt) with a ${inp.stop_loss_pct}% stop risks £${(stake * stopDist).toFixed(0)}, above the £${igCap.toFixed(0)} cap — try a tighter stop or another market.`;
+      if (stake * stopDist > igCap * (isShare ? 1 : 1.5)) return `REJECTED: IG's minimum stake (${minDeal}/pt) with a ${inp.stop_loss_pct}% stop risks £${(stake * stopDist).toFixed(0)}, above the £${igCap.toFixed(0)} cap — try a tighter stop or another market.`;
       let r: { dealId: string; level: number };
       try {
         r = await igPlaceOrder(session, epic, inp.direction, stake, stopDist, undefined, 'GBP', false);
