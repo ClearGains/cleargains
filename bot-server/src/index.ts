@@ -426,6 +426,29 @@ app.get('/mean-reversion/:instance/:mode/status', auth, (req: Request, res: Resp
 
 // ── Cross-bot performance summary (all journals rolled up) ──────────────────
 // GET /closed-positions?broker=alpaca|ig&mode=paper|live|demo&days=7, from the brokers' own records.
+// Options positioning for a US stock (2026-10-29): GET /options/flow?symbols=V,PLTR
+app.get('/options/flow', auth, (req: Request, res: Response) => {
+  let syms = String(req.query.symbols ?? '').toUpperCase().split(',').map(x => x.trim()).filter(x => /^[A-Z.]{1,6}$/.test(x)).slice(0, 8);
+  void (async () => {
+    // No symbols given: the underlyings of the options currently held on Alpaca paper.
+    if (!syms.length) {
+      const { getPositions } = await import('./alpacaApi');
+      const held = (await getPositions('paper').catch(() => [])).map(p => p.symbol).filter(x => /\d{6}[CP]\d{8}$/.test(x)).map(x => x.replace(/\d{6}[CP]\d{8}$/, ''));
+      syms = [...new Set(held)].slice(0, 8);
+    }
+    const { getOptionsFlow } = await import('./optionsFlow');
+    const { getLatestBars } = await import('./alpacaApi');
+    const bars = syms.length ? await getLatestBars(syms, 'paper').catch(() => ({} as Record<string, { c: number }>)) : {};
+    const out = [];
+    for (const s of syms) {
+      const px = (bars as Record<string, { c: number }>)[s]?.c;
+      if (!px) { out.push({ symbol: s, error: 'no price' }); continue; }
+      try { out.push(await getOptionsFlow(s, px)); } catch (e) { out.push({ symbol: s, error: e instanceof Error ? e.message : String(e) }); }
+    }
+    res.json({ ok: true, flows: out });
+  })().catch(e => res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+});
+
 // IG client sentiment for the markets the bots trade (2026-10-29).
 app.get('/ig/sentiment', auth, (_req: Request, res: Response) => {
   void Promise.all([import('./igSentiment').then(m => m.getIgSentiment(IG_MARKETS)), import('./cot').then(m => m.getCot()).catch(() => [])])

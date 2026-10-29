@@ -40,6 +40,7 @@ import { getGbpUsd } from './t212Bot';
 import { runRuleBacktest, INDICATORS, type BacktestSpec } from './ruleBacktest';
 import { getIgSentiment } from './igSentiment';
 import { getCot } from './cot';
+import { getOptionsFlow, describeFlow } from './optionsFlow';
 import {
   buildConfirmStockTradePrompt, parseConfirmStockTradeResponse, buildIsaThesisPrompt, parseIsaThesisResponse,
   type StockConfirmSignal, type StockConfirmVerdict, type IsaThesisRequest, type IsaThesisVerdict,
@@ -1083,7 +1084,8 @@ async function optionChainTool(input: Record<string, unknown>): Promise<string> 
   // Up to 4 expiries spread across the window, 7 strikes nearest the money each.
   const expiries = [...new Set(rows.map(r => r.expiry))].sort();
   const pick = expiries.length <= 4 ? expiries : [0, 1, 2, 3].map(i => expiries[Math.round(i * (expiries.length - 1) / 3)]);
-  const out = [`${symbol} ${type}s, underlying $${m.price.toFixed(2)} (contract = 100 shares; cost = ask × 100):`, 'contract | expiry (days) | strike | bid | ask | spread% | delta | IV'];
+  const flowText = await getOptionsFlow(symbol, m.price).then(describeFlow).catch(() => '(options positioning unavailable)');
+  const out = [flowText, '', `${symbol} ${type}s, underlying $${m.price.toFixed(2)} (contract = 100 shares; cost = ask × 100):`, 'contract | expiry (days) | strike | bid | ask | spread% | delta | IV'];
   for (const e of [...new Set(pick)]) {
     const near = rows.filter(r => r.expiry === e).sort((a, b) => Math.abs(a.strike - m.price) - Math.abs(b.strike - m.price)).slice(0, 7).sort((a, b) => a.strike - b.strike);
     for (const r of near) {
@@ -1809,17 +1811,20 @@ export async function opusVetOptionEntry(req: {
   vetCount++;
   const kind = req.direction === 'BUY' ? 'CALL (betting it rises)' : 'PUT (betting it falls)';
   const m = await metricsFor(req.symbol).catch(() => null);
+  const flowText = await getOptionsFlow(req.symbol, req.price).then(describeFlow).catch(() => '(options positioning unavailable)');
   const prompt = `You vet option entries proposed by a rules-based trend bot on the owner's Alpaca PAPER account. The bot buys near-the-money contracts 90-180 days out and holds them at least a month (only its -50% stop or the 21-days-to-expiry rule can close one sooner), so judge the next 1-3 months, not today.
 
 The owner's rule: chart analysis alone isn't enough for an option. Approve only with news AND macro backing. Use web_search (a few searches) to check:
 1. The company's latest news and catalysts, and whether earnings or another big event falls before expiry (and which way it's likely to cut).
 2. The macro backdrop: rates and the Fed, the dollar, where money is rotating (sectors), market risk appetite, and scheduled data (CPI, jobs, FOMC) that could swing it.
-Also weigh the volume: buying should be heavy on up days for a call (selling heavy on down days for a put); a big move on thin volume is weaker. Then decide. Approve only if news and macro support the direction and your conviction is at least 65. Reject when they conflict, when a binary event makes it a coin flip, or when you can't find enough to judge.
+Also weigh the options positioning below (where the big open interest and today's fresh money sit) and the volume: buying should be heavy on up days for a call (selling heavy on down days for a put); a big move on thin volume is weaker. Then decide. Approve only if news and macro support the direction and your conviction is at least 65. Reject when they conflict, when a binary event makes it a coin flip, or when you can't find enough to judge.
 
 Proposed: BUY a ${kind} on ${req.symbol}.
 Bot's signal: ${req.signal}
 Price ${req.price.toFixed(2)}, today ${req.changePct >= 0 ? '+' : ''}${req.changePct.toFixed(2)}%${m ? `, today's volume ${fmt(m.volToday, 2)}× a normal day (pro-rated), today ${m.aboveOpen === null ? 'flat' : m.aboveOpen ? 'above' : 'below'} its open (heavy volume only confirms a move in its own direction), 20d avg ${m.sma20.toFixed(2)}, 50d avg ${m.sma50.toFixed(2)}, 12-week ${fmt(m.trend12wPct)}%, RSI ${fmt(m.rsi14, 0)}, ATR ${fmt(m.atrPct)}%, ${fmt(m.offHigh52wPct)}% off the 52-week high` : ''}.
 Headlines the bot saw: ${req.headlines.slice(0, 8).join(' | ') || '(none)'}
+
+${flowText}
 
 Finish by calling verdict.`;
   try {

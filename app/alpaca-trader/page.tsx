@@ -11,6 +11,7 @@ import { clsx } from 'clsx';
 import { ClosedPositionsCard } from '@/components/trading/ClosedPositionsCard';
 import { MomentumBotCard } from '@/components/trading/MomentumBotCard';
 import { IgSentimentCard } from '@/components/trading/IgSentimentCard';
+import { OptionsFlowCard } from '@/components/trading/OptionsFlowCard';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -2672,6 +2673,8 @@ export default function AlpacaTraderPage() {
 
         {/* Closed positions, from Alpaca's own fills */}
         <ClosedPositionsCard broker="alpaca" mode={mode} />
+        {/* Options positioning (calls vs puts, big strikes, fresh money) */}
+        {mode === 'paper' && <OptionsFlowCard />}
 
         {/* ── AI Recommendation panel — full width at top ── */}
         <RecommendationPanel onApply={applyRecommendation} isRunning={isRunning} />
