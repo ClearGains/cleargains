@@ -71,10 +71,11 @@ Each can be switched off in .env.
     after every target (25,894 -> 25,940 -> 26,016 -> 26,054), chasing an
     already stretched move.
 
-Stops sized to each market's swings (2026-10-29, owner: the US 500 is
-choppy with rapid moves that hit tight stops). An index stop is the larger of
-INDEX_STOP_PCT and STOP_ATR_FRAC (0.5) x the market's 14-day average daily
-range, so a market that typically moves 1.2% a day gets a 0.6% stop, not 0.3%.
+US 500 stops sized to its swings (2026-10-29, owner: the US 500 is
+choppy with rapid moves that hit tight stops; change for the US 500 ONLY).
+A market with its own stop_atr_frac rule gets a stop of the larger of
+INDEX_STOP_PCT and stop_atr_frac x its 14-day average daily range. Every
+other market keeps the flat INDEX_STOP_PCT (STOP_ATR_FRAC defaults to 0).
 Size still targets ~RISK_PER_TRADE_GBP, so a wider stop means a smaller stake.
 
 Per-market rules (MARKET_RULES, JSON in .env), stricter for the US 500 by
@@ -124,7 +125,7 @@ WAIT_AFTER_WIN_MINUTES = int(os.getenv("WAIT_AFTER_WIN_MINUTES", "45"))
 MAX_QUOTE_AGE_MINUTES = int(os.getenv("MAX_QUOTE_AGE_MINUTES", "30"))
 RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "20"))
 INDEX_STOP_PCT = float(os.getenv("INDEX_STOP_PCT", "0.3"))
-STOP_ATR_FRAC = float(os.getenv("STOP_ATR_FRAC", "0.5"))
+STOP_ATR_FRAC = float(os.getenv("STOP_ATR_FRAC", "0"))   # 0 = off for all markets except those with their own rule (owner: US 500 only)
 try:
     MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_atr_frac": 0.6}}'))
 except ValueError:
