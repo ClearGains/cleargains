@@ -1014,6 +1014,11 @@ async function callModel(model: OpusModel, system: string, messages: Anthropic.B
     model,
     max_tokens: 16000,
     output_config: { effort: config.effort },
+    // Caching (2026-10-29, usage was too high: cache writes were 3.5× reads).
+    // The system breakpoint covers tools + system; the top-level marker moves
+    // to the end of the conversation each turn, so the briefing and earlier
+    // turns are read from cache instead of re-sent at full price.
+    cache_control: { type: 'ephemeral' },
     system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
     tools: toolsFor(searches),
     messages,
@@ -1087,12 +1092,18 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
     const offNote = isUsSessionOpen() ? alpacaNote : `\n\nOFF-HOURS SESSION: the US market is closed. US-share figures above are from the last session. Alpaca can't trade now; ig_demo can trade any market IG has open (indices, FX and commodities nearly round the clock; IG's US shares only when IG offers them out of hours — an order on a closed market is rejected). Manage open IG positions as usual.`;
     const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text + offNote }];
     let backtestsLeft = MAX_BACKTESTS_PER_SESSION;
+    let researchUsed = 0, researchCapNoted = false;
+    const tok = { fresh: 0, read: 0, write: 0 };
     let chartsLeft = MAX_CHARTS_PER_SESSION, shotsLeft = MAX_SCREENSHOTS_PER_SESSION;
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       if (budgetLeftUsd() <= 0.25) { addLog('wait', 'Budget ran out mid-session — stopping here'); break; }
-      // Only the first turn gets the research allowance, so the cap holds per session.
-      const resp = await callModel(model, system, messages, turn === 0 ? searches : 0);
+      // Same tools on every turn: changing the tool list (it used to drop the
+      // web tools after turn 1) invalidates the whole cache. The per-session
+      // allowance is enforced by telling the model once it's used up.
+      const resp = await callModel(model, system, messages, searches);
       sessionUsd += recordUsage(model, resp.usage);
+      tok.fresh += resp.usage.input_tokens; tok.read += resp.usage.cache_read_input_tokens ?? 0; tok.write += resp.usage.cache_creation_input_tokens ?? 0;
+      researchUsed += (resp.usage.server_tool_use?.web_search_requests ?? 0) + (resp.usage.server_tool_use?.web_fetch_requests ?? 0);
       if (resp.model !== model) addLog('info', `Served by fallback model ${resp.model} this turn`);
       if (resp.stop_reason === 'refusal') { addLog('error', 'The model declined this session (refusal, fallback included)'); break; }
 
@@ -1155,7 +1166,12 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
           : out;
         results.push({ type: 'tool_result', tool_use_id: t.id, content, ...(out.startsWith('REJECTED') || out.startsWith('FAILED') ? { is_error: true } : {}) });
       }
-      messages.push({ role: 'user', content: results });
+      const userContent: Anthropic.Beta.BetaContentBlockParam[] = [...results];
+      if (searches > 0 && researchUsed >= searches && !researchCapNoted) {
+        researchCapNoted = true;
+        userContent.push({ type: 'text', text: `(Your web research allowance for this session, ${searches}, is used up. Don't search or fetch again this session.)` });
+      }
+      messages.push({ role: 'user', content: userContent });
     }
 
     if (config.shadowModel && config.shadowModel !== model && budgetLeftUsd() > 1) {
@@ -1163,7 +1179,7 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
       catch (e) { addLog('error', `Shadow run failed: ${e instanceof Anthropic.APIError ? `${e.status} ${e.message}` : e instanceof Error ? e.message : String(e)}`); }
     }
 
-    addLog('info', `Session done in ${((Date.now() - started) / 1000).toFixed(0)}s — cost $${sessionUsd.toFixed(3)}, month $${spend.usd.toFixed(2)} of $${config.monthlyCapUsd}`);
+    addLog('info', `Session done in ${((Date.now() - started) / 1000).toFixed(0)}s — cost $${sessionUsd.toFixed(3)} (input tokens: ${tok.read} from cache, ${tok.write} written to cache, ${tok.fresh} uncached), month $${spend.usd.toFixed(2)} of $${config.monthlyCapUsd}`);
     lastRunAt = new Date().toISOString();
     return { ok: true };
   } catch (e) {
