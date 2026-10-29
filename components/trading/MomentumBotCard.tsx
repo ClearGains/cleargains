@@ -97,7 +97,7 @@ export function MomentumBotCard() {
           {st && (<>
             <p className="text-xs text-slate-500">
               The April Testbot, run separately from Opus on the same demo account. Trades a day move over 0.3% while the market&apos;s own exchange is open
-              (FX any time), risks about £{st.settings.riskPerTradeGbp} a trade, and rests a market for {st.settings.cooldownMinutes} min after a loss and for the day after {st.settings.maxLossesPerDay}.
+              (FX any time), risks about £{st.settings.riskPerTradeGbp} a trade, and rests a market for {st.settings.cooldownMinutes} min after a loss, 3 hours after {st.settings.maxLossesPerDay} losses in a day, and 45 min after a target hit.
               It only touches its own trades.
             </p>
 
@@ -141,7 +141,7 @@ export function MomentumBotCard() {
               <span>Trades opened today: {st.opensToday}</span>
               {Object.entries(st.guard).map(([m, g]) => (
                 <span key={m} className={g.losses >= st.settings.maxLossesPerDay ? 'text-rose-400' : 'text-amber-400'}>
-                  {m}: {g.losses} loss{g.losses === 1 ? '' : 'es'} today{g.losses >= st.settings.maxLossesPerDay ? ' (done for the day)' : ''}
+                  {m}: {g.losses} loss{g.losses === 1 ? '' : 'es'} today{g.losses >= st.settings.maxLossesPerDay ? ' (3h pause after the latest)' : ''}
                 </span>
               ))}
             </div>

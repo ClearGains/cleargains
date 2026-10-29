@@ -35,8 +35,9 @@ these trades "Momentum Testbot" and to keep Opus from ever adopting them.
 Choppy-day guard (2026-10-29, owner's request): on a day with no clear
 direction the original kept re-entering and getting stopped out. Per market:
   - after a losing trade, no new trade in that market for COOLDOWN_MINUTES (60);
-  - after MAX_LOSSES_PER_DAY (2) losing trades in a UTC day, that market is
-    done for the day.
+  - after MAX_LOSSES_PER_DAY (2) losing trades in a UTC day, that market
+    pauses for LONG_PAUSE_MINUTES (180) from the latest loss (owner, 29 Oct:
+    a whole day was too long, markets often settle and trend again later).
 A trade closed by IG (stop or limit) counts as a loss when the market's
 current price is on the losing side of the entry.
 
@@ -107,6 +108,7 @@ TREND_FILTER = os.getenv("TREND_FILTER", "true").strip().lower() in ("1", "true"
 OPENING_SKIP_MINUTES = int(os.getenv("OPENING_SKIP_MINUTES", "30"))
 AUTO_CLOSE = os.getenv("AUTO_CLOSE", "true").strip().lower() in ("1", "true", "yes")
 COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "60"))
+LONG_PAUSE_MINUTES = int(os.getenv("LONG_PAUSE_MINUTES", "180"))
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
 WAIT_AFTER_WIN_MINUTES = int(os.getenv("WAIT_AFTER_WIN_MINUTES", "45"))
 MAX_QUOTE_AGE_MINUTES = int(os.getenv("MAX_QUOTE_AGE_MINUTES", "30"))
@@ -451,7 +453,7 @@ def record_loss(market):
     m["last_loss"] = time.time()
     write_json(CHOP_GUARD, g)
     log.info(f"{market}: loss {m['losses']} of {MAX_LOSSES_PER_DAY} allowed today"
-             + ("; done for the day" if m["losses"] >= MAX_LOSSES_PER_DAY else f"; pausing {COOLDOWN_MINUTES} min"))
+             + (f"; pausing {LONG_PAUSE_MINUTES} min" if m["losses"] >= MAX_LOSSES_PER_DAY else f"; pausing {COOLDOWN_MINUTES} min"))
 
 
 def record_win(market):
@@ -472,9 +474,10 @@ def chop_block(market):
     m = g.get("markets", {}).get(market)
     if not m:
         return None
-    if m["losses"] >= MAX_LOSSES_PER_DAY:
-        return f"{m['losses']} losses today, done until tomorrow (UTC)"
-    left = COOLDOWN_MINUTES - (time.time() - m["last_loss"]) / 60
+    pause = LONG_PAUSE_MINUTES if m["losses"] >= MAX_LOSSES_PER_DAY else COOLDOWN_MINUTES
+    left = pause - (time.time() - m["last_loss"]) / 60
+    if left > 0 and m["losses"] >= MAX_LOSSES_PER_DAY:
+        return f"{m['losses']} losses today, pausing {LONG_PAUSE_MINUTES} min after the latest, {left:.0f} min left"
     if left > 0:
         return f"cooling off after a loss, {left:.0f} min left"
     left = WAIT_AFTER_WIN_MINUTES - (time.time() - m.get("last_win", 0)) / 60
