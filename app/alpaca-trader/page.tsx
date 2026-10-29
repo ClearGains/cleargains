@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { ClosedPositionsCard } from '@/components/trading/ClosedPositionsCard';
+import { MomentumBotCard } from '@/components/trading/MomentumBotCard';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -971,6 +972,9 @@ function IgSpreadBetTab() {
   return (
     <div className="space-y-5">
       {/* Closed positions, from IG's own transaction history */}
+      {/* Momentum Testbot: separate bot on the same demo account */}
+      {igMode === 'demo' && <MomentumBotCard />}
+
       <ClosedPositionsCard broker="ig" mode={igMode} />
 
       {/* Error */}

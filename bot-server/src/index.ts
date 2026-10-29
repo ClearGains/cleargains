@@ -33,6 +33,7 @@ import { startT212Bot, stopT212Bot, getT212BotStatus, wasT212BotRunning, setT212
 import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus, wasMeanReversionBotRunning, type MrInstance } from './meanReversionBot';
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
 import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
+import { momentumStatus, momentumControl } from './momentumBot';
 import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, opusManagesAccount, adoptIgPosition, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
 import { getPerformanceSummary } from './performance';
 import { getClosedPositions } from './closedPositions';
@@ -424,6 +425,14 @@ app.get('/mean-reversion/:instance/:mode/status', auth, (req: Request, res: Resp
 
 // ── Cross-bot performance summary (all journals rolled up) ──────────────────
 // GET /closed-positions?broker=alpaca|ig&mode=paper|live|demo&days=7, from the brokers' own records.
+// Momentum Testbot (separate Python service) — status and switches.
+app.get('/momentum/status', auth, (_req: Request, res: Response) => {
+  void momentumStatus().then(r => res.json({ ok: true, ...r })).catch(e => res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+});
+app.post('/momentum/control', auth, (req: Request, res: Response) => {
+  void momentumControl(String((req.body as { action?: string })?.action ?? '')).then(r => res.json(r)).catch(e => res.status(500).json({ ok: false, message: e instanceof Error ? e.message : String(e) }));
+});
+
 app.get('/closed-positions', auth, (req: Request, res: Response) => {
   const broker = req.query.broker === 'ig' ? 'ig' : 'alpaca';
   const days = Number(req.query.days) || 7;

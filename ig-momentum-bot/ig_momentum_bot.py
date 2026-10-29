@@ -40,6 +40,20 @@ direction the original kept re-entering and getting stopped out. Per market:
 A trade closed by IG (stop or limit) counts as a loss when the market's
 current price is on the losing side of the entry.
 
+Stale prices (2026-10-29, owner's request): Yahoo keeps showing a closed
+market's last session move, so the original was betting on yesterday's US
+move during the UK morning. An index now trades only while its home exchange
+is in its regular session and Yahoo's price is under MAX_QUOTE_AGE_MINUTES (30)
+old. FX quotes round the clock and is unaffected.
+
+Stops sized to the market (2026-10-29): the original used 20/40 points on
+every index. At today's prices that is 0.03% on Japan 225 (whose spread alone
+is ~9 points) and 0.08% on Germany 40, so ordinary noise stopped trades out.
+Index stop = INDEX_STOP_PCT (0.3%, the same as the signal threshold) of price,
+target = twice that (the original's 1:2), and the size is set so a stop-out
+loses about RISK_PER_TRADE_GBP (£20, the original's £1/pt x 20 pts). FX keeps
+the original 20/40 pips, which already fit FX's smaller moves.
+
 Left out on purpose (never fired in the IG history, or not part of the signal):
   - +50% size boost on correlated markets
   - Closing other markets' positions to make room for a "15% stronger" signal
@@ -75,6 +89,9 @@ MIN_STRENGTH = int(os.getenv("MIN_STRENGTH", "60"))
 AUTO_CLOSE = os.getenv("AUTO_CLOSE", "true").strip().lower() in ("1", "true", "yes")
 COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "60"))
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
+MAX_QUOTE_AGE_MINUTES = int(os.getenv("MAX_QUOTE_AGE_MINUTES", "30"))
+RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "20"))
+INDEX_STOP_PCT = float(os.getenv("INDEX_STOP_PCT", "0.3"))
 SIGNAL_THRESHOLD_PCT = 0.3
 CURRENCY = "GBP"
 
@@ -183,7 +200,7 @@ def dynamic_size(requested: float, available: float) -> float:
     if available < 500:
         return 0.1
     pct_based = math.floor(available * 0.05 * 10) / 10
-    return max(0.1, min(requested, pct_based))
+    return max(0.01, min(requested, pct_based))
 
 
 # ── Market data (same Yahoo request as the original) ────────────────────────
@@ -201,7 +218,20 @@ def yahoo_change(symbol: str, http=requests):
     prev = meta.get("previousClose") or meta.get("chartPreviousClose")
     if not price or not prev:
         return None
-    return (price - prev) / prev * 100
+    return (price - prev) / prev * 100, staleness(meta)
+
+
+def staleness(meta):
+    """Why this quote is stale (its exchange is shut or the price is old), or None."""
+    now = time.time()
+    regular = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
+    start, end = regular.get("start"), regular.get("end")
+    if start and end and not (start <= now <= end):
+        return "its exchange is closed, so Yahoo is showing the last session's move"
+    t = meta.get("regularMarketTime")
+    if t and now - t > MAX_QUOTE_AGE_MINUTES * 60:
+        return f"Yahoo's price is {int((now - t) / 60)} min old"
+    return None
 
 
 # ── IG REST client ──────────────────────────────────────────────────────────
@@ -473,12 +503,16 @@ def scan(ig, markets, dry_run, http=requests):
             log.info(f"{name:13} market {status or 'unavailable'}")
             continue
         try:
-            change = yahoo_change(sym, http)
+            quote = yahoo_change(sym, http)
         except Exception as e:
-            change = None
+            quote = None
             log.warning(f"{name}: Yahoo error {e}")
-        if change is None:
+        if quote is None:
             log.warning(f"{name:13} no Yahoo price, skipped this scan")
+            continue
+        change, stale = quote
+        if stale and mtype != "FOREX":
+            log.info(f"{name:13} {change:+.2f}% not traded: {stale}")
             continue
 
         direction, strength = decide(mtype, change)
@@ -520,11 +554,21 @@ def scan(ig, markets, dry_run, http=requests):
                     own.pop(opp["dealId"], None)
                     write_json(OWN_DEALS, own)
 
-        size = dynamic_size(SIZE_PER_POINT, available)
+        stop, limit = STOP_LIMIT[mtype]
+        requested = SIZE_PER_POINT
+        if mtype == "INDEX":
+            snap = (info or {}).get("snapshot", {})
+            px = snap.get("offer") if direction == "BUY" else snap.get("bid")
+            if px:
+                stop = max(round(px * INDEX_STOP_PCT / 100), 1)
+                limit = stop * 2
+                rules = (info or {}).get("dealingRules", {})
+                min_size = (rules.get("minDealSize") or {}).get("value") or 0.04
+                requested = max(min_size, math.floor(RISK_PER_TRADE_GBP / stop * 100) / 100)
+        size = dynamic_size(requested, available)
         if size == 0:
             log.error(f"Available funds £{available:.2f} under £100, pausing new bets")
             return
-        stop, limit = STOP_LIMIT[mtype]
         if dry_run:
             log.info(f"{tag} {direction} £{size}/pt SL {stop} TP {limit} [DRY RUN, not placed]")
             continue
