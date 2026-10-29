@@ -86,6 +86,8 @@ export type OpusConfig = {
   probeMinConviction:   number;   // paper/demo only: conviction from here up to minConviction opens a small PROBE
   probeSizePct:         number;   // probe size as % of the normal size cap
   alpacaStocks:         boolean;  // false = Alpaca is options-only for new entries (owner, 2026-10-29)
+  oldOptionsBot:        boolean;  // the old Alpaca options bot keeps finding entries; Opus vets each one (owner, 2026-10-29)
+  optionVetsPerDay:     number;   // cap on Opus vetting calls for the old bot per day
   optionMaxPremiumUsd:  number;   // max premium paid per option position
   optionMaxTotalUsd:    number;   // max premium across all open option positions
   optionMaxPositions:   number;
@@ -129,6 +131,8 @@ const DEFAULT_CONFIG: OpusConfig = {
   probeMinConviction: 55,
   probeSizePct: 33,
   alpacaStocks: false,
+  oldOptionsBot: true,
+  optionVetsPerDay: 8,
   optionMaxPremiumUsd: 3_000,
   optionMaxTotalUsd: 10_000,
   optionMaxPositions: 5,
@@ -1619,7 +1623,8 @@ export async function startOpus(): Promise<{ ok: boolean; error?: string }> {
   // accounts Opus manages (their existing positions keep their own exits).
   try {
     if (config.accounts.ig_demo) { const m = await import('./igStrategyBot'); m.pauseIgStrategyBot('demo'); }
-    if (config.accounts.alpaca_paper) { const m = await import('./alpacaBot'); m.pauseAlpacaBot('paper'); }
+    // The old options bot keeps running when Opus vets its entries (2026-10-29).
+    if (config.accounts.alpaca_paper && !config.oldOptionsBot) { const m = await import('./alpacaBot'); m.pauseAlpacaBot('paper'); }
   } catch (e) { addLog('error', `Couldn't pause an existing bot: ${e instanceof Error ? e.message : String(e)}`); }
   addLog('info', `Opus started — reviewing every ${config.cycleMinutes}min during the US session${config.offHoursMinutes > 0 && config.accounts.ig_demo ? ` and every ${config.offHoursMinutes}min outside it for IG markets (weekdays)` : ''}; existing IG demo / Alpaca paper bots paused for new entries`);
   // Run straight away only if a session is actually due (2026-10-29: every
@@ -1750,6 +1755,80 @@ async function opusText(prompt: string): Promise<string | null> {
     return text || null;
   } catch (e) {
     addLog('error', `T212 entry check failed: ${e instanceof Anthropic.APIError ? `${e.status} ${e.message}` : e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+// ── Vetting the old Alpaca options bot's entries (2026-10-29) ───────────────
+// The owner: keep the old options bot finding trades, with Opus on top, and
+// "for options plain analysis isn't good enough, there needs to be news and
+// macro backing". One Opus call per signal, with web search; fails closed.
+export function opusVetsOldOptionsBot(): boolean { return config.enabled && config.accounts.alpaca_paper && config.oldOptionsBot; }
+
+const VET_TOOL: Anthropic.Beta.BetaTool = {
+  name: 'verdict',
+  description: 'Your decision on the proposed option entry. Call it exactly once, at the end.',
+  strict: true,
+  input_schema: {
+    type: 'object',
+    properties: {
+      approve:        { type: 'boolean' },
+      conviction:     { type: 'integer', description: '0-100: confidence the underlying moves the proposed way enough over the next 1-3 months' },
+      news_and_macro: { type: 'string', description: 'The news/catalysts and macro backdrop you found, and how they bear on this trade. 2-4 sentences.' },
+      reason:         { type: 'string', description: 'Why approve or reject, 1-2 sentences' },
+    },
+    required: ['approve', 'conviction', 'news_and_macro', 'reason'],
+    additionalProperties: false,
+  },
+};
+
+let vetDay = '', vetCount = 0;
+export async function opusVetOptionEntry(req: {
+  symbol: string; direction: 'BUY' | 'SELL'; price: number; changePct: number; signal: string; headlines: string[];
+}): Promise<{ approve: boolean; conviction: number; reason: string; newsAndMacro: string } | null> {
+  if (!opusVetsOldOptionsBot() || !process.env.ANTHROPIC_API_KEY || budgetLeftUsd() <= 0.5) return null;
+  if (vetDay !== nyDate()) { vetDay = nyDate(); vetCount = 0; }
+  if (vetCount >= config.optionVetsPerDay) return { approve: false, conviction: 0, reason: `daily vetting limit (${config.optionVetsPerDay}) reached`, newsAndMacro: '' };
+  vetCount++;
+  const kind = req.direction === 'BUY' ? 'CALL (betting it rises)' : 'PUT (betting it falls)';
+  const m = await metricsFor(req.symbol).catch(() => null);
+  const prompt = `You vet option entries proposed by a rules-based trend bot on the owner's Alpaca PAPER account. The bot buys near-the-money contracts 90-180 days out and holds them at least a month (only its -50% stop or the 21-days-to-expiry rule can close one sooner), so judge the next 1-3 months, not today.
+
+The owner's rule: chart analysis alone isn't enough for an option. Approve only with news AND macro backing. Use web_search (a few searches) to check:
+1. The company's latest news and catalysts, and whether earnings or another big event falls before expiry (and which way it's likely to cut).
+2. The macro backdrop: rates and the Fed, the dollar, where money is rotating (sectors), market risk appetite, and scheduled data (CPI, jobs, FOMC) that could swing it.
+Then decide. Approve only if news and macro support the direction and your conviction is at least 65. Reject when they conflict, when a binary event makes it a coin flip, or when you can't find enough to judge.
+
+Proposed: BUY a ${kind} on ${req.symbol}.
+Bot's signal: ${req.signal}
+Price ${req.price.toFixed(2)}, today ${req.changePct >= 0 ? '+' : ''}${req.changePct.toFixed(2)}%${m ? `, 20d avg ${m.sma20.toFixed(2)}, 50d avg ${m.sma50.toFixed(2)}, 12-week ${fmt(m.trend12wPct)}%, RSI ${fmt(m.rsi14, 0)}, ATR ${fmt(m.atrPct)}%, ${fmt(m.offHigh52wPct)}% off the 52-week high` : ''}.
+Headlines the bot saw: ${req.headlines.slice(0, 8).join(' | ') || '(none)'}
+
+Finish by calling verdict.`;
+  try {
+    client ??= new Anthropic();
+    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: prompt }];
+    for (let turn = 0; turn < 4; turn++) {
+      const resp = await client.beta.messages.create({
+        model: config.model, max_tokens: 8000, output_config: { effort: 'medium' },
+        tools: [VET_TOOL, { type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
+        messages, betas: [FALLBACK_BETA], fallbacks: 'default',
+      });
+      const usd = recordUsage(config.model, resp.usage);
+      if (resp.stop_reason === 'refusal') return null;
+      const v = resp.content.find((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use' && b.name === 'verdict');
+      if (v) {
+        const x = v.input as { approve: boolean; conviction: number; news_and_macro: string; reason: string };
+        const approve = x.approve && x.conviction >= 65;
+        addLog(approve ? 'enter' : 'wait', `[Options bot vet] ${req.symbol} ${req.direction === 'BUY' ? 'call' : 'put'}: ${approve ? 'APPROVED' : 'rejected'} (${x.conviction}) — ${x.reason} | News/macro: ${x.news_and_macro} ($${usd.toFixed(3)})`);
+        return { approve, conviction: x.conviction, reason: x.reason, newsAndMacro: x.news_and_macro };
+      }
+      if (resp.stop_reason !== 'pause_turn') break;
+      messages.push({ role: 'assistant', content: resp.content });
+    }
+    return null;
+  } catch (e) {
+    addLog('error', `Options vet failed: ${e instanceof Anthropic.APIError ? `${e.status} ${e.message}` : e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }

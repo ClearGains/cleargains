@@ -34,6 +34,7 @@ import { startMeanReversionBot, stopMeanReversionBot, getMeanReversionBotStatus,
 import { startIgOptionsBot, stopIgOptionsBot, getIgOptionsBotStatus, wasIgOptionsBotRunning, executeOverride, dismissOverride, closePositionManually } from './igOptionsBot';
 import { startMemeCoinBot, stopMemeCoinBot, getMemeCoinBotStatus, wasMemeCoinBotRunning } from './memeCoinBot';
 import { momentumStatus, momentumControl } from './momentumBot';
+import { opusVetsOldOptionsBot } from './opusTrader';
 import { startOpus, stopOpus, getOpusStatus, wasOpusRunning, opusManagesAccount, adoptIgPosition, updateOpusConfig, runOpusSession, closeOpusPositionManually, previewOpusBriefing, ingestTradingViewAlert, type OpusConfig } from './opusTrader';
 import { getPerformanceSummary } from './performance';
 import { getClosedPositions } from './closedPositions';
@@ -1025,7 +1026,7 @@ app.listen(PORT, '0.0.0.0', () => {
     void startAlpacaBot(savedAlpaca).then(r => {
       if (r.ok) console.log(`[bot-server] Alpaca ${mode} auto-resume successful`);
       // Opus may have started first; make sure this bot doesn't trade alongside it.
-      if (r.ok && mode === 'paper' && opusManagesAccount('alpaca_paper')) pauseAlpacaBot('paper');
+      if (r.ok && mode === 'paper' && opusManagesAccount('alpaca_paper') && !opusVetsOldOptionsBot()) pauseAlpacaBot('paper');
       else console.error(`[bot-server] Alpaca ${mode} auto-resume failed: ${r.error}`);
     });
   }

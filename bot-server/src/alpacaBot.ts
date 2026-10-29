@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition, getOrders,
+  getAccount, getPositions, getBars, getLatestBars, placeOrder, closePosition, getOrders, getFillsSince,
   cancelAllOrders, cancelOrdersForSymbol, isNYSEOpen, isInOpeningRange, isNearClose,
   sessionStartUtcMs,
   isWeekend, msUntilMondayOpen, isAlpacaDailyCheckTime, isAlpacaWeeklyCheckTime, nyDateStr,
@@ -665,6 +665,8 @@ async function reviewOpenPositions(mode: AccountMode, cfg: AlpacaBotConfig, posi
       }
     }
 
+    const holdBlock = closeReason && isOption ? await optionMinHoldBlock(mode, symbol, closeReason) : null;
+    if (holdBlock) { addLog(mode, 'wait', underlying, holdBlock); closeReason = null; }
     if (closeReason) {
       await executeSignal(mode, symbol, { action: 'CLOSE_LONG', reason: closeReason }, pos, cfg);
       watchMap.delete(symbol);
@@ -767,6 +769,17 @@ async function confirmOptionsEntryAi(
   if (!isNYSEOpen()) return { ok: false, reason: 'Market closed — the AI wasn\'t asked; re-checked at the open', confidence: 0 };
   const price = bars[bars.length - 1].c;
   const prev  = bars.length >= 2 ? bars[bars.length - 2].c : 0;
+  // Opus vets entries first (2026-10-29, owner: news and macro backing, Opus
+  // on top of this bot); Gemini only if Opus is off or unavailable.
+  if (mode === 'paper') {
+    const op = await import('./opusTrader').catch(() => null);
+    if (op?.opusVetsOldOptionsBot()) {
+      const v = await op.opusVetOptionEntry({ symbol: sym, direction, price, changePct: prev > 0 ? ((price - prev) / prev) * 100 : 0, signal: strategyReason, headlines }).catch(() => null);
+      if (v) return v.approve
+        ? { ok: true, reason: `[Opus] ${v.reason} | News/macro: ${v.newsAndMacro}`, confidence: v.conviction }
+        : { ok: false, reason: `[Opus] rejected (${v.conviction}): ${v.reason}`, confidence: v.conviction };
+    }
+  }
   const atr   = calcAtr(bars);
   const breaking = hasBreakingNews(sym);
   const verdict = await askGeminiDailyVerdict({
@@ -781,6 +794,34 @@ async function confirmOptionsEntryAi(
   if (verdict.direction !== direction) return { ok: false, reason: `AI ${verdict.direction} ${verdict.confidence}% — doesn't back the ${direction === 'BUY' ? 'call' : 'put'}: ${verdict.reason}`, confidence: verdict.confidence };
   if (verdict.confidence < ENTRY_MIN_CONFIDENCE) return { ok: false, reason: `AI only ${verdict.confidence}% (needs ${ENTRY_MIN_CONFIDENCE}%): ${verdict.reason}`, confidence: verdict.confidence };
   return { ok: true, reason: verdict.reason, confidence: verdict.confidence };
+}
+
+// Minimum hold for options (2026-10-29, owner: "needs to be a month or
+// more"). The old bot's options held a week or more made +$4,330 (9 of 15
+// won); its quick in-and-out trades lost ~$14k. Inside the first
+// OPTIONS_MIN_HOLD_DAYS only the -50% stop and the 21-days-to-expiry rule may
+// close an option; the AI watch, stalled-loser and lock-in exits wait.
+const OPTIONS_MIN_HOLD_DAYS = 30;
+const optionOpenedCache = new Map<string, number>();
+async function optionOpenedAt(mode: AccountMode, symbol: string): Promise<number | null> {
+  const key = `${mode}:${symbol}`;
+  if (optionOpenedCache.has(key)) return optionOpenedCache.get(key)!;
+  try {
+    const fills = await getFillsSince(mode, new Date(Date.now() - 200 * 86_400_000).toISOString());
+    const buys = fills.filter(f => f.symbol === symbol && f.side === 'buy');
+    if (!buys.length) return null;
+    const t = Date.parse(buys[buys.length - 1].transaction_time);
+    optionOpenedCache.set(key, t);
+    return t;
+  } catch { return null; }
+}
+async function optionMinHoldBlock(mode: AccountMode, symbol: string, reason: string): Promise<string | null> {
+  if (/Stop loss hit|DTE/.test(reason)) return null;
+  const opened = await optionOpenedAt(mode, symbol);
+  if (opened === null) return null;
+  const days = (Date.now() - opened) / 86_400_000;
+  if (days >= OPTIONS_MIN_HOLD_DAYS) return null;
+  return `Holding ${symbol}: ${days.toFixed(1)} of the ${OPTIONS_MIN_HOLD_DAYS}-day minimum hold (only the -50% stop or ≤21 DTE can close it sooner). Would have closed: ${reason}`;
 }
 
 function confirmOptionsEntryFinnhub(
@@ -1042,7 +1083,10 @@ async function evaluateSymbol(
         savePeaks(mode, peaks);
 
         const exitSig = optionsDirectionalSignal(bars, true, plPct, dte, peak);
-        if (exitSig.action !== 'HOLD') {
+        const held = exitSig.action !== 'HOLD' ? await optionMinHoldBlock(mode, optPos.symbol, exitSig.reason) : null;
+        if (held) {
+          addLog(mode, 'wait', sym, held);
+        } else if (exitSig.action !== 'HOLD') {
           await executeSignal(mode, optPos.symbol, exitSig, optPos, cfg);
           peaks.delete(optPos.symbol);
           savePeaks(mode, peaks);
