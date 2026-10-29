@@ -81,6 +81,7 @@ export type OpusConfig = {
   webResearch:          boolean;  // give the model web search/fetch for its own research
   searchesPerSession:   number;   // web searches allowed in a normal session
   researchSearches:     number;   // web searches allowed in the daily research session
+  cacheOneHour:         boolean;  // 1-hour prompt cache on the fixed prefix in US hours (2026-10-29)
   minHoldHours:         number;   // no discretionary close sooner than this (stops still fire)
   reentryCooldownHours: number;   // after closing a symbol, no new position in it for this long
 };
@@ -112,6 +113,7 @@ const DEFAULT_CONFIG: OpusConfig = {
   webResearch: true,
   searchesPerSession: 2,
   researchSearches: 8,
+  cacheOneHour: true,
 };
 
 export type OpusPosition = {
@@ -678,7 +680,7 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
     lines.push(`- id=${p.id} ${p.account} ${p.direction} ${p.symbol} size=${p.size} entry=${p.entryPrice} stop=${p.stopPrice} now=${fmt(v?.current ?? null, 2)} P&L=${fmt(v?.pl ?? null, 2)} held=${heldH.toFixed(1)}h conviction=${p.conviction} thesis: ${p.reason} — exit plan: ${p.exitPlan ?? '(none recorded yet; set one with set_exit_plan)'}`);
   }
 
-  const recent = state.closed.slice(-15);
+  const recent = state.closed.slice(-10);
   if (recent.length) {
     const known = state.closed.filter(c => c.plApprox !== null);
     const score = (xs: ClosedRecord[]) => `${xs.length} closed, ${xs.filter(c => (c.plApprox ?? 0) > 0).length} won, net ${fmt(xs.reduce((t, c) => t + (c.plApprox ?? 0), 0), 2)}`;
@@ -686,15 +688,27 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
     lines.push('## Your track record (learn from it — especially the losers)');
     lines.push(`Overall: ${score(known)} · full-size: ${score(known.filter(c => !c.probe))} · probes: ${score(known.filter(c => c.probe))}. (Mixed currencies: alpaca $, ig £.)`);
     lines.push('Recent closes, most recent last — what you expected vs what happened:');
-    for (const c of recent) lines.push(`- ${new Date(c.closedAt).toISOString().slice(0, 10)} ${c.account} ${c.direction} ${c.symbol}${c.probe ? ' [probe]' : ''} entry ${c.entryPrice}, stop ${c.stopPrice}, held ${((c.closedAt - c.openedAt) / 86_400_000).toFixed(1)}d, P&L ${fmt(c.plApprox, 2)} — closed: ${c.closeReason} — your thesis was: ${c.reason.slice(0, 160)}${c.exitPlan ? ` — your exit plan was: ${c.exitPlan.slice(0, 160)}` : ''}`);
+    for (const c of recent) lines.push(`- ${new Date(c.closedAt).toISOString().slice(0, 10)} ${c.account} ${c.direction} ${c.symbol}${c.probe ? ' [probe]' : ''} entry ${c.entryPrice}, stop ${c.stopPrice}, held ${((c.closedAt - c.openedAt) / 86_400_000).toFixed(1)}d, P&L ${fmt(c.plApprox, 2)} — closed: ${c.closeReason} — your thesis was: ${c.reason.slice(0, 110)}${c.exitPlan ? ` — your exit plan was: ${c.exitPlan.slice(0, 110)}` : ''}`);
   }
 
   lines.push('');
   lines.push('## Market (daily bars; price USD)');
   lines.push('symbol | setup (code) | price | day% | vs open | vol (1.0=normal day) | >20d | >50d | 12w% | RSI | ATR% | off 52w high%');
-  for (const m of [...metrics.values()].filter(x => !isIgOnly(x.symbol))) {
+  // Trimmed (2026-10-29, token cost): full rows only for shares that matter
+  // this session. When Alpaca entries are in scope: held, watchlist extras,
+  // any code setup, a move of 2%+, heavy volume or a stretched RSI. Otherwise
+  // (Alpaca not reviewed, or US closed): held names and code setups only.
+  // The rest are listed by name so Opus knows they were checked.
+  const held = new Set(state.positions.map(p => p.symbol));
+  const shares = [...metrics.values()].filter(x => !isIgOnly(x.symbol));
+  const notable = (m: Metrics) => held.has(m.symbol) || setupOf(m, 'BUY') !== null || setupOf(m, 'SELL') !== null
+    || (alpacaInScope && (state.watchlistExtra.includes(m.symbol) || Math.abs(m.dayChgPct) >= 2 || (m.volToday ?? 0) >= 1.5 || (m.rsi14 ?? 50) >= 75 || (m.rsi14 ?? 50) <= 30));
+  const quiet = shares.filter(m => !notable(m)).map(m => m.symbol);
+  for (const m of shares.filter(notable)) {
     lines.push(`${m.symbol} | ${setupLabel(m)} | ${fmt(m.price, 2)} | ${fmt(m.dayChgPct)} | ${m.aboveOpen === null ? '=' : m.aboveOpen ? 'above' : 'below'} | ${fmt(m.volToday, 2)} | ${m.price > m.sma20 ? 'Y' : 'N'} | ${m.price > m.sma50 ? 'Y' : 'N'} | ${fmt(m.trend12wPct)} | ${fmt(m.rsi14, 0)} | ${fmt(m.atrPct)} | ${fmt(m.offHigh52wPct)}`);
   }
+
+  if (quiet.length) lines.push(`Not shown (no code setup${alpacaInScope ? ', no big move or volume' : ''}): ${quiet.join(', ')}`);
 
   const igOnly = [...metrics.values()].filter(x => isIgOnly(x.symbol));
   if (igOnly.length) {
@@ -707,21 +721,21 @@ async function buildBriefing(view: Map<string, LivePos>): Promise<{ text: string
   // Headlines: open positions + the most active names today (keeps tokens bounded)
   const active = [...metrics.values()].filter(m => m.volToday !== null)
     .sort((a, b) => Math.abs(b.dayChgPct) * (b.volToday ?? 0) - Math.abs(a.dayChgPct) * (a.volToday ?? 0))
-    .slice(0, 8).map(m => m.symbol);
-  const newsFor = [...new Set([...state.positions.map(p => p.symbol), ...active])].slice(0, 12);
+    .slice(0, alpacaInScope ? 6 : 3).map(m => m.symbol);
+  const newsFor = [...new Set([...state.positions.map(p => p.symbol), ...active])].slice(0, 10);
   lines.push('');
   lines.push('## Recent headlines');
   for (const s of newsFor) {
     let h: string[] = [];
-    try { h = await fetchAllHeadlines(s, 3); } catch { /* none */ }
-    if (h.length) lines.push(`${s}: ${h.map(x => x.slice(0, 140)).join(' | ')}`);
+    try { h = await fetchAllHeadlines(s, 2); } catch { /* none */ }
+    if (h.length) lines.push(`${s}: ${h.map(x => x.slice(0, 120)).join(' | ')}`);
   }
 
   lines.push('');
   const tvRecent = state.tvAlerts.filter(a => Date.now() - new Date(a.ts).getTime() < 24 * 3_600_000);
   lines.push('## TradingView alerts (last 24h, newest last)');
   if (!tvRecent.length) lines.push('(none)');
-  for (const a of tvRecent.slice(-25)) lines.push(`- ${a.ts.slice(5, 16).replace('T', ' ')} ${a.symbol} ${a.signal}${a.timeframe ? ` [${a.timeframe}]` : ''}${a.price !== null ? ` @ ${a.price}` : ''}${a.note ? ` — ${a.note}` : ''}`);
+  for (const a of tvRecent.slice(-12)) lines.push(`- ${a.ts.slice(5, 16).replace('T', ' ')} ${a.symbol} ${a.signal}${a.timeframe ? ` [${a.timeframe}]` : ''}${a.price !== null ? ` @ ${a.price}` : ''}${a.note ? ` — ${a.note}` : ''}`);
   lines.push('');
   lines.push('## Your strategy notes');
   lines.push(state.notes || '(none yet)');
@@ -999,6 +1013,9 @@ const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 function toolsFor(searches: number): Anthropic.Beta.BetaToolUnion[] {
   const base: Anthropic.Beta.BetaToolUnion[] = tvChartsOn() ? [...TOOLS, TV_TOOL] : TOOLS;
   if (!config.webResearch || searches <= 0) return base;
+  // Fixed per-request ceiling (not the session allowance): a different max_uses
+  // would change the tool definitions and miss the cache.
+  searches = Math.max(config.researchSearches, config.searchesPerSession);
   return [
     ...base,
     // Anthropic-hosted research tools (2026-10-21, per explicit request that
@@ -1008,7 +1025,14 @@ function toolsFor(searches: number): Anthropic.Beta.BetaToolUnion[] {
   ];
 }
 
-async function callModel(model: OpusModel, system: string, messages: Anthropic.Beta.BetaMessageParam[], searches = 0): Promise<Anthropic.Beta.BetaMessage> {
+// 1-hour cache on the fixed prefix (tools + system, ~12k tokens) when the next
+// session is due within the hour; off-hours sessions are hours apart, where a
+// 1-hour write (2× price) would expire unused, so those keep 5 minutes.
+function cacheTtl(): '1h' | '5m' {
+  return config.cacheOneHour && isUsSessionOpen() && scheduleMinutes() < 60 ? '1h' : '5m';
+}
+
+async function callModel(model: OpusModel, system: string, messages: Anthropic.Beta.BetaMessageParam[], searches = 0, ttl: '1h' | '5m' = '5m'): Promise<Anthropic.Beta.BetaMessage> {
   client ??= new Anthropic();
   return client.beta.messages.create({
     model,
@@ -1019,7 +1043,7 @@ async function callModel(model: OpusModel, system: string, messages: Anthropic.B
     // to the end of the conversation each turn, so the briefing and earlier
     // turns are read from cache instead of re-sent at full price.
     cache_control: { type: 'ephemeral' },
-    system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+    system: [{ type: 'text', text: system, cache_control: ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' } }],
     tools: toolsFor(searches),
     messages,
     betas: [FALLBACK_BETA],
@@ -1074,23 +1098,26 @@ export async function runOpusSession(trigger: 'scheduled' | 'manual' | 'tradingv
   try {
     const view = await livePositionView();
     await reconcile(view);
-    const { text, metrics } = await buildBriefing(view);
-    spend.cycles++; saveSpend();
     const research = config.webResearch && isUsSessionOpen() && nyDate() !== state.lastResearchDay;
-    if (research) { state.lastResearchDay = nyDate(); saveState(); }
-    const searches = research ? config.researchSearches : config.searchesPerSession;
-    const system = SYSTEM_PROMPT + (tvChartsOn() ? TV_PROMPT : '') + (research ? RESEARCH_PROMPT : '');
-    if (trigger === 'scheduled') lastScheduledAt = Date.now();
-    addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}${config.accounts.alpaca_paper && isUsSessionOpen() ? (alpacaInScope ? ', incl. Alpaca' : ', IG only') : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
-
     alpacaInScope = config.accounts.alpaca_paper && isUsSessionOpen()
       && (research || trigger === 'manual' || Date.now() - (state.lastAlpacaReviewAt ?? 0) >= config.alpacaEveryMinutes * 60_000 - 60_000);
+    const { text, metrics } = await buildBriefing(view);
+    spend.cycles++; saveSpend();
+    if (research) { state.lastResearchDay = nyDate(); saveState(); }
     if (alpacaInScope) { state.lastAlpacaReviewAt = Date.now(); saveState(); }
+    const searches = research ? config.researchSearches : config.searchesPerSession;
+    // The system prompt and tool list are byte-identical across sessions so the
+    // 1-hour cache carries over (2026-10-29). Anything session-specific (research
+    // day, allowance, scope) goes in the user message instead.
+    const system = SYSTEM_PROMPT + (tvChartsOn() ? TV_PROMPT : '');
+    const allowanceNote = config.webResearch && searches > 0 ? `\n\nWEB RESEARCH ALLOWANCE THIS SESSION: ${searches} searches/fetches in total. Stay within it.` : '';
+    if (trigger === 'scheduled') lastScheduledAt = Date.now();
+    addLog('info', `Session started (${trigger}${research ? ', daily research' : ''}${config.accounts.alpaca_paper && isUsSessionOpen() ? (alpacaInScope ? ', incl. Alpaca' : ', IG only') : ''}, ${MODELS[model].label}, effort ${config.effort}) — ${metrics.size} symbols, ${state.positions.length} open positions${config.webResearch ? `, up to ${searches} web searches` : ''}`);
     const alpacaNote = alpacaInScope || !config.accounts.alpaca_paper || !isUsSessionOpen() ? '' : `
 
 ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewed every ${config.alpacaEveryMinutes} minutes, not every session. Don't analyse Alpaca entries now (they'd be rejected); its positions keep their broker stops. Only close an Alpaca position if something material broke its thesis. Focus on ig_demo.`;
     const offNote = isUsSessionOpen() ? alpacaNote : `\n\nOFF-HOURS SESSION: the US market is closed. US-share figures above are from the last session. Alpaca can't trade now; ig_demo can trade any market IG has open (indices, FX and commodities nearly round the clock; IG's US shares only when IG offers them out of hours — an order on a closed market is rejected). Manage open IG positions as usual.`;
-    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text + offNote }];
+    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: text + offNote + (research ? RESEARCH_PROMPT : '') + allowanceNote }];
     let backtestsLeft = MAX_BACKTESTS_PER_SESSION;
     let researchUsed = 0, researchCapNoted = false;
     const tok = { fresh: 0, read: 0, write: 0 };
@@ -1100,7 +1127,7 @@ ALPACA NOT IN SCOPE THIS SESSION: Alpaca is the long-term account and is reviewe
       // Same tools on every turn: changing the tool list (it used to drop the
       // web tools after turn 1) invalidates the whole cache. The per-session
       // allowance is enforced by telling the model once it's used up.
-      const resp = await callModel(model, system, messages, searches);
+      const resp = await callModel(model, system, messages, searches, cacheTtl());
       sessionUsd += recordUsage(model, resp.usage);
       tok.fresh += resp.usage.input_tokens; tok.read += resp.usage.cache_read_input_tokens ?? 0; tok.write += resp.usage.cache_creation_input_tokens ?? 0;
       researchUsed += (resp.usage.server_tool_use?.web_search_requests ?? 0) + (resp.usage.server_tool_use?.web_fetch_requests ?? 0);
@@ -1243,12 +1270,18 @@ export function ingestTradingViewAlert(body: Record<string, unknown>): { ok: boo
 
 let lastScheduledAt = 0;
 
+// With the 1-hour cache on, a 60-minute cycle runs at 57 so the next session
+// lands inside the cache window (the timer starts after a session ends).
+function scheduleMinutes(): number {
+  return config.cacheOneHour && config.cycleMinutes >= 57 && config.cycleMinutes <= 60 ? 57 : config.cycleMinutes;
+}
+
 function schedule(): void {
   if (timer) clearTimeout(timer);
   if (!running) { nextRunAt = null; return; }
   // Off-hours the tick still fires on the US cadence (so the US open is never
   // missed) but only runs a session once offHoursMinutes have passed.
-  const delay = config.cycleMinutes * 60_000;
+  const delay = scheduleMinutes() * 60_000;
   nextRunAt = Date.now() + delay;
   timer = setTimeout(() => { void tick(); }, delay);
 }
