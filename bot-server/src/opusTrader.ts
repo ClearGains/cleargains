@@ -174,6 +174,7 @@ export type OpusPosition = {
   // underlying, size the number of contracts, entry/stop are premium per share.
   // The stop is watched by code (Alpaca has no option stop orders).
   option?:     { type: 'call' | 'put'; strike: number; expiry: string };
+  initialRisk?: number;      // entry-to-stop distance at entry, recorded by safe mode before it moves a stop
 };
 
 type ClosedRecord = OpusPosition & { closedAt: number; closeReason: string; plApprox: number | null };
@@ -1600,8 +1601,43 @@ function schedule(): void {
   timer = setTimeout(() => { void tick(); }, delay);
 }
 
+// Safe mode (2026-10-29, owner: when the Claude budget runs out "give it
+// something to go back on so things don't get destroyed, otherwise stop it").
+// No AI and no new trades: plain code protects the open positions. A trade 1R
+// in profit has its stop moved to break-even; at 2R it locks in 1R. Broker
+// stops and the code-watched option stops keep working throughout.
+let safeModeNotedDay = '';
+async function protectWithoutAi(): Promise<void> {
+  if (safeModeNotedDay !== nyDate()) {
+    safeModeNotedDay = nyDate();
+    addLog('wait', `Safe mode: the Claude budget is spent ($${spend.usd.toFixed(2)} of $${config.monthlyCapUsd}). No AI, no new trades; open positions keep their stops, and code moves a stop to break-even at 1R profit and locks in 1R at 2R. Back to normal when the budget resets or the cap is raised.`);
+  }
+  const view = await livePositionView().catch(() => new Map<string, LivePos>());
+  await reconcile(view).catch(() => undefined);
+  for (const p of [...state.positions]) {
+    const cur = view.get(p.id)?.current;
+    if (cur == null) continue;
+    const dir = p.direction === 'BUY' ? 1 : -1;
+    if (p.initialRisk === undefined) {
+      const r = (p.entryPrice - p.stopPrice) * dir;
+      if (!(r > 0)) continue;   // stop already at or past entry: nothing to protect further here
+      p.initialRisk = r; saveState();
+    }
+    const gainR = (cur - p.entryPrice) * dir / p.initialRisk;
+    const want = gainR >= 2 ? p.entryPrice + dir * p.initialRisk : gainR >= 1 ? p.entryPrice : null;
+    if (want === null || (want - p.stopPrice) * dir <= 0) continue;   // only ever tighten
+    const msg = await tightenStop(p.id, want, `[safe mode] ${gainR.toFixed(1)}R in profit`, view);
+    addLog('info', `Safe mode ${p.symbol}: ${msg}`);
+  }
+}
+
 async function tick(): Promise<void> {
   if (!running) return;
+  if (budgetLeftUsd() <= 0.25) {
+    await protectWithoutAi().catch(e => addLog('error', `Safe mode check failed: ${e instanceof Error ? e.message : String(e)}`));
+    schedule();
+    return;
+  }
   const due = isUsSessionOpen() || (offHours() && Date.now() - lastScheduledAt >= config.offHoursMinutes * 60_000 - 60_000);
   if (due) {
     const why = await materialChange().catch(e => `change check failed (${e instanceof Error ? e.message : String(e)}), running anyway`);
