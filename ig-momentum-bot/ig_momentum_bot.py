@@ -133,7 +133,7 @@ try:
     # (£25 loss / £45 profit): the 23-point stop was hit before correct calls
     # had time to play out. 30 Oct (owner): US 500 and FTSE 100 halved to
     # £0.50/pt with the same point distances (US 500 20/10, FTSE 26/13).
-    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_pts": 20, "target_pts": 10, "size": 0.5}, "FTSE 100": {"stop_pts": 26, "target_pts": 13, "size": 0.5}}'))
+    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_pts": 20, "target_pts": 10, "size": 0.5, "exhaust_atr": 0.75}, "FTSE 100": {"stop_pts": 26, "target_pts": 13, "size": 0.5, "pullback": 0.33, "min_move_pct": 0.5}}'))
 except ValueError:
     MARKET_RULES = {}
 SIGNAL_THRESHOLD_PCT = 0.3
@@ -278,8 +278,45 @@ def yahoo_change(symbol: str, http=requests):
         "sma20": sum(closes[-20:]) / 20 if len(closes) >= 20 else None,
         "atr_pct": atr_pct(quote),
         "session_start": ((meta.get("currentTradingPeriod") or {}).get("regular") or {}).get("start"),
+        "prev_close": prev,
+        "day_high": meta.get("regularMarketDayHigh") or ((quote.get("high") or [None])[-1]),
+        "day_low": meta.get("regularMarketDayLow") or ((quote.get("low") or [None])[-1]),
     }
     return (price - prev) / prev * 100, staleness(meta), extra
+
+
+# Last price seen per market at the previous scan (pullback entries need to
+# see the price turn back the move's way).
+LAST_PX = {}
+
+
+def pullback_signal(mtype, change, extra, rules, name):
+    """Wait-for-a-bounce entry (30 Oct, owner: entries came at the end of the
+    move). The day's furthest move must reach min_move_pct; enter only once
+    price has bounced back at least `pullback` of that move (not more than
+    80%) and is turning back the move's way since the last scan.
+    Returns (direction or None, strength, reason)."""
+    price, prev = extra.get("price"), extra.get("prev_close")
+    hi, lo = extra.get("day_high"), extra.get("day_low")
+    last = LAST_PX.get(name)
+    LAST_PX[name] = price
+    if not (price and prev and hi and lo):
+        return None, 0, "no intraday range"
+    up, down = (hi - prev) / prev * 100, (prev - lo) / prev * 100
+    d = 1 if up >= down else -1
+    peak = up if d == 1 else down
+    strength = strength_for(mtype, peak)
+    if peak < rules.get("min_move_pct", 0.5):
+        return None, strength, f"day's move {peak:.2f}% too small"
+    extreme = hi if d == 1 else lo
+    retrace = (extreme - price) * d / ((extreme - prev) * d)
+    if retrace < rules["pullback"]:
+        return None, strength, f"waiting for a bounce ({retrace * 100:.0f}% of the move so far, need {rules['pullback'] * 100:.0f}%)"
+    if retrace > 0.8:
+        return None, strength, "move has mostly reversed"
+    if last is None or (price - last) * d <= 0:
+        return None, strength, "bounced, waiting for it to turn back"
+    return ("BUY" if d == 1 else "SELL"), strength, ""
 
 
 def atr_pct(quote):
@@ -628,10 +665,20 @@ def scan(ig, markets, dry_run, http=requests):
             continue
 
         rules = MARKET_RULES.get(name, {})
-        direction, strength = decide(mtype, change, rules.get("min_strength"))
+        if rules.get("pullback"):
+            direction, strength, why = pullback_signal(mtype, change, extra, rules, name)
+        else:
+            direction, strength = decide(mtype, change, rules.get("min_strength"))
+            why = ""
         tag = f"{name:13} {change:+.2f}% strength {strength:>2}"
         if not direction:
-            log.info(f"{tag} HOLD")
+            log.info(f"{tag} HOLD{f' ({why})' if why else ''}")
+            continue
+        # Skip a move that has already run further than usual (30 Oct: US 500
+        # entries came at the end of the day's move, then it bounced).
+        ex = rules.get("exhaust_atr")
+        if ex and extra.get("atr_pct") and abs(change) > ex * extra["atr_pct"]:
+            log.info(f"{tag} {direction} skipped: move already exhausted ({abs(change):.2f}% > {ex} x {extra['atr_pct']:.2f}% daily range)")
             continue
         mine = [p for p in open_pos if p["epic"] == epic]
         if any(p["direction"] == direction for p in mine):

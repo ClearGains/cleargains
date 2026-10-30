@@ -14,6 +14,7 @@ export type ParamSpec = { key: string; label: string; values: ParamValue[] };
 export type Ctx = {
   bars: Bar[]; i: number;
   prevClose: number; dayOpen: number; minutesIntoDay: number;
+  dayHigh: number; dayLow: number;   // the session so far, up to and including this bar
   sma20: number | null; atrPct: number | null; rsi: number | null; rsiPrev: number | null;
   hiN: (n: number) => number | null; loN: (n: number) => number | null;
 };
@@ -50,16 +51,38 @@ export const STRATEGIES: Strategy[] = [
       { key: 'confirmOpen', label: 'Must hold vs today\'s open', values: [true, false] },
       { key: 'trendFilter', label: 'With the 20-day trend', values: [true, false] },
       { key: 'openingSkipMin', label: 'Skip first minutes', values: [0, 30, 60] },
+      { key: 'pullbackFrac', label: 'Wait for a pullback (share of the move, 0 = off)', values: [0, 0.25, 0.33, 0.5] },
+      { key: 'exhaustAtr', label: 'Skip if already moved more than × daily range (0 = off)', values: [0, 0.75, 1] },
       { key: 'stopPct', label: 'Stop (% of price)', values: [0.3, 0.5] },
       { key: 'stopAtrFrac', label: 'Stop as × daily range (0 = use %)', values: [0, 0.5, 0.75] },
       { key: 'targetR', label: 'Target (× stop)', values: [1.5, 2, 3] },
     ],
-    defaults: { minMovePct: 0.5, confirmOpen: true, trendFilter: true, openingSkipMin: 30, stopPct: 0.3, stopAtrFrac: 0, targetR: 2 },
+    defaults: { minMovePct: 0.5, confirmOpen: true, trendFilter: true, openingSkipMin: 30, pullbackFrac: 0, exhaustAtr: 0, stopPct: 0.3, stopAtrFrac: 0, targetR: 2 },
     signal: (c, p) => {
       const price = c.bars[c.i].c;
       const chg = (price - c.prevClose) / c.prevClose * 100;
-      if (Math.abs(chg) < num(p, 'minMovePct') || c.minutesIntoDay < num(p, 'openingSkipMin')) return null;
-      const dir: 1 | -1 = chg > 0 ? 1 : -1;
+      if (c.minutesIntoDay < num(p, 'openingSkipMin')) return null;
+      const pb = Number(p.pullbackFrac ?? 0);
+      let dir: 1 | -1;
+      if (pb > 0) {
+        // 2026-10-30: wait for a pullback. The day's furthest move must have
+        // qualified; enter only after price has bounced back at least pb of it
+        // (but not more than 80%) and this bar turns back the move's way.
+        const up = (c.dayHigh - c.prevClose) / c.prevClose * 100, down = (c.prevClose - c.dayLow) / c.prevClose * 100;
+        dir = up >= down ? 1 : -1;
+        const peak = dir === 1 ? up : down;
+        if (peak < num(p, 'minMovePct')) return null;
+        const extreme = dir === 1 ? c.dayHigh : c.dayLow;
+        const retrace = (extreme - price) * dir / ((extreme - c.prevClose) * dir);
+        if (retrace < pb || retrace > 0.8) return null;
+        const prev = c.bars[c.i - 1];
+        if (!prev || (price - prev.c) * dir <= 0) return null;
+      } else {
+        if (Math.abs(chg) < num(p, 'minMovePct')) return null;
+        dir = chg > 0 ? 1 : -1;
+      }
+      const ex = Number(p.exhaustAtr ?? 0);
+      if (ex > 0 && c.atrPct && Math.abs(chg) > ex * c.atrPct) return null;
       if (flag(p, 'confirmOpen') && (dir === 1 ? price <= c.dayOpen : price >= c.dayOpen)) return null;
       if (flag(p, 'trendFilter') && !trendOk(c, dir)) return null;
       return dir;
@@ -197,7 +220,7 @@ export const DEFAULT_GUARDS: Guards = { cooldownLossMin: 60, waitWinMin: 45, max
 // Per-bar context that doesn't depend on parameters, computed once per series.
 export type Prepared = {
   series: Series; spreadPct: number;
-  day: string[]; prevClose: number[]; dayOpen: number[]; dayStart: number[];
+  day: string[]; prevClose: number[]; dayOpen: number[]; dayStart: number[]; dayHi: number[]; dayLo: number[];
   sma20: (number | null)[]; atrPct: (number | null)[]; rsi: (number | null)[];
 };
 
@@ -206,14 +229,16 @@ export function prepare(series: Series, spreadPct: number): Prepared {
   const dIdx = new Map<string, number>();
   daily.forEach((b, i) => dIdx.set(dayKey(b.t, tz), i));
   const day: string[] = [], prevClose: number[] = [], dayOpen: number[] = [], dayStart: number[] = [];
+  const dayHi: number[] = [], dayLo: number[] = [];
   const sma20: (number | null)[] = [], atrPct: (number | null)[] = [];
-  let curDay = '', curOpen = 0, curStart = 0;
+  let curDay = '', curOpen = 0, curStart = 0, curHi = 0, curLo = 0;
   const daily1d = series.timeframe === '1d';
   for (let i = 0; i < bars.length; i++) {
     const b = bars[i];
     const dk = dayKey(b.t, tz);
-    if (dk !== curDay) { curDay = dk; curOpen = b.o; curStart = b.t; }
-    day.push(dk); dayOpen.push(curOpen); dayStart.push(curStart);
+    if (dk !== curDay) { curDay = dk; curOpen = b.o; curStart = b.t; curHi = b.h; curLo = b.l; }
+    curHi = Math.max(curHi, b.h); curLo = Math.min(curLo, b.l);
+    day.push(dk); dayOpen.push(curOpen); dayStart.push(curStart); dayHi.push(curHi); dayLo.push(curLo);
     const di = dIdx.get(dk);
     // Daily figures from completed days before this one only.
     const before = di !== undefined ? di : daily.findIndex(d => dayKey(d.t, tz) > dk);
@@ -236,7 +261,7 @@ export function prepare(series: Series, spreadPct: number): Prepared {
     ag = (ag * 13 + g) / 14; al = (al * 13 + l) / 14;
     rsi[i] = al === 0 ? 100 : 100 - 100 / (1 + ag / al);
   }
-  return { series, spreadPct, day, prevClose, dayOpen, dayStart, sma20, atrPct, rsi };
+  return { series, spreadPct, day, prevClose, dayOpen, dayStart, dayHi, dayLo, sma20, atrPct, rsi };
 }
 
 // Overnight funding on IG's daily spread bets: roughly the base rate plus
@@ -283,7 +308,7 @@ export function simulate(prep: Prepared, strat: Strategy, p: Params, from = 0, t
       if (b.t - lastWinT < guards.waitWinMin * 60) continue;
     }
     const ctx: Ctx = {
-      bars, i, prevClose: prep.prevClose[i], dayOpen: prep.dayOpen[i], minutesIntoDay: (b.t - prep.dayStart[i]) / 60,
+      bars, i, prevClose: prep.prevClose[i], dayOpen: prep.dayOpen[i], minutesIntoDay: (b.t - prep.dayStart[i]) / 60, dayHigh: prep.dayHi[i], dayLow: prep.dayLo[i],
       sma20: prep.sma20[i], atrPct: prep.atrPct[i], rsi: prep.rsi[i], rsiPrev: prep.rsi[i - 1],
       hiN: n => { if (i < n) return null; let m = -Infinity; for (let j = i - n; j < i; j++) m = Math.max(m, bars[j].h); return m; },
       loN: n => { if (i < n) return null; let m = Infinity; for (let j = i - n; j < i; j++) m = Math.min(m, bars[j].l); return m; },
