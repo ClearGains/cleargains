@@ -132,8 +132,9 @@ try:
     # Owner, 29 Oct: US 500 at £1/pt with a 25-point stop and 45-point target
     # (£25 loss / £45 profit): the 23-point stop was hit before correct calls
     # had time to play out. 30 Oct (owner): US 500 and FTSE 100 halved to
-    # £0.50/pt with the same point distances (US 500 20/10, FTSE 26/13).
-    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_pts": 20, "target_pts": 10, "size": 0.5, "exhaust_atr": 0.75}, "FTSE 100": {"stop_pts": 26, "target_pts": 13, "size": 0.5, "pullback": 0.33, "min_move_pct": 0.5}}'))
+    # £0.50/pt with the same point distances (US 500 20/10). FTSE 100 switched
+    # to the fade trial (hourly RSI 30/70, 0.4% stop, 1.5x target, £0.50/pt).
+    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_pts": 20, "target_pts": 10, "size": 0.5, "exhaust_atr": 0.75}, "FTSE 100": {"mode": "fade", "rsi_low": 30, "stop_pct": 0.4, "target_r": 1.5, "size": 0.5}}'))
 except ValueError:
     MARKET_RULES = {}
 SIGNAL_THRESHOLD_PCT = 0.3
@@ -288,6 +289,36 @@ def yahoo_change(symbol: str, http=requests):
 # Last price seen per market at the previous scan (pullback entries need to
 # see the price turn back the move's way).
 LAST_PX = {}
+
+
+def fade_signal(sym, rules, http=requests):
+    """FTSE fade trial (30 Oct, owner): the FTSE kept rising then giving it
+    back, so this bets against stretched moves instead of following them.
+    Hourly RSI(14) below rsi_low -> BUY, above 100 - rsi_low -> SELL.
+    Strategy Lab: hourly FTSE, 2 years, best fade settings on unseen data
+    made +£169 over 63 trades (51% won) at this size; moderate evidence.
+    Returns (direction or None, strength, reason)."""
+    url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
+           + requests.utils.quote(sym, safe="") + "?interval=1h&range=10d")
+    r = http.get(url, headers=YAHOO_HEADERS, timeout=15)
+    res = (r.json().get("chart", {}).get("result") or [None])[0] if r.status_code == 200 else None
+    closes = [c for c in (((res or {}).get("indicators") or {}).get("quote") or [{}])[0].get("close") or [] if c is not None]
+    if len(closes) < 16:
+        return None, 0, "not enough hourly data"
+    gains = losses = 0.0
+    for k in range(1, 15):
+        ch = closes[k] - closes[k - 1]
+        gains += max(ch, 0) / 14; losses += max(-ch, 0) / 14
+    for k in range(15, len(closes)):
+        ch = closes[k] - closes[k - 1]
+        gains = (gains * 13 + max(ch, 0)) / 14; losses = (losses * 13 + max(-ch, 0)) / 14
+    rsi = 100 if losses == 0 else 100 - 100 / (1 + gains / losses)
+    lo = rules.get("rsi_low", 30)
+    if rsi < lo:
+        return "BUY", round(rsi), f"hourly RSI {rsi:.0f} < {lo}: stretched down, fading"
+    if rsi > 100 - lo:
+        return "SELL", round(rsi), f"hourly RSI {rsi:.0f} > {100 - lo}: stretched up, fading"
+    return None, round(rsi), f"fade trial: hourly RSI {rsi:.0f}, waiting for <{lo} or >{100 - lo}"
 
 
 def pullback_signal(mtype, change, extra, rules, name):
@@ -665,7 +696,10 @@ def scan(ig, markets, dry_run, http=requests):
             continue
 
         rules = MARKET_RULES.get(name, {})
-        if rules.get("pullback"):
+        fade = rules.get("mode") == "fade"
+        if fade:
+            direction, strength, why = fade_signal(sym, rules, http)
+        elif rules.get("pullback"):
             direction, strength, why = pullback_signal(mtype, change, extra, rules, name)
         else:
             direction, strength = decide(mtype, change, rules.get("min_strength"))
@@ -684,7 +718,9 @@ def scan(ig, markets, dry_run, http=requests):
         if any(p["direction"] == direction for p in mine):
             log.info(f"{tag} {direction} already open, skip")
             continue
-        blocked = chop_block(name) or conviction_block(mtype, direction, extra, rules.get("opening_skip"))
+        # The fade trial bets against the move, so the momentum checks (holding
+        # vs today's open, with the trend) don't apply to it.
+        blocked = chop_block(name) or (None if fade else conviction_block(mtype, direction, extra, rules.get("opening_skip")))
         if blocked:
             log.info(f"{tag} {direction} skipped: {blocked}")
             continue
@@ -716,7 +752,15 @@ def scan(ig, markets, dry_run, http=requests):
 
         stop, limit = STOP_LIMIT[mtype]
         requested = SIZE_PER_POINT
-        if rules.get("stop_pts"):
+        if rules.get("stop_pct"):
+            # Stop as % of price, target as a multiple of it, fixed stake
+            # (FTSE fade trial, 30 Oct).
+            snap = (info or {}).get("snapshot", {})
+            px = snap.get("offer") if direction == "BUY" else snap.get("bid")
+            stop = max(1, round((px or extra["price"]) * rules["stop_pct"] / 100))
+            limit = max(1, round(stop * rules.get("target_r", 1.5)))
+            requested = rules.get("size", SIZE_PER_POINT)
+        elif rules.get("stop_pts"):
             # Fixed points and stake for this market (owner's choice).
             stop, limit = rules["stop_pts"], rules.get("target_pts", rules["stop_pts"] * 2)
             requested = rules.get("size", SIZE_PER_POINT)
@@ -729,8 +773,8 @@ def scan(ig, markets, dry_run, http=requests):
                 stop_pct = max(INDEX_STOP_PCT, frac * atr) if atr else INDEX_STOP_PCT
                 stop = max(round(px * stop_pct / 100), 1)
                 limit = max(round(stop * TARGET_R), 1)
-                rules = (info or {}).get("dealingRules", {})
-                min_size = (rules.get("minDealSize") or {}).get("value") or 0.04
+                drules = (info or {}).get("dealingRules", {})
+                min_size = (drules.get("minDealSize") or {}).get("value") or 0.04
                 requested = max(min_size, math.floor(RISK_PER_TRADE_GBP / stop * 100) / 100)
         size = dynamic_size(requested, available)
         if size == 0:
@@ -739,7 +783,7 @@ def scan(ig, markets, dry_run, http=requests):
         # Owner, 30 Oct: stop at a £20 loss. Same stake and same £10 target;
         # only the stop moves closer.
         # Markets with their own fixed points and size keep them as set.
-        if STOP_GBP > 0 and not rules.get("stop_pts"):
+        if STOP_GBP > 0 and not rules.get("stop_pts") and not rules.get("stop_pct"):
             stop = max(1, round(STOP_GBP / size))
         if dry_run:
             log.info(f"{tag} {direction} £{size}/pt SL {stop} TP {limit} [DRY RUN, not placed]")
