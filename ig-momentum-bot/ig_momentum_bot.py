@@ -123,7 +123,8 @@ LONG_PAUSE_MINUTES = int(os.getenv("LONG_PAUSE_MINUTES", "180"))
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))
 WAIT_AFTER_WIN_MINUTES = int(os.getenv("WAIT_AFTER_WIN_MINUTES", "45"))
 MAX_QUOTE_AGE_MINUTES = int(os.getenv("MAX_QUOTE_AGE_MINUTES", "30"))
-RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "25"))
+RISK_PER_TRADE_GBP = float(os.getenv("RISK_PER_TRADE_GBP", "25"))   # sets the stake
+STOP_GBP = float(os.getenv("STOP_GBP", "20"))   # stop placed at this £ loss for the stake (0 = use the computed stop)
 TARGET_R = float(os.getenv("TARGET_R", "0.4"))   # £10 target / £25 risk (trial)
 INDEX_STOP_PCT = float(os.getenv("INDEX_STOP_PCT", "0.3"))
 STOP_ATR_FRAC = float(os.getenv("STOP_ATR_FRAC", "0"))   # 0 = off for all markets except those with their own rule (owner: US 500 only)
@@ -687,6 +688,10 @@ def scan(ig, markets, dry_run, http=requests):
         if size == 0:
             log.error(f"Available funds £{available:.2f} under £100, pausing new bets")
             return
+        # Owner, 30 Oct: stop at a £20 loss. Same stake and same £10 target;
+        # only the stop moves closer.
+        if STOP_GBP > 0:
+            stop = max(1, round(STOP_GBP / size))
         if dry_run:
             log.info(f"{tag} {direction} £{size}/pt SL {stop} TP {limit} [DRY RUN, not placed]")
             continue
