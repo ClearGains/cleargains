@@ -11,7 +11,8 @@
 import { getFillsSince } from './alpacaApi';
 import { authenticate, fetchClosedTransactions } from './igApi';
 import { resolveCredentials } from './igStrategyBot';
-import { opusClosedRefs, momentumBotDeals } from './opusTrader';
+import { opusClosedRefs } from './opusTrader';
+import { momentumHistory } from './momentumBot';
 
 export type ClosedTrade = {
   market:     string;
@@ -73,7 +74,7 @@ async function igClosed(mode: 'demo' | 'live', days: number): Promise<ClosedTrad
   const tx = await fetchClosedTransactions(session, new Date(Date.now() - days * DAY).toISOString());
   const opus = mode === 'demo' ? opusClosedRefs().filter(r => r.account === 'ig_demo') : [];
   // Momentum Testbot (same demo account, own process): matched on open time and level.
-  const momentum = mode === 'demo' ? momentumBotDeals() : [];
+  const momentum = momentumHistory(mode);   // demo and live copies keep separate histories
   return tx.map(t => {
     const opened = t.openDateUtc ? Date.parse(t.openDateUtc + 'Z') : null;
     const closed = Date.parse(t.closeDateUtc + 'Z');

@@ -783,8 +783,11 @@ def scan(ig, markets, dry_run, http=requests):
         # Owner, 30 Oct: stop at a £20 loss. Same stake and same £10 target;
         # only the stop moves closer.
         # Markets with their own fixed points and size keep them as set.
+        # Based on the intended stake, so if the small-account rule cuts the
+        # stake (available under £500), the stop keeps its distance and the
+        # loss simply shrinks, rather than the stop widening.
         if STOP_GBP > 0 and not rules.get("stop_pts") and not rules.get("stop_pct"):
-            stop = max(1, round(STOP_GBP / size))
+            stop = max(1, round(STOP_GBP / max(requested, size)))
         if dry_run:
             log.info(f"{tag} {direction} £{size}/pt SL {stop} TP {limit} [DRY RUN, not placed]")
             continue
@@ -829,7 +832,10 @@ def main():
                  [("IG_USERNAME", "IG_DEMO_USERNAME"), ("IG_PASSWORD", "IG_DEMO_PASSWORD"),
                   ("IG_API_KEY", "IG_DEMO_API_KEY")]}
     else:
-        creds = {k: os.getenv(k, "").strip() for k in ("IG_USERNAME", "IG_PASSWORD", "IG_API_KEY")}
+        # Live (30 Oct, owner approved): the bot server's IG live login.
+        creds = {k: credential(k, s) for k, s in
+                 [("IG_USERNAME", "IG_LIVE_USERNAME"), ("IG_PASSWORD", "IG_LIVE_PASSWORD"),
+                  ("IG_API_KEY", "IG_LIVE_API_KEY")]}
     missing = [k for k, v in creds.items() if not v]
     if missing:
         sys.exit(f"Missing IG login: {', '.join(missing)}")

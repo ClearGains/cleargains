@@ -501,10 +501,11 @@ app.get('/ig/sentiment', auth, (_req: Request, res: Response) => {
 
 // Momentum Testbot (separate Python service) — status and switches.
 app.get('/momentum/status', auth, (_req: Request, res: Response) => {
-  void momentumStatus().then(r => res.json({ ok: true, ...r })).catch(e => res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+  void momentumStatus(_req.query.instance === 'live' ? 'live' : 'demo').then(r => res.json({ ok: true, ...r })).catch(e => res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) }));
 });
 app.post('/momentum/control', auth, (req: Request, res: Response) => {
-  void momentumControl(String((req.body as { action?: string })?.action ?? '')).then(r => res.json(r)).catch(e => res.status(500).json({ ok: false, message: e instanceof Error ? e.message : String(e) }));
+  const b = (req.body ?? {}) as { action?: string; instance?: string };
+  void momentumControl(String(b.action ?? ''), b.instance === 'live' ? 'live' : 'demo').then(r => res.json(r)).catch(e => res.status(500).json({ ok: false, message: e instanceof Error ? e.message : String(e) }));
 });
 
 app.get('/closed-positions', auth, (req: Request, res: Response) => {

@@ -1138,7 +1138,7 @@ export async function closeIgPositionManually(mode: IgMode, dealId: string): Pro
   try {
     await igClosePos(session, position.dealId, position.direction, position.size);
     const reason = 'Manually closed from the dashboard';
-    const testbot = mode === 'demo' && (await import('./momentumBot').then(m => m.forgetMomentumDeal(dealId, 'closed from the IG tab')).catch(() => false));
+    const testbot = await import('./momentumBot').then(m => m.forgetMomentumDeal(dealId, 'closed from the IG tab', mode)).catch(() => false);
     if (st.config) { recordLossExit(mode, position.epic, position.upl, reason); journalExit(mode, st.config, position, reason); }
     addLog(mode, 'exit', name, `Closed manually — £${position.upl.toFixed(2)}`);
     // Confirm it's actually gone at IG before saying so.

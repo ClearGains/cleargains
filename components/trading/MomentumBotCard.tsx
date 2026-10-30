@@ -19,7 +19,8 @@ type Status = {
 
 const money = (n: number) => `${n < 0 ? '−' : n > 0 ? '+' : ''}£${Math.abs(n).toFixed(2)}`;
 
-export function MomentumBotCard() {
+export function MomentumBotCard({ instance = 'demo' }: { instance?: 'demo' | 'live' }) {
+  const isLive = instance === 'live';
   const [open, setOpen]       = useState(true);
   const [st, setSt]           = useState<Status | null>(null);
   const [error, setError]     = useState<string | null>(null);
@@ -32,13 +33,13 @@ export function MomentumBotCard() {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const res = await fetch('/api/momentum', { cache: 'no-store' });
+      const res = await fetch(`/api/momentum?instance=${instance}`, { cache: 'no-store' });
       const d = await res.json() as Status;
       if (!d.ok) throw new Error(d.error ?? 'Failed to load');
       setSt(d);
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setLoading(false); }
-  }, []);
+  }, [instance]);
 
   useEffect(() => {
     if (!open) return;
@@ -52,7 +53,7 @@ export function MomentumBotCard() {
     if ((action === 'stop' || action === 'close-all') && confirm !== action) { setConfirm(action); return; }
     setConfirm(null); setBusy(action); setMsg(null);
     try {
-      const res = await fetch('/api/momentum', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+      const res = await fetch('/api/momentum', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, instance }) });
       const d = await res.json() as { ok: boolean; message: string };
       setMsg(d.message);
     } catch (e) { setMsg(e instanceof Error ? e.message : String(e)); }
@@ -77,11 +78,11 @@ export function MomentumBotCard() {
   );
 
   return (
-    <div className="bg-slate-900/60 border border-amber-500/20 rounded-xl">
+    <div className={clsx('bg-slate-900/60 border rounded-xl', isLive ? 'border-rose-500/40' : 'border-amber-500/20')}>
       <div className="flex flex-wrap items-center gap-2 px-4 py-3">
         <button onClick={() => setOpen(o => !o)} className="flex items-center gap-2 text-sm font-semibold text-slate-200 mr-auto">
           <Zap className="w-4 h-4 text-amber-400" />
-          Momentum Testbot
+          Momentum Testbot{isLive && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-600 text-white">LIVE · real money</span>}
           <span className={clsx('text-xs font-medium', stateCls)}>{state}</span>
           {st && st.positions.length > 0 && <span className="text-xs font-normal text-slate-500">({st.positions.length} open · <span className={openPl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{money(openPl)}</span>)</span>}
           {open ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
@@ -96,7 +97,7 @@ export function MomentumBotCard() {
           {error && <div className="text-xs text-rose-400">{error}</div>}
           {st && (<>
             <p className="text-xs text-slate-500">
-              The April Testbot, run separately from Opus on the same demo account. Trades a day move over 0.3% while the market&apos;s own exchange is open
+              {isLive ? 'The live copy of the Testbot, on your IG live spread-bet account (real money), with the same rules as the demo copy.' : 'The April Testbot, run separately from Opus on the same demo account.'} Trades a day move over 0.3% while the market&apos;s own exchange is open
               (FX any time), risks about £{st.settings.riskPerTradeGbp} a trade, and rests a market for {st.settings.cooldownMinutes} min after a loss, 3 hours after {st.settings.maxLossesPerDay} losses in a day, and 45 min after a target hit.
               It only touches its own trades.
             </p>

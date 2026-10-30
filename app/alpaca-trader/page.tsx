@@ -979,7 +979,7 @@ function IgSpreadBetTab() {
       <IgSentimentCard />
 
       {/* Momentum Testbot: separate bot on the same demo account */}
-      {igMode === 'demo' && <MomentumBotCard />}
+      <MomentumBotCard key={igMode} instance={igMode} />
 
       <ClosedPositionsCard broker="ig" mode={igMode} />
 
