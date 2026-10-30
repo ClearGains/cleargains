@@ -131,8 +131,9 @@ STOP_ATR_FRAC = float(os.getenv("STOP_ATR_FRAC", "0"))   # 0 = off for all marke
 try:
     # Owner, 29 Oct: US 500 at £1/pt with a 25-point stop and 45-point target
     # (£25 loss / £45 profit): the 23-point stop was hit before correct calls
-    # had time to play out.
-    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_pts": 25, "target_pts": 10, "size": 1}}'))
+    # had time to play out. 30 Oct (owner): US 500 and FTSE 100 halved to
+    # £0.50/pt with the same point distances (US 500 20/10, FTSE 26/13).
+    MARKET_RULES = json.loads(os.getenv("MARKET_RULES", '{"S&P 500": {"min_strength": 85, "opening_skip": 60, "stop_pts": 20, "target_pts": 10, "size": 0.5}, "FTSE 100": {"stop_pts": 26, "target_pts": 13, "size": 0.5}}'))
 except ValueError:
     MARKET_RULES = {}
 SIGNAL_THRESHOLD_PCT = 0.3
@@ -690,7 +691,8 @@ def scan(ig, markets, dry_run, http=requests):
             return
         # Owner, 30 Oct: stop at a £20 loss. Same stake and same £10 target;
         # only the stop moves closer.
-        if STOP_GBP > 0:
+        # Markets with their own fixed points and size keep them as set.
+        if STOP_GBP > 0 and not rules.get("stop_pts"):
             stop = max(1, round(STOP_GBP / size))
         if dry_run:
             log.info(f"{tag} {direction} £{size}/pt SL {stop} TP {limit} [DRY RUN, not placed]")
